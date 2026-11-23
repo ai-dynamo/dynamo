@@ -9,6 +9,10 @@ testable on synthetic bytes. The second drives a real ffmpeg and checks what a
 player depends on -- decodable fragments, one continuous timeline, a partial
 final segment, and fragments arriving while input is still being written. It
 skips when no ffmpeg with libvpx-vp9 is available.
+
+Every test runs with software encoding unless it selects hardware itself
+(``conftest.py``). The hardware group at the end drives a real VA-API encode
+and runs only where ``DYN_XPU_FFMPEG_PATH`` is set.
 """
 
 import asyncio
@@ -26,6 +30,11 @@ from dynamo.common.utils.cmaf_video import (
     CMAF_INIT_TAG,
     CMAF_SEGMENT_TAG_PREFIX,
     iter_cmaf_chunks,
+)
+from dynamo.common.utils.ffmpeg_command import (
+    ENV_XPU_FFMPEG_PATH,
+    ENV_XPU_VIDEO_DEVICE,
+    FRAGMENTED_MOVFLAGS,
 )
 
 pytestmark = [
@@ -49,6 +58,10 @@ def _box(btype: bytes, payload: bytes = b"") -> bytes:
 # vpcC is a FullBox: version/flags, then profile 0, level 10, 8-bit in the
 # high nibble.
 _VPCC = bytes([1, 0, 0, 0, 0, 10, 0x80])
+
+# av1C: marker/version, then profile 0 and level index 5 (3.1), then Main
+# tier, 8-bit, 4:2:0.
+_AV1C = bytes([0x81, 0x05, 0x0C, 0x00])
 
 
 def _init_segment(sample_entry: bytes, config_type: bytes, config: bytes) -> bytes:
@@ -101,6 +114,16 @@ class TestCodecStringFromInit:
         """The VP9 codec string comes from ``vpcC``."""
         init = _init_segment(b"vp09", b"vpcC", _VPCC)
         assert cmaf_encoder.codec_string_from_init(init) == "vp09.00.10.08"
+
+    def test_reads_av1_profile_level_tier_and_depth(self):
+        """The AV1 codec string comes from ``av1C``."""
+        init = _init_segment(b"av01", b"av1C", _AV1C)
+        assert cmaf_encoder.codec_string_from_init(init) == "av01.0.05M.08"
+
+    def test_reads_av1_high_tier_and_ten_bit(self):
+        """Tier and bit depth are read, not assumed."""
+        init = _init_segment(b"av01", b"av1C", bytes([0x81, 0x0D, 0xCC, 0x00]))
+        assert cmaf_encoder.codec_string_from_init(init) == "av01.0.13H.10"
 
     def test_returns_none_for_a_codec_this_encoder_does_not_produce(self):
         """An unknown configuration box gives ``None`` rather than a guess."""
@@ -227,6 +250,103 @@ class TestCmafFfmpegPath:
         await enc.aclose()  # nothing to reap; must not raise
 
 
+class TestCmafEncoderSelection:
+    """The session uses the batch path's switch: ``DYN_XPU_FFMPEG_PATH``."""
+
+    def test_software_by_default(self, monkeypatch, tmp_path):
+        exe = _executable_stub(tmp_path)
+        monkeypatch.setenv(cmaf_encoder.ENV_FFMPEG_PATH, exe)
+        assert cmaf_encoder.resolve_cmaf_encoder() == (exe, None)
+
+    def test_hardware_when_declared_and_the_software_binary_is_not_needed(
+        self, monkeypatch, tmp_path
+    ):
+        exe = _executable_stub(tmp_path)
+        monkeypatch.setenv(ENV_XPU_FFMPEG_PATH, exe)
+        monkeypatch.setenv(ENV_XPU_VIDEO_DEVICE, "/dev/dri/renderD129")
+        monkeypatch.setenv(cmaf_encoder.ENV_FFMPEG_PATH, str(tmp_path / "nope"))
+        assert cmaf_encoder.resolve_cmaf_encoder() == (exe, "/dev/dri/renderD129")
+
+    def test_an_unusable_hardware_path_does_not_fall_back_to_software(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv(cmaf_encoder.ENV_FFMPEG_PATH, _executable_stub(tmp_path))
+        monkeypatch.setenv(ENV_XPU_FFMPEG_PATH, str(tmp_path / "nope"))
+        with pytest.raises(RuntimeError, match=ENV_XPU_FFMPEG_PATH):
+            cmaf_encoder.resolve_cmaf_encoder()
+
+    def test_hardware_command_line(self):
+        """VA-API upload and av1_vaapi, with the same fragmenting and GOP."""
+        cmd = cmaf_encoder.build_cmaf_ffmpeg_command(
+            "/opt/ffmpeg/bin/ffmpeg",
+            width=832,
+            height=480,
+            fps=16,
+            gop=8,
+            hw_device="/dev/dri/renderD129",
+        )
+        pairs = set(zip(cmd, cmd[1:]))
+
+        assert ("-vaapi_device", "/dev/dri/renderD129") in pairs
+        assert ("-vf", "format=nv12,hwupload") in pairs
+        assert ("-c:v", "av1_vaapi") in pairs
+        assert ("-async_depth", "1") in pairs
+        assert ("-g", "8") in pairs and ("-keyint_min", "8") in pairs
+        assert ("-movflags", FRAGMENTED_MOVFLAGS) in pairs
+        assert cmd[-3:] == ["-f", "mp4", "pipe:1"]
+        assert "-deadline" not in cmd, "libvpx options do not apply to av1_vaapi"
+
+    async def test_the_session_runs_the_declared_hardware_ffmpeg(
+        self, monkeypatch, tmp_path
+    ):
+        """start() resolves the encoder; errors and the fallback codec follow it."""
+        argv_file = tmp_path / "argv"
+        stream = tmp_path / "stream.bin"
+        stream.write_bytes(_init_segment(b"av01", b"av1C", _AV1C) + _fragments(1))
+        exe = _executable_stub(
+            tmp_path,
+            f'printf \'%s\\n\' "$@" > "{argv_file}"\ncat > /dev/null\ncat "{stream}"',
+        )
+        monkeypatch.setenv(ENV_XPU_FFMPEG_PATH, exe)
+        monkeypatch.setenv(ENV_XPU_VIDEO_DEVICE, "/dev/dri/renderD129")
+        enc = StreamingCmafEncoder(16, 128, 96)
+        # Before start() nothing is resolved yet.
+        assert enc.codec_string() == cmaf_encoder.CMAF_FALLBACK_VIDEO_CODEC
+        await enc.start()
+        # Resolved, and no init segment read yet: the AV1 fallback applies.
+        assert enc.codec_string() == cmaf_encoder.CMAF_FALLBACK_AV1_CODEC
+        try:
+            async for _ in enc.push(np.zeros((8, 96, 128, 3), dtype=np.uint8)):
+                pass
+            async for _ in enc.finish():
+                pass
+        finally:
+            await enc.aclose()
+
+        argv = argv_file.read_text().splitlines()
+        pairs = set(zip(argv, argv[1:]))
+        assert ("-vaapi_device", "/dev/dri/renderD129") in pairs
+        assert ("-c:v", "av1_vaapi") in pairs
+
+    async def test_a_failing_hardware_encode_names_the_hardware_encoder(
+        self, monkeypatch, tmp_path
+    ):
+        exe = _executable_stub(tmp_path, 'echo "boom: no VA display" >&2\nexit 3')
+        monkeypatch.setenv(ENV_XPU_FFMPEG_PATH, exe)
+        enc = StreamingCmafEncoder(16, 128, 96)
+        await enc.start()
+        try:
+            with pytest.raises(
+                RuntimeError, match=r"av1_vaapi.*exit 3\).*boom: no VA display"
+            ):
+                async for _ in enc.push(np.zeros((8, 96, 128, 3), dtype=np.uint8)):
+                    pass
+                async for _ in enc.finish():
+                    pass
+        finally:
+            await enc.aclose()
+
+
 class TestCmafCommandLine:
     """The argv that makes ffmpeg emit keyframe-aligned fragmented MP4."""
 
@@ -251,7 +371,7 @@ class TestCmafCommandLine:
         assert ("-s", "832x480") in pairs and ("-r", "16") in pairs
         assert ("-i", "-") in pairs
         assert ("-c:v", "libvpx-vp9") in pairs
-        assert ("-movflags", cmaf_encoder.FRAGMENTED_MOVFLAGS) in pairs
+        assert ("-movflags", FRAGMENTED_MOVFLAGS) in pairs
         assert cmd[-3:] == ["-f", "mp4", "pipe:1"]
         # +faststart rewrites the file afterwards and needs a seekable output.
         assert not any("faststart" in arg for arg in cmd)
@@ -881,3 +1001,88 @@ class TestStreamingCmafEncoderReal:
         assert codec == cmaf_encoder.codec_string_from_init(items[0][1])
         # VP9 profile 0, 8-bit: the 4:2:0 stream every MSE implementation plays.
         assert codec.startswith("vp09.00.") and codec.endswith(".08"), codec
+
+
+# ---------------------------------------------------------------------------
+# Real hardware (VA-API AV1)
+# ---------------------------------------------------------------------------
+
+# Hardware encoders have a minimum frame size (128x96 on an Arc Pro B60).
+_HW_WIDTH, _HW_HEIGHT = 160, 96
+
+
+@pytest.mark.xpu_1
+@pytest.mark.timeout(180)
+class TestStreamingCmafEncoderHardwareReal:
+    """The same player-facing properties, on a real VA-API AV1 encode.
+
+    Runs only where ``DYN_XPU_FFMPEG_PATH`` is set; see ``hw_video_encoder``.
+    """
+
+    async def test_fragments_are_playable_and_carry_every_frame(
+        self, hw_video_encoder, tmp_path
+    ):
+        ffmpeg, _ = hw_video_encoder
+        source = _clip(20, _HW_WIDTH, _HW_HEIGHT)
+        _, items = await _run_session(source)
+        tags = [tag for tag, _, _ in items]
+        stream = b"".join(payload for _, payload, _ in items)
+
+        assert tags == [CMAF_INIT_TAG] + [
+            f"{CMAF_SEGMENT_TAG_PREFIX}{i}" for i in (1, 2, 3)
+        ]
+        decoded, info = _decode(ffmpeg, stream, tmp_path, _HW_WIDTH, _HW_HEIGHT)
+        assert "av1" in info and "yuv420p" in info, info
+        assert decoded.shape == source.shape
+        mse = np.mean((decoded.astype(np.float64) - source.astype(np.float64)) ** 2)
+        psnr = 10 * np.log10(255.0**2 / mse)
+        assert psnr >= 25.0, f"decoded picture does not match the input: {psnr:.1f} dB"
+
+    async def test_each_segment_is_decodable_once_the_init_is_known(
+        self, hw_video_encoder, tmp_path
+    ):
+        ffmpeg, _ = hw_video_encoder
+        _, items = await _run_session(_clip(20, _HW_WIDTH, _HW_HEIGHT))
+        init = items[0][1]
+
+        for index, (_, payload, _) in enumerate(items[1:], start=1):
+            decoded, _ = _decode(
+                ffmpeg, init + payload, tmp_path, _HW_WIDTH, _HW_HEIGHT
+            )
+            assert len(decoded) == (8, 8, 4)[index - 1], f"segment {index}"
+
+    async def test_the_timeline_is_continuous_and_the_tail_is_partial(
+        self, hw_video_encoder
+    ):
+        fps = 16
+        _, items = await _run_session(_clip(17, _HW_WIDTH, _HW_HEIGHT), fps=fps)
+        timescale = _timescale(items[0][1])
+        timing = [_fragment_timing(payload) for _, payload, _ in items[1:]]
+
+        sequences = [seq for seq, _, _ in timing]
+        assert sequences == list(range(sequences[0], sequences[0] + len(timing)))
+        assert [samples for _, _, samples in timing] == [8, 8, 1]
+        frames_before = 0
+        for index, (_, decode_time, samples) in enumerate(timing, start=1):
+            assert decode_time * fps == frames_before * timescale, f"segment {index}"
+            frames_before += samples
+
+    async def test_fragments_arrive_while_input_is_still_being_written(
+        self, hw_video_encoder
+    ):
+        _, items = await _run_session(_clip(48, _HW_WIDTH, _HW_HEIGHT), pace=0.3)
+        early = [tag for tag, _, phase in items if phase == "push"]
+
+        assert CMAF_INIT_TAG in early, "the init segment waited for end of input"
+        assert any(
+            tag.startswith(CMAF_SEGMENT_TAG_PREFIX) for tag in early
+        ), "no media segment was delivered before the input ended"
+        assert len([t for t, _, _ in items if t != CMAF_INIT_TAG]) == 6
+
+    async def test_the_codec_string_describes_the_stream(self, hw_video_encoder):
+        enc, items = await _run_session(_clip(8, _HW_WIDTH, _HW_HEIGHT))
+        codec = enc.codec_string()
+
+        assert codec == cmaf_encoder.codec_string_from_init(items[0][1])
+        # AV1 Main profile, 8-bit.
+        assert codec.startswith("av01.0.") and codec.endswith(".08"), codec

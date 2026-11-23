@@ -9,10 +9,12 @@ stdout. One muxer instance sees every frame, so ``mfhd.sequence_number`` and
 bitstream work done here is reading box headers to find segment boundaries.
 No box is modified. See DEP 0017.
 
-The encoder is software VP9 (``libvpx-vp9``), the same royalty-free codec the
-batch path (``video_utils.encode_to_video_bytes``) produces. Encoding starts
-after generation has finished: the whole clip is available before the first
-frame is pushed, and what streams is the encode and the delivery.
+The encoder is the one the batch path (``video_utils.encode_to_video_bytes``)
+uses: software VP9 (``libvpx-vp9``) by default, hardware AV1 (``av1_vaapi``)
+when ``DYN_XPU_FFMPEG_PATH`` is set; see
+:mod:`dynamo.common.utils.ffmpeg_command`. Encoding starts after generation has
+finished: the whole clip is available before the first frame is pushed, and
+what streams is the encode and the delivery.
 
 The wire vocabulary (tags, chunking, metadata) is in
 :mod:`dynamo.common.utils.cmaf_video`.
@@ -32,46 +34,33 @@ from dynamo.common.utils.cmaf_video import (
     DEFAULT_CMAF_GOP_FRAMES,
     segment_tag,
 )
+from dynamo.common.utils.ffmpeg_command import (
+    ENV_XPU_FFMPEG_PATH,
+    HW_VIDEO_ENCODER,
+    SW_VIDEO_ENCODER,
+    build_ffmpeg_command,
+    hw_ffmpeg_path,
+    validate_raw_rgb_frames,
+    xpu_video_device,
+)
 
 logger = logging.getLogger(__name__)
 
-# The ffmpeg binary to run. imageio, which the batch path uses, returns nothing
-# until encoding completes, so it cannot hand back fragments; this path drives
-# the CLI directly. The default is the LGPL build the runtime images ship.
+# The software ffmpeg binary. imageio, which the batch path uses, returns
+# nothing until encoding completes, so it cannot hand back fragments; this path
+# drives the CLI directly. The default is the LGPL build the runtime images
+# ship. Not used when DYN_XPU_FFMPEG_PATH selects the hardware encoder.
 ENV_FFMPEG_PATH = "DYN_FFMPEG_PATH"
 DEFAULT_FFMPEG_PATH = "/usr/local/bin/ffmpeg"
 
-CMAF_VIDEO_ENCODER = "libvpx-vp9"
-
-# Low-latency arguments: libvpx's defaults encode 832x480 slower than real time
-# and look ahead 25 frames, either of which defeats streaming. `yuv420p` is
-# pinned for playability, not quality -- from rgb24 input libvpx picks 4:4:4,
-# which is VP9 profile 1, and browser MSE support for `vp09.01` is not
-# dependable.
-CMAF_ENCODER_ARGS = (
-    "-deadline",
-    "realtime",
-    "-cpu-used",
-    "8",
-    "-lag-in-frames",
-    "0",
-    "-auto-alt-ref",
-    "0",
-    "-row-mt",
-    "1",
-    "-pix_fmt",
-    "yuv420p",
-)
-
-# Fragmented-MP4 muxer flags: `empty_moov` makes the leading ftyp+moov a
-# self-contained init segment, `frag_keyframe` cuts a fragment at each keyframe,
-# `default_base_moof` sets the tfhd flag CMAF requires. No `+faststart` -- it
-# rewrites the file afterwards and needs a seekable output.
-FRAGMENTED_MOVFLAGS = "+frag_keyframe+empty_moov+default_base_moof"
+# The default (software) encoder.
+CMAF_VIDEO_ENCODER = SW_VIDEO_ENCODER
 
 # Used when the init segment cannot be parsed, so the client still gets a codec
-# string it can hand to MediaSource.isTypeSupported(): VP9 profile 0, 8-bit.
+# string it can hand to MediaSource.isTypeSupported(). VP9 profile 0, 8-bit for
+# the software encoder; AV1 Main profile, level 3.1, 8-bit for the hardware one.
 CMAF_FALLBACK_VIDEO_CODEC = "vp09.00.10.08"
+CMAF_FALLBACK_AV1_CODEC = "av01.0.05M.08"
 
 # How long to wait on one read from, or one write to, a live ffmpeg before
 # giving up on it.
@@ -98,13 +87,37 @@ def cmaf_ffmpeg_path() -> str:
         raise RuntimeError(
             f"CMAF streaming needs an ffmpeg binary, but {path!r} is not an "
             f"executable file. Point {ENV_FFMPEG_PATH} at an ffmpeg carrying "
-            f"{CMAF_VIDEO_ENCODER}."
+            f"{CMAF_VIDEO_ENCODER}, or set {ENV_XPU_FFMPEG_PATH} to encode "
+            f"{HW_VIDEO_ENCODER} in hardware."
         )
     return path
 
 
+def resolve_cmaf_encoder() -> Tuple[str, Optional[str]]:
+    """Resolve the ffmpeg binary and the VA-API device for a CMAF session.
+
+    Returns ``(ffmpeg, device)``, where ``device`` is the DRM render node for
+    hardware AV1, or ``None`` for software VP9. The switch is the batch path's:
+    ``DYN_XPU_FFMPEG_PATH``.
+
+    Raises:
+        RuntimeError: If the selected binary is not an executable file. There
+            is no fallback to the other encoder.
+    """
+    hw = hw_ffmpeg_path()
+    if hw is not None:
+        return hw, xpu_video_device()
+    return cmaf_ffmpeg_path(), None
+
+
 def build_cmaf_ffmpeg_command(
-    ffmpeg: str, *, width: int, height: int, fps: int, gop: int
+    ffmpeg: str,
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    gop: int,
+    hw_device: Optional[str] = None,
 ) -> List[str]:
     """Build the ffmpeg argv for one raw-RGB-in, fragmented-MP4-out session.
 
@@ -116,38 +129,18 @@ def build_cmaf_ffmpeg_command(
         gop: Keyframe interval in frames. Every fragment must start with a
             keyframe, so this is the segment length rather than an encoder
             heuristic.
+        hw_device: DRM render node. Its presence selects the hardware encoder.
     """
-    return [
+    return build_ffmpeg_command(
         ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{width}x{height}",
-        "-r",
-        str(fps),
-        "-i",
-        "-",
-        "-c:v",
-        CMAF_VIDEO_ENCODER,
-        "-g",
-        str(gop),
-        "-keyint_min",
-        str(gop),
-        *CMAF_ENCODER_ARGS,
-        "-movflags",
-        FRAGMENTED_MOVFLAGS,
-        "-flush_packets",
-        "1",
-        "-f",
-        "mp4",
-        "pipe:1",
-    ]
+        width=width,
+        height=height,
+        fps=fps,
+        output="pipe:1",
+        hw_device=hw_device,
+        gop=gop,
+        streaming=True,
+    )
 
 
 def validate_cmaf_frames(frames) -> None:
@@ -156,15 +149,7 @@ def validate_cmaf_frames(frames) -> None:
     Raises ``ValueError`` unless ``frames`` is an ``np.ndarray`` of shape
     ``(T, H, W, 3)`` with dtype ``uint8``.
     """
-    if not isinstance(frames, np.ndarray):
-        raise ValueError(
-            "CMAF encoder expects frames as np.ndarray (T, H, W, 3) uint8; "
-            f"got {type(frames).__name__}"
-        )
-    if frames.ndim != 4 or frames.shape[-1] != 3:
-        raise ValueError(f"CMAF encoder expects shape (T, H, W, 3); got {frames.shape}")
-    if frames.dtype != np.uint8:
-        raise ValueError(f"CMAF encoder expects dtype uint8; got {frames.dtype}")
+    validate_raw_rgb_frames(frames, what="CMAF encoder")
 
 
 def _discard_outcome(future: asyncio.Future) -> None:
@@ -235,6 +220,19 @@ def _find_child(
     return None
 
 
+def _av1_codec_string(cfg: bytes) -> Optional[str]:
+    """RFC 6381 ``av01.P.LLT.DD`` from an ``av1C`` payload."""
+    if len(cfg) < 3:
+        return None
+    profile = (cfg[1] >> 5) & 0x07
+    level = cfg[1] & 0x1F
+    tier = "H" if (cfg[2] >> 7) & 0x01 else "M"
+    high_bitdepth = (cfg[2] >> 6) & 0x01
+    twelve_bit = (cfg[2] >> 5) & 0x01
+    depth = 12 if twelve_bit else (10 if high_bitdepth else 8)
+    return f"av01.{profile}.{level:02d}{tier}.{depth:02d}"
+
+
 def _vp9_codec_string(cfg: bytes) -> Optional[str]:
     """RFC 6381 ``vp09.PP.LL.DD`` from a ``vpcC`` payload (a FullBox)."""
     if len(cfg) < 7:
@@ -247,9 +245,10 @@ def _vp9_codec_string(cfg: bytes) -> Optional[str]:
 def codec_string_from_init(init: bytes) -> Optional[str]:
     """Read the RFC 6381 codec string out of a CMAF init segment.
 
-    It cannot be a constant: the level depends on the resolution and frame rate
-    of the encode, and the client passes the string to
-    ``MediaSource.isTypeSupported()`` before appending anything.
+    It cannot be a constant: it names the codec the deployment resolved, the
+    level depends on the resolution and frame rate of the encode, and the
+    client passes the string to ``MediaSource.isTypeSupported()`` before
+    appending anything.
 
     Returns ``None`` if the sample entry cannot be located.
     """
@@ -274,6 +273,8 @@ def codec_string_from_init(init: bytes) -> Optional[str]:
         for btype, payload_start, box_end in _iter_child_boxes(init, body, entry_end):
             if btype == b"vpcC":
                 return _vp9_codec_string(init[payload_start:box_end])
+            if btype == b"av1C":
+                return _av1_codec_string(init[payload_start:box_end])
     except (ValueError, IndexError) as err:
         logger.warning("Could not parse CMAF init segment: %s", err)
     return None
@@ -405,7 +406,9 @@ class StreamingCmafEncoder:
     of *k+1* or end of input, so the last fragment only appears once
     :meth:`finish` closes stdin.
 
-    There is no fallback: if ffmpeg fails, the session raises.
+    The encoder is resolved in :meth:`start`: hardware AV1 when
+    ``DYN_XPU_FFMPEG_PATH`` is set, software VP9 otherwise. There is no
+    fallback: if ffmpeg fails, the session raises.
 
     ffmpeg runs in its own process group and teardown kills the group, so a
     ``DYN_FFMPEG_PATH`` that is a wrapper script does not leave the real
@@ -443,6 +446,9 @@ class StreamingCmafEncoder:
             gop_frames if gop_frames is not None else DEFAULT_CMAF_GOP_FRAMES
         )
         self._io_timeout_s = io_timeout_s
+        # Set by start(): the DRM render node when encoding in hardware.
+        self._hw_device: Optional[str] = None
+        self._encoder = CMAF_VIDEO_ENCODER
 
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._cutter = FragmentedMp4Cutter()
@@ -466,12 +472,15 @@ class StreamingCmafEncoder:
         if self._proc is not None:
             raise RuntimeError("StreamingCmafEncoder.start() called twice")
 
+        ffmpeg, self._hw_device = resolve_cmaf_encoder()
+        self._encoder = HW_VIDEO_ENCODER if self._hw_device else CMAF_VIDEO_ENCODER
         cmd = build_cmaf_ffmpeg_command(
-            cmaf_ffmpeg_path(),
+            ffmpeg,
             width=self.width,
             height=self.height,
             fps=self.fps,
             gop=self.gop_frames,
+            hw_device=self._hw_device,
         )
         logger.info("CMAF encode session: %s", " ".join(cmd))
         self._proc = await asyncio.create_subprocess_exec(
@@ -544,7 +553,7 @@ class StreamingCmafEncoder:
         except asyncio.TimeoutError:
             await self.aclose()
             raise RuntimeError(
-                f"ffmpeg {CMAF_VIDEO_ENCODER} accepted no input for "
+                f"ffmpeg {self._encoder} accepted no input for "
                 f"{self._io_timeout_s:.0f}s while encoding the CMAF stream"
             ) from None
         self._frames_in += len(frames)
@@ -573,7 +582,7 @@ class StreamingCmafEncoder:
             except asyncio.TimeoutError:
                 await self.aclose()
                 raise RuntimeError(
-                    f"ffmpeg {CMAF_VIDEO_ENCODER} produced no output for "
+                    f"ffmpeg {self._encoder} produced no output for "
                     f"{self._io_timeout_s:.0f}s while draining the CMAF stream"
                 ) from None
             if item is None:
@@ -594,13 +603,13 @@ class StreamingCmafEncoder:
         except asyncio.TimeoutError:
             await self.aclose()
             raise RuntimeError(
-                f"ffmpeg {CMAF_VIDEO_ENCODER} did not exit within "
+                f"ffmpeg {self._encoder} did not exit within "
                 f"{self._io_timeout_s:.0f}s of ending the CMAF stream"
             ) from None
         await self._collect_stderr()
         if returncode != 0:
             raise RuntimeError(
-                f"ffmpeg {CMAF_VIDEO_ENCODER} CMAF encode failed (exit {returncode}): "
+                f"ffmpeg {self._encoder} CMAF encode failed (exit {returncode}): "
                 f"{self._stderr_text()}"
             )
         missing = self._missing_output()
@@ -608,7 +617,7 @@ class StreamingCmafEncoder:
             # A zero exit status is not enough: the client would be told the
             # stream is complete.
             raise RuntimeError(
-                f"ffmpeg {CMAF_VIDEO_ENCODER} CMAF encode exited 0 but {missing}: "
+                f"ffmpeg {self._encoder} CMAF encode exited 0 but {missing}: "
                 f"{self._stderr_text()}"
             )
         logger.info(
@@ -635,6 +644,8 @@ class StreamingCmafEncoder:
             parsed = codec_string_from_init(self._init_segment)
             if parsed:
                 return parsed
+        if self._hw_device:
+            return CMAF_FALLBACK_AV1_CODEC
         return CMAF_FALLBACK_VIDEO_CODEC
 
     # -- internals ---------------------------------------------------------
@@ -737,7 +748,7 @@ class StreamingCmafEncoder:
         if not done:
             await self.aclose()
             raise RuntimeError(
-                f"ffmpeg {CMAF_VIDEO_ENCODER} accepted no input for "
+                f"ffmpeg {self._encoder} accepted no input for "
                 f"{self._io_timeout_s:.0f}s while ending the CMAF stream"
             )
 
@@ -809,7 +820,7 @@ class StreamingCmafEncoder:
         if self._stdout_error is not None:
             status += f", reading its output failed: {self._stdout_error!r}"
         return RuntimeError(
-            f"ffmpeg {CMAF_VIDEO_ENCODER} CMAF encode failed ({status}) "
+            f"ffmpeg {self._encoder} CMAF encode failed ({status}) "
             f"after {self._frames_in} frame(s) and {self._segments} segment(s): "
             f"{self._stderr_text()}"
         )

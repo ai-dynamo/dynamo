@@ -29,8 +29,8 @@ The timeline is authored by one long-lived ffmpeg process per request, so
 client does no timestamp arithmetic. Requesting this route is the only trigger:
 nothing in a request body switches a plain `/v1/videos` call to CMAF output.
 
-The encoder is software VP9 (`libvpx-vp9`), the same codec `/v1/videos` produces,
-run from `DYN_FFMPEG_PATH` (default `/usr/local/bin/ffmpeg`).
+The encoder is the one `/v1/videos` uses. By default that is software VP9
+(`libvpx-vp9`), run from `DYN_FFMPEG_PATH` (default `/usr/local/bin/ffmpeg`).
 `DYN_CMAF_GOP_FRAMES` sets the segment length (default 8 frames; must be a
 positive multiple of 4). The stream carries one video track; generated audio is
 not included. The vLLM-Omni backend implements this route.
@@ -40,6 +40,28 @@ not included. The vLLM-Omni backend implements this route.
 > to start a stream because that path is not executable, point
 > `DYN_FFMPEG_PATH` at an ffmpeg the image does carry that includes
 > `libvpx-vp9`.
+
+### Hardware AV1 on Intel GPUs
+
+Set `DYN_XPU_FFMPEG_PATH` to an ffmpeg built with VA-API and the `av1_vaapi`
+encoder, and both `/v1/videos` and this route encode AV1 on the GPU instead:
+
+```bash
+export DYN_XPU_FFMPEG_PATH=/usr/bin/ffmpeg          # an ffmpeg with av1_vaapi
+export DYN_XPU_VIDEO_DEVICE=/dev/dri/renderD128     # the GPU's DRM render node (this is the default)
+./examples/backends/vllm/launch/agg_omni_video.sh
+```
+
+The worker needs access to the render node and an Intel media driver that
+supports AV1 encoding on that GPU. `vainfo --display drm --device <node>` lists
+`VAProfileAV1Profile0 : VAEntrypointEncSlice` when it does. The metadata frame
+then carries an `av01.*` codec string, read from the stream, so the client needs
+no change.
+
+Hardware is never probed for and there is no fallback in either direction: a
+path that is set but unusable, or a hardware encode that fails, is an error,
+not a software encode. Hardware encoders also have a minimum frame size
+(128x96 on an Arc Pro B60).
 
 ## Run it
 

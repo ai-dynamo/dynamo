@@ -10,11 +10,24 @@ video frames to MP4 format.
 import io
 import logging
 import os
+import subprocess
+import tempfile
 from typing import Tuple
 
 import numpy as np
 
+from dynamo.common.utils.ffmpeg_command import (
+    HW_VIDEO_ENCODER,
+    build_ffmpeg_command,
+    hw_ffmpeg_path,
+    validate_raw_rgb_frames,
+    xpu_video_device,
+)
+
 logger = logging.getLogger(__name__)
+
+# How long one hardware encode of a whole clip may take before it is abandoned.
+HW_ENCODE_TIMEOUT_S = 600.0
 
 
 DEFAULT_VIDEO_WIDTH = 832
@@ -190,6 +203,83 @@ def encode_to_mp4(
         raise RuntimeError(f"Video encoding failed: {e}") from e
 
 
+def _encode_av1_vaapi(
+    frames: np.ndarray, fps: int, output_format: str, ffmpeg: str, device: str
+) -> bytes:
+    """Encode frames to AV1-in-mp4 on the VA-API hardware encoder.
+
+    Pipes raw RGB to the operator-supplied ffmpeg. mp4 needs a seekable output
+    for the moov atom, so the clip is encoded to a temporary file and read back.
+
+    Raises:
+        ValueError: If ``frames`` is not ``(T, H, W, 3) uint8``, or
+            ``output_format`` is not "mp4".
+        RuntimeError: If ffmpeg cannot be run, times out, or exits non-zero.
+            Its stderr is included, and software encoding is not attempted.
+    """
+    if output_format != "mp4":
+        raise ValueError(
+            f"Hardware {HW_VIDEO_ENCODER} encoding supports only 'mp4'; "
+            f"got {output_format!r}"
+        )
+    validate_raw_rgb_frames(frames, what="Hardware video encoder")
+    num_frames, height, width, _ = frames.shape
+
+    with tempfile.TemporaryDirectory(prefix="dynamo-av1-") as tmp_dir:
+        output_path = os.path.join(tmp_dir, "out.mp4")
+        cmd = build_ffmpeg_command(
+            ffmpeg,
+            width=width,
+            height=height,
+            fps=fps,
+            output=output_path,
+            hw_device=device,
+        )
+        logger.info(
+            "Encoding %d frames (%dx%d @ %d fps) via %s on %s",
+            num_frames,
+            width,
+            height,
+            fps,
+            HW_VIDEO_ENCODER,
+            device,
+        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=np.ascontiguousarray(frames).tobytes(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=HW_ENCODE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"ffmpeg {HW_VIDEO_ENCODER} encode did not finish within "
+                f"{HW_ENCODE_TIMEOUT_S:.0f}s"
+            ) from None
+        except OSError as err:
+            raise RuntimeError(
+                f"ffmpeg {HW_VIDEO_ENCODER} encode could not be started: {err}"
+            ) from err
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"ffmpeg {HW_VIDEO_ENCODER} encode failed "
+                f"(exit {proc.returncode}): {stderr}"
+            )
+        try:
+            with open(output_path, "rb") as fh:
+                video_bytes = fh.read()
+        except OSError:
+            video_bytes = b""
+    if not video_bytes:
+        raise RuntimeError(
+            f"ffmpeg {HW_VIDEO_ENCODER} encode exited 0 but produced no output"
+        )
+    logger.info("Encoded video to %d bytes", len(video_bytes))
+    return video_bytes
+
+
 def encode_to_video_bytes(
     frames: np.ndarray,
     fps: int = 16,
@@ -197,19 +287,35 @@ def encode_to_video_bytes(
 ) -> bytes:
     """Encode numpy frames to video bytes (in-memory).
 
+    Software VP9 (``libvpx-vp9``, through imageio) by default. When
+    ``DYN_XPU_FFMPEG_PATH`` names a VA-API-capable ffmpeg, the clip is encoded
+    as AV1 on the Intel GPU instead; see
+    :mod:`dynamo.common.utils.ffmpeg_command`. The caller does not choose the
+    codec, and a hardware encode that fails does not fall back to software.
+
     Args:
         frames: Video frames as numpy array of shape (num_frames, height, width, 3)
             with uint8 values 0-255.
         fps: Frames per second for the output video.
-        output_format: Container format — "mp4", "webm".
+        output_format: Container format — "mp4", "webm". Hardware encoding
+            supports "mp4" only.
 
     Returns:
         Encoded video as bytes.
 
     Raises:
-        ImportError: If imageio is not available.
-        RuntimeError: If encoding fails.
+        ImportError: If imageio is not available (software encoding).
+        ValueError: If hardware encoding is selected and ``frames`` is not
+            ``(T, H, W, 3) uint8`` or ``output_format`` is not "mp4".
+        RuntimeError: If encoding fails, or ``DYN_XPU_FFMPEG_PATH`` is set but
+            unusable.
     """
+    hw_ffmpeg = hw_ffmpeg_path()
+    if hw_ffmpeg is not None:
+        return _encode_av1_vaapi(
+            frames, fps, output_format, hw_ffmpeg, xpu_video_device()
+        )
+
     try:
         import imageio.v3 as iio
     except ImportError:
