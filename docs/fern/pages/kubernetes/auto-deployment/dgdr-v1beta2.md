@@ -33,6 +33,10 @@ It is not required for a manually submitted search. See [Planner Live Retune](pl
 The operator selects the planner image configured by its Helm release. Requests and Runs cannot
 select a different AISimulate image or version.
 
+Helm also supplies the matching operator image for the Run publisher. With a custom operator
+command, set `--operator-image` before preparing new Run executions. Omitting it does not prevent
+manager startup; see [v1beta2 availability](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#v1beta2-availability).
+
 ## Create a Search
 
 The following Request pins the hardware topology, so admission does not need cluster discovery:

@@ -165,7 +165,7 @@ func main() {
 		&operatorImage,
 		"operator-image",
 		"",
-		"Operator image used to deliver version-matched helper binaries for DGD overrides",
+		"Operator image used for version-matched DGD override helpers and DGDR Run publishers",
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")

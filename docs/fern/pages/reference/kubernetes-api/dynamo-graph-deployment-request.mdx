@@ -19,6 +19,11 @@ The operator installs their CRDs and reconciles native v1beta2 Requests by defau
 `v1beta1` remains the Request storage version. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
 installations, require an administrator to install the matching CRDs before upgrading the operator.
 
+Custom operator invocations may omit `--operator-image` at startup. Before preparing a new Run
+execution, set it to the image matching the running operator build; Helm supplies it automatically.
+Without it, reconciliation retries without freezing the execution input or creating a Job.
+Existing executions continue using their frozen publisher image.
+
 On a cluster with discoverable GPUs, a native Request can use admission defaults:
 
 ```yaml
