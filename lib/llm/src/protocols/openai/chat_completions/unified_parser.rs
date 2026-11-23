@@ -11310,6 +11310,15 @@ pub(crate) mod tests {
     // TODO: Cover literal native tool-call opener text separately from reasoning controls.
     #[tokio::test]
     async fn quoted_control_markers_stay_visible_in_batch_and_streaming() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quoted_control_markers_stay_visible_in_batch_and_streaming"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        ) {
+            return;
+        }
         assert_quoted_control_markers(true, true).await;
     }
 
@@ -11321,7 +11330,72 @@ pub(crate) mod tests {
     // TODO: Cover literal native tool-call opener text in native-channel batch responses.
     #[tokio::test]
     async fn native_channel_quoted_control_markers_stay_visible_in_batch() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::native_channel_quoted_control_markers_stay_visible_in_batch"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        ) {
+            return;
+        }
         assert_quoted_control_markers(false, true).await;
+    }
+
+    #[test]
+    fn glm_default_quote_policy_parses_a_complete_quoted_native_call() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm_default_quote_policy_parses_a_complete_quoted_native_call"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let input = r#"Before "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>" after"#;
+        let output = parse_complete(
+            GLM47_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(output.text, "Before \"\" after");
+        assert!(output.reasoning.is_empty());
+        assert!(!output.incomplete_native_call);
+        assert_eq!(output.tool_calls.len(), 1);
+        assert_eq!(output.tool_calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output.tool_calls[0].function.arguments)
+                .unwrap(),
+            serde_json::json!({"city":"Paris"}),
+        );
+    }
+
+    #[test]
+    fn glm_quote_aware_policy_keeps_a_complete_quoted_native_call_literal() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm_quote_aware_policy_keeps_a_complete_quoted_native_call_literal"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        ) {
+            return;
+        }
+        let input = r#"Before "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>" after"#;
+        let output = parse_complete(
+            GLM47_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(output.text, input);
+        assert!(output.reasoning.is_empty());
+        assert!(!output.incomplete_native_call);
+        assert!(output.tool_calls.is_empty());
     }
 
     async fn assert_quoted_control_markers(check_streaming: bool, include_deferred: bool) {
@@ -13438,10 +13512,20 @@ pub(crate) mod tests {
 
     #[test]
     fn muse_prefilled_reasoning_does_not_treat_prose_as_a_header() {
-        for reasoning in [
-            "map x to=y before answering",
-            "literal \"<|message|>\" in a thought",
+        let quoted_case_in_child = crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::muse_prefilled_reasoning_does_not_treat_prose_as_a_header"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        );
+        for (reasoning, requires_quote_aware) in [
+            ("map x to=y before answering", false),
+            ("literal \"<|message|>\" in a thought", true),
         ] {
+            if quoted_case_in_child && requires_quote_aware {
+                continue;
+            }
             let input =
                 format!("{reasoning}<|eom|><|start|>assistant to=user<|message|>answer<|eot|>");
             let result = parse_complete(
@@ -15111,6 +15195,13 @@ pub(crate) mod tests {
 
     #[test]
     fn malformed_guided_zero_call_native_channels_recover_for_every_family() {
+        let quoted_cases_in_child = crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::malformed_guided_zero_call_native_channels_recover_for_every_family"
+            ),
+            &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+        );
         for (family, raw) in [
             ("deepseek_v4", "<think>private</think>answer"),
             ("deepseek_v41", "<think>private</think>answer"),
@@ -15144,6 +15235,9 @@ pub(crate) mod tests {
                 assert_eq!(batch.reasoning, "private", "{family} {constraint:?}");
                 assert_eq!(batch.text, "answer", "{family} {constraint:?}");
                 assert!(batch.tool_calls.is_empty());
+                if quoted_cases_in_child {
+                    continue;
+                }
                 let quoted = serde_json::to_string(raw).unwrap();
                 assert!(
                     !contains_native_envelope(&quoted, family),
