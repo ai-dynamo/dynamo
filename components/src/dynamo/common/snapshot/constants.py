@@ -30,6 +30,8 @@ RESTORE_RUNTIME_ENV_NAMES = {
     "DYN_DISCOVERY_BACKEND",
     "DYN_REQUEST_PLANE",
     "DYN_EVENT_PLANE",
+    # Destination policy replaces the temporary capture-time offline override.
+    "HF_HUB_OFFLINE",
     # DistributedRuntime infrastructure env read after restore.
     "DYN_EVENT_PLANE_HOST",
     "DYN_TCP_RPC_HOST",
@@ -50,6 +52,9 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Served model name a restored worker registers under: one snapshot can
+    # back many deployments, each naming its model.
+    "DYN_SERVED_MODEL_NAME",
     # Target identity and failover policy consumed after engine construction.
     "ENGINE_ID",
     "FAILOVER_LOCK_PATH",

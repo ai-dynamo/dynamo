@@ -3,6 +3,8 @@
 
 //! Pool Relay with endpoint-local CKF pools.
 
+pub use dynamo_global_common::PoolKey as RoutingPoolKey;
+
 mod actor;
 mod discovery;
 mod host;
@@ -13,6 +15,7 @@ mod namespace_source;
 mod pool_registry;
 mod publication;
 mod resolution;
+mod routing_pool;
 mod serving_load;
 mod topology;
 pub mod wan;

@@ -13,48 +13,41 @@ use crate::{
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::{RequestAttemptLease, RequestAttemptRelease},
     },
-    lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
         preprocessor::MigrationState,
         timing::{RequestPhase, RequestTracker},
     },
+    routing_policy::AttemptLease,
 };
-use dynamo_kv_router::{
-    indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
-    protocols::{
-        BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
-        compute_next_seq_hash,
-    },
-    scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
 };
+use dynamo_kv_indexer::host::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes};
+use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::DECODE_PROGRESS;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::{BookingHandle, RequestLifecycle};
+use dynamo_session_affinity::host::AffinityLease;
+use dynamo_slot_tracker::host::DecodeProgressUpdate;
 
-pub(super) struct LoraLoadGuard {
-    estimator: Arc<LoadEstimator>,
-    lora_name: String,
-}
-
-impl LoraLoadGuard {
-    pub(super) fn new(estimator: Arc<LoadEstimator>, lora_name: String) -> Self {
-        estimator.increment_load(&lora_name);
-        Self {
-            estimator,
-            lora_name,
-        }
-    }
-}
-
-impl Drop for LoraLoadGuard {
-    fn drop(&mut self) {
-        self.estimator.decrement_load(&self.lora_name);
-    }
+fn decode_progress_output_limit(request: &PreprocessedRequest, phase: RequestPhase) -> Option<u32> {
+    let limit = request
+        .stop_conditions
+        .max_tokens
+        .filter(|limit| *limit > 0)?;
+    (phase == RequestPhase::Aggregated
+        && request.sampling_options.n.unwrap_or(1) == 1
+        && request.sampling_options.best_of.unwrap_or(1) == 1)
+        .then_some(limit)
 }
 
 #[derive(Clone)]
@@ -411,6 +404,7 @@ impl RequestObservability {
 struct OutputBlockUpdate {
     num_blocks: usize,
     decay_fraction: Option<f64>,
+    progress: Option<DecodeProgressUpdate>,
 }
 
 /// Tracks when streamed output grows into a new scheduler accounting block.
@@ -420,6 +414,9 @@ struct OutputBlockTracker {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
+    progress_limit: Option<u32>,
+    progress_last: usize,
+    progress_invalid: bool,
 }
 
 /// Owns the shared attempt-scoped scheduler and approximate-LRU lifecycle after
@@ -468,6 +465,12 @@ impl KvRequestCleanup {
 
     fn lifecycle(&self) -> Option<&RequestAttemptLease> {
         self.lifecycle.as_ref()
+    }
+
+    /// A handle that releases this attempt's scheduler booking ahead of the
+    /// lease, for a migration retry that re-books the same request ID.
+    pub(super) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
+        self.lifecycle().map(RequestAttemptLease::release_handle)
     }
 
     pub(super) async fn finish(&self) {
@@ -571,36 +574,70 @@ impl OutputBlockTracker {
             isl_tokens,
             block_size,
             expected_output_tokens,
+            progress_limit: None,
+            progress_last: 0,
+            progress_invalid: false,
+        }
+    }
+
+    fn enable_decode_progress(&mut self, output_limit: u32) {
+        self.progress_limit = Some(output_limit);
+    }
+
+    fn invalidate_decode_progress(&mut self) {
+        if self.progress_limit.take().is_some() {
+            self.progress_invalid = true;
         }
     }
 
     fn observe(&mut self, cumulative_osl: usize) -> Option<OutputBlockUpdate> {
-        if !self.track_output_blocks {
+        if !self.track_output_blocks && self.progress_limit.is_none() && !self.progress_invalid {
             return None;
         }
-
-        let new_total_blocks = (self.isl_tokens + cumulative_osl).div_ceil(self.block_size);
-        if new_total_blocks <= self.current_total_blocks {
+        let progress = if std::mem::take(&mut self.progress_invalid) {
+            Some(DecodeProgressUpdate::unavailable())
+        } else if let Some(limit) = self.progress_limit {
+            if cumulative_osl < self.progress_last {
+                self.progress_limit = None;
+                Some(DecodeProgressUpdate::unavailable())
+            } else if cumulative_osl > self.progress_last {
+                self.progress_last = cumulative_osl;
+                Some(DecodeProgressUpdate::observed(limit, cumulative_osl))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let num_blocks = if self.track_output_blocks {
+            let new_total_blocks = (self.isl_tokens + cumulative_osl).div_ceil(self.block_size);
+            let num_blocks = new_total_blocks.saturating_sub(self.current_total_blocks);
+            self.current_total_blocks = self.current_total_blocks.max(new_total_blocks);
+            num_blocks
+        } else {
+            0
+        };
+        if num_blocks == 0 && progress.is_none() {
             return None;
         }
-
-        let num_blocks = new_total_blocks - self.current_total_blocks;
-        // Advance before returning so a failed scheduler update preserves existing no-retry behavior.
-        self.current_total_blocks = new_total_blocks;
-        let decay_fraction = self
-            .expected_output_tokens
-            .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
+        // Raw progress supplements the existing path without changing block/OSL-hint semantics.
+        let decay_fraction = (num_blocks > 0)
+            .then(|| {
+                self.expected_output_tokens
+                    .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0))
+            })
+            .flatten();
         Some(OutputBlockUpdate {
             num_blocks,
             decay_fraction,
+            progress,
         })
     }
 }
 
-/// Coordinates scheduler cleanup, observability, and streamed load tracking.
-///
-/// Session-affinity lifetime is separate: the affinity `Hold` and
-/// `AffinityLease` own binding commit, release, and invalidation.
+/// One request attempt from booking to the end of its response stream: the
+/// scheduler and approximate-LRU cleanup, observability, streamed output-block
+/// tracking, and, once the worker accepted the send, the session-affinity lease.
 pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,
@@ -611,7 +648,8 @@ pub(super) struct RequestGuard {
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
     kv_hit: Option<KvHitTracking>,
-    _lora_load: Option<LoraLoadGuard>,
+    affinity_lease: Option<AffinityLease>,
+    _attempt_lease: Option<AttemptLease>,
 }
 
 impl RequestGuard {
@@ -619,6 +657,7 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         mut cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
+        phase: RequestPhase,
         kv_route: Option<RouteObservation>,
         mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
@@ -644,7 +683,7 @@ impl RequestGuard {
         let kv_hit = kv_route.map(|route| KvHitTracking {
             prompt_tokens: route.prompt_tokens,
             reused_tokens: Some(request_metrics.observe_kv_route_estimate(
-                request.phase(),
+                phase,
                 &request.model,
                 route.best_router_tokens,
                 route.selected_router_tokens,
@@ -654,22 +693,33 @@ impl RequestGuard {
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
+        let mut output_blocks = OutputBlockTracker::new(
+            track_output_blocks,
+            isl_tokens,
+            block_size,
+            expected_output_tokens,
+        );
+        if attempt_id.is_some()
+            && chooser.required_worker_inputs().contains(DECODE_PROGRESS)
+            && let Some(limit) = decode_progress_output_limit(request, phase)
+        {
+            output_blocks.enable_decode_progress(limit);
+        }
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
-            output_blocks: OutputBlockTracker::new(
-                track_output_blocks,
-                isl_tokens,
-                block_size,
-                expected_output_tokens,
-            ),
+            output_blocks,
             approximate_lru,
             output_hashes,
             record_itl_at_completion: false,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit,
-            _lora_load: None,
+            affinity_lease: None,
+            _attempt_lease: None,
         }
     }
 
@@ -677,7 +727,7 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
         occupancy_reservation: Option<OccupancyReservation>,
-        lora_load: Option<LoraLoadGuard>,
+        attempt_lease: Option<AttemptLease>,
         request: &PreprocessedRequest,
     ) -> Self {
         request_metrics.requests_started_total.inc();
@@ -697,9 +747,13 @@ impl RequestGuard {
             output_hashes: None,
             record_itl_at_completion: true,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit: None,
-            _lora_load: lora_load,
+            affinity_lease: None,
+            _attempt_lease: attempt_lease,
         }
     }
 
@@ -717,15 +771,16 @@ impl RequestGuard {
         self.observability.request_metrics()
     }
 
-    pub(super) fn start_dispatch(&mut self, phase_label: &str) {
+    /// The send is about to start: open the dispatch stage and note when the
+    /// request's prefill began.
+    pub(super) fn begin_dispatch(&mut self, phase_label: &str, request: &PreprocessedRequest) {
         self.observability.start_dispatch(phase_label);
-    }
-
-    pub(super) fn record_prefill_start(&self, request: &PreprocessedRequest) {
         self.observability.record_prefill_start(request);
     }
 
-    pub(super) fn mark_dispatched(&mut self) {
+    /// The worker accepted the request: close the dispatch stage and tell the
+    /// classifier the request was sent.
+    pub(super) fn on_dispatched(&mut self) {
         self.observability.mark_dispatched();
         if let RequestCleanup::Kv(cleanup) = &mut self.cleanup {
             let worker = cleanup.worker;
@@ -735,10 +790,10 @@ impl RequestGuard {
         }
     }
 
-    pub(super) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
-        self.cleanup
-            .lifecycle()
-            .map(RequestAttemptLease::release_handle)
+    /// Keep the request's committed session-affinity lease alive for as long as
+    /// this guard lives.
+    pub(super) fn hold_affinity_lease(&mut self, lease: AffinityLease) {
+        self.affinity_lease = Some(lease);
     }
 
     pub(super) fn has_approximate_lru(&self) -> bool {
@@ -748,7 +803,7 @@ impl RequestGuard {
     pub(super) async fn acquire_approximate_lru(
         &mut self,
         hashes: RoutingDecisionHashes,
-    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+    ) -> Result<(), dynamo_kv_indexer::host::KvRouterError> {
         let parent_hash = hashes.sequence_hashes.last().copied();
         let private_blocks = self
             .output_hashes
@@ -768,51 +823,82 @@ impl RequestGuard {
         Ok(())
     }
 
+    /// One response item arrived. Each concern is one step, in the order the
+    /// accounting depends on: liveness, the classifier, the prefill boundary,
+    /// output-block hashes, observability, then output-block load.
     pub(super) async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
         self.observability.observe_response();
-
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
+        self.touch_request_lease(new_tokens);
+        self.observe_classifier(item, new_tokens);
+        self.mark_prefill_on_first_tokens(item).await;
+        self.materialize_output_hashes(item);
+        self.observability.observe_tokens(new_tokens);
+        self.capture_kv_worker_hit(item);
+        if item.data.as_ref().is_some_and(|data| {
+            data.index.is_some_and(|index| index != 0) || data.finish_reason.is_some()
+        }) {
+            self.output_blocks.invalidate_decode_progress();
+        }
+        self.observe_output_blocks().await;
+    }
+
+    /// Output tokens prove the request is alive; the request-lease reaper reads this.
+    fn touch_request_lease(&self, new_tokens: usize) {
         if new_tokens > 0
             && let Some(lifecycle) = self.cleanup.lifecycle()
         {
             lifecycle.touch();
         }
-        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
-            lifecycle.responding();
-            lifecycle.observe_output_tokens(new_tokens);
-            if let Some(total_tokens) = item
-                .data
-                .as_ref()
-                .and_then(|data| data.completion_usage.as_ref())
-                .map(|usage| usage.total_tokens as usize)
-            {
-                lifecycle.observe_context_tokens(total_tokens);
-            }
-        }
-        if !self.prefill_marked {
-            let has_tokens = item
-                .data
-                .as_ref()
-                .is_some_and(|data| !data.token_ids.is_empty());
-            if has_tokens {
-                if let RequestCleanup::Kv(cleanup) = &self.cleanup
-                    && let Some(lifecycle) = cleanup.lifecycle()
-                    && lifecycle.is_active()
-                    && let Err(error) = cleanup
-                        .chooser
-                        .mark_prefill_completed_if_booking(lifecycle.booking())
-                        .await
-                {
-                    tracing::warn!(
-                        request_id = %cleanup.context_id,
-                        %error,
-                        "Failed to mark prefill completed"
-                    );
-                }
-                self.prefill_marked = true;
-            }
-        }
+    }
 
+    fn observe_classifier(&mut self, item: &Annotated<LLMEngineOutput>, new_tokens: usize) {
+        let Some(lifecycle) = self.cleanup.request_lifecycle_mut() else {
+            return;
+        };
+        lifecycle.responding();
+        lifecycle.observe_output_tokens(new_tokens);
+        if let Some(total_tokens) = item
+            .data
+            .as_ref()
+            .and_then(|data| data.completion_usage.as_ref())
+            .map(|usage| usage.total_tokens as usize)
+        {
+            lifecycle.observe_context_tokens(total_tokens);
+        }
+    }
+
+    /// The first output tokens mean prefill is over: release the prompt's
+    /// prefill load on the booking, once.
+    async fn mark_prefill_on_first_tokens(&mut self, item: &Annotated<LLMEngineOutput>) {
+        if self.prefill_marked {
+            return;
+        }
+        let has_tokens = item
+            .data
+            .as_ref()
+            .is_some_and(|data| !data.token_ids.is_empty());
+        if !has_tokens {
+            return;
+        }
+        if let RequestCleanup::Kv(cleanup) = &self.cleanup
+            && let Some(lifecycle) = cleanup.lifecycle()
+            && lifecycle.is_active()
+            && let Err(error) = cleanup
+                .chooser
+                .mark_prefill_completed_if_booking(lifecycle.booking())
+                .await
+        {
+            tracing::warn!(
+                request_id = %cleanup.context_id,
+                %error,
+                "Failed to mark prefill completed"
+            );
+        }
+        self.prefill_marked = true;
+    }
+
+    fn materialize_output_hashes(&mut self, item: &Annotated<LLMEngineOutput>) {
         if self
             .cleanup
             .lifecycle()
@@ -837,36 +923,41 @@ impl RequestGuard {
                 "Failed to materialize approximate LRU output blocks"
             );
         }
-        self.observability.observe_tokens(new_tokens);
-        self.capture_kv_worker_hit(item);
+    }
+
+    async fn observe_output_blocks(&mut self) {
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
         };
-
         if let RequestCleanup::Kv(cleanup) = &self.cleanup
             && let Some(lifecycle) = cleanup.lifecycle()
             && lifecycle.is_active()
             && let Err(error) = cleanup
                 .chooser
-                .add_output_blocks_if_booking(
+                .update_output_if_booking(
                     lifecycle.booking(),
                     update.num_blocks,
                     update.decay_fraction,
+                    update.progress,
                 )
                 .await
         {
             tracing::warn!(
                 request_id = %cleanup.context_id,
                 %error,
-                "Failed to add output blocks"
+                "Failed to update tracked output"
             );
         }
 
-        self.observability.observe_output_block_boundary();
+        if update.num_blocks > 0 {
+            self.observability.observe_output_block_boundary();
+        }
     }
 
-    pub(super) async fn finish(&mut self) {
+    /// The worker finished the response: complete the classifier lifecycle,
+    /// record the request's metrics, and release the booking.
+    pub(super) async fn complete(&mut self) {
         if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
             lifecycle.complete();
         }
@@ -876,8 +967,14 @@ impl RequestGuard {
         self.cleanup.finish().await;
     }
 
-    pub(super) async fn abort(&mut self) {
-        self.abort_with_error(None).await;
+    /// The attempt did not finish: the client left, the worker failed, or the
+    /// host gave up. Abort the classifier lifecycle with `cause`, if any, and
+    /// release the booking.
+    pub(super) async fn abort(&mut self, cause: Option<&AbortCause>) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.abort(cause.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
+        self.cleanup.finish().await;
     }
 
     pub(super) async fn release_for_retry(&mut self) -> bool {
@@ -891,13 +988,6 @@ impl RequestGuard {
         migration_state.store_request_lifecycle(lifecycle);
         self.cleanup.finish().await;
         true
-    }
-
-    pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
-        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
-            lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
-        }
-        self.cleanup.finish().await;
     }
 
     /// Count a worker report once, even if the stream subsequently fails or is cancelled.
@@ -927,7 +1017,7 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.observability
             .record_metrics(self.record_itl_at_completion);
-        // RequestCleanup drops immediately afterward and performs resource cleanup.
+        // The affinity lease and RequestCleanup drop with the fields and release their state.
     }
 }
 
@@ -984,6 +1074,7 @@ mod output_block_tests {
         let first = tracker.observe(1).unwrap();
         assert_eq!(first.num_blocks, 1);
         assert_eq!(first.decay_fraction, None);
+        assert!(first.progress.is_none());
         assert!(tracker.observe(16).is_none());
         assert_eq!(tracker.observe(33).unwrap().num_blocks, 2);
         assert!(tracker.observe(33).is_none());
@@ -1027,7 +1118,8 @@ mod output_block_tests {
 #[cfg(test)]
 mod output_hash_tests {
     use super::*;
-    use dynamo_kv_router::protocols::{BlockMmObjectInfo, compute_seq_hash_for_block};
+    use dynamo_kv_hashing::multimodal::BlockMmObjectInfo;
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
 
     fn direct_blocks(
         tokens: &[u32],
@@ -1245,5 +1337,88 @@ mod prefill_start_tests {
         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
         RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start(&request);
         assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
+    }
+}
+
+#[cfg(test)]
+mod decode_progress_tests {
+    use super::*;
+
+    #[test]
+    fn decode_progress_metadata_does_not_allocate_a_scheduler_block() {
+        let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
+        tracker.enable_decode_progress(128);
+        let update = tracker.observe(1).unwrap();
+        assert_eq!(update.num_blocks, 0);
+        assert_eq!(update.decay_fraction, None);
+        assert!(update.progress.is_some());
+        assert!(tracker.observe(1).is_none());
+        assert_eq!(tracker.observe(2).unwrap().num_blocks, 1);
+    }
+
+    #[test]
+    fn decode_progress_invalidates_without_fabricating_output() {
+        let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
+        tracker.enable_decode_progress(128);
+        tracker.observe(1).unwrap();
+        tracker.invalidate_decode_progress();
+        let update = tracker.observe(1).unwrap();
+        assert_eq!(update.num_blocks, 0);
+        assert!(update.progress.is_some());
+        assert!(tracker.observe(1).is_none());
+    }
+
+    #[test]
+    fn decode_progress_is_independent_of_output_block_tracking() {
+        let mut tracker = OutputBlockTracker::new(false, 15, 16, Some(64));
+        tracker.enable_decode_progress(128);
+        for cumulative_osl in [8, 32] {
+            let update = tracker.observe(cumulative_osl).unwrap();
+            assert_eq!(update.num_blocks, 0);
+            assert_eq!(update.decay_fraction, None);
+            assert!(update.progress.is_some());
+            assert_eq!(tracker.current_total_blocks, 1);
+        }
+        assert!(tracker.observe(32).is_none());
+    }
+
+    #[test]
+    fn decode_progress_supports_limited_requests() {
+        let mut request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        request.stop_conditions.max_tokens = Some(128);
+        request.stop_conditions.ignore_eos = Some(true);
+        let phase = RequestPhase::Aggregated;
+        assert_eq!(decode_progress_output_limit(&request, phase), Some(128));
+        for unsupported_phase in [RequestPhase::Prefill, RequestPhase::Decode] {
+            assert_eq!(
+                decode_progress_output_limit(&request, unsupported_phase),
+                None
+            );
+        }
+        request.stop_conditions.max_tokens = None;
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.stop_conditions.max_tokens = Some(0);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.stop_conditions.max_tokens = Some(128);
+        request.stop_conditions.ignore_eos = Some(false);
+        assert_eq!(decode_progress_output_limit(&request, phase), Some(128));
+        request.stop_conditions.ignore_eos = Some(true);
+        request.sampling_options.n = Some(2);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.sampling_options.n = Some(1);
+        request.stop_conditions.stop = Some(vec!["stop".to_string()]);
+        request.stop_conditions.stop_token_ids = Some(vec![1]);
+        request.stop_conditions.stop_token_ids_visible = Some(vec![2]);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![3]);
+        assert_eq!(decode_progress_output_limit(&request, phase), Some(128));
+        request.sampling_options.best_of = Some(2);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
     }
 }

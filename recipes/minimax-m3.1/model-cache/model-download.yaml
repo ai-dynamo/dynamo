@@ -48,7 +48,7 @@ spec:
             - name: HF_MODEL
               value: MiniMaxAI/MiniMax-M3.1-Flash
             - name: HF_REVISION
-              value: 9e7ebacac350497ad4a1272a2e817639bf11561c
+              value: 54e4e69dfc452b1e94a426c24a4fdeeaa8e3ad5e
             - name: MODEL_DIR
               value: /shared-model-cache/MiniMax-M3.1-Flash
             - name: HF_XET_HIGH_PERFORMANCE

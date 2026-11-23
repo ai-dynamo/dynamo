@@ -18,7 +18,7 @@ The planner supports four optimization targets that determine how scaling decisi
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
 - **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
-- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the AIConfigurator compatibility API in the `aisimulate` wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
+- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the AIConfigurator compatibility API in the `aisim` wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
@@ -69,7 +69,7 @@ spec:
       advisory: true
 ```
 
-Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 ### Optimization Target
 
@@ -95,10 +95,13 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
 SLA mode constructs each role's model through
-`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
-`ais_perf_model.roles` to the complete AISimulate configuration for each deployed
-role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
-aggregated deployment. Each role key must match its `worker_type`.
+`aisim_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
+`ais_perf_model` to one config per deployed worker type: a list with a `prefill` and a
+`decode` config for disaggregated deployments, or an `aggregated` config for an
+aggregated deployment. Each config in a list names its `worker_type`. One config
+without `worker_type` covers every worker type. For the keys of a config, see
+[Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+in the AISimulate documentation.
 
 New configurations default to `estimation_mode: auto` and `fallback_policy: deny`.
 Auto searches `op_level`, `fpm_interpolation`, then `fpm_regression`; `deny` prevents
@@ -106,15 +109,23 @@ fallback only when you explicitly select a mode. Without `ais_perf_model`, the
 Planner creates a cold `fpm_regression` model and trains it from self-benchmark
 or live forward-pass metrics (FPM).
 
-Each role accepts the complete upstream schema, including ordered `systems_paths`,
+Each config accepts the complete upstream schema, including ordered `systems_paths`,
 `database_mode`, `transfer_policy`, quantization and speculation settings, and
 nested `estimator_config` controls. Explicit estimator controls override the
 Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
 `[4, 4]` grid; regression and correction may use separate grids. Unknown fields
-and conflicting worker identities are rejected.
+are rejected, and so is a worker type that appears twice.
 
-Configure model identity and estimator controls through `ais_perf_model.roles`.
+Configure model identity and estimator controls through `ais_perf_model`.
 The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
+
+> [!WARNING]
+> **Deprecated.** Use a list of configs. Removed in v1.9. The `roles` and
+> `dataset_profiles` keys of `ais_perf_model` still work and print one warning.
+> `dynamo.replay.run_trace_replay` and `run_synthetic_trace_replay` print it too for a
+> `planner_config` written this way. `roles` and `dataset_profiles` can be written
+> together when they name different worker types. Either of them next to any other key
+> of `ais_perf_model` is an error.
 
 At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
 
@@ -127,30 +138,36 @@ spec:
       optimization_target: sla
       mode: disagg
       ais_perf_model:
-        roles:
-          prefill:
-            model: Qwen/Qwen3-32B
-            system: h200_sxm
-            backend: vllm
-            worker_type: prefill
-            estimation_mode: auto
-            fallback_policy: deny
-            tp: 1
-          decode:
-            model: Qwen/Qwen3-32B
-            system: h200_sxm
-            backend: vllm
-            worker_type: decode
-            estimation_mode: auto
-            fallback_policy: deny
-            tp: 1
-            estimator_config:
-              fpm_regression:
-                sampling:
-                  bins_per_axis: [4, 4]
-                  max_observations: 64
-                min_observations: 5
+        - worker_type: prefill
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+        - worker_type: decode
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+          estimator_config:
+            fpm_regression:
+              sampling:
+                bins_per_axis: [4, 4]
+                max_observations: 64
+              min_observations: 5
 ```
+
+> [!NOTE]
+> With `optimization_target: sla`, the profiler compares `model`, `system`, `backend`,
+> `tp`, and the other parallelism keys of each config with the deployment it selects. A
+> key you leave out counts with its default, so no `tp` means `tp: 1`. A difference fails
+> the request, for example
+> `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`.
+> Leave `ais_perf_model` unset to let the profiler write it. For the full rule, see
+> [`ais_perf_model` in the DynamoGraphDeploymentRequest reference](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping).
 
 ### Throughput-Based Scaling Settings
 
@@ -173,7 +190,7 @@ spec:
 | `load_adjustment_interval_seconds` | int | `5` | Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the perf model at this interval. Must be shorter than `throughput_adjustment_interval_seconds`. |
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
-| `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
+| `load_scaling_down_sensitivity` | int | `80` | SLA-mode scale-down sensitivity 0–100 (100=aggressive). 0 blocks model-based scale-down, but a fully idle pool still shrinks one replica at a time to its endpoint floor (minimum 1); see [Unavailable Scaling Inputs](#unavailable-scaling-inputs). Ignored unless `optimization_target` is `sla`. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
 
 ### General Settings
@@ -328,9 +345,12 @@ spec:
 ## Periodic Retune (Experimental)
 
 > [!WARNING]
-> **Experimental.** In this release, retune runs only in offline simulation:
-> `aisimulate predict --stack dynamo` and `dynamo.replay.run_trace_replay`. A live Planner rejects a
-> configuration that sets `retune` at startup.
+> **Experimental.** `retune.executor` selects where retune runs. With `local`, the default, it runs
+> only in offline simulation: `aisimulate predict --stack dynamo` and
+> `dynamo.replay.run_trace_replay`, and a live Planner rejects it at startup. With `dgdr`, a live
+> Planner on Kubernetes retunes three KV router knobs, and with scaling its own Planner fields,
+> through DGDR v1beta2 Requests; it is for development clusters only. See
+> [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune lets the Planner tune its own runtime parameters from the traffic it served. Every
 `retune.interval_seconds`, it takes the window of the request trace that just ended and replays it
@@ -346,12 +366,14 @@ Retune searches parameters a running deployment can change without a restart:
 
 - **Router parameters** of the KV router, in `retune.router`: `overlap_score_credit`,
   `prefill_load_scale`, `temperature`, and four more `/router_policy` parameters.
-- **Planner runtime fields**, in `retune.planner`: load-scaling sensitivity, the load predictor,
-  minimum worker counts, GPU budgets, `max_throughput_scaling_replicas`, and the thresholds of
-  `optimization_target: load`.
+- **Planner runtime fields**, in `retune.planner`: the scaling policy (which scaling modes run, and
+  their intervals), load-scaling sensitivity, the load predictor,
+  `max_throughput_scaling_replicas`, and the thresholds of `optimization_target: load`.
 
-The engine, the topology, the router mode, and Planner settings fixed at startup, such as the
-scaling intervals and `ttft_ms` / `itl_ms`, stay as configured.
+The engine, the topology, the router mode, Planner settings fixed at startup such as
+`scheduling.scale_interval_seconds` and the FPM sampling, and `ttft_ms` / `itl_ms` stay as
+configured. Minimum worker counts and GPU budgets are user constraints: retune never searches
+them, and every candidate replays within them.
 
 Retune supports two scenarios:
 
@@ -375,8 +397,11 @@ A candidate that changes decisions is judged on one replay of one window, so
 This minimal fixed-replica configuration searches the 108-point default router domain every six
 hours. It is a `PlannerConfig` for the `planner_config` argument of `dynamo.replay.run_trace_replay`
 (see [Run Retune from Python](aisimulate-planner-replay.mdx#run-retune-from-python)), not a DGDR
-`spec.features.planner` fragment: a live Planner rejects it. In `aisimulate predict`, the `planner`
-section takes `retune` and the two scaling flags, and `mode` comes from `engine.mode`; see
+`spec.features.planner` fragment: a live Planner rejects it, because it uses the default
+`executor: local`. For a live Planner, see
+[Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
+In `aisimulate predict`, the `planner` section takes `retune` and the two scaling flags, and `mode`
+comes from `engine.mode`; see
 [Scenario 1](aisimulate-planner-replay.mdx#scenario-1-fixed-replicas-router-only).
 
 ```yaml
@@ -389,11 +414,12 @@ retune:
 ```
 
 To run retune and read its decisions, see
-[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental). For windows,
-candidates, scoring, and decision timing, see
-[Planner Design](planner-design.md#retune-experimental-simulation-only). For every field and the
+[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental), and to run it on a
+live deployment, see [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
+For windows, candidates, scoring, and decision timing, see
+[Planner Design](planner-design.md#retune-experimental). For every field and the
 search-domain syntax, see the
-[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental).
 
 ## Integration with Profiler
 

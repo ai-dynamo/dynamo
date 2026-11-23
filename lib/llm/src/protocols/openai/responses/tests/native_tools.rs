@@ -447,3 +447,43 @@ fn named_tool_rendering_policy_matches_the_production_preprocessor() {
         assert_eq!(prompt.as_str().contains("\"name\": \"other\""), !spark);
     }
 }
+
+/// Function tools declared with an omitted, null, or explicit description,
+/// plus a namespace whose member function omits it.
+fn description_matrix_tools() -> Value {
+    json!([
+        {"type":"function","name":"fn0","parameters":{"type":"object"}},
+        {"type":"function","name":"fn1","description":null,"parameters":{"type":"object"}},
+        {"type":"function","name":"fn2","description":"fixture","parameters":{"type":"object"}},
+        {"type":"namespace","name":"fs","description":"Files","tools":[
+            {"type":"function","name":"read","parameters":{"type":"object"}}]}
+    ])
+}
+
+/// Presence-aware: indexing a missing key also yields `Null`, so check the key.
+fn assert_echoed_tool_descriptions(tools: &Value) {
+    let description = |tool: &Value| {
+        let tool = tool.as_object().unwrap();
+        assert_eq!(tool["strict"], true, "{tool:?}");
+        assert!(tool.contains_key("description"), "missing key: {tool:?}");
+        tool["description"].clone()
+    };
+    assert_eq!(description(&tools[0]), Value::Null);
+    assert_eq!(description(&tools[1]), Value::Null);
+    assert_eq!(description(&tools[2]), "fixture");
+    assert_eq!(tools[3]["description"], "Files");
+    assert_eq!(description(&tools[3]["tools"][0]), Value::Null);
+}
+
+#[test]
+fn unary_response_echoes_null_function_tool_descriptions() {
+    let params = response_params(&request(description_matrix_tools(), json!("Hi")));
+    let chat: NvCreateChatCompletionResponse = serde_json::from_value(json!({
+        "id":"chat-1", "object":"chat.completion", "created":0, "model":"/model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},
+            "finish_reason":"stop","logprobs":null}]
+    }))
+    .unwrap();
+    let response = chat_completion_to_response(chat, &params, None).unwrap();
+    assert_echoed_tool_descriptions(&serde_json::to_value(&response).unwrap()["tools"]);
+}

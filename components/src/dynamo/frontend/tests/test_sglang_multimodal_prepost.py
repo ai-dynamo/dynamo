@@ -10,10 +10,8 @@ sends ``image_url``, so placeholders never rendered.
 
 import pytest
 
-from dynamo.frontend.sglang_prepost import (
-    _normalize_messages_for_template,
-    preprocess_chat_request,
-)
+from dynamo.frontend.sglang_prepost import preprocess_chat_request
+from dynamo.frontend.sglang_prompt_renderer import _normalize_messages_for_template
 
 # Needs sglang packages (gpu_1 container) but allocates no GPU VRAM.
 pytestmark = [

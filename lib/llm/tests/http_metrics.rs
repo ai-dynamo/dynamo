@@ -1041,7 +1041,7 @@ mod integration_tests {
         if let Err(e) = service
             .state()
             .metrics_clone()
-            .update_metrics_from_mdc(&card)
+            .update_metrics_from_mdc(&card, 0)
         {
             tracing::debug!(
                 model = %card.display_name,

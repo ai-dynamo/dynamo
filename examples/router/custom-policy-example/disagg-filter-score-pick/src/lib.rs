@@ -11,12 +11,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy, WorkerType};
+use dynamo_kv_router::plugins::prelude::*;
 use filter::MinimumDeviceOverlapFilter;
 use picker::{DecodePicker, PrefillPicker, UnsupportedWorkerTypePicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};
@@ -40,7 +35,7 @@ fn validate_min_device_overlap_blocks(
 
 /// Builds the complete policy used by prefill routes.
 fn create_prefill_policy(
-    config: &KvRouterConfig,
+    config: &SelectionConfig,
     min_device_overlap_blocks: f64,
 ) -> WorkerSelectionPolicy {
     let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
@@ -58,7 +53,7 @@ fn create_prefill_policy(
 
 /// Builds the complete policy used by decode routes.
 fn create_decode_policy(
-    config: &KvRouterConfig,
+    config: &SelectionConfig,
     min_device_overlap_blocks: f64,
 ) -> WorkerSelectionPolicy {
     let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
@@ -78,7 +73,7 @@ fn create_decode_policy(
 ///
 /// Discovery has already scoped the worker pool before the factory receives this stage.
 fn create_policy(
-    config: &KvRouterConfig,
+    config: &SelectionConfig,
     worker_type: WorkerType,
     min_device_overlap_blocks: f64,
 ) -> WorkerSelectionPolicy {
@@ -108,21 +103,18 @@ fn provider(
 
 /// Register the `disagg-filter-score-pick` policy type.
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("disagg-filter-score-pick", Arc::new(provider))
+    registry.register_worker_selection("disagg-filter-score-pick", Arc::new(provider))
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        KvSchedulerError, SchedulingRequest, WorkerSelectionInput, WorkerSelectionPolicyError,
-        WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 
@@ -148,6 +140,7 @@ mod tests {
 
     fn request() -> SchedulingRequest {
         SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: 16,
@@ -182,7 +175,7 @@ mod tests {
 
     #[test]
     fn creates_each_supported_worker_policy() {
-        let config = KvRouterConfig::default();
+        let config = SelectionConfig::default();
         create_policy(&config, WorkerType::Prefill, 0.0);
         create_policy(&config, WorkerType::Decode, 0.0);
     }
@@ -193,7 +186,7 @@ mod tests {
         let request = request();
 
         for worker_type in [WorkerType::Aggregated, WorkerType::Encode] {
-            let policy = create_policy(&KvRouterConfig::default(), worker_type, 0.0);
+            let policy = create_policy(&SelectionConfig::default(), worker_type, 0.0);
             let error = policy
                 .select_worker(WorkerSelectionInput::configured(
                     &workers,

@@ -24,7 +24,12 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.utils import add_argument, nullable_float, nullable_int
+from dynamo.common.configuration.utils import (
+    ArgEnv,
+    add_argument,
+    nullable_float,
+    nullable_int,
+)
 
 if TYPE_CHECKING:
     from dynamo.llm import RouterConfig
@@ -39,6 +44,9 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "session_affinity_ttl_secs",
     "session_affinity_mode",
 )
+
+# Matches MAX_SESSION_AFFINITY_ENTRIES in lib/router/session-affinity.
+DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
 
 # TODO(v1.7): Remove --active-prefill-tokens-threshold.
 _ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
@@ -64,7 +72,14 @@ _ADMISSION_CONTROL_FLAG_REMOVAL_WARNING = (
 )
 
 
-class _IgnoredAdmissionControlAction(argparse.Action):
+class _IgnoredAction(argparse.Action):
+    """Store nothing, so the namespace never carries the value."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        return None
+
+
+class _IgnoredAdmissionControlAction(_IgnoredAction):
     """Warn and store nothing, so the namespace never carries the value."""
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -80,11 +95,12 @@ class _DeprecatedEnforceDisaggAction(argparse.BooleanOptionalAction):
 class RouterConfigBase(ConfigBase):
     """Mixin carrying the shared router configuration fields."""
 
-    router_mode: str
+    router_mode: Optional[str]
     min_initial_workers: int
     enforce_disagg: bool
     session_affinity_ttl_secs: Optional[int]
     session_affinity_mode: str
+    session_affinity_max_entries: int
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -158,13 +174,16 @@ class RouterArgGroup(ArgGroup):
 
     Args:
         default_router_mode: Default for ``--router-mode``. The frontend passes
-            the historical ``"round-robin"``; a worker set passes ``None`` so
-            that omitting the flag advertises nothing and inherits the
-            frontend's configuration.
+            ``None`` and resolves it with ``resolve_router_mode``, which needs
+            to tell an omitted flag from an explicit one. A worker set passes
+            ``None`` so that omitting the flag advertises nothing and inherits
+            the frontend's configuration.
         include_frontend_only: Whether to register arguments the frontend alone
             consumes. ``--router-min-initial-workers`` gates frontend startup
             and is not carried on the model card, so a worker registering it
             would ship a flag that does nothing.
+        env: Another process's env (see ``ArgEnv``); the removed and
+            deprecated flags then parse without their notices.
     """
 
     def __init__(
@@ -172,15 +191,18 @@ class RouterArgGroup(ArgGroup):
         *,
         default_router_mode: Optional[str],
         include_frontend_only: bool,
+        env: Optional[ArgEnv] = None,
     ) -> None:
         self.default_router_mode = default_router_mode
         self.include_frontend_only = include_frontend_only
+        self.env = env
 
     def add_arguments(self, parser) -> None:
-        if "DYN_ADMISSION_CONTROL" in os.environ:
-            logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
-        if "DYN_ENFORCE_DISAGG" in os.environ:
-            logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
+        if self.env is None:
+            if "DYN_ADMISSION_CONTROL" in os.environ:
+                logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
+            if "DYN_ENFORCE_DISAGG" in os.environ:
+                logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
 
         g = parser.add_argument_group("Router Options")
 
@@ -195,7 +217,11 @@ class RouterArgGroup(ArgGroup):
             g.add_argument(
                 "--admission-control",
                 choices=("token-capacity", "none"),
-                action=_IgnoredAdmissionControlAction,
+                action=(
+                    _IgnoredAdmissionControlAction
+                    if self.env is None
+                    else _IgnoredAction
+                ),
                 default=argparse.SUPPRESS,
                 help=argparse.SUPPRESS,
             )
@@ -210,7 +236,12 @@ class RouterArgGroup(ArgGroup):
                     "readiness are determined from registered worker types."
                 ),
                 arg_type=None,
-                action=_DeprecatedEnforceDisaggAction,
+                action=(
+                    _DeprecatedEnforceDisaggAction
+                    if self.env is None
+                    else argparse.BooleanOptionalAction
+                ),
+                env=self.env,
             )
             add_argument(
                 g,
@@ -225,30 +256,36 @@ class RouterArgGroup(ArgGroup):
                 ),
                 arg_type=int,
                 dest="min_initial_workers",
+                env=self.env,
             )
 
+        mode_help = (
+            "How to route the request. least-loaded routes to the worker with the "
+            "fewest active requests. device-aware-weighted routes based on worker "
+            "device type (CPU/CUDA). In disaggregated prefill mode, least-loaded "
+            "skips bootstrap optimization and falls back to the synchronous prefill "
+            "path."
+        )
+        if self.include_frontend_only:
+            mode_help += (
+                " Defaults to round-robin, or to kv when --router-policy-config is "
+                "given. A policy file with any other --router-mode is an error."
+            )
         add_argument(
             g,
             flag_name="--router-mode",
             env_var="DYN_ROUTER_MODE",
             default=self.default_router_mode,
-            help=(
-                "How to route the request. power-of-two picks 2 random workers and "
-                "routes to the one with fewer in-flight requests. least-loaded routes to "
-                "the worker with the fewest active requests. device-aware-weighted routes "
-                "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
-                "both power-of-two and least-loaded skip bootstrap optimization and fall "
-                "back to the synchronous prefill path."
-            ),
+            help=mode_help,
             choices=[
                 "round-robin",
                 "random",
-                "power-of-two",
                 "kv",
                 "direct",
                 "least-loaded",
                 "device-aware-weighted",
             ],
+            env=self.env,
         )
         add_argument(
             g,
@@ -263,7 +300,31 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+            env=self.env,
         )
+        if self.include_frontend_only:
+            # Sizes this frontend's affinity table, so it is not advertised on a
+            # worker's model card.
+            add_argument(
+                g,
+                flag_name="--router-session-affinity-max-entries",
+                env_var="DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES",
+                default=DEFAULT_SESSION_AFFINITY_MAX_ENTRIES,
+                help=(
+                    "Most sessions each session-affinity table holds at once; the "
+                    "frontend keeps one table per worker set. A request that would start a "
+                    "new session past this limit is rejected as resource exhausted (HTTP "
+                    "529 by default) until an idle session expires. Replica sync copies "
+                    "bindings to every frontend, so size it for the sessions live across "
+                    "all frontends. Has no effect unless "
+                    "--router-session-affinity-ttl-secs is set. This is exported as "
+                    "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES, where every affinity table "
+                    "reads it."
+                ),
+                arg_type=int,
+                dest="session_affinity_max_entries",
+                env=self.env,
+            )
         add_argument(
             g,
             flag_name="--router-session-affinity-mode",
@@ -276,6 +337,7 @@ class RouterArgGroup(ArgGroup):
             ),
             choices=("hard", "soft"),
             dest="session_affinity_mode",
+            env=self.env,
         )
         add_argument(
             g,
@@ -288,6 +350,7 @@ class RouterArgGroup(ArgGroup):
                 "Unset by default; pass 'None' to disable it."
             ),
             arg_type=nullable_float,
+            env=self.env,
         )
         add_argument(
             g,
@@ -303,6 +366,7 @@ class RouterArgGroup(ArgGroup):
                 "with --active-prefill-tokens-threshold-frac."
             ),
             arg_type=nullable_int,
+            env=self.env,
         )
         add_argument(
             g,
@@ -316,6 +380,7 @@ class RouterArgGroup(ArgGroup):
                 "OR logic with --active-prefill-tokens-threshold."
             ),
             arg_type=nullable_float,
+            env=self.env,
         )
 
 
@@ -323,12 +388,40 @@ class RouterArgGroup(ArgGroup):
 ROUTER_MODE_MAP: dict[str, str] = {
     "round-robin": "RoundRobin",
     "random": "Random",
-    "power-of-two": "PowerOfTwoChoices",
     "kv": "KV",
     "direct": "Direct",
     "least-loaded": "LeastLoaded",
     "device-aware-weighted": "DeviceAwareWeighted",
 }
+
+
+def resolve_router_mode(
+    router_mode: Optional[str], router_policy_config: Optional[str]
+) -> str:
+    """Resolve the frontend's ``--router-mode`` against ``--router-policy-config``.
+
+    - No mode: ``kv`` when a policy file is given, so the file selects each
+      role's policy; otherwise ``round-robin``.
+    - ``kv``: a policy file may accompany it.
+    - Any other routing mode: a policy file is an error, because only the KV
+      router reads it.
+
+    A value that is not a routing mode is returned as it is, for
+    ``build_router_config`` to reject.
+    """
+    if router_mode is None:
+        return "kv" if router_policy_config is not None else "round-robin"
+    if (
+        router_policy_config is not None
+        and router_mode != "kv"
+        and router_mode in ROUTER_MODE_MAP
+    ):
+        raise ValueError(
+            f"--router-mode {router_mode} and --router-policy-config are mutually "
+            "exclusive: the policy file selects each role's policy. Remove "
+            "--router-mode, or name the type under worker_selection in the file"
+        )
+    return router_mode
 
 
 class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
@@ -342,18 +435,22 @@ class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     # leaving the attributes absent on a worker's config object.
     min_initial_workers: int = 0
     enforce_disagg: bool = False
+    session_affinity_max_entries: int = DEFAULT_SESSION_AFFINITY_MAX_ENTRIES
 
 
-def add_worker_router_arguments(parser: argparse.ArgumentParser) -> None:
+def add_worker_router_arguments(
+    parser: argparse.ArgumentParser, *, env: Optional[ArgEnv] = None
+) -> None:
     """Register the worker-side router flags.
 
     ``--router-mode`` defaults to ``None``: a worker that omits it advertises
-    nothing and inherits the frontend's configuration.
+    nothing and inherits the frontend's configuration. ``env`` is another
+    process's env (see ``ArgEnv``).
     """
-    RouterArgGroup(default_router_mode=None, include_frontend_only=False).add_arguments(
-        parser
-    )
-    KvRouterArgGroup().add_arguments(parser)
+    RouterArgGroup(
+        default_router_mode=None, include_frontend_only=False, env=env
+    ).add_arguments(parser)
+    KvRouterArgGroup(env=env).add_arguments(parser)
 
 
 def parse_worker_router_config(
@@ -401,6 +498,9 @@ class RouterConfigSource(Protocol):
     def kv_router_kwargs(self) -> dict:
         ...
 
+    def hint_policy_roles(self) -> list[str]:
+        ...
+
 
 def build_router_config(
     config: Optional[RouterConfigSource],
@@ -410,8 +510,8 @@ def build_router_config(
     ``None`` means no mode was requested, leaving ``router_config`` off the card
     so the worker inherits the frontend's configuration. A ``None`` config means
     the same thing, so a backend can pass its optional advertisement directly.
-    The frontend passes its own config here too; it always has a mode, so it
-    never gets ``None`` back.
+    The frontend passes its own config here too, after ``resolve_router_mode``
+    has given it a mode, so it never gets ``None`` back.
     """
     if config is None:
         return None
@@ -441,8 +541,18 @@ def build_router_config(
         ) from error
 
     mode = getattr(RouterMode, mode_attr)
+    if mode != RouterMode.KV and (roles := config.hint_policy_roles()):
+        # Hints run when the KV path books a worker; other modes would drop them.
+        raise ValueError(
+            f"the hints in worker_selection for {', '.join(roles)} run only on the KV "
+            f"path, but --router-mode {router_mode} routes without it; use --router-mode "
+            "kv, or remove "
+            + ", ".join(f"worker_selection.{role}.hints" for role in roles)
+            + " from --router-policy-config"
+        )
     # Only KV routing consults KvRouterConfig; passing it for other modes would
-    # imply tuning that is never read.
+    # imply tuning that is never read. The frontend rejects a policy file with
+    # any other mode, so nothing it was given is dropped here.
     kv_router_config = (
         KvRouterConfig(**config.kv_router_kwargs()) if mode == RouterMode.KV else None
     )

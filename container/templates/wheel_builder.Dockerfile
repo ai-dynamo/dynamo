@@ -49,10 +49,7 @@ RUN apt clean && apt-get update -y && \
     libgl1 \
     libaio-dev \
     linux-libc-dev && \
-    . /etc/os-release && \
-    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge "20260816ubuntu0.${VERSION_ID}.1"
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 {% endif %}
 
 {% if device == "cuda" %}
@@ -641,8 +638,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-{% if framework == "sglang" and device == "xpu" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist && \
-{% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     # Skip maturin's built-in repair: it would graft the in-tree libav* into the
     # wheel, which the codec gate rejects. Repair with those sonames excluded so
     # they stay external and resolve to the image's /usr/local/lib copies. This
@@ -677,7 +673,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist; \
     fi && \
-{% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Complete the root Cargo workspace after the expensive runtime build. Planner
 # wheel metadata and optional source archival both validate every member.
@@ -699,7 +695,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         --only-binary=:all: \
         --no-deps \
         --no-index \
-        --find-links https://pypi.nvidia.com/aisimulate/ \
+        --find-links https://pypi.nvidia.com/aisim/ \
         --dest /opt/dynamo/dist \
         --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
@@ -735,7 +731,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
-    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisimulate*.whl; do \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisim-*.whl; do \
         [ -e "$whl" ] || continue; \
         PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
@@ -765,7 +761,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
 # After you start the local-dev/dev container, you will need to build from source:
-#   cargo build --features dynamo-llm/block-manager
+#   cargo build
 #   cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
 #   uv pip install --no-deps -e /workspace
 # See container/launch_message/dev.txt for the full setup steps.
@@ -801,13 +797,14 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" %}
+{% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" and (framework != "trtllm" or make_efa) %}
 # Builds NIXL (native + Python wheel), then consolidates all wheels.
 # Runtime templates COPY from this stage.
 # Note: XPU triggers this path even when the framework section lacks nixl_ref,
 # because no upstream XPU runtime image ships pre-built NIXL.
 # Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF, so
 # nothing in that image consumes a from-source NIXL build.
+# TRT-LLM reuses upstream NIXL; only EFA needs its missing LIBFABRIC plugin.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -845,7 +842,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             -Dcudapath_lib="/usr/local/cuda/lib64" \
             -Dcudapath_inc="/usr/local/cuda/include" \
             -Ducx_path="/usr/local/ucx" \
-            -Dlibfabric_path="/usr/local/libfabric"; \
+            -Dlibfabric_path="/usr/local/libfabric"{% if framework == "trtllm" %} \
+            -Denable_plugins=LIBFABRIC -Dbuild_tests=false -Dbuild_examples=false{% endif %}; \
     elif [ "$DEVICE" = "xpu" ]; then \
         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx"; \
@@ -879,7 +877,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
-{% if not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
+{% if framework != "trtllm" and not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -901,7 +899,8 @@ COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
 COPY --from=runtime_wheel_builder /opt/dynamo/rust-licenses/ /opt/dynamo/rust-licenses/
 
 {% else %}
-# The frontend installs NIXL from PyPI and Triton ships no NIXL. Keep this alias
+# TRT-LLM reuses upstream NIXL, the frontend installs it from PyPI, and Triton
+# ships no NIXL. Keep this alias
 # so downstream stages can still COPY Dynamo wheels and build tools from a
 # common wheel_builder stage name.
 FROM runtime_wheel_builder AS wheel_builder

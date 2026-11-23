@@ -68,8 +68,19 @@ impl HarnessService {
     }
 
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+        Self::start_with_engine_and_card(engine, ModelDeploymentCard::with_name_only(MODEL)).await
+    }
+
+    /// Start with a model card of the caller's choosing, so handler behavior that depends
+    /// on the registered parsing options (tool-call / reasoning parser) can be exercised.
+    #[allow(dead_code)]
+    pub async fn start_with_engine_and_card(
+        engine: Arc<ScriptedChatEngine>,
+        card: ModelDeploymentCard,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build harness HTTP client");
         let (listener, port) = bind_random_port().await;
@@ -83,11 +94,11 @@ impl HarnessService {
             .build()
             .expect("failed to build harness HTTP service");
 
-        let card = ModelDeploymentCard::with_name_only(MODEL);
         let metrics = service.state_clone().metrics_clone();
+        let checksum = card.mdcsum().to_string();
         service
             .model_manager()
-            .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
+            .add_chat_completions_model_with_card(MODEL, &checksum, card, engine.clone())
             .expect("failed to register scripted harness model");
 
         let cancel = CancellationToken::new();
@@ -260,27 +271,46 @@ pub async fn parse_json_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
 
 #[allow(dead_code)]
 pub async fn parse_responses_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
+    parse_typed_sse(
+        body,
+        "Responses",
+        &[
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ],
+    )
+    .await
+}
+
+#[allow(dead_code)]
+pub async fn parse_anthropic_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
+    parse_typed_sse(body, "Anthropic", &["message_stop", "error"]).await
+}
+
+async fn parse_typed_sse(
+    body: &str,
+    protocol: &str,
+    terminal_events: &[&str],
+) -> Result<Vec<JsonSseEvent>> {
     if body
         .lines()
         .filter_map(|line| line.strip_prefix("data:"))
         .any(|data| data.trim() == "[DONE]")
     {
-        return Err(anyhow!("Responses SSE stream contains a [DONE] sentinel"));
+        return Err(anyhow!("{protocol} SSE stream contains a [DONE] sentinel"));
     }
 
     let events = parse_json_sse_events(body).await?;
-    let terminal = events.iter().position(|event| {
-        matches!(
-            event.event.as_str(),
-            "response.completed" | "response.incomplete" | "response.failed"
-        )
-    });
+    let terminal = events
+        .iter()
+        .position(|event| terminal_events.contains(&event.event.as_str()));
     match terminal {
         Some(index) if index + 1 == events.len() => Ok(events),
         Some(_) => Err(anyhow!(
-            "Responses SSE stream contains data after its terminal event"
+            "{protocol} SSE stream contains data after its terminal event"
         )),
-        None => Err(anyhow!("Responses SSE stream is missing a terminal event")),
+        None => Err(anyhow!("{protocol} SSE stream is missing a terminal event")),
     }
 }
 

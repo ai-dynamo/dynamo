@@ -64,7 +64,7 @@ func RenderLPXPodCliqueSet(
 	return pcs, nil
 }
 
-// RenderLPXWorkloadTemplates renders one workload's roles, scaling group and resources.
+// RenderLPXWorkloadTemplates renders one workload's roles and scaling group.
 // Pointer inputs must be non-nil, except secretsRetriever when no secrets are used.
 // Inputs are not mutated.
 func RenderLPXWorkloadTemplates(
@@ -99,10 +99,6 @@ func RenderLPXWorkloadTemplates(
 		}
 	}
 
-	// Scope the rendered resources to the graph's Kubernetes namespace.
-	for _, resource := range rendered.Resources {
-		resource.SetNamespace(source.Namespace)
-	}
 	return rendered, nil
 }
 
@@ -281,9 +277,9 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		alphaComponent := alphaComponents[component.ComponentName]
 		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
+		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-			p.discoveryContext, lpuDefaults)
+			p.discoveryContext, defaults)
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
@@ -299,7 +295,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		if workload.Pipeline() != dynamolpx.PipelineHybrid {
 			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-				p.discoveryContext, lpuDefaults)
+				p.discoveryContext, defaults)
 			if err != nil {
 				return nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
@@ -314,7 +310,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
-		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: servingHash}
 		gpu := p
 		gpu.component = role
 		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: replicas}
@@ -443,12 +438,6 @@ func renderSelectedLPXRole(
 		}
 	}
 
-	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
-	explicitVolumes := component.PodTemplate.Spec.Volumes
-	basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
-		return volume.Name == "config" && !slices.ContainsFunc(explicitVolumes,
-			func(explicit corev1.Volume) bool { return explicit.Name == volume.Name })
-	})
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
 		delete(metadata.Annotations, annotationKey)
 	}

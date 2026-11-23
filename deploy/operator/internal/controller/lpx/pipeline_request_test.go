@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -30,10 +32,13 @@ import (
 func TestRemoveReleasedAgentPods(t *testing.T) {
 	for _, tc := range []struct {
 		name, change                                  string
+		podOwnerVersion, cliqueOwnerVersion           string
 		reason                                        lpxv1alpha1.ReleaseReason
 		remove, wantError, deleteError, missingClique bool
 	}{
 		{name: "dependency changed", remove: true},
+		{name: "beta Pod owner", podOwnerVersion: grovev1beta1.SchemeGroupVersion.String(), remove: true},
+		{name: "beta PodClique owner", cliqueOwnerVersion: grovev1beta1.SchemeGroupVersion.String(), remove: true},
 		{name: "request changed", reason: lpxv1alpha1.ReleaseReasonRequestChanged, remove: true},
 		{name: "binding failed", reason: lpxv1alpha1.ReleaseReasonBindingFailed, remove: true},
 		{name: "unbound target", change: "target", remove: true},
@@ -64,6 +69,8 @@ func TestRemoveReleasedAgentPods(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Observe one released Agent Pod and its ownership beneath a trusted scaling group")
 			pcsgs, pclq, pod := newLPXTestAgentHierarchy()
+			pod.OwnerReferences[0].APIVersion = cmp.Or(tc.podOwnerVersion, grovev1alpha1.SchemeGroupVersion.String())
+			pclq.OwnerReferences[0].APIVersion = cmp.Or(tc.cliqueOwnerVersion, grovev1alpha1.SchemeGroupVersion.String())
 			request := newLPXTestReleaseRequest(pod)
 			execution := &request.Status.Committed.Execution
 			if tc.reason != "" {
@@ -232,17 +239,25 @@ func TestGetPipelineRequests(t *testing.T) {
 			for _, request := range []struct {
 				name, namespace string
 				uid             types.UID
+				apiVersion      string
+				kind            string
+				controller      bool
 			}{
-				{"last", "default", "pcs-uid"},
-				{"first", "default", "pcs-uid"},
-				{"other-owner", "default", "other-uid"},
-				{"other-namespace", "other", "pcs-uid"},
+				{"last", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"first", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"other-owner", "default", "other-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"other-namespace", "other", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"beta", "default", "pcs-uid", grovev1beta1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"foreign-group", "default", "pcs-uid", "foreign.example/v1alpha1", "PodCliqueSet", true},
+				{"unsupported-version", "default", "pcs-uid", "grove.io/v2", "PodCliqueSet", true},
+				{"wrong-kind", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodClique", true},
+				{"non-controller", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", false},
 			} {
 				objects = append(objects, &lpxv1alpha1.LPUPipelineRequest{
 					Name: request.name, Namespace: request.namespace,
 					OwnerReferences: []metav1.OwnerReference{{
-						APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueSet",
-						Name: "pcs", UID: request.uid, Controller: new(true),
+						APIVersion: request.apiVersion, Kind: request.kind,
+						Name: "pcs", UID: request.uid, Controller: new(request.controller),
 					}}})
 			}
 			r := &graphReconciler{Client: newLPXTestClient(t, objects...)}
@@ -550,31 +565,15 @@ func requirePipelineRequestNotFound(
 	require.True(t, apierrors.IsNotFound(err), "expected LPX request %s/%s to be absent, got %v", namespace, name, err)
 }
 
-func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		localPartitions *v1beta1.LPXLocalPartitions
-		wantPartitions  [][]int64
-	}{
-		{name: "all-local selection requests no LPU placement", localPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}, wantPartitions: [][]int64{}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Resolve a hybrid workload with the selected local partitions")
-			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
-			dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: tc.localPartitions}
-			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
-
-			t.Log("Publish one request per remote workload replica, listing only remote compiler partitions")
-			_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
-			partitions := make([][]int64, 0, len(missing))
-			for _, request := range missing {
-				compilerIDs := make([]int64, 0, len(request.Spec.Partitions))
-				for _, partition := range request.Spec.Partitions {
-					compilerIDs = append(compilerIDs, partition.CompilerPartitionID)
-				}
-				partitions = append(partitions, compilerIDs)
-			}
-			require.Equal(t, tc.wantPartitions, partitions)
-		})
+func TestResolvePipelineRequestsSkipsAllLocalWorkload(t *testing.T) {
+	t.Log("Resolve a hybrid workload with every unit local")
+	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{
+		LocalPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
 	}
+	desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
+
+	t.Log("An all-local workload publishes no LPU placement request")
+	_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+	require.Empty(t, missing)
 }

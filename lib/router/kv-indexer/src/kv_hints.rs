@@ -1,0 +1,98 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! The transfer candidate vocabulary the indexer emits with a match: who holds a KV prefix a
+//! target could fetch ([`KvTransferCandidateSource`]), the candidates with the routing
+//! snapshot they were read under ([`KvTransferCandidates`]), the hashed hint identity of a
+//! cache owner ([`CacheOwnerKvTransferKeys`]), and the label hashing both sides of a source
+//! match use ([`label_key`], [`topology_keys`]). The producer owns its output: `dynamo-kv-hints`
+//! re-exports the source enum and the two hash functions from here, never the reverse.
+//!
+//! `label_key` hashes with `std::collections::hash_map::DefaultHasher::new()`: fixed SipHash
+//! keys, deterministic within one toolchain, not a cross-version contract. Both sides of a
+//! comparison are computed in the same process today; if keys ever cross a process boundary,
+//! replace the hasher with a pinned one.
+
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+
+use crate::residency::{ResidencyOwnerKey, ResidencyRoutingSnapshot, RouterHintSourceMetadata};
+
+/// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner known by its
+/// compact residency key. Produced by the indexer, consumed by worker selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KvTransferCandidateSource {
+    /// A worker's data-parallel rank.
+    Worker(WorkerWithDpRank),
+    /// A cache owner, by the compact key of its residency owner.
+    CacheOwner(ResidencyOwnerKey),
+}
+
+impl From<WorkerWithDpRank> for KvTransferCandidateSource {
+    fn from(worker: WorkerWithDpRank) -> Self {
+        Self::Worker(worker)
+    }
+}
+
+/// One source's contiguous coverage of request blocks `[start, end)`.
+/// A destination can use it only when its actual local prefix reaches `start`.
+/// `start` may be clamped to the first destination frontier that needs the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvTransferSourceInterval {
+    pub source: KvTransferCandidateSource,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KvTransferCandidates {
+    pub block_hashes: Vec<ExternalSequenceBlockHash>,
+    pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
+    /// Suffix-only coverage that can extend an original device+host prefix.
+    pub source_intervals: Vec<KvTransferSourceInterval>,
+    pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
+}
+
+/// Hash a label once, when its config or snapshot is published, so matching
+/// sources to targets per request compares integers instead of strings.
+pub fn label_key(label: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    label.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Sorted, so keys built from equal labels compare equal.
+pub fn topology_keys(topology: &HashMap<String, String>) -> Vec<(u64, u64)> {
+    let mut keys: Vec<_> = topology
+        .iter()
+        .map(|(domain, value)| (label_key(domain), label_key(value)))
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// A cache owner's router-hint identity, hashed when its routing snapshot is built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheOwnerKvTransferKeys {
+    /// Hashed hint worker type.
+    pub worker_type: u64,
+    /// Whether the owner exposes a source control endpoint.
+    pub is_source: bool,
+    /// `(domain, value)` topology labels, hashed and sorted.
+    pub topology: Vec<(u64, u64)>,
+}
+
+impl CacheOwnerKvTransferKeys {
+    pub fn new(metadata: &RouterHintSourceMetadata) -> Self {
+        Self {
+            worker_type: label_key(&metadata.worker_type),
+            is_source: !metadata.source_control_endpoint.is_empty(),
+            topology: topology_keys(&metadata.topology_domains),
+        }
+    }
+}

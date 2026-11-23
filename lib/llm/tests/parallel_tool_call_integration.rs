@@ -95,6 +95,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
 
     NvCreateChatCompletionRequest {
         responses_tools: None,
+        chat_template_tools: None,
         inner,
         common: CommonExt::default(),
         nvext: None,
@@ -103,6 +104,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         thinking_token_budget: None,
+        preserve_thinking: None,
         unsupported_fields: Default::default(),
     }
 }

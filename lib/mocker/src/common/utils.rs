@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use std::sync::Once;
 
-use aisimulate_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
+use aisim_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
 
 use crate::common::handoff::HandoffTransferTiming;
 use crate::common::protocols::{KvTransferTimingMode, MockerConfig, WorkerType};
@@ -222,10 +222,11 @@ impl ReusablePreciseTimer {
 }
 
 async fn sleep_until_tokio(deadline: Instant) {
-    if deadline <= Instant::now() {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    if deadline <= tokio::time::Instant::now() {
         tokio::task::yield_now().await;
     } else {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        tokio::time::sleep_until(deadline).await;
     }
 }
 

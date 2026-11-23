@@ -10,6 +10,7 @@ import os
 import subprocess
 
 import pytest
+import pytest_asyncio
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -30,7 +31,7 @@ def example_dir():
     )
 
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def server_process(example_dir):
     """Start the hello_world server and clean up after test"""
     server_proc = subprocess.Popen(

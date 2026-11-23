@@ -7,6 +7,7 @@
 //! routing decision.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use bytes::Bytes;
 use dynamo_llm::http::service::metadata::MetadataHeaderError;
@@ -105,6 +106,30 @@ pub struct PickResult {
     /// so the picker can free the exact reservation for this stream without a
     /// shared, request-id-keyed lookup. `None` when the picker booked nothing.
     pub reservation_id: Option<String>,
+    /// How long the pick spent in each step, for the per-request routing log.
+    /// `None` from pickers that do not tokenize in this process.
+    pub timings: Option<PickTimings>,
+}
+
+/// Where one `pick()` spent its time. The same steps feed
+/// `dynamo_epp_stage_duration_seconds`; these per-request copies go into the
+/// "Request routed" log line, so a slow request can be traced to its step.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PickTimings {
+    /// Prompt tokens the pick routed on.
+    pub prompt_tokens: usize,
+    /// Parsing the body into the typed request.
+    pub parse: Duration,
+    /// Waiting for a blocking-pool thread, for chat requests.
+    pub blocking_wait: Option<Duration>,
+    /// Rendering the chat template, for chat requests.
+    pub template: Option<Duration>,
+    /// Tokenizing the prompt, unless the request carried token ids.
+    pub tokenize: Option<Duration>,
+    /// Choosing the prefill and decode workers, including router queueing.
+    pub select: Duration,
+    /// Registering the request with the router's load bookkeeping.
+    pub book: Duration,
 }
 
 /// Resolve the request's cache namespace with the canonical precedence:
