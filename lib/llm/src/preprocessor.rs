@@ -12289,7 +12289,8 @@ mod tests {
         tool_choice: ChatCompletionToolChoiceOption,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
-responses_tools: None,
+            responses_tools: None,
+            chat_template_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                 .model("test")
                 .messages(vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -12778,11 +12779,11 @@ responses_tools: None,
                 .message()
                 .contains("requires the v1 tool-call jail")
         );
-        match crate::http::service::error::http_action_for_error(dynamo_error) {
-            crate::http::service::error::ClientErrorAction::Respond { status, .. } => {
+        match dynamo_error::http::http_action_for_error(dynamo_error) {
+            dynamo_error::http::ClientErrorAction::Respond { status, .. } => {
                 assert_eq!(status.as_u16(), 400);
             }
-            crate::http::service::error::ClientErrorAction::NoDelivery => {
+            dynamo_error::http::ClientErrorAction::NoDelivery => {
                 panic!("invalid parser-route requests must return an HTTP response");
             }
         }
@@ -16753,8 +16754,8 @@ responses_tools: None,
                 };
                 let error = error.downcast_ref::<DynamoError>().unwrap();
                 assert!(matches!(
-                    crate::http::service::error::http_action_for_error(error),
-                    crate::http::service::error::ClientErrorAction::Respond {
+                    dynamo_error::http::http_action_for_error(error),
+                    dynamo_error::http::ClientErrorAction::Respond {
                         status: axum::http::StatusCode::BAD_REQUEST,
                         ..
                     }

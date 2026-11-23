@@ -70,6 +70,10 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** Remove `DynamoConnector` from `--kv-transfer-config` and drop the `DYN_KVBM_*` variables. Use the engine's native KV offloading, LMCache, or FlexKV for host and disk tiering; `PdConnector` still pairs LMCache or FlexKV with `NixlConnector` on prefill workers. Rust code that needs token blocks and sequence hashes uses the `dynamo-tokens` crate.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **A response plane mismatch no longer fails requests** ([#17885](https://github.com/ai-dynamo/dynamo/pull/17885)). During a rolling update that changes the response plane, frontends and workers briefly disagree. A worker now serves such a request on its frontend's plane and logs a warning. Previously it failed the request with `response plane mismatch`, and the frontend quarantined the worker. Frontends and workers should still use the same `--response-plane`.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Selecting `velo` while TLS is configured uses the tcp response plane** ([#17885](https://github.com/ai-dynamo/dynamo/pull/17885)). Velo has no TLS. A process that selects `velo` while any `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is true now runs on tcp and logs one warning, instead of refusing to start.
+
 <a id="v170"></a>
 
 ## v1.7.0 - Upcoming

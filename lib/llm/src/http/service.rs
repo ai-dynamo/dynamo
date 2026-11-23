@@ -30,7 +30,7 @@ mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
-pub mod error;
+pub(crate) mod error;
 pub mod format_generate;
 pub mod frontend_extension;
 

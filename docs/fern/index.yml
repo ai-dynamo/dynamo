@@ -1004,6 +1004,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Inkling 2 Mini
+                path: pages/recipes/model-recipes/inkling-2-mini.mdx
+                slug: inkling-2-mini
               - page: Inkling NVFP4
                 path: pages/recipes/model-recipes/inkling-nvfp4.mdx
                 slug: inkling
@@ -1481,6 +1484,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "Build Tool-Calling Parsers in Rust with AI Agents"
+            path: pages/blog/2026/build-tool-calling-parsers-in-rust-with-ai-agents.mdx
+            slug: build-tool-calling-parsers-in-rust-with-ai-agents
           - page: "Planner Retune"
             path: pages/blog/2026/planner-retune.mdx
             slug: planner-retune

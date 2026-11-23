@@ -3889,10 +3889,12 @@ class AudioSpeechPayload(BasePayload):
 
         with wave.open(BytesIO(audio_bytes), "rb") as wav:
             sample_rate = wav.getframerate()
-            frame_count = wav.getnframes()
             sample_width = wav.getsampwidth()
             channels = wav.getnchannels()
-            frames = wav.readframes(frame_count)
+            frames = wav.readframes(wav.getnframes())
+        # Count what was read: a streamed WAV header carries a 0xFFFFFFFF
+        # placeholder data size, so getnframes() reports about 2**31 frames.
+        frame_count = len(frames) // (sample_width * channels)
 
         if self.expected_sample_rate is not None:
             assert sample_rate == self.expected_sample_rate, (
