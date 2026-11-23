@@ -138,6 +138,13 @@ http = "1"
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
+# Keep `mm-routing` but build Symphonia without the AAC decoder. Upstream
+# llm-multimodal enables Symphonia's "all" feature; the vendored copy omits "aac".
+# This crate is an excluded workspace, so it needs its own patch matching the root
+# Cargo.toml. See lib/vendor/llm-multimodal/VENDORED.md.
+[patch.crates-io]
+llm-multimodal = { path = "../../vendor/llm-multimodal" }
+
 [profile.profiling]
 inherits = "release"
 debug = true
