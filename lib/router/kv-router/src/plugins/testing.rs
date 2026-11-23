@@ -61,14 +61,17 @@ use std::collections::HashMap;
 
 use dynamo_admission::host::ClassifyRequestHostExt;
 use dynamo_admission::{ClassifierError, ClassifyRequest, RequestClassifier, RequestProgress};
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_indexer::TieredMatchDetails;
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{
-    AccountingAttribution, KvSchedulerError, OverlapSignals, RoutingConstraints, ScheduleMode,
-    SchedulingRequest, WorkerConfigLike, WorkerSelectionInput, WorkerSelector, worker_input_rows,
+    AccountingAttribution, CacheHitWeights, KvSchedulerError, OverlapAnalysis, OverlapSignals,
+    RoutingConstraints, ScheduleMode, SchedulingRequest, WorkerConfigLike, WorkerSelectionInput,
+    WorkerSelector, worker_input_rows,
 };
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
@@ -76,12 +79,17 @@ use dynamo_worker_selection::{
     SelectionConfig, WorkerInputRows, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
     WorkerSelectionPolicyError,
 };
+use rustc_hash::FxHashMap;
 
 use crate::plugins::RouterPluginRegistry;
 use crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError;
 
 /// The signals one worker reports in a [`SelectionCase`]. Every value starts at zero or
 /// unreported; set the ones the policy under test reads.
+///
+/// The cache estimate a policy reads (`WorkerCacheInput::accounting_cache_estimate`) follows
+/// from the three overlap tiers as it does in the router: the device blocks plus each lower
+/// tier at its default cache weight, and that many blocks of tokens.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CaseWorker {
     device_overlap_blocks: usize,
@@ -276,18 +284,46 @@ impl SelectionCase {
     /// for a test that changes one worker between selections.
     pub fn set_worker(&mut self, worker_id: WorkerId, worker: CaseWorker) {
         let rank = WorkerWithDpRank::from_worker_id(worker_id);
-        let tiers = &mut self.request.overlap.tier_overlap_blocks;
+        // The router's overlap analysis turns the worker's tiers into the tier blocks and the
+        // cache estimate a row reads, so the two agree here as they do in the router. A tier
+        // with no blocks is not reported, as an indexer reports none.
+        let mut matches = TieredMatchDetails::default();
+        if worker.device_overlap_blocks > 0 {
+            let blocks = u32::try_from(worker.device_overlap_blocks).unwrap_or(u32::MAX);
+            matches.device.overlap_scores.scores.insert(rank, blocks);
+        }
         for (tier, blocks) in [
-            (&mut tiers.device, worker.device_overlap_blocks),
-            (&mut tiers.host_pinned, worker.host_overlap_blocks),
-            (&mut tiers.disk, worker.disk_overlap_blocks),
+            (StorageTier::HostPinned, worker.host_overlap_blocks),
+            (StorageTier::Disk, worker.disk_overlap_blocks),
         ] {
-            if blocks == 0 {
-                tier.remove(&rank);
-            } else {
-                tier.insert(rank, blocks);
+            if blocks > 0 {
+                let tier = matches.lower_tier.entry(tier).or_default();
+                tier.hits.insert(rank, blocks);
             }
         }
+        let signals =
+            OverlapAnalysis::new(&CacheHitWeights::default(), self.block_size, &matches).signals();
+        let overlap = &mut self.request.overlap;
+        let tiers = &mut overlap.tier_overlap_blocks;
+        for (blocks, reported) in [
+            (&mut tiers.device, signals.tier_overlap_blocks.device),
+            (
+                &mut tiers.host_pinned,
+                signals.tier_overlap_blocks.host_pinned,
+            ),
+            (&mut tiers.disk, signals.tier_overlap_blocks.disk),
+            (
+                &mut overlap.effective_cached_tokens,
+                signals.effective_cached_tokens,
+            ),
+        ] {
+            set_rank(blocks, rank, reported.get(&rank).copied());
+        }
+        set_rank(
+            &mut overlap.effective_overlap_blocks,
+            rank,
+            signals.effective_overlap_blocks.get(&rank).copied(),
+        );
         self.request.worker_loads.insert(rank, worker.load);
         self.workers.insert(
             worker_id,
@@ -336,6 +372,18 @@ impl SelectionCase {
                 KvSchedulerError::WorkerSelectionPolicy(error) => SelectionCaseError::Policy(error),
                 other => SelectionCaseError::NoWorker(other.to_string()),
             })
+    }
+}
+
+/// Set `rank`'s entry in one of the request's per-rank overlap maps, or clear it.
+fn set_rank<V>(map: &mut FxHashMap<WorkerWithDpRank, V>, rank: WorkerWithDpRank, value: Option<V>) {
+    match value {
+        Some(value) => {
+            map.insert(rank, value);
+        }
+        None => {
+            map.remove(&rank);
+        }
     }
 }
 
@@ -397,13 +445,122 @@ pub fn classify<C: RequestClassifier + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     // Only the harness names: every other name comes from the plugin API, as in a plugin's
     // own tests, and not from this module's kernel and host imports.
     use super::{CaseWorker, SelectionCase, classify, classify_request, registered_policy};
     use crate::plugins::request_classifier::*;
     use crate::plugins::worker_selection::*;
+
+    /// Picks the first row.
+    struct PickFirst;
+
+    impl WorkerPicker for PickFirst {
+        fn pick(
+            &self,
+            _request: &WorkerSelectionRequest<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(0)
+        }
+    }
+
+    /// What a scorer reads from one worker's `CACHE` row: the three tiers and the estimate.
+    #[derive(Debug, PartialEq)]
+    struct CacheRow {
+        device_blocks: f64,
+        host_blocks: f64,
+        disk_blocks: f64,
+        estimate: (f64, usize),
+    }
+
+    /// Records each candidate's cache row by worker.
+    struct RecordCache(Arc<Mutex<HashMap<WorkerId, CacheRow>>>);
+
+    impl WorkerScorer for RecordCache {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE
+        }
+
+        fn score(
+            &self,
+            _request: &WorkerSelectionRequest<'_>,
+            candidates: WorkerCandidates<'_>,
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            let mut seen = self.0.lock().unwrap();
+            for (candidate, cost) in candidates.iter().zip(costs) {
+                let cache = candidate.cache().expect("declared CACHE");
+                seen.insert(
+                    candidate.worker().worker_id,
+                    CacheRow {
+                        device_blocks: cache.device_overlap_blocks(),
+                        host_blocks: cache.host_overlap_blocks(),
+                        disk_blocks: cache.disk_overlap_blocks(),
+                        estimate: cache.accounting_cache_estimate(),
+                    },
+                );
+                *cost = 0.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_workers_cache_estimate_follows_from_its_tiers() {
+        const BLOCK_SIZE: u32 = 16;
+        let seen = Arc::new(Mutex::new(HashMap::new()));
+        let policy = WorkerSelectionPolicy::new(
+            "test",
+            vec![Box::new(RecordCache(Arc::clone(&seen)))],
+            Box::new(PickFirst),
+        );
+        // The estimate counts a device block as one and a lower tier at its default weight.
+        let weights = SelectionConfig::default();
+        let row = |device_blocks: f64, host_blocks: f64, disk_blocks: f64| {
+            let blocks = device_blocks
+                + host_blocks * weights.host_cache_hit_weight
+                + disk_blocks * weights.disk_cache_hit_weight;
+            CacheRow {
+                device_blocks,
+                host_blocks,
+                disk_blocks,
+                estimate: (blocks, (blocks * f64::from(BLOCK_SIZE)).round() as usize),
+            }
+        };
+
+        let mut case = SelectionCase::new(320, BLOCK_SIZE)
+            .worker(1, CaseWorker::new().device_overlap_blocks(8))
+            .worker(2, CaseWorker::new().host_overlap_blocks(4))
+            .worker(3, CaseWorker::new().disk_overlap_blocks(8))
+            .worker(
+                4,
+                CaseWorker::new()
+                    .device_overlap_blocks(2)
+                    .host_overlap_blocks(4)
+                    .disk_overlap_blocks(8),
+            )
+            .worker(5, CaseWorker::new());
+        case.select(&policy).unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            HashMap::from([
+                (1, row(8.0, 0.0, 0.0)),
+                (2, row(0.0, 4.0, 0.0)),
+                (3, row(0.0, 0.0, 8.0)),
+                (4, row(2.0, 4.0, 8.0)),
+                (5, row(0.0, 0.0, 0.0)),
+            ])
+        );
+        assert_eq!(seen.lock().unwrap()[&1].estimate, (8.0, 128));
+
+        // Replacing a worker's signals replaces its tiers and its estimate.
+        case.set_worker(4, CaseWorker::new().host_overlap_blocks(4));
+        case.select(&policy).unwrap();
+        assert_eq!(seen.lock().unwrap()[&4], row(0.0, 4.0, 0.0));
+    }
 
     /// Marks a request `batch` when every observed worker is at or past a request count.
     struct LoadAwareClassifier {
