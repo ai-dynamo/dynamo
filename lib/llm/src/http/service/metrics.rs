@@ -698,7 +698,8 @@ mod tests {
 
     #[test]
     fn migration_limit_gauge_reports_frontend_limit() {
-        let metrics = Metrics::new();
+        // The assertion reads the exported name, so do not take a prefix from the environment.
+        let metrics = Metrics::new_with_prefix(None);
         let registry = Registry::new();
         metrics.register(&registry).unwrap();
         let mut card = ModelDeploymentCard::default();
