@@ -31,6 +31,10 @@ def run_dgd_recommend(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> tuple[list[str], subprocess.CompletedProcess[str]]:
+    try:
+        config_argument = config_path.relative_to(_REPOSITORY_ROOT)
+    except ValueError:
+        config_argument = config_path
     command = [
         sys.executable,
         "-m",
@@ -39,7 +43,7 @@ def run_dgd_recommend(
         "--stack",
         "dynamo",
         "--config",
-        str(config_path),
+        str(config_argument),
         "--output-dir",
         str(output_dir),
         "--format",
