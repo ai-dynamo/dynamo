@@ -357,6 +357,10 @@ impl DistributedRuntime {
             );
         }
 
+        crate::metrics::register_merge_conflicts_counter(
+            distributed_runtime.get_metrics_registry(),
+        );
+
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
             .system_health

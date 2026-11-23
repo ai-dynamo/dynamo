@@ -99,6 +99,9 @@ pub mod name_prefix {
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
+    /// Prefix for metrics about the metrics system itself (combined gathers).
+    pub const METRICS: &str = "dynamo_metrics";
+
     /// Prefix for per-phase routing overhead latency (hashing, scheduling).
     /// Raw Prometheus, not component-scoped.
     pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
@@ -585,6 +588,13 @@ pub mod task_tracker {
 
     /// Total number of rejected tasks
     pub const TASKS_REJECTED_TOTAL: &str = "tasks_rejected_total";
+}
+
+/// Metrics about merging a DistributedRuntime's registry tree into one gather
+pub mod metrics_merge {
+    /// Metric families skipped because their help or type conflicted with an
+    /// earlier family of the same name
+    pub const CONFLICTS_TOTAL: &str = "merge_conflicts_total";
 }
 
 /// DistributedRuntime core metrics
