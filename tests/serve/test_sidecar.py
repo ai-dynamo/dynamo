@@ -443,7 +443,9 @@ sidecar_configs = {
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            pytest.mark.post_merge,
+            # TODO: revert to pytest.mark.post_merge after pre_merge validation
+            # on this PR (see .ai/ci-guidelines.md).
+            pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
         ],
@@ -454,8 +456,7 @@ sidecar_configs = {
             "PYTHONUNBUFFERED": "1",
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
-            # Log UCX transports for the ~60 s decode KV read stall on Blackwell
-            # runners (DD_XBV5KL): did the NIXL read use cuda_ipc or a fallback?
+            # Show which UCX transport and protocol the KV read uses.
             "UCX_LOG_LEVEL": "info",
             "UCX_PROTO_INFO": "y",
         },
