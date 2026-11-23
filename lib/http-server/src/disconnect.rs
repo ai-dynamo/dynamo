@@ -19,9 +19,10 @@
 //! second handle will be disarmed, otherwise, the stream was dropped and the [`Drop`] trait on the [`ConnectionHandle`]
 //! triggers a [`ConnectionStatus::ClosedUnexpectedly`] signal.
 //!
-//! The [`ConnectionHandle`] is a simple wrapper around a [`tokio::sync::oneshot::Sender`] which will send a
-//! [`ConnectionStatus`] enum to the primary task. The primary task will then use this to determine if it should
-//! cancel the request or not.
+//! The [`ConnectionHandle`] is a simple wrapper around a [`tokio::sync::oneshot::Sender`] which sends its
+//! [`ConnectionStatus`] when it is dropped. The receiver is the [`connection_monitor`] task that
+//! [`create_connection_monitor`] spawns; it kills the engine context when a handle reports
+//! [`ConnectionStatus::ClosedUnexpectedly`].
 
 use crate::metrics::{CancellationLabels, Metrics};
 use dynamo_runtime::engine::AsyncEngineContext;

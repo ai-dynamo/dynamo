@@ -9,8 +9,8 @@
 //! arm it, and disarm it when the stream ends gracefully. A producer reports an application error
 //! to its monitor through a `StreamErrorSignal`.
 //!
-//! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
-//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
+//! When the source stream fails, the monitor ends the response itself: it yields a structured error
+//! as a `data:` frame, followed by `data: [DONE]` only on the routes that use that sentinel.
 
 use axum::{http::StatusCode, response::sse::Event};
 use dynamo_runtime::engine::AsyncEngineContext;
