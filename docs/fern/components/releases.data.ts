@@ -20,7 +20,8 @@
  *   3. reference/general/releases/known-issues.mdx + reference/general/releases/deprecations.mdx: new vXYZ
  *      section + accordion retitles (titles read RELEASE_STATS).
  *   4. Nav: docs/fern/index.yml Release Notes section (+ explicit slug).
- *   5. Regenerate agent twins: python3 scripts/gen_llms_tables.py
+ *   5. Update README.md runtime tags and local install troubleshooting examples.
+ *   6. Regenerate agent twins: python3 scripts/gen_llms_tables.py
  *      (--check must pass afterwards).
  *
  * PARSER NOTE: scripts/gen_llms_tables.py parses this file with a
@@ -68,10 +69,10 @@ export interface Release {
   enterprise?: string;
 }
 
-export const CURRENT_VERSION = "v1.6.0";
-export const CURRENT_DATE = "Oct 22, 2026";
-export const CURRENT_TAG = "1.6.0";
-export const CURRENT_WHEEL = "1.6.0";
+export const CURRENT_VERSION = "v1.6.2";
+export const CURRENT_DATE = "Nov 5, 2026";
+export const CURRENT_TAG = "1.6.2";
+export const CURRENT_WHEEL = "1.6.2";
 
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.23",
@@ -85,6 +86,24 @@ export const MAIN_TOT: BackendPins = {
 const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
 
 export const RELEASES: Release[] = [
+  {
+    version: "v1.6.2",
+    date: "Nov 5, 2026",
+    kind: "patch",
+    github: `${GH}v1.6.2`,
+    pins: { sglang: "0.5.21", trtllm: "1.3.0rc29", vllm: "0.31.0", nixlSglang: "1.5.0", nixlTrtllm: "1.3.1", nixlVllm: "1.4.1" },
+    ucx: "1.21.0",
+    delta: "Refreshes runtime OS and Python packages, moves the SGLang image to CPython 3.12.16, rejects oversized TensorRT-LLM prompts with HTTP 400, and adds opt-in SGLang garbage-collection freezing. Backend versions are unchanged from v1.6.1. See the release notes for inherited known issues and the cuda-gdb Python scripting limitation.",
+  },
+  {
+    version: "v1.6.1",
+    date: "Oct 27, 2026",
+    kind: "patch",
+    github: `${GH}v1.6.1`,
+    pins: { sglang: "0.5.21", trtllm: "1.3.0rc29", vllm: "0.31.0", nixlSglang: "1.5.0", nixlTrtllm: "1.3.1", nixlVllm: "1.4.1" },
+    ucx: "1.21.0",
+    delta: "Refreshes container and wheel trust stores, removes the emSign ECC Root CA - G3 root, upgrades container images to Pillow 13, and restores KVBM crate publishing. Backend versions are unchanged from v1.6.0.",
+  },
   {
     version: "v1.6.0",
     notesHref: "/dynamo/dev/reference/releases/v1-6-0",
@@ -430,6 +449,12 @@ export interface CudaRow {
 }
 
 export const CUDA_HISTORY: CudaRow[] = [
+  { version: "1.6.2", backend: "SGLang", toolkit: "13.0", minDriver: "580.xx+" },
+  { version: "1.6.2", backend: "TensorRT-LLM", toolkit: "13.1", minDriver: "580.xx+" },
+  { version: "1.6.2", backend: "vLLM", toolkit: "13.0", minDriver: "580.xx+" },
+  { version: "1.6.1", backend: "SGLang", toolkit: "13.0", minDriver: "580.xx+" },
+  { version: "1.6.1", backend: "TensorRT-LLM", toolkit: "13.1", minDriver: "580.xx+" },
+  { version: "1.6.1", backend: "vLLM", toolkit: "13.0", minDriver: "580.xx+" },
   { version: "1.6.0", backend: "SGLang", toolkit: "13.0", minDriver: "580.xx+" },
   { version: "1.6.0", backend: "TensorRT-LLM", toolkit: "13.1", minDriver: "580.xx+" },
   { version: "1.6.0", backend: "vLLM", toolkit: "13.0", minDriver: "580.xx+" },
@@ -686,8 +711,8 @@ export const ARTIFACTS: Artifact[] = [
     meta: "vLLM v0.31.0 · CUDA 13.0 · AMD64/ARM64",
     href: `${NGC_C}/vllm-runtime/tags`,
     tags: [
-      { label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0" },
-      { label: "1.6.0-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-efa", variant: "experimental" },
+      { label: "1.6.2", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2" },
+      { label: "1.6.2-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2-efa", variant: "experimental" },
     ],
   },
   {
@@ -698,8 +723,8 @@ export const ARTIFACTS: Artifact[] = [
     meta: "SGLang v0.5.21 · CUDA 13.0 · AMD64/ARM64",
     href: `${NGC_C}/sglang-runtime/tags`,
     tags: [
-      { label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0" },
-      { label: "1.6.0-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-efa", variant: "experimental" },
+      { label: "1.6.2", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.2" },
+      { label: "1.6.2-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.2-efa", variant: "experimental" },
     ],
   },
   {
@@ -710,8 +735,8 @@ export const ARTIFACTS: Artifact[] = [
     meta: "TRT-LLM v1.3.0rc29 · CUDA 13.1 · AMD64/ARM64",
     href: `${NGC_C}/tensorrtllm-runtime/tags`,
     tags: [
-      { label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0" },
-      { label: "1.6.0-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-efa", variant: "experimental" },
+      { label: "1.6.2", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.2" },
+      { label: "1.6.2-efa", clipboard: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.2-efa", variant: "experimental" },
     ],
   },
   {
@@ -721,7 +746,7 @@ export const ARTIFACTS: Artifact[] = [
     description: "OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP)",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/dynamo-frontend/tags`,
-    tags: [{ label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0" }],
+    tags: [{ label: "1.6.2", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.2" }],
   },
   {
     category: "container",
@@ -730,7 +755,7 @@ export const ARTIFACTS: Artifact[] = [
     description: "Standalone Planner used by Profiler jobs and Planner pods",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/dynamo-planner/tags`,
-    tags: [{ label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0" }],
+    tags: [{ label: "1.6.2", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.2" }],
   },
   {
     category: "container",
@@ -739,7 +764,7 @@ export const ARTIFACTS: Artifact[] = [
     description: "Operator that manages Dynamo deployments and CRDs",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/kubernetes-operator/tags`,
-    tags: [{ label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.6.0" }],
+    tags: [{ label: "1.6.2", clipboard: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.6.2" }],
   },
   {
     category: "container",
@@ -749,24 +774,24 @@ export const ARTIFACTS: Artifact[] = [
     meta: "CPU-only · AMD64/ARM64",
     href: `${NGC_C}/dynamo-sidecar/tags`,
     badge: "Experimental",
-    tags: [{ label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.6.0" }],
+    tags: [{ label: "1.6.2", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.6.2" }],
   },
   {
     category: "wheel",
     name: "ai-dynamo",
     description: "Main package with backend integrations (vLLM, SGLang, TRT-LLM)",
     meta: "Python 3.10–3.12 · Linux (glibc v2.28+)",
-    href: "https://pypi.org/project/ai-dynamo/1.6.0/",
-    tags: [{ label: "uv pip install ai-dynamo==1.6.0", clipboard: "uv pip install ai-dynamo==1.6.0" }],
+    href: "https://pypi.org/project/ai-dynamo/1.6.2/",
+    tags: [{ label: "uv pip install ai-dynamo==1.6.2", clipboard: "uv pip install ai-dynamo==1.6.2" }],
   },
   {
     category: "wheel",
     name: "ai-dynamo-runtime",
     description: "Core Python bindings for the Dynamo runtime",
     meta: "Python 3.10–3.12 · Linux (glibc v2.28+)",
-    href: "https://pypi.org/project/ai-dynamo-runtime/1.6.0/",
+    href: "https://pypi.org/project/ai-dynamo-runtime/1.6.2/",
     tags: [
-      { label: "uv pip install ai-dynamo-runtime==1.6.0", clipboard: "uv pip install ai-dynamo-runtime==1.6.0" },
+      { label: "uv pip install ai-dynamo-runtime==1.6.2", clipboard: "uv pip install ai-dynamo-runtime==1.6.2" },
     ],
   },
   {
@@ -774,19 +799,19 @@ export const ARTIFACTS: Artifact[] = [
     name: "kvbm",
     description: "KV Block Manager for disaggregated KV cache",
     meta: "Python 3.10–3.12 · Linux (glibc v2.28+)",
-    href: "https://pypi.org/project/kvbm/1.6.0/",
-    tags: [{ label: "uv pip install kvbm==1.6.0", clipboard: "uv pip install kvbm==1.6.0" }],
+    href: "https://pypi.org/project/kvbm/1.6.1/",
+    tags: [{ label: "uv pip install kvbm==1.6.1", clipboard: "uv pip install kvbm==1.6.1" }],
   },
   {
     category: "helm",
     name: "dynamo-platform",
-    description: "Platform services (etcd, NATS) and the Dynamo Operator for a Dynamo cluster",
-    href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.6.0.tgz",
+    description: "Dynamo Operator and optional platform services for a Kubernetes cluster",
+    href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.6.2.tgz",
     tags: [
       {
-        label: "helm install · dynamo-platform 1.6.0",
+        label: "helm install · dynamo-platform 1.6.2",
         clipboard:
-          "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.6.0.tgz",
+          "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.6.2.tgz",
       },
     ],
   },

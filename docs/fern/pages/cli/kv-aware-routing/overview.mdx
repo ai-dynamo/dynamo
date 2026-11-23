@@ -48,6 +48,17 @@ The vLLM and SGLang presets start two workers and require 2 GPUs. The TensorRT-L
   </Tab>
 </Tabs>
 
+## Verify Cache Reuse
+
+A successful completion proves generation, but does not prove cache-aware worker selection.
+
+1. Confirm that at least two model workers registered and that the frontend runs with `--router-mode kv`. Record whether worker KV events or `--no-router-kv-events` supplies the cache view.
+2. Send a request with a long shared prefix, then send it again after the first completes. Keep the model, tokenizer, prefix, and worker configuration fixed. Use a prefix longer than several engine KV blocks so block alignment does not hide reuse.
+3. Capture the selected worker for both requests from routing logs or a request trace. Compare the engine's cached-token reporting before and after the repeated request. A router overlap estimate alone does not prove that the engine reused KV cache.
+4. Inspect the frontend's `/metrics` endpoint and the worker's backend metrics. Use the [Metrics Catalog](../../reference/observability/metrics-catalog.mdx#router-metrics) for metric availability in the installed release. Treat absent telemetry as unverified, rather than as a cache hit.
+
+Record request IDs, selected workers, observed cached tokens, and any errors. Worker selection can trade cache overlap against load; a repeated prefix is not guaranteed to select the same worker under concurrent traffic. A latency reduction alone does not establish cache reuse or a performance improvement over another routing policy.
+
 ## Disaggregated serving with KV routing
 
 The vLLM and SGLang presets start 2 prefill and 2 decode workers and require 4 GPUs. The TensorRT-LLM preset starts 1 prefill and 1 decode worker and requires 2 GPUs. The frontend runs in KV routing mode and activates its internal prefill router after discovering compatible typed prefill and decode services for the same model and namespace.

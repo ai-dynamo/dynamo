@@ -10,6 +10,7 @@ supplies the marker registrations.
 """
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -254,3 +255,37 @@ class TestGeneratedNightlyLedger:
             gen.TSParseError, match="require version, date, and packages"
         ):
             gen.load_nightly_builds(path)
+
+
+def test_local_install_preserves_distinct_container_and_wheel_versions():
+    rendered = gen.render_local_install(
+        {
+            "CURRENT_VERSION": "v9.8.7",
+            "CURRENT_TAG": "9.8.7",
+            "CURRENT_WHEEL": "9.8.7.post1",
+        }
+    )
+    for image in ("sglang", "vllm", "tensorrtllm"):
+        assert f"/{image}-runtime:9.8.7" in rendered
+    for backend in ("sglang", "vllm"):
+        assert f"ai-dynamo[{backend}]==9.8.7.post1" in rendered
+    assert "ai-dynamo[trtllm]" not in rendered
+
+
+def test_release_freeze_removes_development_install_twin(tmp_path: Path):
+    source = gen.SCRIPT_DIR.parent / "pages/cli/getting-started/quickstart.mdx"
+    page = tmp_path / "quickstart.mdx"
+    page.write_text(source.read_text())
+    script = gen.SCRIPT_DIR.parents[2] / ".github/scripts/freeze_install_selector.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(page), "9.8.7"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    frozen = page.read_text()
+    assert "llms-install:begin" not in frozen
+    assert "<InstallSelector" not in frozen
+    for image in ("sglang", "vllm", "tensorrtllm"):
+        assert f"/{image}-runtime:9.8.7" in frozen

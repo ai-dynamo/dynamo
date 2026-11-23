@@ -83,6 +83,11 @@ This covers single-machine setups only. Multi-node disaggregated serving additio
 
     <InstallSelector hardware="nvidia" />
 
+<llms-only>
+For stable container and wheel install commands, read the [Local Quickstart](../getting-started/quickstart.mdx). The command selector above is interactive; do not infer an install command from its component name.
+</llms-only>
+
+
     The container command drops you into a shell with Dynamo and its backend dependencies installed. Run the frontend and workers inside that container so file discovery uses the same filesystem. If you chose optional infrastructure services on the host, `--network host` lets the container reach them.
 
     Before using a wheel command, create and activate a Python virtual environment:
@@ -187,10 +192,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.2
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.2
 ```
 
 ## Next Steps

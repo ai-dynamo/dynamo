@@ -46,6 +46,16 @@ The vLLM, SGLang, and TensorRT-LLM `launch/disagg.sh` presets start the frontend
   </Tab>
 </Tabs>
 
+## Verify Prefill and Decode
+
+A successful completion alone does not establish that prefill and decode ran separately.
+
+1. Confirm that the intended prefill and decode processes registered for the same model and namespace, on the intended GPUs. Check their actual process arguments, rather than only the launch script.
+2. Send a completion and retain its request ID, response, and both workers' logs. Verify that the request used the prefill and decode services and that the configured KV transfer completed without transport errors. An aggregated worker answering the request does not validate disaggregation.
+3. Correlate the request trace or backend transfer telemetry with the response. Metric names and availability depend on the backend and release; see the [Metrics Catalog](../../reference/observability/metrics-catalog.mdx). If the logs or metrics do not establish the handoff, report generation as working and KV transfer as unverified.
+
+For multi-node runs, verify the intended network transport and placement separately. A successful local transfer does not prove RDMA use or multi-node performance.
+
 ## TokenSpeed
 
 For LongCat-Flash with two prefill replicas and KV-aware routing, use the

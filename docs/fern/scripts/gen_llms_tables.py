@@ -1250,6 +1250,28 @@ def build_atom(data: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_local_install(data: dict) -> str:
+    parts = [
+        f"Current stable release: {data['CURRENT_VERSION']}. These commands install the stable release, not a nightly or a release-branch build."
+    ]
+    for label, image, extra in [
+        ("SGLang", "sglang", "sglang"),
+        ("vLLM", "vllm", "vllm"),
+        ("TensorRT-LLM", "tensorrtllm", None),
+    ]:
+        parts.append(
+            f"**{label} container**\n\n```bash\ndocker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/{image}-runtime:{data['CURRENT_TAG']}\n```"
+        )
+        if extra:
+            parts.append(
+                f'**{label} wheel** (activate a Python virtual environment first)\n\n```bash\nuv pip install --prerelease=allow "ai-dynamo[{extra}]=={data["CURRENT_WHEEL"]}"\n```'
+            )
+    parts.append(
+        "TensorRT-LLM uses the container path; this selector does not offer a TensorRT-LLM wheel installation."
+    )
+    return "\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Emission
 # ---------------------------------------------------------------------------
@@ -1378,12 +1400,17 @@ def main(argv: list[str]) -> int:
             print(f"error: failed to parse {args.nightly_data}: {exc}", file=sys.stderr)
             return 2
 
+    local_block = Block("llms-install", render_local_install, True, False)
+    pages = {REFERENCE_DIR / name: blocks for name, blocks in PAGES.items()}
+    pages[SCRIPT_DIR.parent / "pages/cli/getting-started/quickstart.mdx"] = (
+        local_block,
+    )
+
     # Render every selected output up front so a rendering failure emits nothing.
     try:
         rendered: dict[Path, str] = {}
         if not args.assets_only:
-            for page_name, blocks in PAGES.items():
-                page_path = REFERENCE_DIR / page_name
+            for page_path, blocks in pages.items():
                 if not page_path.is_file():
                     print(f"error: page not found: {page_path}", file=sys.stderr)
                     return 2

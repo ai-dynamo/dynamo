@@ -23,6 +23,7 @@ cp -R docs "$tmp_dir/first/docs"
 cp -R docs "$tmp_dir/second/docs"
 
 outputs=(
+  docs/fern/pages/cli/getting-started/quickstart.mdx
   docs/fern/pages/reference/general/compatibility.mdx
   docs/fern/pages/reference/general/release-artifacts.mdx
   docs/fern/pages/reference/general/model-early-access-builds.mdx
