@@ -235,6 +235,47 @@ pub(crate) fn normalize_tool_call_arguments(
     Ok(())
 }
 
+/// Give each historical tool call its own assistant message.
+///
+/// The published gpt-oss chat template renders only `tool_calls[0]` of an
+/// assistant message, so a turn with parallel calls would lose every call after
+/// the first while all of their tool results still render. vLLM's Harmony
+/// renderer writes one assistant message per call; this matches it. The first
+/// message keeps the original content and reasoning fields.
+pub(crate) fn split_parallel_tool_call_messages(messages_json: &mut serde_json::Value) {
+    let Some(messages) = messages_json.as_array_mut() else {
+        return;
+    };
+    let is_parallel = |message: &serde_json::Value| {
+        message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|calls| calls.len() > 1)
+    };
+    if !messages.iter().any(is_parallel) {
+        return;
+    }
+    let mut split = Vec::with_capacity(messages.len());
+    for mut message in messages.drain(..) {
+        if !is_parallel(&message) {
+            split.push(message);
+            continue;
+        }
+        let calls = match message.get_mut("tool_calls").map(std::mem::take) {
+            Some(serde_json::Value::Array(calls)) => calls,
+            _ => Vec::new(),
+        };
+        let mut calls = calls.into_iter();
+        message["tool_calls"] = serde_json::Value::Array(calls.next().into_iter().collect());
+        split.push(message);
+        split.extend(calls.map(
+            |call| serde_json::json!({"role": "assistant", "content": "", "tool_calls": [call]}),
+        ));
+    }
+    *messages = split;
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
@@ -989,6 +1030,44 @@ mod tests {
             args.as_str().unwrap(),
             r#"{"location": "San Francisco", "unit": "celsius"}"#
         );
+    }
+
+    /// An assistant turn with two parallel calls becomes two assistant
+    /// messages with one call each, in order; other messages are untouched.
+    #[test]
+    fn split_parallel_tool_calls_gives_each_call_its_own_message() {
+        use serde_json::json;
+        let call = |id: &str, reference: &str| {
+            json!({"id": id, "type": "function", "function": {
+                "name": "get_order_status",
+                "arguments": format!("{{\"order_reference\":\"{reference}\"}}")
+            }})
+        };
+        let mut msgs = json!([
+            {"role": "user", "content": "check both"},
+            {"role": "assistant", "content": "", "reasoning_content": "two calls",
+             "tool_calls": [call("call_0", "ORD-2024-0192"), call("call_1", "A-77314")]},
+            {"role": "tool", "tool_call_id": "call_0", "content": "{\"ok\":true}"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "{\"ok\":true}"}
+        ]);
+        super::split_parallel_tool_call_messages(&mut msgs);
+        assert_eq!(
+            msgs,
+            json!([
+                {"role": "user", "content": "check both"},
+                {"role": "assistant", "content": "", "reasoning_content": "two calls",
+                 "tool_calls": [call("call_0", "ORD-2024-0192")]},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [call("call_1", "A-77314")]},
+                {"role": "tool", "tool_call_id": "call_0", "content": "{\"ok\":true}"},
+                {"role": "tool", "tool_call_id": "call_1", "content": "{\"ok\":true}"}
+            ])
+        );
+
+        let single = make_tool_call_messages(r#"{"city": "Paris"}"#);
+        let mut unchanged = single.clone();
+        super::split_parallel_tool_call_messages(&mut unchanged);
+        assert_eq!(unchanged, single);
     }
 
     fn continue_rendered(

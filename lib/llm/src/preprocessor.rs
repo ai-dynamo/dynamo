@@ -1879,13 +1879,17 @@ pub(crate) fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
 }
 
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
-/// `function.arguments` when the model opts in (GLM-5.2), and appends
+/// `function.arguments` when the model opts in (GLM-5.2), splits parallel
+/// historical tool calls into one message each for gpt-oss, and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
 /// Other trait methods delegate to the inner request, except typed_messages:
 /// rendering must use the transformed messages rather than the original slice.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
+    /// gpt-oss: one assistant message per historical tool call, because its
+    /// template renders only the first call of each message.
+    split_parallel_tool_calls: bool,
     continue_final_message: bool,
     named_tool: Option<&'a str>,
     final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
@@ -1909,6 +1913,9 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
                 "tool_call arguments normalization failed; template rendering may fail \
                  if it calls .items() on a string"
             );
+        }
+        if self.split_parallel_tool_calls {
+            crate::preprocessor::prompt::split_parallel_tool_call_messages(&mut json);
         }
         if self.continue_final_message
             && let Err(e) = crate::preprocessor::prompt::append_continue_final_message_tag(
@@ -4178,12 +4185,13 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
-        let final_message_start_tag = (emulate_continuation
-            && crate::protocols::openai::chat_completions::unified_parser::configured_family(
+        let is_gpt_oss =
+            crate::protocols::openai::chat_completions::unified_parser::configured_family(
                 self.tool_call_parser.as_deref(),
                 self.runtime_config.reasoning_parser.as_deref(),
-            ) == Some("gpt_oss"))
-        .then(crate::preprocessor::prompt::FinalMessageTags::new);
+            ) == Some("gpt_oss");
+        let final_message_start_tag = (emulate_continuation && is_gpt_oss)
+            .then(crate::preprocessor::prompt::FinalMessageTags::new);
         // Beam resolves `builtin_tools` names against `tools` for rendering only.
         let rendering = if self.beam_route {
             dynamo_renderer::beam::builtin_tools_view(
@@ -4194,7 +4202,19 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
+        // Typed messages are a render fast path; split only when a turn needs it.
+        let split_parallel_tool_calls = is_gpt_oss
+            && request.typed_messages().is_none_or(|messages| {
+                messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant)
+                            if assistant.tool_calls.as_ref().is_some_and(|calls| calls.len() > 1)
+                    )
+                })
+            });
         let formatted_prompt = if self.normalize_tool_call_args
+            || split_parallel_tool_calls
             || emulate_continuation
             || rendering.is_some()
             || named_tool.is_some()
@@ -4202,6 +4222,7 @@ impl OpenAIPreprocessor {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
+                split_parallel_tool_calls,
                 continue_final_message: emulate_continuation,
                 named_tool: named_tool.as_deref(),
                 final_message_start_tag: final_message_start_tag.as_ref(),
@@ -17527,6 +17548,7 @@ mod tests {
             named_tool: None,
             inner: &request,
             normalize_tool_call_args: true,
+            split_parallel_tool_calls: false,
             continue_final_message: true,
             final_message_start_tag: None,
             rendering: None,
@@ -17559,6 +17581,55 @@ mod tests {
         );
     }
 
+    /// The gpt-oss template renders only `tool_calls[0]` of each assistant
+    /// message; splitting first keeps every parallel call in the history.
+    #[test]
+    fn gpt_oss_history_renders_every_parallel_tool_call() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "call_0", "type": "function", "function": {
+                        "name": "get_order_status",
+                        "arguments": "{\"order_reference\":\"ORD-2024-0192\"}"}},
+                    {"id": "call_1", "type": "function", "function": {
+                        "name": "get_order_status",
+                        "arguments": "{\"order_reference\":\"A-77314\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_0", "content": "{\"ok\":true}"},
+                {"role": "tool", "tool_call_id": "call_1", "content": "{\"ok\":true}"}
+            ]
+        }))
+        .unwrap();
+        // The tool-call branch of the published gpt-oss chat template.
+        let formatter = test_prompt_formatter(
+            "{% for m in messages %}{% if m.tool_calls %}{% set c = m.tool_calls[0].function %}\
+             <|start|>assistant to=functions.{{ c.name }}<|message|>{{ c.arguments }}<|call|>\
+             {% elif m.role == 'tool' %}<|start|>tool<|message|>{{ m.content }}<|end|>{% endif %}{% endfor %}",
+        );
+        let render = |split_parallel_tool_calls| {
+            formatter
+                .render_prompt(&NormalizedArgsRequest {
+                    named_tool: None,
+                    inner: &request,
+                    normalize_tool_call_args: false,
+                    split_parallel_tool_calls,
+                    continue_final_message: false,
+                    final_message_start_tag: None,
+                    rendering: None,
+                })
+                .unwrap()
+                .as_str()
+                .to_string()
+        };
+        let calls = "<|start|>assistant to=functions.get_order_status<|message|>\
+                     {\"order_reference\": \"ORD-2024-0192\"}<|call|>\
+                     <|start|>assistant to=functions.get_order_status<|message|>\
+                     {\"order_reference\": \"A-77314\"}<|call|>";
+        assert!(render(true).starts_with(calls), "{}", render(true));
+        assert!(!render(false).contains("A-77314"));
+    }
+
     fn render_with_continue_final_message(
         formatter: &dyn OAIPromptFormatter,
         request: &NvCreateChatCompletionRequest,
@@ -17572,6 +17643,7 @@ mod tests {
                     named_tool: None,
                     inner: request,
                     normalize_tool_call_args: false,
+                    split_parallel_tool_calls: false,
                     continue_final_message: true,
                     final_message_start_tag: None,
                     rendering: None,
