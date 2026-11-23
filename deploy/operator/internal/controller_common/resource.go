@@ -282,14 +282,16 @@ func SyncObservedResource[T client.Object](
 		}
 		observed = created
 	} else {
-		// Preserve lifecycle metadata maintained by the resource's own controller.
+		// Validate ownership without turning observed lifecycle metadata into intent.
 		if !options.sharedOwnership {
 			if err := CheckControllerOwnership(observed, parentResource, r.Scheme()); err != nil {
 				return false, zero, err
 			}
 		}
-		intent.SetOwnerReferences(observed.GetOwnerReferences())
-		intent.SetFinalizers(observed.GetFinalizers())
+		if parentResource != nil && (!options.sharedOwnership || metav1.IsControlledBy(observed, parentResource)) {
+			// Only our validated controller reference belongs to this actor's lifecycle intent.
+			intent.SetOwnerReferences([]metav1.OwnerReference{*metav1.GetControllerOf(observed)})
+		}
 
 		// Preserve bookkeeping still read by existing callers, without gating metadata Apply.
 		change, err := GetSpecChangeResult(observed, desired, opts...)
@@ -357,8 +359,11 @@ func SyncObservedResource[T client.Object](
 }
 
 // migrateUpdateOwnership upgrades this actor's Update entries and, for a legacy
-// owner, the operator entries identified by its bookkeeping. observed must be non-nil.
-func migrateUpdateOwnership[T client.Object](ctx context.Context, kubeClient client.Client, observed T, fieldManager string, legacyOwner bool) (T, error) {
+// owner, the operator entries identified by its bookkeeping. Legacy lifecycle
+// attribution is relinquished without deleting values: a shared Update manager
+// does not tell us which controller added a finalizer or reference.
+// observed must be non-nil.
+func migrateUpdateOwnership[T client.Object](ctx context.Context, kubeClient client.Writer, observed T, fieldManager string, legacyOwner bool) (T, error) {
 	// Shared resources must not transfer another parent's field ownership.
 	managers := sets.New(fieldManager)
 	if legacyOwner {
@@ -373,16 +378,38 @@ func migrateUpdateOwnership[T client.Object](ctx context.Context, kubeClient cli
 		}
 	}
 
-	// The upstream migration patch includes the observed resourceVersion precondition.
-	patch, err := csaupgrade.UpgradeManagedFieldsPatch(observed, managers, fieldManager)
-	if err != nil {
+	// Do not transfer ambiguous lifecycle fields from a legacy shared manager to Apply.
+	migrated := observed.DeepCopyObject().(T)
+	lifecycle := fieldpath.NewSet(
+		fieldpath.MakePathOrDie("metadata", "finalizers"),
+		fieldpath.MakePathOrDie("metadata", "ownerReferences"),
+	)
+	entries := migrated.GetManagedFields()
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Operation != metav1.ManagedFieldsOperationUpdate || entry.Subresource != "" || !managers.Has(entry.Manager) {
+			continue
+		}
+		fields := &fieldpath.Set{}
+		if err := fields.FromJSON(entry.FieldsV1.GetRawReader()); err != nil {
+			return observed, err
+		}
+		owned, err := fields.RecursiveDifference(lifecycle).ToJSON()
+		if err != nil {
+			return observed, err
+		}
+		entry.FieldsV1.SetRawBytes(owned)
+	}
+	migrated.SetManagedFields(entries)
+	if err := csaupgrade.UpgradeManagedFields(migrated, managers, fieldManager); err != nil {
 		return observed, err
 	}
-	if patch == nil {
+	if reflect.DeepEqual(observed.GetManagedFields(), migrated.GetManagedFields()) {
 		return observed, nil
 	}
-	migrated := observed.DeepCopyObject().(T)
-	if err := kubeClient.Patch(ctx, migrated, client.RawPatch(types.JSONPatchType, patch)); err != nil {
+
+	// An ownership-only patch preserves values and rejects a changed observation.
+	if err := kubeClient.Patch(ctx, migrated, client.MergeFromWithOptions(observed, client.MergeFromWithOptimisticLock{})); err != nil {
 		return observed, err
 	}
 	return migrated, nil
