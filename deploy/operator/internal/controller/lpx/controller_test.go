@@ -2303,6 +2303,12 @@ func TestLPXGroveDefaultedRollingUpdatePreservesPodCliqueSet(t *testing.T) {
 	rollingUpdate := &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(int32(1))}
 	pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate = rollingUpdate
 	createLPXTestObjects(t, t.Context(), r.Client, objects...)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Apply: func(ctx context.Context, delegated client.WithWatch, configuration k8sruntime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			defaultLPXTestPCSApply(t, configuration, 1)
+			return delegated.Apply(ctx, configuration, opts...)
+		},
+	})
 	pcsUID := pcs.UID
 	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
 
@@ -3132,12 +3138,15 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 		}
 	}
 
-	t.Log("Unchanged desired input does not write the PCS again")
+	t.Log("Unchanged desired input preserves the PCS content and identity")
 	before := pcs.DeepCopy()
 	_, err = r.Reconcile(t.Context(), key)
 	require.NoError(t, err)
 	pcs, err = getPodCliqueSet(t.Context(), r.Client, child)
 	require.NoError(t, err)
+
+	// Fake Apply advances resourceVersion on a no-op; API-server no-op behavior is covered separately.
+	pcs.ResourceVersion = before.ResourceVersion
 	require.Equal(t, before, pcs)
 }
 
@@ -3206,12 +3215,16 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 				current := list.DeepCopyObject().(client.ObjectList)
 				require.NoError(t, r.List(ctx, current))
 
-				// The fake client increments Service resource versions even for unchanged Apply.
-				if services, ok := current.(*corev1.ServiceList); ok {
-					previous := list.(*corev1.ServiceList)
-					require.Len(t, services.Items, len(previous.Items))
-					for i := range services.Items {
-						services.Items[i].ResourceVersion = previous.Items[i].ResourceVersion
+				// Fake Apply advances resourceVersion on a no-op; API-server no-op behavior is covered separately.
+				previous, err := meta.ExtractList(list)
+				require.NoError(t, err)
+				objects, err := meta.ExtractList(current)
+				require.NoError(t, err)
+				require.Len(t, objects, len(previous))
+				for i := range objects {
+					switch object := objects[i].(type) {
+					case *grovev1alpha1.PodCliqueSet, *corev1.Service:
+						object.(client.Object).SetResourceVersion(previous[i].(client.Object).GetResourceVersion())
 					}
 				}
 				require.Equal(t, list, current)
@@ -3408,6 +3421,27 @@ func newLPXTestClient(t testing.TB, objects ...client.Object) client.WithWatch {
 			return delegated.Create(ctx, object, opts...)
 		},
 	})
+}
+
+// defaultLPXTestPCSApply models Grove admission for tests that observe its rolling-update defaults.
+func defaultLPXTestPCSApply(t testing.TB, configuration k8sruntime.ApplyConfiguration, maxUnavailable int32) {
+	t.Helper()
+	object, ok := configuration.(client.Object)
+	if !ok || object.GetObjectKind().GroupVersionKind().Kind != "PodCliqueSet" {
+		return
+	}
+	applied := configuration.(k8sruntime.Unstructured)
+	desired := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, k8sruntime.DefaultUnstructuredConverter.FromUnstructured(applied.UnstructuredContent(), desired))
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		group := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		if group.RollingUpdate == nil {
+			group.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(maxUnavailable)}
+		}
+	}
+	fields, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(desired)
+	require.NoError(t, err)
+	applied.UnstructuredContent()["spec"] = fields["spec"]
 }
 
 func newLPXTestReconciler(
@@ -4159,6 +4193,7 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 					require.NoError(t, err)
 					require.Len(t, requests, tc.wantRequests)
 				}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 				pcs.Status.ObservedGeneration = new(pcs.Generation)
 				pcs.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
 				require.NoError(t, r.Update(t.Context(), pcs))
@@ -4479,13 +4514,14 @@ func TestLPXCoherentUpdateDefersCyborgScaleUntilLiveCapacityMatches(t *testing.T
 	require.Zero(t, scaleWrites)
 
 	t.Log("Neither missing nor completed old progress acknowledges the updated Cyborg template")
-	pcs.Generation = 2
-	pcs.Status.ObservedGeneration = new(int64(1))
-	pcs.Annotations[commoncontroller.NvidiaAnnotationGenerationKey] = "2"
 	for _, progress := range []*grovev1alpha1.PodCliqueSetUpdateProgress{
 		nil,
 		{UpdateStartedAt: metav1.Now(), UpdateEndedAt: new(metav1.Now())},
 	} {
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+		pcs.Generation = 2
+		pcs.Status.ObservedGeneration = new(int64(1))
+		pcs.Annotations[commoncontroller.NvidiaAnnotationGenerationKey] = "2"
 		pcs.Status.UpdateProgress = progress
 		require.NoError(t, r.Update(ctx, pcs))
 		for range 2 {
@@ -4496,6 +4532,7 @@ func TestLPXCoherentUpdateDefersCyborgScaleUntilLiveCapacityMatches(t *testing.T
 	}
 
 	t.Log("Grove starts the current Coherent rollout while live Cyborg capacity still differs")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
 	pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
 	require.NoError(t, r.Update(ctx, pcs))
 
@@ -4530,6 +4567,7 @@ func TestLPXCoherentUpdateDefersCyborgScaleUntilLiveCapacityMatches(t *testing.T
 	r.Client = base
 
 	t.Log("After completion, apply live capacity and wait for Grove readiness")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
 	pcs.Status.ObservedGeneration = new(pcs.Generation)
 	pcs.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
 	require.NoError(t, r.Update(ctx, pcs))
@@ -4596,16 +4634,19 @@ func TestLPXScalingWaitsForCachedConfigurationAndCoherentCompletion(t *testing.T
 					}
 					return delegated.Get(ctx, key, object, opts...)
 				},
-				Update: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+				Apply: func(ctx context.Context, delegated client.WithWatch, configuration k8sruntime.ApplyConfiguration, opts ...client.ApplyOption) error {
 					// Emulate API-server generation increments without advancing observedGeneration.
-					if desired, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
+					if object, ok := configuration.(client.Object); ok && object.GetObjectKind().GroupVersionKind().Kind == "PodCliqueSet" {
+						desired := &grovev1alpha1.PodCliqueSet{}
+						require.NoError(t, k8sruntime.DefaultUnstructuredConverter.FromUnstructured(configuration.(k8sruntime.Unstructured).UnstructuredContent(), desired))
 						current := &grovev1alpha1.PodCliqueSet{}
 						require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(desired), current))
+						object.SetGeneration(current.Generation)
 						if !apiequality.Semantic.DeepEqual(current.Spec, desired.Spec) {
-							desired.Generation = current.Generation + 1
+							object.SetGeneration(current.Generation + 1)
 						}
 					}
-					return delegated.Update(ctx, object, opts...)
+					return delegated.Apply(ctx, configuration, opts...)
 				},
 				SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
 					if subresource == "scale" {
@@ -4755,16 +4796,14 @@ func TestLPXRolloutBudgetEditsPreservePodCliqueSetAndRequests(t *testing.T) {
 					if _, ok := object.(*lpxv1alpha1.LPUPipelineRequest); ok {
 						requestWrites++
 					}
-					if desired, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
-						// Model Grove's defaulted response without reproducing its validation.
-						for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
-							group := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
-							if group.RollingUpdate == nil {
-								group.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(expectedDefault)}
-							}
-						}
-					}
 					return delegated.Update(ctx, object, opts...)
+				},
+				Apply: func(ctx context.Context, delegated client.WithWatch, configuration k8sruntime.ApplyConfiguration, opts ...client.ApplyOption) error {
+					if object, ok := configuration.(client.Object); ok && object.GetObjectKind().GroupVersionKind().Kind == "LPUPipelineRequest" {
+						requestWrites++
+					}
+					defaultLPXTestPCSApply(t, configuration, expectedDefault)
+					return delegated.Apply(ctx, configuration, opts...)
 				},
 			})
 			pcsUID := pcs.UID

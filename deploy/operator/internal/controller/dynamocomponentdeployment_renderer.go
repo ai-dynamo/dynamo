@@ -31,7 +31,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	leaderworkerset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/shared"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/service"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -606,7 +606,7 @@ func (r *dcdWorkloadRenderer) generateService(
 		graphDeploymentName = metav1.GetControllerOf(dcd).Name
 	}
 
-	svc, err := componentdeployment.RenderService(shared.ServiceParams{
+	svc, err := componentdeployment.RenderService(service.Params{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
 		DGDName:         graphDeploymentName,
@@ -653,7 +653,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	if err != nil {
 		return nil, false, err
 	}
-	service, err := componentdeployment.RenderService(shared.ServiceParams{
+	service, err := componentdeployment.RenderService(service.Params{
 		ServiceName:     serviceName,
 		Namespace:       dgd.Namespace,
 		DGDName:         dgd.Name,

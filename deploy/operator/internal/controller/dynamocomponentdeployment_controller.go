@@ -813,14 +813,9 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 		return false, err
 	}
 
-	if toDelete {
-		modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(context.Context) (*corev1.Service, bool, error) {
-			return desired, true, nil
-		})
-		return modified, err
-	}
-
-	modified, _, err := commonController.SyncService(ctx, r.Client, opt.dynamoComponentDeployment, desired)
+	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(context.Context) (*corev1.Service, bool, error) {
+		return desired, toDelete, nil
+	})
 	return modified, err
 }
 

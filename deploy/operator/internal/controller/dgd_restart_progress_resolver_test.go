@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
@@ -211,12 +212,12 @@ func TestGroveRestartWaitsForRequestedRevisionAfterFailedWrite(t *testing.T) {
 						}
 						return c.Create(ctx, obj, opts...)
 					},
-					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
 						// The program writes the PodCliqueSet as unstructured; emulate
 						// the API server by starting a new generation on a spec change.
-						desired, isProgramWrite := obj.(*unstructured.Unstructured)
-						if !isProgramWrite || desired.GroupVersionKind() != pcsGVK {
-							return c.Update(ctx, obj, opts...)
+						desired := &unstructured.Unstructured{Object: obj.(runtime.Unstructured).UnstructuredContent()}
+						if desired.GroupVersionKind() != pcsGVK {
+							return c.Apply(ctx, obj, opts...)
 						}
 						if failWrite {
 							return injectedConflict
@@ -230,7 +231,7 @@ func TestGroveRestartWaitsForRequestedRevisionAfterFailedWrite(t *testing.T) {
 						if !equality.Semantic.DeepEqual(stored.Object["spec"], desired.Object["spec"]) {
 							desired.SetGeneration(stored.GetGeneration() + 1)
 						}
-						return c.Update(ctx, desired, opts...)
+						return c.Apply(ctx, obj, opts...)
 					},
 				}, nil)).
 				Build()

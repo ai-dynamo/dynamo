@@ -58,9 +58,9 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 				existing.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
 				baseClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(existing).Build()
 				reader := interceptor.NewClient(baseClient, interceptor.Funcs{
-					Update: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+					Apply: func(ctx context.Context, delegated client.WithWatch, object runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
 						// Model only Grove's admission response; this does not validate Grove compatibility.
-						wire := object.(*unstructured.Unstructured)
+						wire := &unstructured.Unstructured{Object: object.(runtime.Unstructured).UnstructuredContent()}
 						field := "cliques"
 						if grouped {
 							field = "podCliqueScalingGroups"
@@ -74,7 +74,7 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 							}
 						}
 						require.NoError(t, unstructured.SetNestedSlice(wire.Object, items, "spec", "template", field))
-						return delegated.Update(ctx, object, opts...)
+						return delegated.Apply(ctx, object, opts...)
 					},
 				})
 				syncer := &groveWorkloadsReconciler{syncer: newDGDResourceSyncer(reader, events.NewFakeRecorder(20))}

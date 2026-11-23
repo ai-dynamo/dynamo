@@ -27,7 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/shared"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/service"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -140,7 +140,7 @@ func groveComponentServiceParams(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
-) shared.ServiceParams {
+) service.Params {
 	componentName := component.ComponentName
 	componentType := string(component.ComponentType)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
@@ -158,7 +158,7 @@ func groveComponentServiceParams(
 			labels[commonconsts.KubeLabelDynamoWorkerHash] = value
 		}
 	}
-	return shared.ServiceParams{
+	return service.Params{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
 		DGDName:         dgd.Name,
@@ -185,7 +185,9 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
-	_, syncedService, err := commoncontroller.SyncService(ctx, r.Client, dgd, service)
+	_, syncedService, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.Service, bool, error) {
+		return service, false, nil
+	})
 	if err != nil {
 		logger.Error(err, "failed to sync the main component service")
 		return nil, fmt.Errorf("failed to sync the main component service: %w", err)
@@ -220,7 +222,9 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		return nil, r.deleteOwnedService(ctx, dgd, grove.ElasticEPLeaderServiceName(params.ServiceName))
 	}
 
-	_, syncedService, err := commoncontroller.SyncService(ctx, r.Client, dgd, service)
+	_, syncedService, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.Service, bool, error) {
+		return service, false, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync the elastic-EP leader service: %w", err)
 	}

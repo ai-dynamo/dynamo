@@ -86,6 +86,9 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: d7a188d4ce9ce65543e903494974dc0b7061c0fcadea69b9659ffa9e634e4abf
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: "SglangDecode"
@@ -131,6 +134,9 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: e7479fcb7ac46314ace404fa805c8d020b918900c8bd6f566df3b391dcc3ea6d
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: "SglangPrefill"

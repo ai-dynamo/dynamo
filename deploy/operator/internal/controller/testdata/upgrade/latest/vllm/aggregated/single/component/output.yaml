@@ -605,6 +605,9 @@ subjects:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: frontend
@@ -649,6 +652,9 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: worker

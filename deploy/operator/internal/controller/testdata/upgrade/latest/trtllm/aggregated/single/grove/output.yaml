@@ -408,6 +408,9 @@ subjects:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: cc3e35348e90bb36c3743a3a6b30a9c3b8b35470cc11105967ba3b040ed9ca6f
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: "frontend"
@@ -452,6 +455,9 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 2293670af59392fff489401a4a294988f4374b042826f050e8271d7c6d631c35
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: "worker"

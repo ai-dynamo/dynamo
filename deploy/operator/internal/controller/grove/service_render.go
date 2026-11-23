@@ -10,7 +10,7 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/shared"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/service"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -51,16 +51,16 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 //
 // It returns nil unless the component is a single-pod elastic-EP Ray leader.
 // component must be non-nil. Inputs are not modified; elasticRayLaunch is the resolved launch mode.
-func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSharedSpec, params shared.ServiceParams, elasticRayLaunch bool) *corev1.Service {
+func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSharedSpec, params service.Params, elasticRayLaunch bool) *corev1.Service {
 	if !elasticRayLaunch || component.GetNumberOfNodes() > 1 || (component.Replicas != nil && *component.Replicas != 1) {
 		return nil
 	}
 
-	service := shared.RenderService(params)
-	service.Name = ElasticEPLeaderServiceName(params.ServiceName)
-	service.Spec.ClusterIP = corev1.ClusterIPNone
-	service.Spec.PublishNotReadyAddresses = true
-	service.Spec.Ports = []corev1.ServicePort{
+	svc := service.Render(params)
+	svc.Name = ElasticEPLeaderServiceName(params.ServiceName)
+	svc.Spec.ClusterIP = corev1.ClusterIPNone
+	svc.Spec.PublishNotReadyAddresses = true
+	svc.Spec.Ports = []corev1.ServicePort{
 		{
 			// Ray GCS head port (VLLMPort). Followers connect their raylet
 			// here via `ray start --address=<svc>:6379`.
@@ -77,5 +77,5 @@ func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSh
 			Protocol:   corev1.ProtocolTCP,
 		},
 	}
-	return service
+	return svc
 }

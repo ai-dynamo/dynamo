@@ -38,8 +38,8 @@ func setupUpgradeComponentController(mgr ctrl.Manager, opts SetupOptions, comple
 	return builder.WithOptions(controller.Options{MaxConcurrentReconciles: 2}).Complete(completed)
 }
 
-// incompatibleUpgradeClient changes only the candidate's in-memory rendering input.
-// Neither the persisted DCD spec nor the restored history is edited.
+// incompatibleUpgradeClient supplies an incompatible candidate rendering input
+// without changing the restored history fixtures.
 type incompatibleUpgradeClient struct{ client.Client }
 
 func (c incompatibleUpgradeClient) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
@@ -48,6 +48,13 @@ func (c incompatibleUpgradeClient) Get(ctx context.Context, key client.ObjectKey
 	}
 	if dcd, ok := object.(*api.DynamoComponentDeployment); ok && dcd.Spec.ComponentType != api.ComponentTypeFrontend {
 		container := &dcd.Spec.PodTemplate.Spec.Containers[0]
+		for i := range container.Env {
+			if container.Env[i].Name == "INCOMPATIBLE_CANDIDATE" {
+				container.Env[i].Value = "true"
+				container.Env[i].ValueFrom = nil
+				return nil
+			}
+		}
 		container.Env = append(container.Env, corev1.EnvVar{Name: "INCOMPATIBLE_CANDIDATE", Value: "true"})
 	}
 	return nil

@@ -42,8 +42,9 @@ func TestServiceIdentityBackfillPreservesServiceContract(t *testing.T) {
 	t.Log("Simulate an existing pre-upgrade Service with external metadata and no identity labels")
 	service.Labels = map[string]string{"example.com/team": "external"}
 	service.Annotations = map[string]string{
-		"example.com/note":                       "external",
-		commoncontroller.NvidiaAnnotationHashKey: "existing-service-bookkeeping",
+		"example.com/note":                             "external",
+		commoncontroller.NvidiaAnnotationHashKey:       original.Annotations[commoncontroller.NvidiaAnnotationHashKey],
+		commoncontroller.NvidiaAnnotationGenerationKey: original.Annotations[commoncontroller.NvidiaAnnotationGenerationKey],
 	}
 	require.NoError(t, kubeClient.Update(ctx, service, client.FieldOwner("external-service-manager")))
 	_, err = r.reconcileComponentService(ctx, dgd, component, nil, true)
@@ -52,7 +53,8 @@ func TestServiceIdentityBackfillPreservesServiceContract(t *testing.T) {
 	require.Equal(t, original.UID, service.UID)
 	require.Equal(t, original.Spec, service.Spec)
 	require.Equal(t, original.OwnerReferences, service.OwnerReferences)
-	require.Equal(t, "existing-service-bookkeeping", service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
+	require.Equal(t, original.Annotations[commoncontroller.NvidiaAnnotationHashKey], service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
+	require.Equal(t, original.Annotations[commoncontroller.NvidiaAnnotationGenerationKey], service.Annotations[commoncontroller.NvidiaAnnotationGenerationKey])
 	require.Equal(t, "external", service.Labels["example.com/team"])
 	require.Equal(t, "external", service.Annotations["example.com/note"])
 	require.Equal(t, dgd.Name, service.Labels[consts.KubeLabelDynamoGraphDeploymentName])

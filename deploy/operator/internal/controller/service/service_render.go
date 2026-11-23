@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package shared renders resources common to component workload lowerings.
-package shared
+// Package service renders base Services for component workload lowerings.
+package service
 
 import (
 	"maps"
@@ -12,8 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// ServiceParams supplies resolved component identity and authored Service metadata.
-type ServiceParams struct {
+// Params supplies resolved component identity and authored Service metadata.
+type Params struct {
 	ServiceName     string
 	Namespace       string
 	DGDName         string // empty for standalone components
@@ -25,9 +25,9 @@ type ServiceParams struct {
 	IsK8sDiscovery  bool
 }
 
-// RenderService returns a base Service for a lowering to extend with ports and other spec fields.
+// Render returns a base Service for a lowering to extend with ports and other spec fields.
 // The returned metadata and selector maps do not alias the inputs.
-func RenderService(params ServiceParams) *corev1.Service {
+func Render(params Params) *corev1.Service {
 	// Unresolved optional identity must preserve authored metadata rather than erase it.
 	labels := make(map[string]string, len(params.Labels)+4)
 	maps.Copy(labels, params.Labels)

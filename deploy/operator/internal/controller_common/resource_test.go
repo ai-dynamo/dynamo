@@ -23,7 +23,6 @@ import (
 	"reflect"
 	"testing"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -704,89 +703,6 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCopySpec(t *testing.T) {
-	src := appsv1.Deployment{
-		Name:      "nim-deployment",
-		Namespace: "default",
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &[]int32{2}[0],
-		},
-	}
-
-	dst := appsv1.Deployment{
-		Name:      "nim-deployment",
-		Namespace: "default",
-		OwnerReferences: []metav1.OwnerReference{
-			{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       "nim-deployment",
-				UID:        "1234567890",
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &[]int32{1}[0],
-		},
-	}
-
-	err := CopySpec(&src, &dst)
-	if err != nil {
-		t.Errorf("failed to copy spec in test for resource %s: %s", src.GetName(), err)
-	}
-
-	expected := appsv1.Deployment{
-		Name:      "nim-deployment",
-		Namespace: "default",
-		OwnerReferences: []metav1.OwnerReference{
-			{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       "nim-deployment",
-				UID:        "1234567890",
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &[]int32{2}[0],
-		},
-	}
-
-	g := gomega.NewGomegaWithT(t)
-	g.Expect(dst).To(gomega.Equal(expected))
-}
-
-func TestCopySpecPreservesUnstructuredFields(t *testing.T) {
-	t.Log("Build live and desired unstructured specs with an opaque future field")
-	src := &unstructured.Unstructured{Object: map[string]any{
-		"spec": map[string]any{
-			"known":  "value",
-			"future": map[string]any{"enabled": true},
-		},
-	}}
-	dst := &unstructured.Unstructured{Object: map[string]any{
-		"metadata": map[string]any{"name": "resource"},
-		"spec":     map[string]any{"known": "old"},
-	}}
-
-	t.Log("Copy the desired spec without decoding it through registered Go types")
-	if err := CopySpec(src, dst); err != nil {
-		t.Fatalf("CopySpec() error = %v", err)
-	}
-
-	t.Log("Verify the opaque field and its value were preserved")
-	want := map[string]any{
-		"known":  "value",
-		"future": map[string]any{"enabled": true},
-	}
-	got, found, err := unstructured.NestedMap(dst.Object, "spec")
-	if err != nil {
-		t.Fatalf("read copied spec: %v", err)
-	}
-	if !found {
-		t.Fatal("copied spec was not found")
-	}
-	gomega.NewWithT(t).Expect(got).To(gomega.Equal(want))
 }
 
 func TestAppendUniqueImagePullSecrets(t *testing.T) {

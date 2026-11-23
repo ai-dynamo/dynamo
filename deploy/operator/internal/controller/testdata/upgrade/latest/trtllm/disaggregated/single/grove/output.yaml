@@ -559,6 +559,9 @@ subjects:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: e3277d6dd969600be82371247fa57ddede7a5532ec81b186b42c42cc069c462f
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: "decode"
@@ -604,6 +607,9 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: c81ce99d593be32a35dd9cfb5b3423c52679675a98d7a3f718f1ce96edf68282
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: "frontend"
@@ -648,6 +654,9 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 9ea4b845de9806b8c65faebbddf77140ad72981937cb08f998dcbe4f72c2e80a
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: "prefill"

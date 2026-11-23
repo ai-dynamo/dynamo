@@ -5,14 +5,14 @@ package component
 
 import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/shared"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/service"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // RenderService renders a component Service from resolved metadata and discovery settings.
 // The input maps are not modified.
-func RenderService(params shared.ServiceParams) (*corev1.Service, error) {
+func RenderService(params service.Params) (*corev1.Service, error) {
 	if !ServiceEnabled(params.ComponentType, params.IsK8sDiscovery) {
 		return nil, nil
 	}
@@ -43,9 +43,9 @@ func RenderService(params shared.ServiceParams) (*corev1.Service, error) {
 		}
 	}
 
-	service := shared.RenderService(params)
-	service.Spec.Ports = []corev1.ServicePort{servicePort}
-	return service, nil
+	svc := service.Render(params)
+	svc.Spec.Ports = []corev1.ServicePort{servicePort}
+	return svc, nil
 }
 
 // ServiceEnabled reports whether this component exposes an ordinary discovery Service.

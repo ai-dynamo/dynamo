@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package shared_test
+package service_test
 
 import (
 	"maps"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/shared"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/service"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -27,16 +27,16 @@ func TestRenderServicePreservesUnresolvedComponentType(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Render the base Service from an optional resolved component type")
-			service := shared.RenderService(shared.ServiceParams{
+			rendered := service.Render(service.Params{
 				ServiceName: "graph-component", Namespace: "default", DGDName: "graph",
 				ComponentName: "component", ComponentType: tc.resolvedType, DynamoNamespace: "default-graph", Labels: tc.authored,
 			})
 
 			t.Log("Preserve authored type metadata while retaining the exact Pod selector contract")
-			value, present := service.Labels[consts.KubeLabelDynamoComponentType]
+			value, present := rendered.Labels[consts.KubeLabelDynamoComponentType]
 			require.Equal(t, tc.wantPresent, present)
 			require.Equal(t, tc.want, value)
-			selectorType, present := service.Spec.Selector[consts.KubeLabelDynamoComponentType]
+			selectorType, present := rendered.Spec.Selector[consts.KubeLabelDynamoComponentType]
 			require.True(t, present, "an empty selector requirement must not become an absent requirement")
 			require.Equal(t, tc.resolvedType, selectorType)
 		})
@@ -57,26 +57,26 @@ func TestRenderServiceGraphIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Render the resolved graph identity, including standalone components")
-			service := shared.RenderService(shared.ServiceParams{
+			rendered := service.Render(service.Params{
 				ServiceName: "Qwen3-0.6B", Namespace: "default", DGDName: tc.dgdName,
 				ComponentName: "frontend", ComponentType: "frontend", DynamoNamespace: "default-graph", Labels: tc.authored,
 			})
 
 			t.Log("Keep canonical identity and selector metadata while leaving ports to the lowering")
-			value, present := service.Labels[consts.KubeLabelDynamoGraphDeploymentName]
+			value, present := rendered.Labels[consts.KubeLabelDynamoGraphDeploymentName]
 			require.Equal(t, tc.wantPresent, present)
 			require.Equal(t, tc.want, value)
-			require.Equal(t, "qwen3-0-6b", service.Name)
-			require.Equal(t, "default", service.Namespace)
-			require.Equal(t, "frontend", service.Labels[consts.KubeLabelDynamoComponent])
-			require.Equal(t, "frontend", service.Labels[consts.KubeLabelDynamoComponentType])
-			require.Equal(t, "default-graph", service.Labels[consts.KubeLabelDynamoNamespace])
+			require.Equal(t, "qwen3-0-6b", rendered.Name)
+			require.Equal(t, "default", rendered.Namespace)
+			require.Equal(t, "frontend", rendered.Labels[consts.KubeLabelDynamoComponent])
+			require.Equal(t, "frontend", rendered.Labels[consts.KubeLabelDynamoComponentType])
+			require.Equal(t, "default-graph", rendered.Labels[consts.KubeLabelDynamoNamespace])
 			require.Equal(t, map[string]string{
 				consts.KubeLabelDynamoComponent:     "frontend",
 				consts.KubeLabelDynamoComponentType: "frontend",
 				consts.KubeLabelDynamoNamespace:     "default-graph",
-			}, service.Spec.Selector)
-			require.Empty(t, service.Spec.Ports)
+			}, rendered.Spec.Selector)
+			require.Empty(t, rendered.Spec.Ports)
 		})
 	}
 }
@@ -85,11 +85,11 @@ func TestRenderServiceDiscovery(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
 			t.Log("Render the explicit Kubernetes discovery setting")
-			service := shared.RenderService(shared.ServiceParams{IsK8sDiscovery: enabled})
+			rendered := service.Render(service.Params{IsK8sDiscovery: enabled})
 
 			t.Log("Expose Kubernetes discovery labels only when requested")
-			backend, backendPresent := service.Labels[consts.KubeLabelDynamoDiscoveryBackend]
-			discoveryEnabled, enabledPresent := service.Labels[consts.KubeLabelDynamoDiscoveryEnabled]
+			backend, backendPresent := rendered.Labels[consts.KubeLabelDynamoDiscoveryBackend]
+			discoveryEnabled, enabledPresent := rendered.Labels[consts.KubeLabelDynamoDiscoveryEnabled]
 			require.Equal(t, enabled, backendPresent)
 			require.Equal(t, enabled, enabledPresent)
 			if enabled {
@@ -102,7 +102,7 @@ func TestRenderServiceDiscovery(t *testing.T) {
 
 func TestRenderServiceDoesNotAliasInputs(t *testing.T) {
 	t.Log("Render twice from authored metadata that contains stale component identity")
-	params := shared.ServiceParams{
+	params := service.Params{
 		ServiceName: "graph-frontend", Namespace: "default", DGDName: "graph",
 		ComponentName: "frontend", ComponentType: "frontend", DynamoNamespace: "default-graph",
 		Labels: map[string]string{
@@ -111,18 +111,18 @@ func TestRenderServiceDoesNotAliasInputs(t *testing.T) {
 		Annotations: map[string]string{"user-annotation": "original"},
 	}
 	previousLabels, previousAnnotations := maps.Clone(params.Labels), maps.Clone(params.Annotations)
-	service := shared.RenderService(params)
-	other := shared.RenderService(params)
+	rendered := service.Render(params)
+	other := service.Render(params)
 	require.Equal(t, previousLabels, params.Labels)
 	require.Equal(t, previousAnnotations, params.Annotations)
 
 	t.Log("Extend one lowering's rendered metadata and spec without changing inputs or another rendering")
-	service.Labels["user-label"] = "changed"
-	service.Labels["lowering-label"] = "owned"
-	service.Annotations["user-annotation"] = "changed"
-	service.Spec.Selector[consts.KubeLabelDynamoComponent] = "leader"
-	service.Spec.ClusterIP = corev1.ClusterIPNone
-	service.Spec.Ports = []corev1.ServicePort{{Name: "http", Port: 8000}}
+	rendered.Labels["user-label"] = "changed"
+	rendered.Labels["lowering-label"] = "owned"
+	rendered.Annotations["user-annotation"] = "changed"
+	rendered.Spec.Selector[consts.KubeLabelDynamoComponent] = "leader"
+	rendered.Spec.ClusterIP = corev1.ClusterIPNone
+	rendered.Spec.Ports = []corev1.ServicePort{{Name: "http", Port: 8000}}
 	require.Equal(t, previousLabels, params.Labels)
 	require.Equal(t, previousAnnotations, params.Annotations)
 	require.Equal(t, "original", other.Labels["user-label"])
@@ -133,7 +133,7 @@ func TestRenderServiceDoesNotAliasInputs(t *testing.T) {
 	require.Empty(t, other.Spec.Ports)
 
 	t.Log("Extending a rendering with absent authored metadata also has writable maps")
-	standalone := shared.RenderService(shared.ServiceParams{})
+	standalone := service.Render(service.Params{})
 	standalone.Labels["lowering-label"] = "owned"
 	standalone.Annotations["lowering-annotation"] = "owned"
 	require.Equal(t, "owned", standalone.Labels["lowering-label"])
