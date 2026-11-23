@@ -145,7 +145,7 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
       -H "Content-Type: application/json" \
       -d '{"model": "Qwen/Qwen3-0.6B",
            "messages": [{"role": "user", "content": "Hello!"}],
-           "max_tokens": 50}'
+           "max_tokens": 256}'
     ```
 
     ```json title="Response"
@@ -162,7 +162,11 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
     ```
     </CodeBlocks>
 
-    A successful result has no `error`, has the requested `model`, and contains a non-empty assistant response in `choices`. This verifies basic generation. Verify [KV-aware routing](../kv-aware-routing/overview.mdx#verify-cache-reuse) and [disaggregated serving](../disaggregated-serving/overview.mdx#verify-prefill-and-decode) separately before claiming those features work.
+    A successful result has no `error`, has the requested `model`, and contains a non-empty assistant response in `choices`. This verifies basic generation.
+
+    If `finish_reason` is `length`, the token budget was exhausted; reasoning models can use that budget before producing a final answer. Increase the budget and verify the completed answer before judging output correctness.
+
+    Verify [KV-aware routing](../kv-aware-routing/overview.mdx#verify-cache-reuse) and [disaggregated serving](../disaggregated-serving/overview.mdx#verify-prefill-and-decode) separately before claiming those features work.
 
     <Info>
     Connection refused? The frontend takes a few seconds to start — retry. For production liveness and readiness probes, see [Health Check Reference](../../reference/observability/health-checks.mdx).
