@@ -129,6 +129,9 @@ cargo bench -p dynamo-bench --no-default-features --features selection-replay \
   `harness_wait_share` flags a run, raise those counts.
 - `--perf-ctl-fifo` and `--perf-ack-fifo` bracket the measured window for
   `perf record --control fifo:CTL,ACK`; divide by `admitted` for per-admission costs.
+  For events or cache blocks per admission, divide the counters under `window`,
+  which cover that same interval. `cache`, `index_events_applied` and
+  `prompt_hit_rate` cover the whole run, including the warmup that fills the caches.
 
 ## A/B protocol
 
