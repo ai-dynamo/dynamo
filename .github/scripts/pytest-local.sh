@@ -177,6 +177,11 @@ fi
 
 pytest_args+=(-m "${PYTEST_MARKS}")
 
+# TODO: remove this selector after the requested sidecar UCX comparison.
+if [[ -n "${PYTEST_NODE_ID:-}" ]]; then
+  pytest_args+=("${PYTEST_NODE_ID}")
+fi
+
 echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): python -m pytest ${pytest_args[*]}"
 umask 0022
 cd "${CONTAINER_WORKSPACE}"
