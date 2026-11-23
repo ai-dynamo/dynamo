@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -326,7 +328,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		func(obj client.Object) []string {
 			model := obj.(*v1alpha1.DynamoModel)
 			// Hash the base model name using the same function used for EndpointSlice labels
-			hash := dynamo.HashModelName(model.Spec.BaseModelName)
+			hash := modelservice.HashModelName(model.Spec.BaseModelName)
 			return []string{hash}
 		},
 	); err != nil {
@@ -429,7 +431,7 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 	logs := log.FromContext(ctx)
 
 	// Hash the base model name for label-based discovery
-	modelHash := dynamo.HashModelName(model.Spec.BaseModelName)
+	modelHash := modelservice.HashModelName(model.Spec.BaseModelName)
 
 	// Query EndpointSlices directly by base model hash label
 	// This label propagates from the Service to its EndpointSlices

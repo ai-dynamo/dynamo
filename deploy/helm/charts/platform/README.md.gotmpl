@@ -106,6 +106,24 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### Unreleased
 
+#### Operator behavior changes
+
+##### DGD-scoped model-discovery Services
+
+**Change:** DGDs whose immutable operator origin is 1.8.0 or later own one model-discovery
+Service per referenced model. All workload providers use `<dgd-name>-model-<model-hash>`,
+with a deterministic graph-hash fallback when the readable name is not a valid Service name.
+Selectors include both graph and model identity; frontend and component Services keep their names.
+
+**Affected:** Newly created DGDs with `spec.components[*].modelRef`. A child DCD created by a
+newer operator still follows its parent graph's origin. Standalone DCDs retain legacy behavior.
+
+**Action:** No migration is required for older graphs. Existing names, selectors and ownership
+are preserved, including when the origin annotation is absent or invalid. Model management
+continues discovering EndpointSlices by model-hash label across the Kubernetes namespace.
+Use the generated graph-scoped names when referring directly to model-discovery Services of
+new graphs; these Services expose worker system APIs on port 9090 rather than frontend HTTP.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract

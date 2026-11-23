@@ -19,16 +19,15 @@ package dynamo
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"maps"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -73,11 +72,7 @@ func ReconcileModelServicesForComponents(
 		}
 
 		// Generate headless service with deterministic name based on model name
-		headlessService := generateHeadlessServiceForModel(
-			namespace,
-			baseModelName,
-			annotations,
-		)
+		headlessService := modelservice.Render(modelservice.Params{Namespace: namespace, ModelName: baseModelName, Annotations: annotations})
 
 		// Sync the service (create or update)
 		_, syncedService, err := commonController.SyncResource(
@@ -125,103 +120,13 @@ func ReconcileModelServicesForComponents(
 	return nil
 }
 
-// GenerateModelServiceForGraph returns a model Service private to one graph.
-// Graph-scoped callers must use this identity because the Service is owned by
-// the graph deployment. The legacy model-only helper remains for DCD/Grove.
-func GenerateModelServiceForGraph(namespace, baseModelName, graphName string, annotations map[string]string) *corev1.Service {
-	return generateHeadlessServiceForGraph(namespace, baseModelName, graphName, annotations)
-}
-
-// GenerateHeadlessServiceForModel creates a headless service for model endpoint discovery
-// Service name is generated deterministically from the base model name using a hash
-// The base model name hash is stored as a label for efficient discovery
-// The original base model name is stored in an annotation for human readability
-func generateHeadlessServiceForModel(
-	namespace string,
-	baseModelName string,
-	annotations map[string]string,
-) *corev1.Service {
-	// Generate deterministic service name from model name
-	serviceName := GenerateServiceName(baseModelName)
-
-	// Hash the base model name for use in labels (no length or character restrictions)
-	modelHash := HashModelName(baseModelName)
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	serviceAnnotations := make(map[string]string)
-	if annotations != nil {
-		serviceAnnotations = maps.Clone(annotations)
-	}
-	// Original name for humans
-	serviceAnnotations[commonconsts.KubeAnnotationDynamoBaseModel] = baseModelName
-
-	service := &corev1.Service{
-		Name:      serviceName,
-		Namespace: namespace,
-		Labels: map[string]string{
-			commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
-			"nvidia.com/managed-by":                   "dynamo-operator",
-		},
-		Annotations: serviceAnnotations,
-		Spec: corev1.ServiceSpec{
-			// Headless service - no ClusterIP, no load balancing
-			ClusterIP: corev1.ClusterIPNone,
-
-			// Selector to match pods with the base model hash label
-			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
-			},
-
-			// Don't publish not-ready addresses - only ready pods in EndpointSlices
-			PublishNotReadyAddresses: false,
-
-			// System port for model HTTP APIs
-			Ports: []corev1.ServicePort{
-				{
-					Name:       commonconsts.DynamoSystemPortName,
-					Port:       commonconsts.DynamoSystemPort,
-					TargetPort: intstr.FromInt32(commonconsts.DynamoSystemPort),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-		},
-	}
-
-	return service
-}
-
-func generateHeadlessServiceForGraph(namespace, baseModelName, graphName string, annotations map[string]string) *corev1.Service {
-	service := generateHeadlessServiceForModel(namespace, baseModelName, annotations)
-	modelHash := HashModelName(baseModelName)
-	graphHash := HashModelName(graphName)
-	service.Name = fmt.Sprintf("dynamo-model-%s-%s", modelHash, graphHash)
-	service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
-	service.Spec.Selector[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
-	return service
-}
-
-// HashModelName creates a deterministic hash from a base model name for use in labels
-// Returns an 8-character hex string (always valid as a Kubernetes label value)
-func HashModelName(baseModelName string) string {
-	hash := sha256.Sum256([]byte(baseModelName))
-	// Use 8 characters for brevity and consistency
-	return hex.EncodeToString(hash[:])[:8]
-}
-
-// GenerateServiceName creates a deterministic, DNS-safe service name from a base model name
-// Format: dynamo-model-{8-char-hash}
-func GenerateServiceName(baseModelName string) string {
-	return fmt.Sprintf("dynamo-model-%s", HashModelName(baseModelName))
-}
-
 // AddBaseModelLabel adds the base model hash label to a label map if modelRef is present
 // Uses a hash of the model name to avoid label length/character restrictions
 func AddBaseModelLabel(labels map[string]string, modelRef *v1beta1.ModelReference) {
 	if labels == nil || modelRef == nil || modelRef.Name == "" {
 		return
 	}
-	labels[commonconsts.KubeLabelDynamoBaseModelHash] = HashModelName(modelRef.Name)
+	labels[commonconsts.KubeLabelDynamoBaseModelHash] = modelservice.HashModelName(modelRef.Name)
 }
 
 // AddBaseModelAnnotation adds the base model annotation to preserve the original model name

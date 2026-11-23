@@ -22,13 +22,16 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type componentProgram struct {
+	modelServices   modelservice.Reconciler
 	sharedResources *dgdSharedResourcesReconciler
 	rollout         *dgdWorkerRolloutReconciler
 	restart         *dgdRestartReconciler
@@ -42,6 +45,7 @@ type componentProgram struct {
 func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	return &componentProgram{
+		modelServices: modelservice.Reconciler{Client: r.Client},
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
 			r.Recorder,
@@ -117,6 +121,15 @@ func (p *componentProgram) Reconcile(
 		return programResult, err
 	}
 	hasMultinode := req.DGD.HasAnyMultinodeComponent()
+
+	// New graphs own model discovery independently of their child workload revisions.
+	var modelServiceNames map[string]struct{}
+	if compatibility.DGDScopedModelServices.Enabled(req.DGD.Annotations) {
+		modelServiceNames, err = p.modelServices.Reconcile(ctx, req.DGD)
+		if err != nil {
+			return programResult, err
+		}
+	}
 	if hasMultinode && !p.lwsEnabled {
 		err := fmt.Errorf("no multinode orchestrator available")
 		log.FromContext(ctx).Error(
@@ -155,6 +168,12 @@ func (p *componentProgram) Reconcile(
 		if err := p.scalingAdapters.Reconcile(ctx, req.DGD); err != nil {
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
+		}
+	}
+	// Retire discovery for old models only after the serving workload transition completes.
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful && compatibility.DGDScopedModelServices.Enabled(req.DGD.Annotations) {
+		if err := p.modelServices.DeleteStale(ctx, req.DGD, modelServiceNames); err != nil {
+			return programResult, err
 		}
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)

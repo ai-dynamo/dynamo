@@ -11,6 +11,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -319,7 +321,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		modelServices := map[string]corev1.Service{}
 		for i := range services.Items {
 			service := services.Items[i]
-			if service.Labels[consts.KubeLabelDynamoBaseModelHash] == dynamo.HashModelName("llama-3") &&
+			if service.Labels[consts.KubeLabelDynamoBaseModelHash] == modelservice.HashModelName("llama-3") &&
 				service.Labels[consts.KubeLabelDynamoGraphDeploymentName] != "" {
 				modelServices[service.Labels[consts.KubeLabelDynamoGraphDeploymentName]] = service
 			}

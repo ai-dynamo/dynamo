@@ -44,6 +44,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -228,13 +229,15 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
 		}
 
-		componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
-		componentMap := map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-			componentName: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
-		}
-		if err := dynamo.ReconcileModelServicesForComponents(ctx, r, dynamoComponentDeployment, componentMap, dynamoComponentDeployment.Namespace); err != nil {
-			logs.Error(err, "Failed to reconcile model service")
-			return ctrl.Result{}, err
+		if !dcdHasGraphOwnedModelServices(dynamoComponentDeployment) {
+			componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
+			componentMap := map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				componentName: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+			}
+			if err := dynamo.ReconcileModelServicesForComponents(ctx, r, dynamoComponentDeployment, componentMap, dynamoComponentDeployment.Namespace); err != nil {
+				logs.Error(err, "Failed to reconcile model service")
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -267,6 +270,20 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	return
+}
+
+// Graph children inherit the authoritative parent origin in their Pod templates.
+// Their own metadata origin records the child creation and can be newer than the graph.
+func dcdHasGraphOwnedModelServices(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {
+	if dcd.GetParentGraphDeploymentName() == "" {
+		return false
+	}
+	for _, template := range dynamo.ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		if compatibility.DGDScopedModelServices.Enabled(template.Annotations) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *DynamoComponentDeploymentReconciler) isDisaggregatedSetBacked(

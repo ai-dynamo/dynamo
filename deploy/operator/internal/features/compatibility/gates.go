@@ -26,6 +26,12 @@ import (
 // first reconciled / created the DGD resource).
 
 var (
+	// DGDScopedModelServices gives new graphs exclusive model-discovery Services.
+	DGDScopedModelServices = Gate{
+		Name:             "DGDScopedModelServices",
+		MinOriginVersion: *semver.MustParse("1.8.0"),
+	}
+
 	// FrontendStartupProbe requires runtime support and pins defaults to new workloads.
 	// The published 1.6 operator did not render this default, even for 1.6 runtimes.
 	FrontendStartupProbe = RuntimeGate{

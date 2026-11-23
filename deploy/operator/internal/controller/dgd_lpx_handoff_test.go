@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -858,12 +860,12 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 
 	t.Log("Model discovery remains DGD-owned while the LPX child is downloading")
 	service := &corev1.Service{}
-	serviceKey := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.GenerateServiceName("test/model")}
+	serviceKey := client.ObjectKey{Namespace: source.Namespace, Name: modelservice.Name("test/model", "", false)}
 	require.NoError(t, kube.Get(t.Context(), serviceKey, service))
 	require.Equal(t, corev1.ClusterIPNone, service.Spec.ClusterIP)
 	require.False(t, service.Spec.PublishNotReadyAddresses)
-	require.Equal(t, map[string]string{consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("test/model")}, service.Spec.Selector)
-	require.Equal(t, dynamo.HashModelName("test/model"), service.Labels[consts.KubeLabelDynamoBaseModelHash])
+	require.Equal(t, map[string]string{consts.KubeLabelDynamoBaseModelHash: modelservice.HashModelName("test/model")}, service.Spec.Selector)
+	require.Equal(t, modelservice.HashModelName("test/model"), service.Labels[consts.KubeLabelDynamoBaseModelHash])
 	require.Equal(t, "enabled", service.Annotations["example.com/model-discovery"])
 	require.True(t, metav1.IsControlledBy(service, source))
 

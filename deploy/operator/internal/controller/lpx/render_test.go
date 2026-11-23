@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -459,7 +461,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 				require.Subset(t, clique.Spec.PodSpec.Containers[0].Env, dgd.Spec.Env)
 				if clique.Labels[dynamo.LPXServingLabel] == consts.KubeLabelValueTrue {
 					require.NotEqual(t, lpxv1alpha1.PodRoleAgent, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
-					require.Equal(t, dynamo.HashModelName("test/model"), clique.Labels[consts.KubeLabelDynamoBaseModelHash])
+					require.Equal(t, modelservice.HashModelName("test/model"), clique.Labels[consts.KubeLabelDynamoBaseModelHash])
 					service := getResource[*corev1.Service](t, resources, plans[clique.Labels[consts.KubeLabelDynamoComponent]].ResourcePrefix+"-serve")
 					require.NotEqual(t, clique.Labels[consts.KubeLabelDynamoWorkerHash], nextPCS.Spec.Template.Cliques[index].Labels[consts.KubeLabelDynamoWorkerHash])
 					for _, revision := range []*grovev1alpha1.PodCliqueTemplateSpec{clique, nextPCS.Spec.Template.Cliques[index]} {
