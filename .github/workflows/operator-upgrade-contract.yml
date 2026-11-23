@@ -50,7 +50,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.operator == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -81,6 +81,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: operator-upgrade-${{ github.sha }}
+          overwrite: true
           path: |
             ${{ runner.temp }}/operator-upgrade.log
             deploy/operator/internal/controller/testdata/upgrade/**/*.new

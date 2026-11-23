@@ -5,17 +5,23 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 from uuid import uuid4
 
 from pydantic import TypeAdapter
 from sglang.srt.managers.io_struct import GenerateReqInput
 
+from dynamo.common.http.url_validator import (
+    UrlValidationPolicy,
+    check_remote_url_allowed,
+)
+
 SGLANG_GENERATE_CAPABILITY = "sglang_generate"
 DISAGG_PREFILL_CANCEL_ANYTIME_V1 = "disagg_prefill_cancel_anytime_v1"
 _PAYLOAD_KEY = "sglang_tito"
 _GENERATE_REQUEST_ADAPTER = TypeAdapter(GenerateReqInput)
+_MEDIA_FIELDS = ("image_data", "audio_data", "video_data")
 
 
 def new_sglang_request_id() -> str:
@@ -32,6 +38,23 @@ def native_generate_payload(
         return None
     payload = extra_args.get(_PAYLOAD_KEY)
     return payload if isinstance(payload, dict) else None
+
+
+def _media_urls(value: Any) -> Iterator[str]:
+    """Yield the URLs in one SGLang media field.
+
+    A field holds one item, a list, or a list per prompt. An item is a URL
+    string or a dict that may carry a ``url``.
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        url = value.get("url")
+        if isinstance(url, str):
+            yield url
+    elif isinstance(value, list):
+        for item in value:
+            yield from _media_urls(item)
 
 
 def build_native_generate_request(
@@ -55,8 +78,9 @@ def build_native_generate_request(
 
     The Rust frontend preserves the public request opaquely under
     ``extra_args.sglang_tito``. Dynamo replaces only canonical input,
-    routing state, and fields supplied by the selected worker. SGLang owns
-    all remaining validation.
+    routing state, and fields supplied by the selected worker. Media URLs are
+    checked against ``DYN_MM_ALLOW_REMOTE_URLS``; SGLang owns all remaining
+    validation.
 
     ``request_id`` is router-owned and always replaces a caller-supplied
     ``rid`` so cancellation cannot target another request.
@@ -65,6 +89,12 @@ def build_native_generate_request(
     request ID.
     """
     payload = dict(native_payload)
+    # SGLang downloads these URLs itself, so enforce
+    # DYN_MM_ALLOW_REMOTE_URLS before the request reaches it.
+    policy = UrlValidationPolicy.from_env()
+    for name in _MEDIA_FIELDS:
+        for url in _media_urls(payload.get(name)):
+            check_remote_url_allowed(url, policy)
     # Peer selection is router-owned, never part of the caller's opaque body.
     payload.pop("kv_hints", None)
     if (

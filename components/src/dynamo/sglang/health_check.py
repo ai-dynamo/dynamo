@@ -86,6 +86,11 @@ class SglangHealthCheckPayload(HealthCheckPayload):
 
         super().__init__()
 
+    def to_dict(self) -> dict[str, Any]:
+        payload = dict(super().to_dict())
+        payload[HEALTH_CHECK_KEY] = True
+        return payload
+
 
 class SglangEmbeddingHealthCheckPayload(HealthCheckPayload):
     """Send an embedding request through the worker's normal encode path."""

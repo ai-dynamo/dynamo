@@ -47,6 +47,7 @@ fn drive_moved_jail(
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             })
         })
 }
@@ -60,7 +61,9 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     )];
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
         responses_tools: None,
+        chat_template_tools: None,
         inner: CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages,
@@ -528,6 +531,7 @@ fn make_text_chunk(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -674,6 +678,7 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         })
     })
     .collect()

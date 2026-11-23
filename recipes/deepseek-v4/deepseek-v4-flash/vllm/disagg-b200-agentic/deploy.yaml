@@ -13,7 +13,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           workingDir: /workspace
           command:
           - /bin/bash
@@ -55,7 +55,7 @@ spec:
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           workingDir: /workspace
           securityContext:
             runAsUser: 0
@@ -124,7 +124,7 @@ spec:
               --no-async-scheduling \
               --enable-prefix-caching \
               --attention-config '{
-                  "use_fp4_indexer_cache": true
+                  "indexer_kv_dtype": "mxfp4"
                 }' \
               --moe-backend flashinfer_trtllm \
               --tokenizer-mode deepseek_v4 \
@@ -176,7 +176,7 @@ spec:
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           workingDir: /workspace
           securityContext:
             runAsUser: 0
@@ -243,7 +243,7 @@ spec:
               --tensor-parallel-size 4 \
               --no-scheduler-reserve-full-isl \
               --attention-config '{
-                  "use_fp4_indexer_cache": true
+                  "indexer_kv_dtype": "mxfp4"
                 }' \
               --moe-backend flashinfer_trtllm \
               --tokenizer-mode deepseek_v4 \

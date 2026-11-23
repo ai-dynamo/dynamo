@@ -121,7 +121,7 @@ class StandaloneRouterHandler:
             raise RuntimeError("Router not initialized")
 
         (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
-            token_ids,
+            token_ids_to_list(token_ids),
             router_config_override,
             cache_namespace=cache_namespace,
         )

@@ -12,7 +12,10 @@ from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 from dynamo.common.forward_pass_metrics import decode as decode_fpm
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
-from dynamo.planner.core.state_machine import PlannerScalingState
+from dynamo.planner.core.state_machine import (
+    PlannerScalingState,
+    normalize_speculative_accept_length,
+)
 from dynamo.planner.core.types import (
     FpmObservations,
     ScalingDecision,
@@ -120,8 +123,11 @@ class BuiltinLoadPredict:
         self._last_accept_length: float = 1.0
 
     def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Replace worker capabilities and bound the stored accept length."""
         self._capabilities = capabilities
-        self._last_accept_length = self._clamp_accept_length(self._last_accept_length)
+        self._last_accept_length = normalize_speculative_accept_length(
+            self._last_accept_length, self._capabilities, self._config
+        )
 
     def warm_from_observations(self, observations: list[TrafficObservation]) -> None:
         if self._config.optimization_target != "sla":
@@ -183,11 +189,14 @@ class BuiltinLoadPredict:
         self._seen_live_traffic = prepared._seen_live_traffic
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
+        """Update traffic history and retain valid cache and acceptance metrics."""
         self._observe_load(traffic)
         if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
             self._last_kv_hit_rate = traffic.kv_hit_rate
         if traffic.accept_length is not None and math.isfinite(traffic.accept_length):
-            self._last_accept_length = self._clamp_accept_length(traffic.accept_length)
+            self._last_accept_length = normalize_speculative_accept_length(
+                traffic.accept_length, self._capabilities, self._config
+            )
 
     def _predict_load(self) -> tuple[float | None, float | None, float | None]:
         try:
@@ -211,21 +220,8 @@ class BuiltinLoadPredict:
             log.error("Failed to predict load: %s", exc)
             return None, None, None
 
-    def _effective_speculative_nextn(self) -> int:
-        d_caps = self._capabilities.decode
-        if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
-            return d_caps.speculative_nextn
-        return max(0, int(self._config.speculative_nextn))
-
-    def _clamp_accept_length(self, accept_length: float | None) -> float:
-        nextn = self._effective_speculative_nextn()
-        if nextn <= 0:
-            return 1.0
-        if accept_length is None or not math.isfinite(accept_length):
-            return 1.0
-        return min(max(float(accept_length), 1.0), float(nextn + 1))
-
     async def Predict(self, req: PredictStageRequest) -> PredictStageResponse:
+        """Forecast traffic and return acceptance bounded by current capabilities."""
         # Keep builtin stage methods async: InProcessTransport runs sync plugin
         # methods in a thread pool, but these methods mutate plugin-local state.
         if not self._config.enable_throughput_scaling:
@@ -247,8 +243,8 @@ class BuiltinLoadPredict:
                 predicted_isl=isl,
                 predicted_osl=osl,
                 predicted_kv_hit_rate=self._last_kv_hit_rate,
-                predicted_accept_length=self._clamp_accept_length(
-                    self._last_accept_length
+                predicted_accept_length=normalize_speculative_accept_length(
+                    self._last_accept_length, self._capabilities, self._config
                 ),
                 source=self.plugin_id,
             ),

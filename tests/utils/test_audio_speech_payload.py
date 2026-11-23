@@ -122,9 +122,13 @@ def test_truncated_waveform_fails(make_response):
     """A mis-assembled chunk stream yields a short but parseable WAV."""
     payload = _payload(min_duration_s=1.0)
     audio = _wav_bytes(duration_s=0.2)
+    # A streamed WAV, as Dynamo sends it, has placeholder RIFF and data sizes.
+    placeholder = b"\xff\xff\xff\xff"
+    streamed = audio[:4] + placeholder + audio[8:40] + placeholder + audio[44:]
 
-    with pytest.raises(AssertionError, match="shorter than the expected minimum"):
-        payload.response_handler(make_response(audio))
+    for wav_bytes in (audio, streamed):
+        with pytest.raises(AssertionError, match="shorter than the expected minimum"):
+            payload.response_handler(make_response(wav_bytes))
 
 
 @pytest.mark.parametrize(

@@ -427,6 +427,83 @@ def test_load_aware_preserves_deprecated_overlap_score_weight_env(monkeypatch) -
     assert kwargs["overlap_score_weight"] == 2.5
 
 
+def _frontend_config(argv: list[str]) -> FrontendConfig:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args(argv))
+    config.validate()
+    return config
+
+
+@pytest.mark.parametrize(
+    ("argv", "policy_file", "expected_mode"),
+    [
+        pytest.param([], False, "round-robin", id="neither"),
+        pytest.param([], True, "kv", id="file-alone"),
+        pytest.param(["--router-mode", "kv"], False, "kv", id="kv"),
+        pytest.param(["--router-mode", "kv"], True, "kv", id="kv-with-file"),
+        pytest.param(
+            ["--router-mode", "least-loaded"], False, "least-loaded", id="other-mode"
+        ),
+    ],
+)
+def test_frontend_routes_by_a_router_mode_or_a_policy_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    argv: list[str],
+    policy_file: bool,
+    expected_mode: str,
+) -> None:
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_POLICY_CONFIG", raising=False)
+    if policy_file:
+        path = tmp_path / "policy.yaml"
+        path.write_text("worker_selection:\n  decode: round-robin\n")
+        argv = [*argv, "--router-policy-config", str(path)]
+
+    config = _frontend_config(argv)
+
+    assert config.router_mode == expected_mode
+    kwargs = config.kv_router_kwargs()
+    assert (kwargs["router_policy_config"] is not None) == policy_file
+
+
+@pytest.mark.parametrize("router_mode", ["round-robin", "direct"])
+def test_frontend_rejects_a_policy_file_with_a_router_mode_other_than_kv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, router_mode: str
+) -> None:
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    path = tmp_path / "policy.yaml"
+    path.write_text("worker_selection:\n  decode: round-robin\n")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _frontend_config(
+            ["--router-mode", router_mode, "--router-policy-config", str(path)]
+        )
+
+
+def test_load_aware_does_not_hide_a_router_mode_that_conflicts_with_a_policy_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    path = tmp_path / "policy.yaml"
+    path.write_text("worker_selection:\n  decode: round-robin\n")
+
+    with (
+        pytest.warns(FutureWarning, match="deprecated"),
+        pytest.raises(ValueError, match="mutually exclusive"),
+    ):
+        _frontend_config(
+            [
+                "--load-aware",
+                "--router-mode",
+                "direct",
+                "--router-policy-config",
+                str(path),
+            ]
+        )
+
+
 def test_load_aware_frontend_implies_kv_router_mode() -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
@@ -474,7 +551,7 @@ def test_frontend_reasoning_field_name_rejects_invalid_choice() -> None:
         parser.parse_args(["--reasoning-field-name", "invalid"])
 
 
-def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
+def test_frontend_response_plane_defaults_to_unset_and_accepts_quic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
@@ -490,7 +567,7 @@ def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
     FrontendArgGroup().add_arguments(env_parser)
     env_config = FrontendConfig.from_cli_args(env_parser.parse_args([]))
 
-    assert default_config.response_plane == "tcp"
+    assert default_config.response_plane is None
     assert quic_config.response_plane == "quic"
     assert parser.parse_args(["--response-plane", "velo"]).response_plane == "velo"
     assert env_config.response_plane == "quic"
@@ -972,6 +1049,35 @@ def test_session_affinity_mode_cli_and_environment(monkeypatch) -> None:
     assert config.session_affinity_mode == "hard"
 
 
+def test_session_affinity_max_entries_cli_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def parse(argv: list[str]) -> FrontendConfig:
+        parser = argparse.ArgumentParser()
+        FrontendArgGroup().add_arguments(parser)
+        config = FrontendConfig.from_cli_args(parser.parse_args(argv))
+        config.validate()
+        return config
+
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", raising=False)
+    assert parse([]).session_affinity_max_entries == 65_536
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", "1000000")
+    assert parse([]).session_affinity_max_entries == 1_000_000
+
+    config = parse(["--router-session-affinity-max-entries", "2000000"])
+    assert config.session_affinity_max_entries == 2_000_000
+    assert "session_affinity_max_entries" not in config.router_kwargs()
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-max-entries", "0"])
+    )
+    with pytest.raises(ValueError, match="router-session-affinity-max-entries"):
+        config.validate()
+
+
 @pytest.mark.parametrize("ttl", [0, 31_536_001])
 def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
     parser = argparse.ArgumentParser()
@@ -1201,7 +1307,8 @@ def test_router_yaml_applies_before_frontend_validation(tmp_path):
         )
     )
     with pytest.raises(
-        ValueError, match="AIS perf config requires backend, system, model"
+        ValueError,
+        match=r"--router-prefill-load-model=ais requires an AIS perf model",
     ):
         config.validate()
 
@@ -1228,7 +1335,9 @@ def test_router_yaml_rejects_invalid_settings(tmp_path, settings):
 
 
 def test_shared_router_settings_fixture_flows_to_binding_kwargs(pytestconfig):
-    path = pytestconfig.rootpath / "lib/kv-router/tests/data/router-settings.yaml"
+    path = (
+        pytestconfig.rootpath / "lib/router/kv-router/tests/data/router-settings.yaml"
+    )
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
     config = KvRouterConfigBase.from_cli_args(

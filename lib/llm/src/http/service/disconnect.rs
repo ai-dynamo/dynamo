@@ -39,8 +39,9 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
+use crate::http::service::error::{Protocol, public_message_for};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
+use dynamo_error::http::{ClientErrorAction, SanitizedError, http_action_for_error};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -152,6 +153,7 @@ impl StreamErrorSignal {
             ErrorType::Cancelled => return,
             ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
             ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::UnsupportedModality => ErrorClass::UnsupportedMedia,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
         crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
@@ -357,8 +359,6 @@ async fn connection_monitor(
     }
 }
 
-type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
-
 struct StreamMonitorOptions {
     activity_rx: Option<mpsc::UnboundedReceiver<()>>,
     error_signal: Option<StreamErrorSignal>,
@@ -399,8 +399,9 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
             "Request cancelled",
         ),
     };
-    let message = error.public_message().unwrap_or(message);
-    let error_type = if status == crate::http::service::error::overload_status_code() {
+    let message =
+        public_message_for(error, Protocol::OpenAi).unwrap_or_else(|| message.to_string());
+    let error_type = if status == dynamo_error::http::overload_status_code() {
         "service_unavailable"
     } else {
         match status {
@@ -467,7 +468,7 @@ pub(crate) fn monitor_for_disconnects_with_error(
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -553,6 +554,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
     stream_handle: ConnectionHandle,
     activity_rx: mpsc::UnboundedReceiver<()>,
     error_signal: StreamErrorSignal,
+    emit_done_sentinel: bool,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -564,7 +566,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
         StreamMonitorOptions {
             activity_rx: Some(activity_rx),
             error_signal: Some(error_signal),
-            ..Default::default()
+            emit_done_sentinel,
         },
     )
 }
@@ -594,7 +596,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
     options: StreamMonitorOptions,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
@@ -978,6 +980,7 @@ mod tests {
                     handle,
                     rx,
                     StreamErrorSignal::default(),
+                    true,
                 ))
                 .await
             } else {
@@ -1330,10 +1333,113 @@ mod tests {
         assert_eq!(body["error"]["type"], "service_unavailable");
         assert_eq!(
             body["error"]["code"],
-            crate::http::service::error::overload_status_code().as_u16()
+            dynamo_error::http::overload_status_code().as_u16()
         );
     }
 
+    #[test]
+    fn semantic_stream_error_renders_context_length_details() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            body["error"]["message"],
+            "This model's maximum context length is 8192 tokens. However, your request would \
+             use 4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). \
+             Please reduce the length of the messages or the requested output."
+        );
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("maximum context length is 8192 tokens"));
+        assert!(message.contains("4000 prompt tokens"));
+        assert!(message.contains("5000 requested output tokens"));
+        assert!(message.contains("9000 tokens total"));
+        assert!(
+            !message.contains("prompt is too long"),
+            "combined-budget errors must not blame the prompt alone, got: {message}"
+        );
+    }
+
+    #[test]
+    fn semantic_stream_error_prompt_at_limit_reports_missing_output_room() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8192),
+                prompt_tokens: Some(8192),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert_eq!(
+            message,
+            "This model's maximum context length is 8192 tokens. However, your messages \
+             resulted in 8192 tokens, which leaves no room for output. Please reduce the length \
+             of the messages."
+        );
+        assert!(!message.contains("prompt is too long"));
+    }
+
+    #[test]
+    fn semantic_stream_error_keeps_class_message_for_other_invalid_requests() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Invalid request");
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_sse_body() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported video media");
+        assert_eq!(body["error"]["code"], 415);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text_in_sse() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported media type");
+        assert_eq!(body["error"]["code"], 415);
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret")
+        );
+    }
     #[tokio::test]
     async fn signaled_error_before_terminal_event_keeps_disconnect_handle_armed() {
         let error_signal = StreamErrorSignal::default();

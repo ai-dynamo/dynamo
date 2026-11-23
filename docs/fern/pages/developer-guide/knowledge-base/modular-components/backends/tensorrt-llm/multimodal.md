@@ -7,7 +7,10 @@ title: TensorRT-LLM Multimodal
 This document provides a comprehensive guide for multimodal inference using TensorRT-LLM backend in Dynamo.
 
 You can provide multimodal inputs in the following ways:
+
 - By sending image URLs
+- By sending audio URLs
+- By sending base64-encoded audio with `input_audio`
 - By providing paths to pre-computed embedding files
 
 > **Note:** You should provide **either image URLs or embedding file paths** in a single request.
@@ -19,7 +22,7 @@ You can provide multimodal inputs in the following ways:
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Full support for all image models |
 | **Image** | Pre-computed Embeddings (.safetensors) | Yes | Yes | Direct embedding files |
 | **Video** | HTTP/HTTPS URL | Yes | Yes | Decoded per request; H.264/H.265 on NVDEC, other codecs via the TensorRT-LLM loader |
-| **Audio** | HTTP/HTTPS URL | No | No | Not implemented |
+| **Audio** | `audio_url` (HTTPS or base64 data URL), `input_audio` (base64 WAV/MP3) | Yes | Not validated | Requires a model with audio support in TensorRT-LLM. separate encoder workers are not supported |
 
 ### Supported URL Formats
 
@@ -31,12 +34,17 @@ You can provide multimodal inputs in the following ways:
 > [!NOTE]
 > Media URLs are validated against a default-deny policy. `https://` and `data:` sources
 > pass; plain `http://` and hostnames that resolve to private or loopback addresses are
-> refused. To fetch media over the cluster's internal network, set
-> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
+> refused. Two settings change this:
+>
+> - `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads the media, allows `http://` and
+>   internal hosts.
+> - `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every remote
+>   media URL and takes precedence over `DYN_MM_ALLOW_INTERNAL`. See
+>   [Runtime Configuration](../../../../../reference/components/runtime-configuration.mdx#multimodal-and-media-output).
 
 ## Deployment Patterns
 
-TRT-LLM supports aggregated and traditional disaggregated patterns. See [Multimodal Model Serving](../../../../../use-cases/multimodal-serving/overview.md) for detailed explanations.
+TRT-LLM supports aggregated and traditional disaggregated patterns. See [Multimodal Model Serving](../../../../../use-cases/image-understanding/vlm-performance-optimization.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -93,7 +101,7 @@ Current limitations:
 - Requests that mix image URLs and precomputed `.safetensors` embeddings skip multimodal-aware routing.
 - The worker and frontend must use matching block sizes.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 
 ## Aggregated Serving
 
@@ -133,6 +141,56 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
     "max_tokens": 160
 }'
 ```
+
+## Audio Input
+
+For aggregated serving, use a model with audio support in TensorRT-LLM and enable
+`--modality multimodal` or `--enable-multimodal`.
+
+Each clip is limited to 256 MiB of decoded audio across all channels.
+This limit is fixed and separate from the encoded-file limit controlled by
+`--max-file-size-mb`.
+
+### Example Request
+
+With `google/gemma-4-E2B-it` running, send an audio URL:
+
+```bash
+curl -sS http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "google/gemma-4-E2B-it",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Transcribe the attached speech exactly."},
+        {"type": "audio_url", "audio_url": {
+          "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+        }}
+      ]
+    }],
+    "temperature": 0,
+    "max_tokens": 100
+  }'
+```
+
+The `audio_url.url` field also accepts a base64 data URL, such as
+`data:audio/wav;base64,...`.
+
+For base64-encoded audio, replace the `audio_url` content part with `input_audio`.
+Set `data` to the encoded file contents and `format` to `wav` or `mp3`:
+
+```json
+{
+  "type": "input_audio",
+  "input_audio": {"data": "<base64-encoded audio>", "format": "wav"}
+}
+```
+
+Non-streaming requests with unsupported models, invalid audio, or clips exceeding
+the decoded-audio limit return HTTP 400.
+If a streaming response has already started, errors are reported in the stream
+and the HTTP status remains 200.
 
 ## Disaggregated Serving
 
@@ -440,11 +498,11 @@ await register_model(
 
 ## Known Limitations
 
-- **No audio support** - No audio encoder implementation
+- **Audio input** - Dynamo's TensorRT-LLM adapter rejects audio requests combined with separate encoder outputs or pre-computed image embeddings.
 - **Video decode requires NVDEC** - H.264/H.265 video is decoded on the GPU; the
   runtime image ships no software video decoder. This needs a GPU with a video
   decode engine and a container granted the `video` driver capability — see
-  [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+  [Video Decode GPU Requirements](../../../../../use-cases/video-understanding/video-decoding.md).
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)
 - **llava-v1.6-mistral-7b-hf model crash** - Known issue with TRTLLM backend compatibility with `TensorRT LLM version: 1.2.0rc6.post1`. To use Llava model download revision `revision='52320fb52229` locally using HF.

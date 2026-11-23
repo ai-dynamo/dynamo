@@ -23,6 +23,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,10 +33,16 @@ import (
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -43,6 +51,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+var publisherEnv = operatorenv.New(operatorenv.Options{
+	Admission:       operatorenv.AdmissionWebhooks{Mutating: true, Validating: true},
+	OperatorVersion: "1.6.0",
+	SetupWebhooks: func(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptions) error {
+		return webhooksetup.Setup(mgr, webhooksetup.Options{
+			Config: opts.OperatorConfig, RuntimeConfig: opts.RuntimeConfig,
+			OperatorVersion: opts.OperatorVersion, OperatorPrincipal: opts.OperatorPrincipal,
+		})
+	},
+})
+
+func TestMain(m *testing.M) {
+	os.Exit(publisherEnv.RunM(m))
+}
 
 // These tests send the publisher's real server-side-apply payloads to an API server that
 // has the v1beta2 CRDs installed. The reconciler tests use a fake writer; this is the
@@ -60,10 +83,7 @@ type writerFixture struct {
 
 func newWriterFixture(t *testing.T) *writerFixture {
 	t.Helper()
-	env := operatorenv.New(operatorenv.Options{
-		// The publisher has no webhooks; the environment only requires the hook to exist.
-		SetupWebhooks: func(ctrl.Manager, operatorenv.WebhookSetupOptions) error { return nil },
-	}).RunT(t)
+	env := publisherEnv.ForTest(t)
 	ctx := context.Background()
 	c := env.Client()
 
@@ -133,16 +153,18 @@ func envtestCandidate() dgdcreconcile.DesiredCandidate {
 		Spec:       validManifest + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: companion\n",
 		Parameters: map[string]any{"tp": 2},
 		Metrics:    map[string]any{"throughput": 12.5},
+		Validity: metav1.Condition{Type: v1beta2.DGDCConditionValid, Status: metav1.ConditionTrue,
+			Reason: "ValidationSucceeded", LastTransitionTime: metav1.Now()},
 	}
 }
 
 func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconcile.DesiredCandidate) *v1beta2.DynamoGraphDeploymentCandidate {
 	t.Helper()
-	spec, _, err := decodeManifest(candidate.ID, candidate.Spec)
+	dgd, _, err := decodeManifest(candidate.ID, candidate.Spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parameters, err := json.Marshal(candidate.Parameters)
+	spec, err := json.Marshal(dgd.Object["spec"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,10 +172,7 @@ func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconc
 		Namespace: namespace,
 		Name:      name,
 		Labels:    map[string]string{"owner": "foreign"},
-		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
-			DynamoGraphDeploymentSpec: *spec,
-			Parameters:                runtime.RawExtension{Raw: parameters},
-		},
+		Spec:      runtime.RawExtension{Raw: spec},
 	}
 }
 
@@ -161,9 +180,13 @@ type writeInterceptClient struct {
 	client.Client
 	beforeCreate func()
 	beforeApply  func()
+	createError  error
 }
 
 func (c *writeInterceptClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
+	if c.createError != nil {
+		return c.createError
+	}
 	if c.beforeCreate != nil {
 		hook := c.beforeCreate
 		c.beforeCreate = nil
@@ -289,6 +312,142 @@ func hasApplyManager(fields []metav1.ManagedFieldsEntry, subresource string) boo
 	return false
 }
 
+func TestEnvtestCandidatePreparation(t *testing.T) {
+	f := newWriterFixture(t)
+	const overridePrefix = `{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment",`
+	tests := []struct {
+		name       string
+		manifest   string
+		override   string
+		reason     string
+		wantSpec   string
+		wantLabel  string
+		absentSpec string
+		admitRun   bool
+	}{
+		{name: "valid DGD keeps its pre-defaulting spec", manifest: validManifest, reason: "ValidationSucceeded"},
+		{name: "optional DGD backend is not synthesized", manifest: strings.Replace(validManifest, "  backendFramework: vllm\n", "", 1), reason: "ValidationSucceeded", absentSpec: `"backendFramework"`},
+		{name: "unknown field is retained", manifest: validManifest + "  unknownField: 9007199254740993\n", reason: "ValidationFailed", wantSpec: `"unknownField":9007199254740993`},
+		{name: "wrong type is retained", manifest: "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\nspec:\n  components: not-a-list\n", reason: "ValidationFailed", wantSpec: `"components":"not-a-list"`},
+		{name: "DGD webhook rejects an ambiguous runtime image", manifest: strings.ReplaceAll(validManifest, "runtime:1.6.0", "runtime:custom"), reason: "ValidationFailed", wantSpec: `"image":"registry.example/runtime:custom"`},
+		{name: "shared override applies without recomputing metrics", manifest: validManifest, override: overridePrefix + `"spec":{"components":[{"name":"worker","replicas":3}]}}`, reason: "ValidationSucceeded", wantSpec: `"replicas":3`},
+		{name: "args append directive is materialized before strict dry-run", manifest: strings.ReplaceAll(validManifest, "image: registry.example/runtime:1.6.0", "image: registry.example/runtime:1.6.0\n          args: [--base]"), override: overridePrefix + `"spec":{"components":[{"name":"worker","podTemplate":{"spec":{"containers":[{"name":"main","$patch":{"args":"append"},"args":["--extra"]}]}}}]}}`, reason: "ValidationSucceeded", wantSpec: `"args":["--base","--extra"]`, absentSpec: `"$patch"`},
+		{name: "args append requires an existing container", manifest: validManifest, override: overridePrefix + `"spec":{"components":[{"name":"worker","podTemplate":{"spec":{"containers":[{"name":"missing","$patch":{"args":"append"},"args":["--extra"]}]}}}]}}`, reason: "OverrideFailed", absentSpec: `"name":"missing"`},
+		{name: "ordinary merge can add a named container", manifest: validManifest, override: overridePrefix + `"spec":{"components":[{"name":"worker","podTemplate":{"spec":{"containers":[{"name":"extra","image":"registry.example/sidecar:1.0.0"}]}}}]}}`, reason: "ValidationSucceeded", wantSpec: `"name":"extra"`},
+		{name: "missing target applies nothing", manifest: validManifest, override: overridePrefix + `"spec":{"backendFramework":"sglang","components":[{"name":"missing","replicas":3}]}}`, reason: "OverrideTargetNotFound", wantSpec: `"backendFramework":"vllm"`},
+		{name: "metadata is copied to Candidate", manifest: validManifest, override: overridePrefix + `"metadata":{"labels":{"custom":"kept"},"annotations":{"custom":"kept"}}}`, reason: "ValidationSucceeded", wantLabel: "kept"},
+		{name: "failed override retains only generated metadata", manifest: strings.Replace(validManifest, "\nspec:", "\nmetadata:\n  labels:\n    custom: generated\n  annotations:\n    custom: generated\nspec:", 1), override: overridePrefix + `"metadata":{"labels":{"custom":"discarded"},"annotations":{"custom":"discarded"}},"spec":{"components":[{"name":"missing","replicas":3}]}}`, reason: "OverrideTargetNotFound", wantLabel: "generated"},
+		{name: "failed dry-run retains successfully merged metadata", manifest: strings.ReplaceAll(validManifest, "runtime:1.6.0", "runtime:custom"), override: overridePrefix + `"metadata":{"labels":{"custom":"kept"},"annotations":{"custom":"kept"}}}`, reason: "ValidationFailed", wantLabel: "kept"},
+		{
+			name:       "merged annotations exceed the metadata limit atomically",
+			manifest:   strings.Replace(validManifest, "\nspec:", "\nmetadata:\n  labels:\n    custom: generated\n  annotations:\n    custom: generated\n    generated: kept\nspec:", 1),
+			override:   overridePrefix + `"metadata":{"labels":{"custom":"discarded"},"annotations":{"custom":"` + strings.Repeat("x", apivalidation.TotalAnnotationSizeLimitB-len("custom")) + `"}},"spec":{"components":[{"name":"worker","replicas":3}]}}`,
+			reason:     "OverrideFailed",
+			wantLabel:  "generated",
+			absentSpec: `"replicas":3`,
+			admitRun:   true,
+		},
+		{
+			name:       "companion annotations consume the Candidate metadata budget",
+			manifest:   validManifest + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: companion\ndata:\n  payload: " + strings.Repeat("x", 2048) + "\n",
+			override:   overridePrefix + `"metadata":{"labels":{"custom":"discarded"},"annotations":{"custom":"` + strings.Repeat("x", apivalidation.TotalAnnotationSizeLimitB-1024-len("custom")) + `"}},"spec":{"components":[{"name":"worker","replicas":3}]}}`,
+			reason:     "OverrideFailed",
+			absentSpec: `"replicas":3`,
+			admitRun:   true,
+		},
+		{name: "identity override fails atomically", manifest: validManifest, override: overridePrefix + `"metadata":{"namespace":"other"},"spec":{"backendFramework":"sglang"}}`, reason: "OverrideFailed", wantSpec: `"backendFramework":"vllm"`},
+	}
+	for i, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Prepare a generated DGD through the production override and admission paths")
+			run := f.run.DeepCopy()
+			if test.override != "" {
+				run.Spec.Overrides = &v1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(test.override)}}
+			}
+			if test.admitRun {
+				t.Log("Verify the override's own metadata is accepted before it is merged")
+				admitted := run.DeepCopy()
+				admitted.Name = fmt.Sprintf("metadata-run-%d", i)
+				admitted.UID = ""
+				admitted.ResourceVersion = ""
+				admitted.CreationTimestamp = metav1.Time{}
+				require.NoError(t, f.client.Create(f.ctx, admitted))
+			}
+			candidate := envtestCandidate()
+			candidate.ID = fmt.Sprintf("case-%d", i)
+			candidate.Spec = test.manifest
+			wire, err := json.Marshal(Snapshot{SchemaVersion: SnapshotSchemaVersion,
+				Run: SnapshotRun{Phase: PhaseRunning},
+				Candidates: []SnapshotCandidate{{ID: candidate.ID, Outcome: OutcomeMaterialized,
+					Manifest: candidate.Spec, Parameters: candidate.Parameters, Metrics: candidate.Metrics}},
+			})
+			require.NoError(t, err)
+			parsed, err := ParseSnapshot(wire)
+			require.NoError(t, err, "readable DGD content errors must not fail the snapshot protocol")
+			candidate = Desire(run.Name, string(run.UID), parsed).Candidates[0]
+			prepared, err := f.writer.PrepareCandidate(f.ctx, run, candidate)
+			require.NoError(t, err)
+			require.Equal(t, test.reason, prepared.Validity.Reason)
+			wantValidity := metav1.ConditionFalse
+			if test.reason == "ValidationSucceeded" {
+				wantValidity = metav1.ConditionTrue
+			}
+			require.Equal(t, wantValidity, prepared.Validity.Status)
+
+			t.Log("Persist the pre-dry-run payload and its original evaluation facts")
+			name := f.name(candidate.ID)
+			stored, err := f.writer.CreateCandidate(f.ctx, run, name, prepared)
+			require.NoError(t, err)
+			require.NoError(t, f.writer.PopulateStatus(f.ctx, name, stored.ResourceVersion, prepared))
+			got := f.candidate(name)
+			require.Contains(t, string(got.Status.Parameters.Raw), `"tp":2`)
+			require.Contains(t, string(got.Status.Metrics.Raw), `"throughput":12.5`)
+			condition := meta.FindStatusCondition(got.Status.Conditions, v1beta2.DGDCConditionValid)
+			require.NotNil(t, condition)
+			require.Equal(t, test.reason, condition.Reason)
+			require.Equal(t, wantValidity, condition.Status)
+			if test.wantSpec != "" {
+				require.Contains(t, string(got.Spec.Raw), test.wantSpec)
+			}
+			if test.absentSpec != "" {
+				require.NotContains(t, string(got.Spec.Raw), test.absentSpec)
+			}
+			require.Equal(t, test.wantLabel, got.Labels["custom"])
+			require.Equal(t, test.wantLabel, got.Annotations["custom"])
+			if i == 0 {
+				var spec map[string]any
+				require.NoError(t, json.Unmarshal(got.Spec.Raw, &spec))
+				for _, component := range spec["components"].([]any) {
+					require.NotContains(t, component.(map[string]any), "replicas", "dry-run defaults leaked into the stored payload")
+				}
+			}
+
+			t.Log("Verify dry-run did not create a deployment")
+			deployments := &unstructured.UnstructuredList{}
+			deployments.SetAPIVersion("nvidia.com/v1beta1")
+			deployments.SetKind("DynamoGraphDeploymentList")
+			require.NoError(t, f.client.List(f.ctx, deployments, client.InNamespace(run.Namespace)))
+			require.Empty(t, deployments.Items)
+
+			t.Log("Reuse the persisted validity verdict after a publisher restart")
+			restartedWriter := *f.writer
+			restartedWriter.Client = &writeInterceptClient{Client: f.client, createError: errors.New("dry-run must not run again")}
+			restarted := &Reconciler{Client: f.client, Writer: &restartedWriter, Namespace: run.Namespace}
+			desired := DesiredState{Candidates: []dgdcreconcile.DesiredCandidate{candidate}, Names: map[string]string{candidate.ID: name}}
+			require.NoError(t, restarted.prepareCandidates(f.ctx, run, &desired))
+			require.Equal(t, got.Status.Conditions[0], desired.Candidates[0].Validity)
+		})
+	}
+
+	t.Run("API outage remains retryable", func(t *testing.T) {
+		t.Log("Fail the API create operation before a definitive content verdict exists")
+		writer := *f.writer
+		writer.Client = &writeInterceptClient{Client: f.client, createError: apierrors.NewServiceUnavailable("temporary outage")}
+		_, err := writer.PrepareCandidate(f.ctx, f.run, envtestCandidate())
+		require.True(t, apierrors.IsServiceUnavailable(err), "unexpected error: %v", err)
+	})
+}
+
 func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	f := newWriterFixture(t)
 	name := f.name("a")
@@ -311,11 +470,14 @@ func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	if !strings.Contains(got.Annotations[AnnotationAdditionalResources], "kind: ConfigMap") {
 		t.Errorf("companion annotation = %q", got.Annotations[AnnotationAdditionalResources])
 	}
-	var parameters map[string]any
-	if err := json.Unmarshal(got.Spec.Parameters.Raw, &parameters); err != nil || parameters["tp"] != float64(2) {
-		t.Errorf("parameters = %s, err = %v", got.Spec.Parameters.Raw, err)
+	var spec map[string]any
+	if err := json.Unmarshal(got.Spec.Raw, &spec); err != nil {
+		t.Fatal(err)
 	}
-	if got.Status.Metrics != nil {
+	if _, found := spec["parameters"]; found {
+		t.Fatal("simulation parameters must not be injected into the DGD spec")
+	}
+	if got.Status.Metrics != nil || got.Status.Parameters != nil {
 		t.Errorf("candidate apply wrote through the status subresource: %+v", got.Status)
 	}
 	if !hasApplyManager(got.ManagedFields, "") {
@@ -447,6 +609,16 @@ func TestEnvtestCandidateStatusIsWrittenOnceAndGuardedByResourceVersion(t *testi
 	if err := json.Unmarshal(got.Status.Metrics.Raw, &metrics); err != nil || metrics["throughput"] != 12.5 {
 		t.Errorf("metrics = %s, err = %v", got.Status.Metrics.Raw, err)
 	}
+	var parameters map[string]any
+	if got.Status.Parameters == nil {
+		t.Fatal("status.parameters is not set after PopulateStatus")
+	}
+	if err := json.Unmarshal(got.Status.Parameters.Raw, &parameters); err != nil || parameters["tp"] != float64(2) {
+		t.Errorf("parameters = %s, err = %v", got.Status.Parameters.Raw, err)
+	}
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta2.DGDCConditionValid) {
+		t.Fatalf("validity was not published: %+v", got.Status.Conditions)
+	}
 	if !hasApplyManager(got.ManagedFields, "status") {
 		t.Errorf("no status apply manager %q: %+v", fieldOwner, got.ManagedFields)
 	}
@@ -493,11 +665,30 @@ func TestEnvtestRunStatusIsOwnedByThePublisher(t *testing.T) {
 	f := newWriterFixture(t)
 	first := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 
+	t.Log("Seed lifecycle conditions and optimizer progress under a different SSA owner")
+	controllerStatus := v1beta2.DynamoGraphDeploymentRunStatus{
+		Conditions: []metav1.Condition{{Type: v1beta2.DGDRRunConditionCompleted, Status: metav1.ConditionFalse,
+			Reason: "JobRunning", Message: "execution is running", ObservedGeneration: 1, LastTransitionTime: metav1.NewTime(first)}},
+		Progress: &v1beta2.DGDRRunProgress{
+			Branches:    []v1beta2.BranchProgress{{Name: "agg", Rounds: v1beta2.RoundProgress{Completed: 1, Total: 2}}},
+			Evaluations: &v1beta2.EvaluationProgress{Feasible: 1}, Candidates: &v1beta2.CandidateProgress{ParetoFront: 2},
+		},
+	}
+	fields, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&controllerStatus)
+	require.NoError(t, err)
+	controllerApply := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"namespace": f.run.Namespace, "name": f.run.Name}, "status": fields,
+	}}
+	controllerApply.SetGroupVersionKind(v1beta2.DynamoGraphDeploymentRunGVK)
+	require.NoError(t, f.client.Status().Apply(f.ctx, client.ApplyConfigurationFromUnstructured(controllerApply.DeepCopy()), client.FieldOwner("run-controller-test")))
+
+	t.Log("Publish a retryable failure while retaining the other owner's condition and progress")
 	staleVersion := f.currentRun().ResourceVersion
 	if err := f.writer.UpdateRunStatus(f.ctx, staleVersion, RunStatus{
 		Published:      2,
 		LastProgress:   first,
 		CandidateNames: []string{f.name("a"), f.name("b")},
+		Publication:    publicationCondition(f.currentRun(), metav1.ConditionFalse, "PublicationBlocked", "HTTP 403: authorization is not visible yet"),
 	}); err != nil {
 		t.Fatalf("update run status: %v", err)
 	}
@@ -514,12 +705,34 @@ func TestEnvtestRunStatusIsOwnedByThePublisher(t *testing.T) {
 	if !hasApplyManager(run.ManagedFields, "status") {
 		t.Errorf("no status apply manager %q: %+v", fieldOwner, run.ManagedFields)
 	}
+	require.True(t, apiequality.Semantic.DeepEqual(&controllerStatus.Conditions[0], meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionCompleted)), "publisher must preserve the lifecycle condition")
+	require.Equal(t, controllerStatus.Progress.Branches, run.Status.Progress.Branches)
+	require.Equal(t, controllerStatus.Progress.Evaluations, run.Status.Progress.Evaluations)
+	require.Equal(t, int64(2), run.Status.Progress.Candidates.ParetoFront)
+	require.True(t, meta.IsStatusConditionFalse(run.Status.Conditions, v1beta2.DGDRRunConditionPublished))
 
 	// A write based on the version read before the first write conflicts.
-	err := f.writer.UpdateRunStatus(f.ctx, staleVersion, RunStatus{Published: 1, CandidateNames: []string{f.name("a")}})
+	err = f.writer.UpdateRunStatus(f.ctx, staleVersion, RunStatus{Published: 1, CandidateNames: []string{f.name("a")}})
 	if !apierrors.IsConflict(err) {
 		t.Fatalf("update with a stale resourceVersion: err = %v, want a conflict", err)
 	}
+
+	t.Log("The lifecycle owner can still update Completed without forcing ownership")
+	controllerStatus.Conditions[0].Message = "execution is still running"
+	fields, err = runtime.DefaultUnstructuredConverter.ToUnstructured(&controllerStatus)
+	require.NoError(t, err)
+	controllerApply.Object["status"] = fields
+	require.NoError(t, f.client.Status().Apply(f.ctx, client.ApplyConfigurationFromUnstructured(controllerApply.DeepCopy()), client.FieldOwner("run-controller-test")))
+	run = f.currentRun()
+
+	t.Log("Recover the publication condition without changing references or progress")
+	require.NoError(t, f.writer.UpdateRunStatus(f.ctx, run.ResourceVersion, RunStatus{
+		Published: 2, LastProgress: first, CandidateNames: []string{f.name("a"), f.name("b")},
+		Publication: publicationCondition(run, metav1.ConditionTrue, "PublicationSucceeded", "The current Candidate projection is published"),
+	}))
+	run = f.currentRun()
+	require.True(t, meta.IsStatusConditionTrue(run.Status.Conditions, v1beta2.DGDRRunConditionPublished))
+	require.True(t, apiequality.Semantic.DeepEqual(&controllerStatus.Conditions[0], meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionCompleted)), "publisher must preserve the lifecycle condition")
 
 	// Fields the publisher owns and omits are removed: this is why the reconciler carries
 	// the existing progress time into every payload.
@@ -533,6 +746,11 @@ func TestEnvtestRunStatusIsOwnedByThePublisher(t *testing.T) {
 	if run.Status.LastProgressTime != nil {
 		t.Errorf("lastProgressTime = %v, want it removed when the payload omits it", run.Status.LastProgressTime)
 	}
+	require.Nil(t, meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionPublished))
+	require.True(t, apiequality.Semantic.DeepEqual(&controllerStatus.Conditions[0], meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionCompleted)), "publisher must preserve the lifecycle condition")
+	require.Equal(t, controllerStatus.Progress.Branches, run.Status.Progress.Branches)
+	require.Equal(t, controllerStatus.Progress.Evaluations, run.Status.Progress.Evaluations)
+	require.Equal(t, int64(2), run.Status.Progress.Candidates.ParetoFront)
 }
 
 func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
@@ -564,7 +782,7 @@ func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
 func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) {
 	f := newWriterFixture(t)
 	candidate := envtestCandidate()
-	snapshot, err := ParseSnapshot(snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: candidate.Metrics}))
+	snapshot, err := ParseSnapshot(withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: candidate.Metrics}), "2026-10-05T21:35:12Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +826,23 @@ func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) 
 	}, 10*time.Second, 25*time.Millisecond, "candidate status update did not trigger repair")
 	waitForReconcileQuiet(t, recorder, 250*time.Millisecond, 10*time.Second)
 
-	t.Log("Publish a terminal replacement and let write echoes drive completion")
+	t.Log("Block DGD dry-runs through real HTTP 403 quota admission")
+	quotaResource := corev1.ResourceName("count/dynamographdeployments.nvidia.com")
+	quota := &corev1.ResourceQuota{
+		Name: "block-dgd-publication", Namespace: f.run.Namespace,
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{quotaResource: resource.MustParse("0")}},
+	}
+	require.NoError(t, f.client.Create(f.ctx, quota))
+	quota.Status = corev1.ResourceQuotaStatus{Hard: quota.Spec.Hard.DeepCopy(), Used: corev1.ResourceList{quotaResource: resource.MustParse("0")}}
+	require.NoError(t, f.client.Status().Update(f.ctx, quota))
+	require.Eventually(t, func() bool {
+		_, denied := f.writer.PrepareCandidate(f.ctx, f.currentRun(), candidate)
+		return apierrors.IsForbidden(denied)
+	}, 10*time.Second, 25*time.Millisecond, "quota must deny DGD dry-runs with HTTP 403")
+	beforeBlocked := f.currentRun().Status.DeepCopy()
+	require.NotNil(t, beforeBlocked.LastProgressTime)
+
+	t.Log("Keep retrying the terminal replacement while reporting the denial on the Run")
 	terminal, err := ParseSnapshot(snapshotJSON(t, PhaseSucceeded, cand{id: "b", metrics: candidate.Metrics}))
 	if err != nil {
 		t.Fatal(err)
@@ -618,6 +852,25 @@ func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) 
 	}
 	beforeTerminal := recorder.count.Load()
 	events <- event.GenericEvent{Object: runKeyObject(types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name})}
+	require.Eventually(t, func() bool {
+		condition := meta.FindStatusCondition(f.currentRun().Status.Conditions, v1beta2.DGDRRunConditionPublished)
+		return condition != nil && condition.Status == metav1.ConditionFalse && strings.Contains(condition.Message, "forbidden")
+	}, 10*time.Second, 25*time.Millisecond, "retryable HTTP 403 must be visible in a Run condition")
+	blocked := f.currentRun()
+	require.Equal(t, "PublicationBlocked", meta.FindStatusCondition(blocked.Status.Conditions, v1beta2.DGDRRunConditionPublished).Reason)
+	require.Equal(t, beforeBlocked.CandidateRefs, blocked.Status.CandidateRefs)
+	require.Equal(t, beforeBlocked.Progress, blocked.Status.Progress)
+	require.Equal(t, beforeBlocked.LastProgressTime, blocked.Status.LastProgressTime)
+	require.False(t, completion.Finished(), "403 must not finish the Run or reject its Candidate permanently")
+	var unpublished v1beta2.DynamoGraphDeploymentCandidate
+	require.True(t, apierrors.IsNotFound(f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: f.name("b")}, &unpublished)))
+	beforeRetry := recorder.count.Load()
+	require.Eventually(t, func() bool { return recorder.count.Load() > beforeRetry }, 10*time.Second, 25*time.Millisecond)
+	retried := f.currentRun()
+	require.Equal(t, blocked.ResourceVersion, retried.ResourceVersion, "identical denials must not churn Run status: before=%+v after=%+v", blocked.Status.Conditions, retried.Status.Conditions)
+
+	t.Log("Repair the configuration and let the same terminal snapshot complete automatically")
+	require.NoError(t, f.client.Delete(f.ctx, quota))
 	select {
 	case <-completion.Done():
 	case <-time.After(10 * time.Second):
@@ -635,6 +888,12 @@ func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) 
 		t.Fatal("candidate metrics were not populated before completion")
 	}
 	run := f.currentRun()
+	publication := meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionPublished)
+	require.NotNil(t, publication)
+	require.Equal(t, metav1.ConditionTrue, publication.Status)
+	require.Equal(t, "PublicationSucceeded", publication.Reason)
+	require.NotContains(t, publication.Message, "forbidden")
+	require.Equal(t, beforeBlocked.LastProgressTime, run.Status.LastProgressTime)
 	if len(run.Status.CandidateRefs) != 1 || run.Status.CandidateRefs[0].Name != f.name("b") {
 		t.Fatalf("candidateRefs = %+v, want the terminal candidate", run.Status.CandidateRefs)
 	}

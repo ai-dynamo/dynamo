@@ -37,6 +37,7 @@ rules:
   - delete
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - ""
@@ -289,6 +290,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - dynamoworkermetadatas
   - lpxgraphdeployments
   verbs:
   - create
@@ -306,6 +308,7 @@ rules:
   - dynamographdeploymentruns/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - dynamopoolrelays/finalizers
   - lpxgraphdeployments/finalizers
   verbs:
   - update
@@ -319,6 +322,7 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - dynamopoolrelays/status
   - lpxgraphdeployments/status
   verbs:
   - get
@@ -336,6 +340,14 @@ rules:
   - get
   - list
   - patch
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamopoolrelays
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - nvidia.com

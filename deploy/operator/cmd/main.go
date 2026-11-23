@@ -65,6 +65,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
+	poolrelaycontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/poolrelay"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
@@ -178,7 +179,6 @@ func run() error {
 	var operatorImage string
 	var operatorImagePullPolicy string
 	var dgdrDefaultImage string
-	var dgdrV1beta2Enabled bool
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -186,7 +186,7 @@ func run() error {
 		&operatorImage,
 		"operator-image",
 		"",
-		"Operator image used to deliver version-matched helper binaries for DGD overrides",
+		"Operator image used for version-matched DGD override helpers and DGDR Run publishers",
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
@@ -197,8 +197,6 @@ func run() error {
 		"Planner image used by v1beta2 Runs and as the v1beta1 spec.image default; "+
 			"empty derives dynamo-planner:<operator-version>",
 	)
-	flag.BoolVar(&dgdrV1beta2Enabled, "dgdr-v1beta2-enabled", false,
-		"Reconcile native v1beta2 DGDRs; requires the v1beta2 Request and Run CRDs to be installed")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -311,7 +309,7 @@ func run() error {
 
 	// Initialize observability metrics
 	setupLog.Info("Initializing observability metrics")
-	observability.InitMetrics()
+	observability.InitMetrics(operatorVersion)
 
 	// Set up webhook certificate management.
 	// A direct (non-cached) client is needed because the manager's cache isn't started yet.
@@ -489,7 +487,6 @@ func run() error {
 			mgr, operatorCfg, runtimeConfig,
 			dockerSecretRetriever, sshKeyManager,
 			operatorImage, pullPolicy, plannerImage, dynamoVersion,
-			dgdrV1beta2Enabled,
 		); err != nil {
 			return fmt.Errorf("failed to register controllers: %w", err)
 		}
@@ -528,6 +525,7 @@ func run() error {
 		return nil
 	}
 
+	// Keep restricted startup inside the lease cleanup boundary.
 	if leaseManager != nil {
 		return leaseManager.Guard(mainCtx, leaseCleanupTimeout, startup)
 	}
@@ -545,7 +543,6 @@ func registerControllers(
 	operatorPullPolicy corev1.PullPolicy,
 	plannerImage string,
 	dynamoVersion string,
-	dgdrV1beta2Enabled bool,
 ) error {
 	if operatorCfg.Namespace.Restricted == "" {
 		// The cluster-wide manager cache covers all namespaces. ExcludedNamespaces only filters
@@ -596,6 +593,9 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
+	if err := poolrelaycontroller.Setup(mgr, operatorCfg, runtimeConfig); err != nil {
+		return err
+	}
 	if err := controller.SetupDynamoGraphDeploymentScalingAdapter(mgr, setupOptions); err != nil {
 		return err
 	}
@@ -606,20 +606,19 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
-	if dgdrV1beta2Enabled {
-		if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
-			return err
-		}
-		if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
-			SetupOptions:            setupOptions,
-			DockerSecretRetriever:   dockerSecretRetriever,
-			PlannerImage:            plannerImage,
-			DynamoVersion:           dynamoVersion,
-			OperatorImage:           operatorImage,
-			OperatorImagePullPolicy: operatorPullPolicy,
-		}); err != nil {
-			return err
-		}
+	// DGDR v1beta2 is available without an API feature gate.
+	if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
+		return err
+	}
+	if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
+		SetupOptions:            setupOptions,
+		DockerSecretRetriever:   dockerSecretRetriever,
+		PlannerImage:            plannerImage,
+		DynamoVersion:           dynamoVersion,
+		OperatorImage:           operatorImage,
+		OperatorImagePullPolicy: operatorPullPolicy,
+	}); err != nil {
+		return err
 	}
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,

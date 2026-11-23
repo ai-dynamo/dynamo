@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Forward router KV hints and advertise KVCR HiCache sources to Dynamo."""
+"""Forward router KV hints and advertise SGLang KVCR sources to Dynamo."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
+from dynamo.common.kv_state_agent import validate_advertise_host
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     resolved_server_args,
@@ -30,7 +31,30 @@ def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     return filter_supported_async_generate_kwargs(engine, {"kv_hints": dict(hint)})
 
 
-def kvcr_hint_endpoints(scheduler_infos, rank_bounds) -> dict[str, str]:
+def is_supported_kvcr_linker_topology(server_args) -> bool:
+    return (
+        getattr(server_args, "enable_unified_cache_external_linker", False)
+        and getattr(server_args, "unified_cache_external_linker_backend", None)
+        == "kvcr"
+        and all(
+            getattr(server_args, name, 1) in (None, 1)
+            for name in (
+                "nnodes",
+                "tp_size",
+                "dp_size",
+                "attn_dp_size",
+                "attn_cp_size",
+                "dcp_size",
+                "pp_size",
+                "tokenizer_worker_num",
+            )
+        )
+    )
+
+
+def kvcr_hint_endpoints(
+    scheduler_infos, rank_bounds, *, require_inventory=False
+) -> dict[str, str]:
     """Validate SGLang-owned coordinates; never infer backend defaults or offsets."""
     endpoints: dict[str, str] = {}
     expected_ranks = set(range(*rank_bounds))
@@ -45,6 +69,8 @@ def kvcr_hint_endpoints(scheduler_infos, rank_bounds) -> dict[str, str]:
             if not isinstance(capabilities, list):
                 raise ValueError("SGLang KV hint capabilities must be a list")
             if "router_hint" not in capabilities:
+                continue
+            if require_inventory and "kvcr_inventory" not in capabilities:
                 continue
             rank = source.get("dp_rank")
             endpoint = source.get("source_control_endpoint")
@@ -78,6 +104,15 @@ def kvcr_hint_endpoints(scheduler_infos, rank_bounds) -> dict[str, str]:
                     raise ValueError(
                         "SGLang KV hint source cannot advertise a wildcard"
                     )
+            if require_inventory:
+                host = parsed.hostname
+                try:
+                    validate_advertise_host(f"[{host}]" if ":" in host else host)
+                except ValueError as exc:
+                    raise ValueError(
+                        "KVCR advertise_host in --hicache-storage-backend-extra-config "
+                        "must be a non-loopback connectable host"
+                    ) from exc
             key = str(rank)
             if key in endpoints and endpoints[key] != endpoint:
                 raise ValueError(
@@ -92,10 +127,11 @@ def kvcr_hint_endpoints(scheduler_infos, rank_bounds) -> dict[str, str]:
 def publish_kvcr_hint_capabilities(
     runtime_config, engine, server_args, worker_type
 ) -> None:
-    """Publish only HiCache sources explicitly reported by compatible SGLang."""
+    """Publish KVCR sources explicitly reported by a supported SGLang worker."""
     server_args = resolved_server_args(server_args)
+    linker = is_supported_kvcr_linker_topology(server_args)
     if (
-        not getattr(server_args, "enable_hierarchical_cache", False)
+        not (getattr(server_args, "enable_hierarchical_cache", False) or linker)
         or getattr(server_args, "nnodes", 1) != 1
         or getattr(server_args, "pp_size", 1) != 1
         or not filter_supported_async_generate_kwargs(engine, {"kv_hints": None})
@@ -105,7 +141,9 @@ def publish_kvcr_hint_capabilities(
     if init_result is None:
         return
     endpoints = kvcr_hint_endpoints(
-        init_result.scheduler_infos, model_card_dp_rank_bounds(server_args)
+        init_result.scheduler_infos,
+        model_card_dp_rank_bounds(server_args),
+        require_inventory=linker,
     )
     if not endpoints:
         return

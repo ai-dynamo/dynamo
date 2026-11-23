@@ -12,6 +12,7 @@ from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.adapters import AggPlanner
 from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
     PlannerEffects,
     ScalingDecision,
     ScheduledTick,
@@ -60,6 +61,9 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
         applied_targets.extend(targets)
 
     environment.refresh = AsyncMock(side_effect=refresh)
+    environment.apply_batch_drain_limits = AsyncMock(
+        side_effect=lambda _decisions: events.append("environment.apply_batch_drain")
+    )
     environment.apply_scaling = AsyncMock(side_effect=apply_scaling)
 
     observer = EnvironmentObservePlugin(
@@ -88,6 +92,14 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
             return PlannerEffects(
                 scale_to=ScalingDecision(num_decode=3),
                 next_tick=next_tick,
+                batch_drain_limits=[
+                    BatchDrainLimitDecision(
+                        pool_id="pool",
+                        max_admission_rps=5.0,
+                        valid_until_s=100.0,
+                        decision_id="decision",
+                    )
+                ],
             )
 
     class RecordingAggPlanner(AggPlanner):
@@ -109,6 +121,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
         return_value=MagicMock(),
     ):
         planner = RecordingAggPlanner(None, config, environment)
+    planner.prometheus_port = 1
 
     engine = RecordingEngine()
     planner._engine = engine
@@ -125,6 +138,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
         "apply effects",
     ]
     if not advisory:
+        expected_events[3:3] = ["environment.apply_batch_drain"]
         expected_events.append("environment.apply_scaling")
         assert len(applied_targets) == 1
         assert applied_targets[0].sub_component_type == SubComponentType.DECODE
@@ -132,6 +146,13 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
         assert applied_targets[0].desired_replicas == 3
     else:
         assert applied_targets == []
+    planner.prometheus_metrics.predicted_num_decode_replicas.set.assert_called_once_with(
+        3
+    )
+    if advisory:
+        environment.apply_batch_drain_limits.assert_not_awaited()
+    else:
+        environment.apply_batch_drain_limits.assert_awaited_once()
     assert events == expected_events
 
 
@@ -144,6 +165,7 @@ async def test_runtime_patch_queued_during_decision_discards_stale_effects():
     environment = MagicMock()
     environment.deployment_state.return_value = state
     environment.metrics_state.return_value = Metrics()
+    environment.apply_batch_drain_limits = AsyncMock()
 
     submitted_effects = []
 
@@ -189,6 +211,14 @@ async def test_runtime_patch_queued_during_decision_discards_stale_effects():
             return PlannerEffects(
                 scale_to=ScalingDecision(num_decode=8),
                 next_tick=next_tick,
+                batch_drain_limits=[
+                    BatchDrainLimitDecision(
+                        pool_id="pool",
+                        max_admission_rps=5.0,
+                        valid_until_s=100.0,
+                        decision_id="stale-decision",
+                    )
+                ],
             )
 
     next_tick = ScheduledTick(at_s=20.0)
@@ -199,6 +229,7 @@ async def test_runtime_patch_queued_during_decision_discards_stale_effects():
     assert (await runtime_patch_tasks[0])["max_gpu_budget"] == 1
     assert completed_tick is next_tick
     assert submitted_effects == []
+    environment.apply_batch_drain_limits.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -253,6 +284,7 @@ async def test_stalled_effect_ack_keeps_runtime_api_available_without_duplicate(
     environment = MagicMock()
     environment.deployment_state.return_value = state
     environment.metrics_state.return_value = Metrics()
+    environment.apply_batch_drain_limits = AsyncMock()
 
     submission_started = asyncio.Event()
     acknowledge_submission = asyncio.Event()
@@ -290,16 +322,30 @@ async def test_stalled_effect_ack_keeps_runtime_api_available_without_duplicate(
     )
     first_next_tick = ScheduledTick(at_s=20.0)
     second_next_tick = ScheduledTick(at_s=30.0)
+    first_drain = BatchDrainLimitDecision(
+        pool_id="pool",
+        max_admission_rps=5.0,
+        valid_until_s=100.0,
+        decision_id="first-decision",
+    )
+    second_drain = BatchDrainLimitDecision(
+        pool_id="pool",
+        max_admission_rps=1.0,
+        valid_until_s=110.0,
+        decision_id="second-decision",
+    )
     engine = MagicMock()
     engine.tick = AsyncMock(
         side_effect=[
             PlannerEffects(
                 scale_to=ScalingDecision(num_decode=8),
                 next_tick=first_next_tick,
+                batch_drain_limits=[first_drain],
             ),
             PlannerEffects(
                 scale_to=ScalingDecision(num_decode=1),
                 next_tick=second_next_tick,
+                batch_drain_limits=[second_drain],
             ),
         ]
     )
@@ -319,6 +365,7 @@ async def test_stalled_effect_ack_keeps_runtime_api_available_without_duplicate(
     assert patch_response["max_gpu_budget"] == 1
     assert (await planner.get_min_endpoints())["max_gpu_budget"] == 1
     assert len(submitted_effects) == 1
+    environment.apply_batch_drain_limits.assert_awaited_once_with([first_drain])
 
     acknowledge_submission.set()
     await pending_submission
@@ -411,6 +458,60 @@ async def test_late_submission_error_after_timeout_fails_closed_without_retry(ca
     assert len(submission_attempts) == 1
     assert planner._effect_submission_outcome_unknown is not None
     assert "requires a Planner restart" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_batch_drain_failure_is_outcome_unknown_without_scaling_or_retry():
+    state = DeploymentState()
+    state.decode.info = WorkerInfo(k8s_name="decode-worker")
+    environment = MagicMock()
+    environment.deployment_state.return_value = state
+    environment.apply_batch_drain_limits = AsyncMock(
+        side_effect=RuntimeError("redis acknowledgement lost")
+    )
+    submitted_effects = []
+
+    class RecordingAggPlanner(AggPlanner):
+        async def _apply_effects(self, effects):
+            submitted_effects.append(effects)
+
+    config = PlannerConfig(
+        mode="agg",
+        namespace="test-namespace",
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        report_interval_hours=None,
+    )
+    with patch(
+        "dynamo.planner.core.base.PlannerPrometheusMetrics",
+        return_value=MagicMock(),
+    ):
+        planner = RecordingAggPlanner(None, config, environment)
+
+    drain = BatchDrainLimitDecision(
+        pool_id="pool",
+        max_admission_rps=5.0,
+        valid_until_s=100.0,
+        decision_id="ambiguous-decision",
+    )
+    effects = PlannerEffects(
+        scale_to=ScalingDecision(num_decode=3),
+        batch_drain_limits=[drain],
+    )
+
+    with pytest.raises(RuntimeError, match="acknowledgement lost"):
+        await planner._submit_effects(effects, 0)
+    await asyncio.sleep(0)
+
+    assert submitted_effects == []
+    assert planner._effect_submission_outcome_unknown is not None
+    assert "redis acknowledgement lost" in planner._effect_submission_outcome_unknown
+
+    await planner._submit_effects(effects, 0)
+
+    environment.apply_batch_drain_limits.assert_awaited_once_with([drain])
+    assert submitted_effects == []
 
 
 @pytest.mark.asyncio

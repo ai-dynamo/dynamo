@@ -42,8 +42,8 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
-| Thu, Oct 15, 2026 | ~~[CoreWeave x NVIDIA Dynamo Meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you.)~~ | San Francisco |
-| Tue, Oct 13, 2026 | ~~[Dynamo Engineering Sync](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
+| Thu, Nov 19, 2026 | ~~[SIG Frontend — Biweekly Sync](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261119T210000Z%2F20261119T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
+| Thu, Nov 19, 2026 | ~~[SIG Router](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
@@ -65,7 +65,6 @@ If you're running a single model on a single GPU, your inference engine alone is
 | [**Disaggregated Serving**](https://docs.nvidia.com/dynamo/dev/knowledge-base/concepts/system-architecture/disaggregated-serving) | ✅ | ✅ | ✅ |
 | [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | ✅ | ✅ | ✅ |
 | [**SLA-Based Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | ✅ | ✅ | ✅ |
-| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
 | [**Tool Calling**](docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx) | ✅ | ✅ | ✅ |
 
@@ -98,11 +97,10 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 |------------|-------------|----------------|
 | [**Disaggregated Prefill/Decode**](https://docs.nvidia.com/dynamo/dev/knowledge-base/concepts/system-architecture/disaggregated-serving) | Separates prefill and decode into independently scalable GPU pools | Maximizes GPU utilization; each phase runs on hardware tuned for its workload |
 | [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | Routes requests based on worker load and KV cache overlap | Eliminates redundant prefill computation — 2x faster TTFT |
-| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | Offloads KV cache across GPU → CPU → SSD → remote storage | Extends effective context length beyond GPU memory |
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
 | [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
 | [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
-| [**AISimulate**](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline | Finds a strong serving configuration without bringing up a GPU cluster |
+| [**AISimulate**](https://pypi.org/project/aisim/) | Predicts serving behavior and searches deployment configurations offline | Finds a strong serving configuration without bringing up a GPU cluster |
 | [**Fault Tolerance**](https://docs.nvidia.com/dynamo/user-guides/fault-tolerance/request-migration) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
 
 ### New in 1.0
@@ -326,7 +324,6 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 [disagg]: docs/design-docs/disagg-serving.md
 [kv-routing]: docs/components/router/README.md
 [planner]: docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
-[kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
 [tools]: docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx

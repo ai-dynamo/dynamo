@@ -21,3 +21,7 @@ package v1beta2
 // the Run reached a terminal result. status.phase only describes how a completed Run ended, and
 // consumers (such as the Request controller) decide on this condition, not on the phase.
 const DGDRRunConditionCompleted = "Completed"
+
+// DGDRRunConditionPublished reports candidate publication independently of Run completion.
+// False reports retryable preparation errors; True means the current Candidate projection is published.
+const DGDRRunConditionPublished = "Published"

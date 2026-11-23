@@ -6,6 +6,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -18,11 +20,10 @@ use tokio::sync::Notify;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
-use tonic::transport::server::Connected;
+use tonic::transport::server::{Connected, TcpIncoming};
 
 use super::config::PoolRelayGrpcConfig;
 use super::load::{LoadUpdateHub, load_update, run_load_publisher, run_snapshot_publisher};
@@ -45,15 +46,29 @@ pub(crate) struct GrpcTransport {
     cancel: CancellationToken,
     health: Arc<RwLock<GrpcTransportHealth>>,
     task: Mutex<Option<JoinHandle<()>>>,
+    global_view: Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
+    source: GrpcPublicationSource,
+    load_updates: LoadUpdateHub<super::protocol::KvPoolLoadUpdate>,
+    serving_load_updates: LoadUpdateHub<super::protocol::ServingLoadUpdate>,
     #[cfg(test)]
-    accepted: Arc<Notify>,
+    accepted: Arc<AcceptedConnectionProbe>,
+}
+
+/// Test hook: signals when tonic first reads an accepted connection and records
+/// whether it had `TCP_NODELAY` set. Callers must open only one connection on
+/// a fresh transport before waiting on this shared probe.
+#[cfg(test)]
+#[derive(Default)]
+struct AcceptedConnectionProbe {
+    polled: Notify,
+    nodelay: AtomicBool,
 }
 
 struct CancellableIo {
     stream: TcpStream,
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
     #[cfg(test)]
-    accepted: Option<Arc<Notify>>,
+    accepted: Option<Arc<AcceptedConnectionProbe>>,
 }
 
 impl CancellableIo {
@@ -78,7 +93,7 @@ impl CancellableIo {
     }
 
     #[cfg(test)]
-    fn notify_when_polled(mut self, accepted: Arc<Notify>) -> Self {
+    fn notify_when_polled(mut self, accepted: Arc<AcceptedConnectionProbe>) -> Self {
         self.accepted = Some(accepted);
         self
     }
@@ -92,7 +107,9 @@ impl AsyncRead for CancellableIo {
     ) -> Poll<io::Result<()>> {
         #[cfg(test)]
         if let Some(accepted) = self.accepted.take() {
-            accepted.notify_one();
+            let nodelay = self.stream.nodelay().unwrap_or(false);
+            accepted.nodelay.store(nodelay, Ordering::Release);
+            accepted.polled.notify_one();
         }
         if let Err(error) = self.poll_cancelled(cx) {
             return Poll::Ready(Err(error));
@@ -111,6 +128,21 @@ impl AsyncWrite for CancellableIo {
             return Poll::Ready(Err(error));
         }
         Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        if let Err(error) = self.poll_cancelled(cx) {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
@@ -217,19 +249,28 @@ impl GrpcTransport {
         let server_cancel = cancel.clone();
         let server_health = health.clone();
         #[cfg(test)]
-        let accepted = Arc::new(Notify::new());
+        let accepted = Arc::new(AcceptedConnectionProbe::default());
         #[cfg(test)]
         let accepted_for_server = accepted.clone();
         let server_task = tokio::spawn(async move {
             let connection_cancel = server_cancel.clone();
-            let incoming = TcpListenerStream::new(listener).map(move |connection| {
-                connection.map(|stream| {
-                    let io = CancellableIo::new(stream, connection_cancel.clone());
-                    #[cfg(test)]
-                    let io = io.notify_when_polled(accepted_for_server.clone());
-                    io
+            let incoming = TcpIncoming::from(listener)
+                .with_nodelay(Some(true))
+                .then(|connection| async move {
+                    if connection.is_err() {
+                        // Avoid spinning when descriptor exhaustion leaves the listener readable.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    connection
                 })
-            });
+                .map(move |connection| {
+                    connection.map(|stream| {
+                        let io = CancellableIo::new(stream, connection_cancel.child_token());
+                        #[cfg(test)]
+                        let io = io.notify_when_polled(accepted_for_server.clone());
+                        io
+                    })
+                });
             let shutdown = async move {
                 server_cancel.cancelled().await;
                 health_reporter
@@ -243,13 +284,14 @@ impl GrpcTransport {
                 .context("KV Relay gRPC server failed")
         });
         let kv_load_publisher =
-            run_load_publisher(load_window, load_updates, cancel.clone(), move |sequence| {
-                load_update(relay, source.load_snapshots(), load_window, sequence)
+            run_load_publisher(load_window, load_updates.clone(), cancel.clone(), {
+                let source = source.clone();
+                move |sequence| load_update(relay, source.load_snapshots(), load_window, sequence)
             });
         // The aggregator snapshots once per `load_window`; each snapshot is one window.
         let serving_load_publisher = run_snapshot_publisher(
             serving_load,
-            serving_load_updates,
+            serving_load_updates.clone(),
             cancel.clone(),
             move |snapshot, sequence| serving_load_update(relay, snapshot, load_window, sequence),
         );
@@ -269,6 +311,10 @@ impl GrpcTransport {
             cancel,
             health,
             task: Mutex::new(Some(task)),
+            global_view: Mutex::new(None),
+            source,
+            load_updates,
+            serving_load_updates,
             #[cfg(test)]
             accepted,
         })
@@ -278,13 +324,40 @@ impl GrpcTransport {
         self.health.read().clone()
     }
 
+    pub(crate) fn broadcast_global_views(
+        &self,
+        pool: dynamo_global_common::PoolKey,
+        routers: watch::Receiver<std::collections::HashSet<dynamo_global_common::RouterReplica>>,
+    ) {
+        let task = super::global_view::spawn(
+            pool,
+            routers,
+            self.source.clone(),
+            self.load_updates.clone(),
+            self.serving_load_updates.clone(),
+            self.cancel.clone(),
+        );
+        *self.global_view.lock() = Some(tokio_util::task::AbortOnDropHandle::new(task));
+    }
+
+    /// Waits until tonic first reads an accepted connection, then reports whether
+    /// it had `TCP_NODELAY` set. Callers must use a fresh transport with only one
+    /// connection because the probe is shared by all accepted connections.
     #[cfg(test)]
-    pub(crate) async fn wait_for_accepted_connection(&self) {
-        self.accepted.notified().await;
+    pub(crate) async fn wait_for_accepted_connection(&self) -> bool {
+        self.accepted.polled.notified().await;
+        self.accepted.nodelay.load(Ordering::Acquire)
     }
 
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
+        let global_view = self.global_view.lock().take();
+        if let Some(task) = global_view
+            && let Err(error) = task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "Global Router publisher failed during shutdown");
+        }
         let task = self.task.lock().take();
         if let Some(task) = task
             && let Err(error) = task.await
@@ -352,6 +425,34 @@ async fn supervise_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn connection_vectored_writes_obey_parent_cancellation() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let cancel = CancellationToken::new();
+            let mut connection = CancellableIo::new(stream, cancel.child_token());
+            assert!(connection.is_write_vectored());
+
+            let bufs = [io::IoSlice::new(b"header"), io::IoSlice::new(b"body")];
+            let written = connection.write_vectored(&bufs).await.unwrap();
+            assert!(written > 0);
+            let mut received = vec![0; written];
+            peer.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, &b"headerbody"[..written]);
+
+            cancel.cancel();
+            let error = connection.write_vectored(&bufs).await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        })
+        .await
+        .expect("connection write or cancellation hung");
+    }
 
     #[tokio::test]
     async fn supervised_load_task_failure_cancels_the_relay() {

@@ -20,11 +20,12 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import parse_args, resolve_planner_profile_data
+from .args import parse_args, use_planner_profile_data
 from .config import (
     apply_worker_engine_args_overrides,
     build_runtime_config,
     load_mocker_engine_args,
+    validate_systemone_serial_config,
 )
 from .utils.kv_cache import compute_kv_bytes_per_token
 
@@ -82,9 +83,7 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
-    # Resolve planner-profile-data: convert profile results dir to NPZ if needed
-    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
-    args.planner_profile_data = profile_data_result.npz_path
+    profile_data_result = use_planner_profile_data(args)
 
     try:
         # Only when something needs the local files: many workers (rate limiting)
@@ -152,6 +151,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     - Independent service registration and stats scraping
     - But still sharing the same tokio runtime (efficient)
     """
+    validate_systemone_serial_config(args, base_engine_args)
     futures = []
     runtimes = []
     shutdown_requested = False
@@ -243,6 +243,8 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
         if args.sglang_generate:
             runtime_config.set_engine_specific("sglang_generate", "true")
+        if args.systemone_serial:
+            runtime_config.set_engine_specific("sglang_systemone_serial_v1", "true")
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(

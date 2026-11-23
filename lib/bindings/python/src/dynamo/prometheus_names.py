@@ -107,6 +107,18 @@ class frontend_service:
     INFLIGHT_INPUT_TOKENS = "inflight_input_tokens"
     # Total known input tokens of admitted requests.
     INPUT_TOKENS_TOTAL = "input_tokens_total"
+    # Questions per admitted System One request.
+    SYSTEMONE_QUESTIONS = "systemone_questions"
+    # Expanded prompt tokens per admitted System One request.
+    SYSTEMONE_INPUT_TOKENS = "systemone_input_tokens"
+    # Requested candidate token IDs per admitted System One request.
+    SYSTEMONE_CANDIDATE_IDS = "systemone_candidate_ids"
+    # Cached prompt tokens reported by a completed System One branch.
+    SYSTEMONE_CACHED_TOKENS = "systemone_cached_tokens"
+    # Total question branches admitted for System One dispatch.
+    SYSTEMONE_ADMITTED_BRANCHES_TOTAL = "systemone_admitted_branches_total"
+    # Duration of a System One execution phase in seconds.
+    SYSTEMONE_PHASE_SECONDS = "systemone_phase_seconds"
     # Total number of terminal semantic request failures.
     FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
@@ -260,6 +272,9 @@ class frontend_service:
         INTERNAL = "internal"
         # Feature not implemented (501)
         NOT_IMPLEMENTED = "not_implemented"
+        # Media refused by a frontend serving a text-only model
+        # (`--reject-media`)
+        UNSUPPORTED_MODALITY = "unsupported_modality"
 
     class migration_outcome:
         """Migration outcome label values"""
@@ -317,41 +332,6 @@ class kv_publisher:
     ZMQ_CONVERSION_ISSUES_TOTAL = "kv_publisher_zmq_conversion_issues_total"
     # Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
     ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
-
-
-class kvbm:
-    """KVBM"""
-
-    # The number of offload blocks from device to host
-    OFFLOAD_BLOCKS_D2H = "offload_blocks_d2h"
-    # The number of offload blocks from host to disk
-    OFFLOAD_BLOCKS_H2D = "offload_blocks_h2d"
-    # The number of offload blocks from device to disk (bypassing host memory)
-    OFFLOAD_BLOCKS_D2D = "offload_blocks_d2d"
-    # The number of onboard blocks from host to device
-    ONBOARD_BLOCKS_H2D = "onboard_blocks_h2d"
-    # The number of onboard blocks from disk to device
-    ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
-    # The number of matched tokens
-    MATCHED_TOKENS = "matched_tokens"
-    # Host cache hit rate (0.0-1.0) from the sliding window
-    HOST_CACHE_HIT_RATE = "host_cache_hit_rate"
-    # Disk cache hit rate (0.0-1.0) from the sliding window
-    DISK_CACHE_HIT_RATE = "disk_cache_hit_rate"
-    # Object storage cache hit rate (0.0-1.0) from the sliding window
-    OBJECT_CACHE_HIT_RATE = "object_cache_hit_rate"
-    # Number of blocks offloaded from device to object storage
-    OFFLOAD_BLOCKS_D2O = "offload_blocks_d2o"
-    # Number of blocks onboarded from object storage to device
-    ONBOARD_BLOCKS_O2D = "onboard_blocks_o2d"
-    # Bytes transferred to object storage (offload)
-    OFFLOAD_BYTES_OBJECT = "offload_bytes_object"
-    # Bytes transferred from object storage (onboard)
-    ONBOARD_BYTES_OBJECT = "onboard_bytes_object"
-    # Number of failed object storage read operations (blocks)
-    OBJECT_READ_FAILURES = "object_read_failures"
-    # Number of failed object storage write operations (blocks)
-    OBJECT_WRITE_FAILURES = "object_write_failures"
 
 
 class kvindexer:

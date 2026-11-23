@@ -179,10 +179,13 @@ func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
 	}
 
 	t.Run("v1beta1 unchanged legacy images remain valid", func(t *testing.T) {
-		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-		}}
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: consts.ComponentTypeWorker,
+			Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+				{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+				{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			},
+		}
 		newSpec := oldSpec.DeepCopy()
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Beta1}
 
@@ -191,10 +194,13 @@ func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
 	})
 
 	t.Run("v1beta1 changed legacy image requires override", func(t *testing.T) {
-		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-		}}
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: consts.ComponentTypeWorker,
+			Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+				{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+				{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			},
+		}
 		newSpec := oldSpec.DeepCopy()
 		newSpec.Roles[1].PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:other"
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Beta1}
@@ -204,10 +210,13 @@ func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
 	})
 
 	t.Run("v1alpha1 changed legacy image requires override", func(t *testing.T) {
-		oldSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
-			{Name: nvidiacomv1alpha1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-			{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-		}}
+		oldSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: consts.ComponentTypeWorker,
+			Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
+				{Name: nvidiacomv1alpha1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+				{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			},
+		}
 		newSpec := oldSpec.DeepCopy()
 		newSpec.Roles[0].PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:other"
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Alpha1}

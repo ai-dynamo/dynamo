@@ -24,6 +24,7 @@ Wire semantics are specified in [the gRPC contract](grpc-contract.md) and
 | [`actor.rs`](../actor.rs) | Exact rank ownership, refcounts, CKF mutation, and publication cuts. |
 | [`topology.rs`](../topology.rs), [`load.rs`](../load.rs) | Serving readiness, worker-authoritative KV load, and per-pool router scheduler load. |
 | [`serving_load.rs`](../serving_load.rs) | Frontend-load aggregation and the serving-load snapshot behind `SubscribeServingLoad`. |
+| [`routing_pool.rs`](../routing_pool.rs) | The routing pool's Global Discovery registration (`POST /pools`), under the model the topology names. |
 | [`publication.rs`](../publication.rs) | Transport-neutral source, streams, frames, and error categories. |
 | [`publication/hub.rs`](../publication/hub.rs), [`publication/stream.rs`](../publication/stream.rs) | Lazy mirrors, bounded fanout, snapshot bootstrap, and stream continuity. |
 | [`wan/grpc.rs`](../wan/grpc.rs), [`wan/grpc/config.rs`](../wan/grpc/config.rs) | gRPC adapter facade and configuration. |
@@ -72,7 +73,8 @@ implementation feature. Certificates, authentication, and rotation remain outsid
 
 ## Inputs
 
-The Relay consumes only DC-local, positively advertised facts:
+The Relay consumes only positively advertised facts. All of them are DC-local except the Global
+Router replica list:
 
 | Input | Source | Feeds |
 | --- | --- | --- |
@@ -83,6 +85,7 @@ The Relay consumes only DC-local, positively advertised facts:
 | Router scheduler reports | DC event plane (`scheduler_load` subject, per serving endpoint) | pool scheduler load in serving-load windows |
 | Frontend load frames | DC event plane (`frontend_load` topic, per namespace) | model request and token load in serving-load windows |
 | Event-channel registrations | discovery plane, watched per namespace and serving endpoint | expected routers and frontends for serving-load coverage |
+| Global Router replicas | Global Discovery Service `GET /routers`, read every 5 s by `RouterCache` from `dynamo-global-discovery-client` when `--global-discovery-url` is set | the router set behind `subscribe_global_routers()` |
 
 The Relay never probes workers, never synthesizes facts it cannot observe, and
 never assumes another component's internal state.

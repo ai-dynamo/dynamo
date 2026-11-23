@@ -18,7 +18,7 @@ To set the thinking mode used when a request omits an explicit control, pass
 `--dyn-default-thinking-mode enabled|disabled` to the TensorRT-LLM worker or
 set `DYN_DEFAULT_THINKING_MODE`. Request-level thinking controls, including
 adaptive thinking, take precedence. See
-[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default).
+[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default).
 
 ## Building a Custom Container
 
@@ -70,7 +70,7 @@ Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to
 
 ## Diffusion Support (Experimental)
 
-Dynamo supports video and image generation using diffusion models through TensorRT-LLM. For requirements, supported models, API usage, and configuration options, see the [Text-to-Image](../../../../../use-cases/diffusion/workflows/text-to-image.md#tensorrt-llm) and [Text-to-Video](../../../../../use-cases/diffusion/workflows/text-to-video.md#tensorrt-llm) guides.
+Dynamo supports video and image generation using diffusion models through TensorRT-LLM. For requirements, supported models, API usage, and configuration options, see the [Text-to-Image](../../../../../use-cases/diffusion/workflows/text-to-image.md#tensorrt-llm) and [Text to Video (T2V)](../../../../../use-cases/diffusion/workflows/text-to-video.md#tensorrt-llm) guides.
 
 ## Logits Processing
 

@@ -19,8 +19,9 @@ ModelExpress can stage a version from three sources:
 
 All three refit paths are Experimental. The [ModelExpress RL refit package](https://github.com/ai-dynamo/modelexpress/tree/main/modelexpress_client/python/modelexpress_rl) contains the current source strategies. The [Dynamo vLLM reshard refit example](https://github.com/ai-dynamo/modelexpress/tree/main/examples/rl/dynamo_vllm_reshard_refit) validates the full-weight trainer-to-inference path, and the [Dynamo vLLM S3 delta refit example](https://github.com/ai-dynamo/modelexpress/tree/main/examples/rl/dynamo_vllm_s3_delta_refit) exercises the artifact-to-inference path with a full snapshot followed by incremental deltas. Neither qualifies every backend and topology. ModelExpress startup loading remains a separate boot and scale-out workflow.
 
-> [!NOTE]
-> ModelExpress startup loading and live RL refit have different interfaces. vLLM 0.23 and later use the native `--load-format modelexpress`; `mx` remains a backward-compatible alias. Earlier plugin-based images generally use `mx`, while legacy split-loader images can expose `mx-source` and `mx-target`. Match the loader to the installed vLLM, ModelExpress package, and runtime image instead of inferring it from the refit API. See [Dynamo deprecations](../../reference/general/releases/deprecations.mdx) for the Dynamo-owned loader migration.
+<Note>
+ModelExpress startup loading and live RL refit have different interfaces. vLLM 0.23 and later use the native `--load-format modelexpress`; `mx` remains a backward-compatible alias. Earlier plugin-based images generally use `mx`, while legacy split-loader images can expose `mx-source` and `mx-target`. Match the loader to the installed vLLM, ModelExpress package, and runtime image instead of inferring it from the refit API. See [Dynamo deprecations](../../reference/general/releases/deprecations.mdx) for the Dynamo-owned loader migration.
+</Note>
 
 ## Choose the Update Path
 
@@ -91,10 +92,9 @@ For distributed vLLM updates, use the advertised group lifecycle and distributed
 
 **Experimental.** SGLang workers do not currently register with `GET /v1/rl/workers`. Set `DYN_SYSTEM_PORT` on each worker and obtain its trusted system-server URL from the framework or deployment. Do not derive that URL from the shared frontend address.
 
-SGLang exposes fixed weight-update routes under `/engine/control/*`. Generation pause and continue methods must be explicitly allowlisted when the integration needs a framework-owned update barrier:
+SGLang exposes fixed weight-update routes under `/engine/control/*`. It also exposes `/engine/pause_generation` and `/engine/continue_generation` by default, so the integration can use them as a framework-owned update barrier without an allowlist:
 
 ```bash
-export DYN_SGLANG_ENGINE_ROUTES="pause_generation:tm continue_generation:tm"
 DYN_SYSTEM_PORT=8081 python -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B
 ```

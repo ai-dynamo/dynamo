@@ -16,7 +16,6 @@
 //! - **ETCD**: ETCD client connection and authentication
 //! - **TCP Request Callback**: bidirectional request callback listener port and host
 //! - **Event Plane**: Event transport selection (NATS)
-//! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
 //! - **Model**: Model loading and caching
 //! - **Worker**: Worker lifecycle and shutdown
@@ -279,96 +278,6 @@ pub mod etcd {
     }
 }
 
-/// Key-Value Block Manager (KVBM) environment variables
-pub mod kvbm {
-    /// Enable KVBM metrics endpoint
-    pub const DYN_KVBM_METRICS: &str = "DYN_KVBM_METRICS";
-
-    /// KVBM metrics endpoint port
-    pub const DYN_KVBM_METRICS_PORT: &str = "DYN_KVBM_METRICS_PORT";
-
-    /// Enable KVBM recording for debugging.
-    pub const DYN_KVBM_ENABLE_RECORD: &str = "DYN_KVBM_ENABLE_RECORD";
-
-    /// Disable disk offload filter
-    pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
-
-    /// CPU cache configuration
-    pub mod cpu_cache {
-        /// CPU cache size in GB
-        pub const DYN_KVBM_CPU_CACHE_GB: &str = "DYN_KVBM_CPU_CACHE_GB";
-
-        /// CPU cache size in number of blocks (override)
-        pub const DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS: &str =
-            "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS";
-    }
-
-    /// Disk cache configuration
-    pub mod disk_cache {
-        /// Disk cache size in GB
-        pub const DYN_KVBM_DISK_CACHE_GB: &str = "DYN_KVBM_DISK_CACHE_GB";
-
-        /// Disk cache size in number of blocks (override)
-        pub const DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS: &str =
-            "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
-    }
-
-    /// Object storage configuration
-    pub mod object_storage {
-        /// Enable object storage. Set to "1" to enable.
-        pub const DYN_KVBM_OBJECT_ENABLED: &str = "DYN_KVBM_OBJECT_ENABLED";
-
-        /// Bucket name for object storage cache
-        /// Supports `{worker_id}` template for per-worker buckets
-        /// Example: "kv-cache-{worker_id}"
-        pub const DYN_KVBM_OBJECT_BUCKET: &str = "DYN_KVBM_OBJECT_BUCKET";
-
-        /// Endpoint for object storage
-        pub const DYN_KVBM_OBJECT_ENDPOINT: &str = "DYN_KVBM_OBJECT_ENDPOINT";
-
-        /// Region for object storage
-        pub const DYN_KVBM_OBJECT_REGION: &str = "DYN_KVBM_OBJECT_REGION";
-
-        /// Access key for authentication
-        pub const DYN_KVBM_OBJECT_ACCESS_KEY: &str = "DYN_KVBM_OBJECT_ACCESS_KEY";
-
-        /// Secret key for authentication
-        pub const DYN_KVBM_OBJECT_SECRET_KEY: &str = "DYN_KVBM_OBJECT_SECRET_KEY";
-
-        /// Number of blocks to store in object storage
-        pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
-    }
-    /// Transfer configuration
-    pub mod transfer {
-        /// Maximum number of blocks per transfer batch
-        pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
-    }
-
-    /// KVBM leader (distributed mode) configuration
-    pub mod leader {
-        /// Timeout in seconds for KVBM leader and worker initialization
-        pub const DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS: &str =
-            "DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS";
-
-        /// ZMQ host for KVBM leader
-        pub const DYN_KVBM_LEADER_ZMQ_HOST: &str = "DYN_KVBM_LEADER_ZMQ_HOST";
-
-        /// ZMQ publish port for KVBM leader
-        pub const DYN_KVBM_LEADER_ZMQ_PUB_PORT: &str = "DYN_KVBM_LEADER_ZMQ_PUB_PORT";
-
-        /// ZMQ acknowledgment port for KVBM leader
-        pub const DYN_KVBM_LEADER_ZMQ_ACK_PORT: &str = "DYN_KVBM_LEADER_ZMQ_ACK_PORT";
-    }
-
-    /// NIXL backend configuration
-    pub mod nixl {
-        /// Prefix for NIXL backend environment variables
-        /// Pattern: `DYN_KVBM_NIXL_BACKEND_<backend>`=true/false
-        /// Example: DYN_KVBM_NIXL_BACKEND_UCX=true
-        pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
-    }
-}
-
 /// LLM (Language Model) inference environment variables
 pub mod llm {
     /// Delay between tokens emitted by the token echo engine, in milliseconds.
@@ -401,7 +310,7 @@ pub mod llm {
     /// through 999 are accepted; an informational value from 100 through 199,
     /// an unparseable value, or an out-of-range value falls back to 529. The
     /// value is read and cached on first use.
-    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = dynamo_error::DYN_HTTP_OVERLOAD_STATUS_CODE;
 
     /// Emit an SSE comment at this interval while a streaming response has no
     /// data. Unset, `0`, invalid, or unrepresentable values keep SSE comments
@@ -411,11 +320,63 @@ pub mod llm {
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
+    /// Enable request-time LoRA resolution and worker-local loading.
+    pub const DYN_LORA_RUNTIME_LOAD_ENABLED: &str = "DYN_LORA_RUNTIME_LOAD_ENABLED";
+
+    /// Worker-side Python runtime LoRA resolver import reference.
+    pub const DYN_LORA_DOWNLOADER_PLUGIN: &str = "DYN_LORA_DOWNLOADER_PLUGIN";
+
+    /// Comma-separated runtime LoRA source URI scheme allowlist.
+    pub const DYN_LORA_ALLOWED_SCHEMES: &str = "DYN_LORA_ALLOWED_SCHEMES";
+
+    /// Worker-owned request-time resolution deadline.
+    pub const DYN_LORA_RESOLVE_TIMEOUT_SECONDS: &str = "DYN_LORA_RESOLVE_TIMEOUT_SECONDS";
+
+    /// Maximum concurrent worker resolver calls.
+    pub const DYN_LORA_MAX_CONCURRENT_RESOLUTIONS: &str = "DYN_LORA_MAX_CONCURRENT_RESOLUTIONS";
+
+    /// Maximum distinct unresolved request-time adapter identities.
+    pub const DYN_LORA_MAX_PENDING_RUNTIME_KEYS: &str = "DYN_LORA_MAX_PENDING_RUNTIME_KEYS";
+
+    /// Maximum pending request admissions for resident request-time adapters.
+    pub const DYN_LORA_MAX_PENDING_ADMISSIONS: &str = "DYN_LORA_MAX_PENDING_ADMISSIONS";
+
+    /// Pending request-time adapter lease lifetime before generation activation.
+    pub const DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS: &str =
+        "DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS";
+
+    /// Maximum resident request-time adapters per worker.
+    pub const DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS: &str = "DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS";
+
+    /// Maximum materialized bytes for one request-time adapter.
+    pub const DYN_LORA_MAX_DOWNLOAD_BYTES: &str = "DYN_LORA_MAX_DOWNLOAD_BYTES";
+
+    /// Request-time resolver cache admission bound; exceeding it does not trigger disk eviction.
+    pub const DYN_LORA_MAX_CACHE_BYTES: &str = "DYN_LORA_MAX_CACHE_BYTES";
+
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
 
+    /// Skip TLS certificate verification for S3 LoRA downloads (set to "true" to enable).
+    /// Intended for trusted internal networks with private-CA or self-signed S3 endpoints.
+    pub const DYN_LORA_S3_TLS_INSECURE: &str = "DYN_LORA_S3_TLS_INSECURE";
+
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
+
+    /// Enable the experimental System One typed-decisions endpoint (/v1/systemone)
+    pub const DYN_ENABLE_SYSTEMONE_API: &str = "DYN_ENABLE_SYSTEMONE_API";
+
+    /// Maximum concurrent System One question branches (default 256, ceiling 4,096).
+    /// Increases above the default warn; values above the ceiling warn and clamp.
+    pub const DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES: &str = "DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES";
+
+    /// Maximum cumulative prompt tokens per System One request (default 65,536, ceiling 1,048,576).
+    /// Context and tokenization-work limits apply independently; increases warn, above-ceiling values clamp.
+    pub const DYN_SYSTEMONE_MAX_INPUT_TOKENS: &str = "DYN_SYSTEMONE_MAX_INPUT_TOKENS";
+    /// Total decision preflight and execution deadline (default 300 seconds, ceiling 3,600).
+    /// Increases above the default warn; values above the ceiling warn and clamp.
+    pub const DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS: &str = "DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS";
 
     /// Master switch for the `nvext` extension protocol on the frontend.
     /// The protocol is **enabled by default**; this variable disables it.
@@ -438,16 +399,32 @@ pub mod llm {
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
     /// Master switch for the frontend's HTTP admin API surface.
-    /// The admin API is **enabled by default**; this variable disables it.
-    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
-    /// registration of `GET` / `POST /busy_threshold`. Inference, metrics,
-    /// models, health, and liveness routes are unaffected.
-    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
+    /// The admin API is **disabled by default**. Truthy values (`1` / `true` / `yes` /
+    /// `on`, case-insensitive) start the admin listener (see `DYN_FRONTEND_ADMIN_HOST` /
+    /// `DYN_FRONTEND_ADMIN_PORT`), which serves `/router_policy`, its busy-threshold
+    /// subresource, and the legacy `/busy_threshold` routes.
+    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+
+    /// Host the frontend admin listener binds to. Default `127.0.0.1`.
+    pub const DYN_FRONTEND_ADMIN_HOST: &str = "DYN_FRONTEND_ADMIN_HOST";
+
+    /// Port of the frontend admin listener. Default `8002`. When the admin API is
+    /// enabled and this port cannot be bound, startup aborts.
+    pub const DYN_FRONTEND_ADMIN_PORT: &str = "DYN_FRONTEND_ADMIN_PORT";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
+
+    /// When truthy, refuse chat requests that carry image, video, or audio
+    /// content in any message before they are routed. For frontends serving
+    /// text-only models.
+    pub const DYN_REJECT_MEDIA: &str = "DYN_REJECT_MEDIA";
+
+    /// HTTP status (4xx or 5xx) for a request refused by `DYN_REJECT_MEDIA`.
+    /// Defaults to 415.
+    pub const DYN_REJECT_MEDIA_STATUS_CODE: &str = "DYN_REJECT_MEDIA_STATUS_CODE";
 
     /// When truthy, force usage in streaming chat and text-completion responses
     /// regardless of the request's `stream_options.include_usage` value.
@@ -831,6 +808,11 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Most sessions each session-affinity table holds; defaults to 65,536.
+    /// The Python frontend exports `--router-session-affinity-max-entries` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
@@ -883,8 +865,9 @@ pub mod response_plane {
     /// Response transport used by every runtime in this process: "tcp", "quic"
     /// or "velo". Defaults to "tcp".
     ///
-    /// Velo has no TLS, so a velo runtime refuses to start while any
-    /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
+    /// Velo has no TLS, so a process that selects velo uses tcp instead
+    /// while any `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is
+    /// truthy.
     ///
     /// On a graceful Stop, velo still delivers what the worker's engine
     /// yields, final chunk included; tcp and quic end the stream at the worker.
@@ -911,7 +894,7 @@ pub mod response_plane {
     /// service also listens on TCP, so a frontend and worker set differently
     /// still reach each other, and the worker reports the mismatch.
     pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
-    /// Maximum Velo response batching delay in milliseconds (default: 5).
+    /// Maximum Velo response batching delay in milliseconds (default: 2).
     /// Set to 0 for greedy flushing after transport admission. Full batches and
     /// lifecycle records can flush sooner. Read once when the service starts.
     pub const DYN_VELO_RESPONSE_BATCH_MS: &str = "DYN_VELO_RESPONSE_BATCH_MS";
@@ -1175,19 +1158,6 @@ mod tests {
             etcd::auth::ETCD_AUTH_CA,
             etcd::auth::ETCD_AUTH_CLIENT_CERT,
             etcd::auth::ETCD_AUTH_CLIENT_KEY,
-            // KVBM
-            kvbm::DYN_KVBM_METRICS,
-            kvbm::DYN_KVBM_METRICS_PORT,
-            kvbm::DYN_KVBM_ENABLE_RECORD,
-            kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
-            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
-            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
-            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_GB,
-            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
-            kvbm::leader::DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_HOST,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB,
@@ -1200,14 +1170,34 @@ mod tests {
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
+            llm::DYN_LORA_RUNTIME_LOAD_ENABLED,
+            llm::DYN_LORA_DOWNLOADER_PLUGIN,
+            llm::DYN_LORA_ALLOWED_SCHEMES,
+            llm::DYN_LORA_RESOLVE_TIMEOUT_SECONDS,
+            llm::DYN_LORA_MAX_CONCURRENT_RESOLUTIONS,
+            llm::DYN_LORA_MAX_PENDING_RUNTIME_KEYS,
+            llm::DYN_LORA_MAX_PENDING_ADMISSIONS,
+            llm::DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS,
+            llm::DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS,
+            llm::DYN_LORA_MAX_DOWNLOAD_BYTES,
+            llm::DYN_LORA_MAX_CACHE_BYTES,
             llm::DYN_LORA_PATH,
+            llm::DYN_LORA_S3_TLS_INSECURE,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_SERVING_LOAD_PUBLISH,
+            llm::DYN_ENABLE_SYSTEMONE_API,
+            llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
+            llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+            llm::DYN_FRONTEND_ADMIN_HOST,
+            llm::DYN_FRONTEND_ADMIN_PORT,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_REJECT_MEDIA,
+            llm::DYN_REJECT_MEDIA_STATUS_CODE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
@@ -1350,7 +1340,6 @@ mod tests {
         assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
         assert!(runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS.starts_with("DYN_"));
         assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
-        assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
         assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));
 
         // NATS vars should start with NATS_

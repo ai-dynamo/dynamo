@@ -7,17 +7,27 @@ import functools
 import json
 import math
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
 
-from dynamo._core import KvRouterConfig
+from dynamo._core import AisPerfConfig, KvRouterConfig
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+from dynamo.common.ais_perf_model import (
+    AIS_OLD_INPUTS_REMOVE_IN,
+    engine_perf_config,
+    normalized_config,
+    router_perf_config,
+    set_timing_model,
+)
+from dynamo.common.configuration.utils import Deprecated
 from dynamo.replay.report import (
     PlannerReplayDetails,
     ReplayReport,
@@ -29,6 +39,9 @@ if TYPE_CHECKING:
     from dynamo.planner.core.types import RetuneInputs, TrafficObservation
 
 _AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
+# Set while a retune sweep replays its candidates: the replay or the Planner
+# that runs the sweep already warned about its deprecated inputs.
+_OLD_INPUTS_WARNED: ContextVar[bool] = ContextVar("old_inputs_warned", default=False)
 
 
 def _planner_replay_adapter():
@@ -64,6 +77,8 @@ class _CommonReplayOptions(TypedDict, total=False):
     decode_engine_args: Any
     router_config: Any
     ais_perf_config: Any
+    router_ais_perf_model: Any
+    ais_perf_model: Any
     num_workers: int
     num_prefill_workers: int
     num_decode_workers: int
@@ -84,9 +99,11 @@ class _CommonReplayOptions(TypedDict, total=False):
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
+    conversation_affinity: dict[str, Any] | None
     agentic_lanes: int | None
     agentic_snapshot: dict[str, Any] | None
     agentic_warmup: bool
+    agentic_warmup_policy: Literal["repeated_prefixes", "live_trajectory_v1"] | None
     agentic_profile: dict[str, Any] | None
     execution_model: str | None
     weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
@@ -96,7 +113,7 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     trace_num_prefix_groups: int
     report_jsonl_path: str | os.PathLike[str] | None
     max_sim_time_ms: float | None
-    # Internal to retune sweeps; not part of the public API.
+    # Internal; not part of the public API.
     _planner_warmup_observations: "Sequence[TrafficObservation] | None"
     _deterministic: bool
 
@@ -109,12 +126,124 @@ class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
     shared_prefix_ratio: float
     num_prefix_groups: int
     inter_turn_delay_ms: float
+    accumulate_session_deltas: bool
 
 
 def _normalize_trace_files(trace_files):
     if isinstance(trace_files, (str, os.PathLike)):
         return [trace_files]
     return list(trace_files)
+
+
+def _has_ais_load_model(router_config: KvRouterConfig) -> bool:
+    """Return whether the router config selects the AIS prefill load model."""
+    # The object has no attribute for it; its JSON form spells ais as "aic".
+    load_model = json.loads(router_config.to_json())["router_prefill_load_model"]
+    return load_model in ("ais", "aic")
+
+
+def _perf_model_inputs(
+    *,
+    ais_perf_config: Any,
+    router_ais_perf_model: Any,
+    ais_perf_model: Any,
+    router_mode: str,
+    router_config: Any,
+    extra_engine_args: Any,
+    prefill_engine_args: Any,
+    decode_engine_args: Any,
+) -> tuple[Any, Any, Any, Any]:
+    """Return the router perf config object and the three engine args to run with.
+
+    The caller's engine args are not changed. The warning for a deprecated
+    ``ais_perf_config`` names the line that called the caller.
+    """
+    for keyword, value in (
+        ("router_ais_perf_model", router_ais_perf_model),
+        ("ais_perf_model", ais_perf_model),
+    ):
+        if value is not None and not isinstance(
+            value, (str, os.PathLike, Mapping, list, tuple)
+        ):
+            raise ValueError(
+                f"{keyword}= takes a file path, inline JSON, a config or a list of "
+                f"configs, not {type(value).__name__}"
+            )
+    if ais_perf_config is not None and router_ais_perf_model is not None:
+        raise ValueError(
+            "ais_perf_config= cannot be combined with router_ais_perf_model="
+        )
+    disaggregated = prefill_engine_args is not None or decode_engine_args is not None
+    native_config = ais_perf_config
+    # A router config of another type is left to the native replay to reject.
+    ais_load_model = (
+        router_mode == "kv_router"
+        and isinstance(router_config, KvRouterConfig)
+        and _has_ais_load_model(router_config)
+    )
+    if router_ais_perf_model is not None:
+        if router_mode != "kv_router":
+            raise ValueError("router_ais_perf_model= requires router_mode='kv_router'")
+        if router_config is None or (
+            isinstance(router_config, KvRouterConfig) and not ais_load_model
+        ):
+            raise ValueError(
+                "router_ais_perf_model= requires router_config with "
+                "router_prefill_load_model='ais'"
+            )
+        try:
+            router_perf_model = router_perf_config(
+                router_ais_perf_model, "prefill" if disaggregated else "aggregated"
+            )
+        except ValueError as error:
+            # ais_perf_model= can raise the same text, so the error says
+            # which keyword it is about.
+            raise ValueError(f"router_ais_perf_model: {error}") from error
+        native_config = AisPerfConfig(config=router_perf_model)
+    elif ais_perf_config is None and ais_load_model:
+        raise ValueError(
+            "router_prefill_load_model='ais' requires router_ais_perf_model="
+        )
+    if ais_perf_model is not None:
+        engine_args = {
+            "extra_engine_args": extra_engine_args,
+            "prefill_engine_args": prefill_engine_args,
+            "decode_engine_args": decode_engine_args,
+        }
+        roles = (
+            {"prefill": "prefill_engine_args", "decode": "decode_engine_args"}
+            if disaggregated
+            else {"aggregated": "extra_engine_args"}
+        )
+        for role, name in roles.items():
+            # A disaggregated role needs engine.worker_type in its engine
+            # args, so they are not created here: the native check reports
+            # the missing ones.
+            if disaggregated and engine_args[name] is None:
+                continue
+            config = engine_perf_config(ais_perf_model, role)
+            # Only a check: the engine gets the config as resolved, without
+            # the defaults the normalized form adds.
+            normalized_config(config)
+            engine_args[name] = set_timing_model(
+                engine_args[name],
+                config,
+                engine_args_name=name,
+                perf_model_name="ais_perf_model",
+            )
+        extra_engine_args = engine_args["extra_engine_args"]
+        prefill_engine_args = engine_args["prefill_engine_args"]
+        decode_engine_args = engine_args["decode_engine_args"]
+    if ais_perf_config is not None and not _OLD_INPUTS_WARNED.get():
+        Deprecated("router_ais_perf_model=", remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
+            "ais_perf_config=", stacklevel=3
+        )
+    return (
+        native_config,
+        extra_engine_args,
+        prefill_engine_args,
+        decode_engine_args,
+    )
 
 
 def _retune_inputs(
@@ -154,6 +283,14 @@ def _retune_inputs(
     AISimulate setting.
     """
 
+    retune = config.retune
+    if retune is not None and retune.executor != "local":
+        # Replay runs local sweeps only; executor 'dgdr' needs a live
+        # Planner, so do not silently replay it as a local sweep.
+        raise ValueError(
+            f"planner.retune executor {retune.executor!r} is not supported in "
+            "replay; replay retune runs executor 'local'"
+        )
     if trace_format != "dynamo":
         raise ValueError(
             "planner.retune replays a Dynamo request trace: it requires "
@@ -254,12 +391,47 @@ def _retune_inputs(
     )
 
 
-def _planner_config_arg(planner_config):
-    """Normalize a planner config to the JSON form ``prepare_planner_replay``
-    expects: a dict is json-encoded; a str (path or inline JSON) passes through."""
+def _read_planner_config(planner_config) -> "PlannerConfig":
+    """Read a planner config given as a dict, a file path or inline JSON."""
+    # Imported on first use: ``dynamo.mocker`` imports this module, and the
+    # Planner package needs AISimulate.
+    from dynamo.planner.config.planner_config import PlannerConfig
+
     if isinstance(planner_config, dict):
-        return json.dumps(planner_config)
-    return planner_config
+        planner_config = json.dumps(planner_config)
+    return PlannerConfig.from_config_arg(planner_config)
+
+
+def _warn_old_planner_config(config: "PlannerConfig") -> None:
+    """Warn about a planner config with deprecated ``ais_perf_model`` keys.
+
+    Call it once the planner adapter is built, so no config error follows the
+    warning. The warning names the line that called the caller.
+    """
+    if _OLD_INPUTS_WARNED.get():
+        return
+    # Imported on first use: ``dynamo.mocker`` imports this module, and the
+    # Planner package needs AISimulate.
+    from dynamo.planner.config.planner_config import (
+        AIS_PERF_MODEL_NEW_FORM,
+        ais_perf_model_old_form_names,
+    )
+
+    old = ais_perf_model_old_form_names(config.ais_perf_model)
+    if old:
+        Deprecated(AIS_PERF_MODEL_NEW_FORM, remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
+            old, stacklevel=3
+        )
+
+
+@contextmanager
+def _old_inputs_already_warned() -> Iterator[None]:
+    """Replay without the warnings for a deprecated planner config or keyword."""
+    token = _OLD_INPUTS_WARNED.set(True)
+    try:
+        yield
+    finally:
+        _OLD_INPUTS_WARNED.reset(token)
 
 
 def _materialize_offline_report(
@@ -385,6 +557,8 @@ def run_trace_replay(
     decode_engine_args=None,
     router_config=None,
     ais_perf_config=None,
+    router_ais_perf_model=None,
+    ais_perf_model=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -392,7 +566,9 @@ def run_trace_replay(
     agentic_lanes=None,
     agentic_snapshot=None,
     agentic_warmup=False,
+    agentic_warmup_policy=None,
     agentic_profile=None,
+    conversation_affinity=None,
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
@@ -418,8 +594,9 @@ def run_trace_replay(
     # Internal: a retune sweep's inner planner is warmed with the history it
     # already bucketed instead of its load_predictor_warmup_trace.
     _planner_warmup_observations=None,
-    # Internal: a retune sweep replays the baseline and every candidate with
-    # the canonical router seed and ordinal request ids (common random numbers).
+    # Internal: replay with the canonical router seed and ordinal request ids
+    # (common random numbers). Retune sweeps and every trace replay through
+    # the Sweeper's Dynamo runner set it.
     _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
@@ -435,9 +612,13 @@ def run_trace_replay(
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
 
-    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
-    workload controls on the existing offline trace path. Native validation owns
-    their schemas and lifecycle constraints.
+    ``agentic_snapshot``, ``agentic_warmup``, ``agentic_warmup_policy`` and
+    ``agentic_profile`` use AISimulate workload controls on the existing offline
+    trace path. Native validation owns their schemas and lifecycle constraints.
+
+    ``conversation_affinity`` enables native hard binding for AgentX conversations:
+    ``{"mode": "session" | "sibling_group", "ttl_seconds": 300}``. It requires
+    offline KV-router replay with fixed workers; omission preserves normal routing.
 
     Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
     leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
@@ -447,6 +628,25 @@ def run_trace_replay(
     persistence overhead. JSONL output is opened lazily on the first sample.
     If a later write fails, replay fails; completed prior lines remain, and the
     failing final line may be partial.
+
+    ``ais_perf_model`` gives the engines an AIS perf model and
+    ``router_ais_perf_model`` gives the KV router the one its ``ais`` prefill
+    load model reads. Each takes a file path, inline JSON, one config or a
+    list of configs with one ``worker_type`` each. ``ais_perf_model`` sets
+    ``engine.timing_model`` for every role the replay runs: ``prefill`` and
+    ``decode`` when prefill or decode engine args are given, ``aggregated``
+    otherwise. It creates aggregated engine args when none are given and is an
+    error with engine args that already write ``engine.timing_model``. For a
+    disaggregated replay pass both ``prefill_engine_args`` and
+    ``decode_engine_args``: neither is created.
+    ``router_ais_perf_model`` requires ``router_mode="kv_router"`` and a
+    ``router_config`` with ``router_prefill_load_model="ais"``, and a KV
+    router with that load model requires ``router_ais_perf_model``; it reads
+    the ``prefill`` entry of a disaggregated replay and the ``aggregated``
+    entry otherwise. ``ais_perf_config`` is deprecated: use
+    ``router_ais_perf_model``. A ``planner_config`` that writes
+    ``ais_perf_model`` with ``roles`` or ``dataset_profiles`` is deprecated
+    too and warns once.
     """
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
@@ -463,6 +663,21 @@ def run_trace_replay(
             raise ValueError("weka_nested_timestamp_basis requires trace_format='weka'")
     execution_model = _normalize_execution_model(trace_format, execution_model)
     trace_files = _normalize_trace_files(trace_files)
+    (
+        ais_perf_config,
+        extra_engine_args,
+        prefill_engine_args,
+        decode_engine_args,
+    ) = _perf_model_inputs(
+        ais_perf_config=ais_perf_config,
+        router_ais_perf_model=router_ais_perf_model,
+        ais_perf_model=ais_perf_model,
+        router_mode=router_mode,
+        router_config=router_config,
+        extra_engine_args=extra_engine_args,
+        prefill_engine_args=prefill_engine_args,
+        decode_engine_args=decode_engine_args,
+    )
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -476,7 +691,9 @@ def run_trace_replay(
         "agentic_lanes": agentic_lanes,
         "agentic_snapshot": agentic_snapshot,
         "agentic_warmup": agentic_warmup,
+        "agentic_warmup_policy": agentic_warmup_policy,
         "agentic_profile": agentic_profile,
+        "conversation_affinity": conversation_affinity,
         "replay_mode": replay_mode,
         "router_mode": router_mode,
         "arrival_speedup_ratio": arrival_speedup_ratio,
@@ -504,6 +721,10 @@ def run_trace_replay(
             "use report_jsonl_path for online request records"
         )
     if planner_config is not None:
+        if conversation_affinity is not None:
+            raise ValueError(
+                "conversation_affinity requires fixed workers, without a Planner"
+            )
         # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
         # offline planner run (matches the CLI's guardrails).
@@ -521,6 +742,7 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
+        parsed_planner_config = _read_planner_config(planner_config)
         retune_inputs_factory = functools.partial(
             _retune_inputs,
             trace_files=trace_files,
@@ -547,7 +769,7 @@ def run_trace_replay(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
-            planner_config_arg=_planner_config_arg(planner_config),
+            planner_config_arg=parsed_planner_config,
             performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
@@ -555,6 +777,7 @@ def run_trace_replay(
             warmup_observations=_planner_warmup_observations,
         )
         with adapter_scope as adapter:
+            _warn_old_planner_config(parsed_planner_config)
             native = _run_mocker_trace_replay(
                 trace_files,
                 **replay_kwargs,
@@ -627,6 +850,8 @@ def run_synthetic_trace_replay(
     decode_engine_args=None,
     router_config=None,
     ais_perf_config=None,
+    router_ais_perf_model=None,
+    ais_perf_model=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -641,6 +866,7 @@ def run_synthetic_trace_replay(
     shared_prefix_ratio=0.0,
     num_prefix_groups=0,
     inter_turn_delay_ms=0.0,
+    accumulate_session_deltas=False,
     model_name=None,
     sla_ttft_ms=None,
     sla_itl_ms=None,
@@ -656,12 +882,35 @@ def run_synthetic_trace_replay(
     """Run synthetic replay with the same optional ``TelemetryOptions`` and
     ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`.
 
+    ``accumulate_session_deltas`` treats ``input_tokens`` as each turn's new
+    input: every later turn's prompt starts with the session's earlier prompts
+    and generated outputs. It requires ``replay_mode="offline"``.
+
     ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
     selection. With ``router_mode="kv_router"``, equal-cost workers are selected
     randomly even at router temperature zero. A fixed arrival seed therefore
     does not guarantee identical routing, prefix reuse, or latency across runs,
     including offline replay.
+
+    ``ais_perf_model``, ``router_ais_perf_model``, the deprecated
+    ``ais_perf_config`` and the warning for a deprecated ``planner_config``
+    work as in :func:`run_trace_replay`.
     """
+    (
+        ais_perf_config,
+        extra_engine_args,
+        prefill_engine_args,
+        decode_engine_args,
+    ) = _perf_model_inputs(
+        ais_perf_config=ais_perf_config,
+        router_ais_perf_model=router_ais_perf_model,
+        ais_perf_model=ais_perf_model,
+        router_mode=router_mode,
+        router_config=router_config,
+        extra_engine_args=extra_engine_args,
+        prefill_engine_args=prefill_engine_args,
+        decode_engine_args=decode_engine_args,
+    )
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -682,6 +931,7 @@ def run_synthetic_trace_replay(
         "shared_prefix_ratio": shared_prefix_ratio,
         "num_prefix_groups": num_prefix_groups,
         "inter_turn_delay_ms": inter_turn_delay_ms,
+        "accumulate_session_deltas": accumulate_session_deltas,
         "model_name": model_name,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
@@ -698,16 +948,18 @@ def run_synthetic_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
+        parsed_planner_config = _read_planner_config(planner_config)
         adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
-            planner_config_arg=_planner_config_arg(planner_config),
+            planner_config_arg=parsed_planner_config,
             performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
         )
         with adapter_scope as adapter:
+            _warn_old_planner_config(parsed_planner_config)
             native = _run_mocker_synthetic_trace_replay(
                 input_tokens,
                 output_tokens,

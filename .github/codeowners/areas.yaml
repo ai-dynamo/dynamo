@@ -10,6 +10,9 @@ areas:
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
+  - lib/generate-format-catalog/
+  - lib/llm/src/generate_format.rs
+  - lib/llm/src/generate_format/
   - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
   - lib/llm/src/entrypoint/input.rs
@@ -19,12 +22,15 @@ areas:
   - lib/llm/src/grpc/protos/
   - lib/llm/src/grpc/service.rs
   - lib/llm/src/grpc/service/
+  - lib/http-server/
   - lib/llm/src/http.rs
   - lib/llm/src/http/
   - lib/llm/src/http/service.rs
   - lib/llm/src/http/service/
   - lib/llm/src/lora.rs
   - lib/llm/src/lora/
+  - lib/llm/src/lora_routing.rs
+  - lib/lora/
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
   - lib/llm/src/preprocessor/tools/
@@ -41,7 +47,8 @@ areas:
   - tests/frontend/grpc/
 - label: agents
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
-  path_globs: []
+  path_globs:
+  - examples/agents/
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
@@ -51,15 +58,23 @@ areas:
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
   - components/src/dynamo/thunderagent_router/
-  - lib/kv-router/
-  - lib/kv-router/src/indexer/
-  - lib/kv-router/src/recovery/
-  - lib/kv-router/src/scheduling/
-  - lib/kv-router/src/sequences/
-  - lib/kv-router/src/zmq_wire/
-  - lib/kv-router/tests/
+  - lib/kv-events/
+  - lib/kv-events/src/zmq_wire/
+  - lib/router/
+  - lib/router/admission/
+  - lib/router/kv-hints/
+  - lib/router/kv-indexer/
+  - lib/router/kv-router/
+  - lib/router/kv-router/src/scheduling/
+  - lib/router/kv-router/tests/
+  - lib/router/protocol/
+  - lib/router/scheduler/
+  - lib/router/session-affinity/
+  - lib/router/slot-tracker/
+  - lib/router/worker-selection/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
+  - lib/llm/src/routing_policy.rs
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
   - lib/llm/src/kv_router/publisher/
@@ -73,11 +88,14 @@ areas:
   path_globs:
   - lib/global-view-broadcaster/
   - components/src/dynamo/pool_relay/
+  - container/global-discovery-service.yaml
   - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - lib/global-*/**
   - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+  - docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md
   - docs/fern/pages/reference/components/pool-relay-configuration.md
+  - docs/fern/pages/reference/components/global-discovery-service-configuration.md
   - lib/bindings/python/rust/llm/pool_relay.rs
   - lib/llm/src/pool_relay.rs
   - lib/llm/src/pool_relay/
@@ -91,6 +109,7 @@ areas:
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
   - lib/sidecar/vllm/
+  - lib/generate-formats/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -114,6 +133,7 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+  - lib/generate-formats/sglang/
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
@@ -121,77 +141,15 @@ areas:
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
 - label: sidecar
   github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
-  path_globs: []
+  path_globs:
+  - lib/sidecar/AGENTS.md
+  - lib/sidecar/CLAUDE.md
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
   - deploy/pre-deployment/nixl/
-  - lib/bindings/kvbm/
   - lib/bindings/python/src/dynamo/nixl_connect/
   - lib/kv-hashing/
-  - lib/kvbm-common/
-  - lib/kvbm-config/
-  - lib/kvbm-consolidator/
-  - lib/kvbm-engine/
-  - lib/kvbm-engine/bin/
-  - lib/kvbm-engine/docs/
-  - lib/kvbm-engine/scripts/
-  - lib/kvbm-engine/src/collectives/
-  - lib/kvbm-engine/src/leader/
-  - lib/kvbm-engine/src/object/
-  - lib/kvbm-engine/src/offload/
-  - lib/kvbm-engine/src/pubsub/
-  - lib/kvbm-engine/src/runtime/
-  - lib/kvbm-engine/src/testing/
-  - lib/kvbm-engine/src/worker/
-  - lib/kvbm-kernels/
-  - lib/kvbm-kernels/cuda/
-  - lib/kvbm-kernels/examples/
-  - lib/kvbm-kernels/tests/
-  - lib/kvbm-logical/
-  - lib/kvbm-logical/docs/
-  - lib/kvbm-logical/src/blocks/
-  - lib/kvbm-logical/src/events/
-  - lib/kvbm-logical/src/integrations/
-  - lib/kvbm-logical/src/manager/
-  - lib/kvbm-logical/src/metrics/
-  - lib/kvbm-logical/src/pools/
-  - lib/kvbm-logical/src/registry/
-  - lib/kvbm-logical/src/sequence/
-  - lib/kvbm-logical/src/testing/
-  - lib/kvbm-physical/
-  - lib/kvbm-physical/docs/
-  - lib/kvbm-physical/src/layout/
-  - lib/kvbm-physical/src/manager/
-  - lib/kvbm-physical/src/testing/
-  - lib/kvbm-physical/src/transfer/
-  - lib/llm/src/block_manager.md
-  - lib/llm/src/block_manager.rs
-  - lib/llm/src/block_manager/
-  - lib/llm/src/block_manager/block.rs
-  - lib/llm/src/block_manager/block/
-  - lib/llm/src/block_manager/connector.rs
-  - lib/llm/src/block_manager/connector/
-  - lib/llm/src/block_manager/controller.rs
-  - lib/llm/src/block_manager/controller/
-  - lib/llm/src/block_manager/distributed.rs
-  - lib/llm/src/block_manager/distributed/
-  - lib/llm/src/block_manager/kv_consolidator/
-  - lib/llm/src/block_manager/layout.rs
-  - lib/llm/src/block_manager/layout/
-  - lib/llm/src/block_manager/offload.rs
-  - lib/llm/src/block_manager/offload/
-  - lib/llm/src/block_manager/pool.rs
-  - lib/llm/src/block_manager/pool/
-  - lib/llm/src/block_manager/state.rs
-  - lib/llm/src/block_manager/state/
-  - lib/llm/src/block_manager/storage.rs
-  - lib/llm/src/block_manager/storage/
-  - lib/llm/src/block_manager/v2.rs
-  - lib/llm/src/block_manager/v2/
-  - lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/
-  - lib/llm/src/kv.rs
-  - lib/llm/src/kv/
   - lib/memory/
   - lib/memory/bin/
   - lib/memory/src/nixl.rs
@@ -200,7 +158,6 @@ areas:
   - lib/memory/src/pool/
   - lib/tokens/
   - lib/tokens/docs/
-  - tests/kvbm_integration/
   - tests/lmcache/
 - label: multimodal
   github_team: '@ai-dynamo/dynamo-multimodal-codeowners'
@@ -263,21 +220,23 @@ areas:
   - lib/backend-common/examples/
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
+  - lib/sidecar/SUPPORT_NOTES.md
   - lib/sidecar/common/
   - lib/sidecar/testkit/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
+  - lib/error/
   - lib/llm/
   - lib/llm/benches/
-  - lib/llm/bin/
   - lib/llm/examples/
   - lib/llm/src/bin/
   - lib/llm/src/common/
   - lib/llm/src/discovery/
-  - lib/llm/src/kernels/
   - lib/llm/src/local_model/
-  - lib/llm/src/lora/routing/
+  - lib/lora/src/huggingface.rs
+  - lib/lora/src/routing/
+  - lib/lora/tests/
   - lib/llm/src/model_card.rs
   - lib/llm/src/perf/
   - lib/llm/src/utils/
@@ -373,7 +332,6 @@ areas:
   - dev/sanity_check.py
   - dynamo.code-workspace
   - hatch_build.py
-  - lib/bindings/kvbm/pyproject.toml
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
@@ -446,6 +404,8 @@ areas:
   - deploy/utils/
   - deploy/utils/manifests/
   - deploy/utils/tests/
+  - docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+  - docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx
   - examples/deployments/
   - examples/gpu-sharing/
   - recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json
@@ -555,7 +515,6 @@ areas:
   path_globs:
   - .github/workflows/pr-xpu.yaml
   - .github/workflows/xpu-ci.yaml
-  - container/templates/sglang_xpu_framework.Dockerfile
   - dev/docker-observability-xpu.yml
   - dev/observability/prometheus-xpu.yml
   - dev/observability/xpu-alert-rules.yml
@@ -571,6 +530,14 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: Cargo.lock
+  owners:
+  - ops
+  - runtime
+- glob: Cargo.toml
+  owners:
+  - ops
+  - runtime
 - glob: .github/review-prompts/README.md
   owners:
   - ops
@@ -620,6 +587,14 @@ shared:
   owners:
   - process
   - agents
+- glob: .ai/metrics-guidelines.md
+  owners:
+  - process
+  - observability
+- glob: .ai/metrics-review.md
+  owners:
+  - process
+  - observability
 - glob: .github/workflows/fern-docs.yml
   owners:
   - ops
@@ -1028,10 +1003,10 @@ shared:
   owners:
   - ops
   - runtime
-- glob: dev/observability/grafana_dashboards/kvbm.json
+- glob: examples/router/custom-policy-example/epp/
   owners:
-  - observability
-  - kv-memory
+  - router
+  - epp
 - glob: lib/backend-common/src/metrics.rs
   owners:
   - runtime
@@ -1049,50 +1024,93 @@ shared:
   - performance
   - router
   - global-router
-- glob: lib/kv-router/src/services/shared_cache/
+- glob: lib/router/kv-router/src/plugins/registry.rs
   owners:
   - router
-  - kv-memory
-- glob: lib/kv-router/src/zmq_wire/extra_keys.rs
+  - epp
+# The pre-split scheduling/config.rs: the flat config half stays in kv-router, the
+# kernel-facing slice (RouterConfigOverride) lives in the scheduler crate.
+- glob: lib/router/kv-router/src/scheduling/config.rs
+  owners:
+  - router
+  - epp
+- glob: lib/router/scheduler/src/config.rs
+  owners:
+  - router
+  - epp
+# Top-level files only: the selection core in core/ stays router-only. The pre-split
+# services/selection top level is now the kernel's selection/ (types, catalog, ingress,
+# errors), the kv-router service adapters, and the session-affinity table.
+- glob: lib/router/scheduler/src/selection/*
+  owners:
+  - router
+  - epp
+- glob: lib/router/kv-router/src/services/selection/*
+  owners:
+  - router
+  - epp
+- glob: lib/router/session-affinity/src/lib.rs
+  owners:
+  - router
+  - epp
+- glob: lib/kv-events/src/zmq_wire/extra_keys.rs
   owners:
   - router
   - multimodal
-- glob: lib/kvbm-config/src/messenger.rs
+- glob: lib/kv-hashing/src/multimodal/
   owners:
+  - router
+  - multimodal
   - kv-memory
+- glob: lib/llm/src/discovery/worker_monitor.rs
+  owners:
   - runtime
-- glob: lib/kvbm-consolidator/src/egress/zmq_publisher.rs
+  - epp
+- glob: lib/llm/src/entrypoint.rs
   owners:
-  - kv-memory
-  - runtime
-- glob: lib/kvbm-consolidator/src/ingress/zmq_subscriber.rs
-  owners:
-  - kv-memory
-  - runtime
-- glob: lib/kvbm-engine/src/pubsub/nats.rs
-  owners:
-  - kv-memory
-  - runtime
-- glob: lib/kvbm-logical/src/metrics/
-  owners:
-  - kv-memory
-  - observability
-- glob: lib/llm/src/block_manager/metrics_kvbm.rs
-  owners:
-  - kv-memory
-  - observability
+  - frontend
+  - epp
 - glob: lib/llm/src/http/service/busy_threshold.rs
   owners:
   - frontend
   - kv-memory
+  - epp
+- glob: lib/error/src/http.rs
+  owners:
+  - runtime
+  - frontend
+- glob: lib/llm/src/http/service/error.rs
+  owners:
+  - frontend
+  - epp
 - glob: lib/llm/src/http/service/metrics.rs
   owners:
   - frontend
   - observability
+- glob: lib/http-server/src/metrics.rs
+  owners:
+  - frontend
+  - observability
+- glob: lib/llm/src/kv_router/README.md
+  owners:
+  - router
+  - epp
+- glob: lib/llm/src/kv_router/prefill_router/query.rs
+  owners:
+  - router
+  - epp
+- glob: lib/llm/src/kv_router/routing_load.rs
+  owners:
+  - router
+  - epp
 - glob: lib/llm/src/kv_router/shared_cache.rs
   owners:
   - router
   - kv-memory
+- glob: lib/llm/src/lora_routing.rs
+  owners:
+  - frontend
+  - router
 - glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
@@ -1120,6 +1138,10 @@ shared:
   - performance
   - backend-trtllm
   - sidecar
+- glob: lib/router-plugins/builtin/src/lib.rs
+  owners:
+  - router
+  - epp
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
@@ -1168,6 +1190,10 @@ shared:
   - ops
   - sidecar
 - glob: lib/sidecar/README.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/SUPPORT_NOTES.md
   owners:
   - runtime
   - sidecar
@@ -1288,6 +1314,10 @@ shared:
   owners:
   - operator
   - backend-vllm
+- glob: container/Dockerfile.global-discovery-service
+  owners:
+  - global-router
+  - ops
 - glob: deploy/operator/Dockerfile
   owners:
   - operator
@@ -1377,11 +1407,6 @@ shared:
   owners:
   - ops
   - backend-sglang
-- glob: container/templates/sglang_xpu_framework.Dockerfile
-  owners:
-  - ops
-  - backend-sglang
-  - xpu
 - glob: container/templates/trtllm_runtime.Dockerfile
   owners:
   - ops

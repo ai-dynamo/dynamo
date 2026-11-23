@@ -360,12 +360,25 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 				metric := nvidiacomv1beta2.ObjectiveMetric("TTFT")
 				spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{Metric: &metric}
 				spec.Recommendation = &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 3}
-				spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{
+				spec.AISim = &nvidiacomv1beta2.AISimSpec{InputOverrides: &runtime.RawExtension{
 					Raw: []byte(`{"engine":{"hardware":"h100_sxm"},"custom":"kept"}`),
 				}}
 			}),
 			discovered: discoveredH200,
 			check:      expectV1beta2ExplicitValues,
+		},
+		{
+			name: "v1beta2 trace workload receives the format default and no static default",
+			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
+				spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
+					Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
+						ClaimName: "request-traces", SubPath: "retune/w-1.jsonl.gz",
+					}},
+				}}
+			}),
+			discovered: discoveredH200,
+			check:      expectV1beta2TraceWithoutStaticDefault,
+			idempotent: true,
 		},
 		{
 			name: "v1beta2 explicit node width wins while admission discovers a missing budget",
@@ -553,11 +566,11 @@ func expectV1beta2ExplicitValues(t *testing.T, request *nvidiacomv1beta2.DynamoG
 	if request.Spec.Recommendation.MaxCandidates != 3 {
 		t.Fatalf("maxCandidates = %d, want 3", request.Spec.Recommendation.MaxCandidates)
 	}
-	if request.Spec.AISimulate == nil || request.Spec.AISimulate.InputOverrides == nil {
-		t.Fatalf("aisimulate = %#v, want input overrides", request.Spec.AISimulate)
+	if request.Spec.AISim == nil || request.Spec.AISim.InputOverrides == nil {
+		t.Fatalf("aisim = %#v, want input overrides", request.Spec.AISim)
 	}
 	var overrides map[string]any
-	if err := json.Unmarshal(request.Spec.AISimulate.InputOverrides.Raw, &overrides); err != nil {
+	if err := json.Unmarshal(request.Spec.AISim.InputOverrides.Raw, &overrides); err != nil {
 		t.Fatalf("decode input overrides: %v", err)
 	}
 	if overrides["custom"] != "kept" {
@@ -566,6 +579,23 @@ func expectV1beta2ExplicitValues(t *testing.T, request *nvidiacomv1beta2.DynamoG
 	engine, _ := overrides["engine"].(map[string]any)
 	if engine["hardware"] != "h100_sxm" {
 		t.Fatalf("inputOverrides = %#v, want engine.hardware untouched", overrides)
+	}
+	expectV1beta2H200x8Hardware(t, request)
+}
+
+func expectV1beta2TraceWithoutStaticDefault(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	want := &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
+		Format: nvidiacomv1beta2.TraceFormatDynamo,
+		Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
+			ClaimName: "request-traces", SubPath: "retune/w-1.jsonl.gz",
+		}},
+	}}
+	if !reflect.DeepEqual(request.Spec.Workload, want) {
+		t.Fatalf("workload = %#v, want the trace alone", request.Spec.Workload)
+	}
+	if request.Spec.Objective == nil || request.Spec.Recommendation == nil {
+		t.Fatalf("objective = %#v, recommendation = %#v, want the other defaults", request.Spec.Objective, request.Spec.Recommendation)
 	}
 	expectV1beta2H200x8Hardware(t, request)
 }
