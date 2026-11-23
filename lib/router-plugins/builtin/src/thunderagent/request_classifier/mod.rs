@@ -310,6 +310,7 @@ mod tests {
             tokens,
             Some(request_id),
             Some(SessionContext::new(session_id.into(), None, None, None)),
+            None,
         )
     }
 
@@ -364,7 +365,7 @@ mod tests {
         let wakes = attach_counter(gate.as_ref());
 
         // A request without a session passes through untouched.
-        let plain = classify_request(10, Some("plain"), None);
+        let plain = classify_request(10, Some("plain"), None, None);
         assert!(classify(&mut classifier, plain).is_ok());
 
         let session_a = SessionContext::new("a".into(), None, None, None);
@@ -431,8 +432,36 @@ mod tests {
             10,
             None,
             Some(SessionContext::new("a".into(), None, None, None)),
+            None,
         );
         let error = classify(&mut classifier, request).unwrap_err();
         assert!(error.to_string().contains("request ID"));
+    }
+
+    #[tokio::test]
+    async fn a_pinned_request_is_admitted_onto_its_pin() {
+        // Both ranks have room for the turn, so without a pin the gate sends it to rank 1.
+        let mut classifier = classifier(&[(1, 500), (2, 500)]);
+        let gate = classifier
+            .dispatch_gate()
+            .expect("ThunderAgent exposes a gate");
+        let session = SessionContext::new("a".into(), None, None, None);
+        let pin = WorkerWithDpRank::new(2, 0);
+
+        let request = classify_request(200, Some("a1"), Some(session.clone()), Some(pin));
+        assert!(classify(&mut classifier, request).is_ok());
+        assert_eq!(
+            gate.check(&head("a1", &session, 200)),
+            DispatchDecision::Go { target: Some(pin) }
+        );
+
+        assert!(classify(&mut classifier, session_request("b1", "b", 200)).is_ok());
+        let unpinned = SessionContext::new("b".into(), None, None, None);
+        assert_eq!(
+            gate.check(&head("b1", &unpinned, 200)),
+            DispatchDecision::Go {
+                target: Some(WorkerWithDpRank::new(1, 0))
+            }
+        );
     }
 }

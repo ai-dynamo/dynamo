@@ -410,13 +410,16 @@ pub fn registered_policy(
 }
 
 /// A request to hand to `RequestClassifier::classify`: `isl_tokens` prompt tokens with no
-/// cached prefix, arriving now, with the request ID and session a test gives it.
+/// cached prefix, arriving now, with the request ID, session, and pinned worker a test gives
+/// it. Together with `isl_tokens` those are the facts `ClassifyRequest::info` returns.
 pub fn classify_request(
     isl_tokens: usize,
     request_id: Option<&str>,
     session_context: Option<SessionContext>,
+    pinned_worker: Option<WorkerWithDpRank>,
 ) -> ClassifyRequest {
-    let mut request = ClassifyRequest::with_timing(isl_tokens, 0, tokio::time::Instant::now());
+    let mut request = ClassifyRequest::with_timing(isl_tokens, 0, tokio::time::Instant::now())
+        .with_pinned_worker(pinned_worker);
     if let Some(request_id) = request_id {
         request = request.with_request_id(request_id);
     }
@@ -429,7 +432,7 @@ pub fn classify_request(
 /// A progress reading fixed at `context_tokens`, as `ClassifyRequest::progress` returns one
 /// for a request the router has not updated.
 pub fn request_progress(context_tokens: usize) -> RequestProgress {
-    classify_request(context_tokens, None, None)
+    classify_request(context_tokens, None, None, None)
         .progress()
         .clone()
 }
@@ -506,6 +509,40 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_classifier_reads_the_request_facts_a_test_gives() {
+        const PINNED: WorkerWithDpRank = WorkerWithDpRank {
+            worker_id: 41,
+            dp_rank: 0,
+        };
+
+        /// Checks the four facts `info()` returns.
+        struct ReadFacts;
+
+        impl RequestClassifier for ReadFacts {
+            fn classify(
+                &mut self,
+                request: ClassifyRequest,
+                _workers: WorkerCandidates<'_>,
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+                let info = request.info();
+                assert_eq!(info.request_id(), Some("r1"));
+                assert_eq!(info.isl_tokens(), 160);
+                let session = info.session_context().expect("the test's session");
+                assert_eq!(session.session_id(), "s1");
+                assert_eq!(info.pinned_worker(), Some(PINNED));
+                Ok(request)
+            }
+        }
+
+        let session = SessionContext::new("s1".to_owned(), None, None, None);
+        let request = classify_request(160, Some("r1"), Some(session), Some(PINNED));
+        classify(&mut ReadFacts, request).unwrap();
+
+        let unpinned = classify_request(160, None, None, None);
+        assert_eq!(unpinned.info().pinned_worker(), None);
     }
 
     #[test]
@@ -603,7 +640,10 @@ mod tests {
             .worker(29, CaseWorker::new().active_requests(4))
             .worker(41, CaseWorker::new().active_requests(9));
         let classified = busy
-            .classify(&mut classifier, classify_request(160, Some("r1"), None))
+            .classify(
+                &mut classifier,
+                classify_request(160, Some("r1"), None, None),
+            )
             .unwrap();
         assert_eq!(classifier.rows_seen, 2);
         assert_eq!(classified.policy_class(), Some("batch"));
@@ -612,12 +652,16 @@ mod tests {
             .worker(29, CaseWorker::new().active_requests(4))
             .worker(41, CaseWorker::new().active_requests(1));
         let classified = idle
-            .classify(&mut classifier, classify_request(160, Some("r2"), None))
+            .classify(
+                &mut classifier,
+                classify_request(160, Some("r2"), None, None),
+            )
             .unwrap();
         assert_eq!(classified.policy_class(), None);
 
         // Without a case the classifier is lent no rows.
-        let classified = classify(&mut classifier, classify_request(160, None, None)).unwrap();
+        let classified =
+            classify(&mut classifier, classify_request(160, None, None, None)).unwrap();
         assert_eq!(classifier.rows_seen, 0);
         assert_eq!(classified.policy_class(), None);
     }

@@ -204,6 +204,7 @@ mod tests {
             isl,
             Some(request_id),
             Some(SessionContext::new(session.to_owned(), None, None, None)),
+            None,
         )
     }
 
@@ -278,7 +279,7 @@ mod tests {
         priority(&mut classifier, "a1", "s", 1_000, now);
         complete(&mut classifier, "a1", Some(1_250), now);
 
-        let mut anonymous = classify_request(2_000, None, None);
+        let mut anonymous = classify_request(2_000, None, None, None);
         classifier.predict(&mut anonymous, now);
         assert_eq!(anonymous.backend_priority(), Some(-250));
         assert!(classifier.pending.is_empty());

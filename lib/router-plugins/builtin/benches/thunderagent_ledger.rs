@@ -118,7 +118,7 @@ request_classifier:
 }
 
 fn classify(classifier: &mut dyn RequestClassifier, request_id: &str, session: &SessionContext) {
-    let request = classify_request(ISL, Some(request_id), Some(session.clone()));
+    let request = classify_request(ISL, Some(request_id), Some(session.clone()), None);
     dynamo_kv_router::plugins::testing::classify(classifier, request)
         .expect("classification succeeds");
 }
