@@ -741,8 +741,16 @@ navigation:
             contents:
               - page: verl Integration
                 path: pages/use-cases/reinforcement-learning/verl.md
-              - page: NeMo RL Integration
-                path: pages/use-cases/reinforcement-learning/nemo-rl.md
+              - section: NeMo RL Integration
+                slug: nemo-rl-integration
+                contents:
+                  - page: Overview
+                    path: pages/use-cases/reinforcement-learning/nemo-rl/overview.mdx
+                  - page: Installation and Setup
+                    path: pages/use-cases/reinforcement-learning/nemo-rl/installation.mdx
+                  - page: Train with NeMo RL on KubeRay
+                    slug: train-with-nemo-rl-on-kuberay
+                    path: pages/use-cases/reinforcement-learning/nemo-rl/train.mdx
               - section: Slime Integration
                 contents:
                   - page: Overview

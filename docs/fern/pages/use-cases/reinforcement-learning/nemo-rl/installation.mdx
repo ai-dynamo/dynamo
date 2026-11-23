@@ -1,0 +1,205 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Install and Set Up NeMo RL with Dynamo
+subtitle: Install KubeRay and build the NeMo RL image, then stage the model and dataset on a shared volume
+---
+
+## Prerequisites
+
+- A [Kubernetes](https://kubernetes.io/docs/setup/) cluster with a node that has 3 free NVIDIA H100 or H200 GPUs, NVIDIA driver 580 or later, and the [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html)
+- [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+- [Helm](https://helm.sh/docs/intro/install/)
+- [Docker Buildx](https://docs.docker.com/build/install-buildx/), and a container registry that your cluster can pull from
+
+You don't need the Dynamo Kubernetes platform. NeMo RL starts Dynamo from the Python packages in its own image.
+
+## Install KubeRay
+
+KubeRay runs the NeMo RL trainer as a `RayJob`. Follow [Install KubeRay](../../../kubernetes/installation/install-kuberay.mdx). These pages were validated with KubeRay 1.7.1.
+
+## Build the NeMo RL Image
+
+NeMo RL's release images, up to v0.8.0, predate the `dynamo: true` setting, and its nightly images aren't public. Build an image from the NeMo RL commit that these pages were validated with.
+
+<Steps toc={true}>
+  <Step title="Clone NeMo RL" id="clone-nemo-rl">
+
+Clone NeMo RL with its submodules, check out the commit, and update the submodules to match it:
+
+```bash
+git clone --recursive https://github.com/NVIDIA-NeMo/RL.git nemo-rl
+cd nemo-rl
+git checkout d51b2842e87403b4d1fbd008d28cd52694ced487
+git submodule update --init --recursive
+```
+
+  </Step>
+  <Step title="Build and push the image" id="build-and-push-the-image">
+
+Set the image name to a registry that your cluster can pull from. The other pages use this variable:
+
+```bash
+export IMAGE=<registry>/nemo-rl:d51b2842-dynamo
+```
+
+Build and push the image from the `nemo-rl` directory. The command is the one that NeMo RL's CI uses, with build arguments that leave out what the tutorial doesn't need:
+
+```bash
+docker buildx build --platform linux/amd64 \
+  --file docker/Dockerfile --target release --build-context nemo-rl=. \
+  --build-arg BUILD_DYNAMO=1 \
+  --build-arg SKIP_SGLANG_BUILD=1 \
+  --build-arg SKIP_TRTLLM_BUILD=1 \
+  --build-arg STRIP_UV_CACHE=1 \
+  --build-arg NVTE_CUDA_ARCHS=90 \
+  --build-arg MAX_JOBS=4 \
+  --build-arg CUSTOM_SETUP_FNAME= \
+  --tag "$IMAGE" --push .
+```
+
+- `BUILD_DYNAMO=1` adds the `etcd` and `nats-server` binaries that NeMo RL starts, in `/opt/dynamo/bin`. Dynamo itself, `ai-dynamo` 1.5.1, is one of NeMo RL's vLLM dependencies, so the image has it either way.
+- `SKIP_SGLANG_BUILD=1` and `SKIP_TRTLLM_BUILD=1` leave out the SGLang and TensorRT-LLM environments.
+- `STRIP_UV_CACHE=1` leaves out uv's package cache, so run NeMo RL with the image's Python, `/opt/nemo_rl_venv/bin/python`, instead of `uv run`, as these pages do.
+- `NVTE_CUDA_ARCHS=90` builds Transformer Engine's PyTorch extension for Hopper GPUs only. The default, `90;100`, also builds it for Blackwell GPUs.
+- `MAX_JOBS=4` limits the number of parallel compile jobs, as NeMo RL's CI does.
+- `CUSTOM_SETUP_FNAME=` skips the Apptainer installation that the image includes by default.
+
+The build compiles CUDA extensions from source, such as DeepEP, FlashMLA, and flash-attn, which NeMo RL's CI restores from a cache image instead. On a builder with 64 CPUs and 384 GiB of memory, the build took 1 hour 38 minutes, 23 minutes of them to export and push the image. The image is 17 GB compressed.
+
+  </Step>
+</Steps>
+
+## Stage the Model and Dataset
+
+<Steps toc={true}>
+  <Step title="Choose a StorageClass" id="choose-a-storageclass">
+
+The setup Job and the Ray head share one volume for the model, the dataset, NeMo RL's converted copy of the model, and vLLM's compile cache. List the StorageClasses in your cluster:
+
+```bash
+kubectl get storageclass
+```
+
+Pick one that your GPU nodes can mount. The tutorial runs on one node, so the volume needs only the `ReadWriteOnce` access mode. Some providers, such as Azure Premium SSD, raise a disk's throughput with its size, and a faster disk loads the dataset faster. Set the StorageClass and the namespace that the rest of these pages use:
+
+```bash
+export NAMESPACE=nemo-rl-dynamo
+export STORAGE_CLASS=<storage-class>
+```
+
+  </Step>
+  <Step title="Create the namespace and shared volume" id="create-the-namespace-and-shared-volume">
+
+Create the namespace and a 100 GiB claim on the StorageClass. The setup Job and the Ray head mount this claim at `/data`:
+
+```bash
+kubectl create namespace "$NAMESPACE"
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nemo-rl-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 100Gi
+EOF
+```
+
+Depending on the StorageClass, the claim can stay `Pending` until the setup Job mounts it. With a zonal StorageClass, that first Pod also fixes the volume's zone.
+
+  </Step>
+  <Step title="Download the model and dataset" id="download-the-model-and-dataset">
+
+Run a one-time Job in the NeMo RL image. It fills the Hugging Face cache on the volume, which the training run reads through `HF_HOME`:
+
+1. Downloads `Qwen/Qwen2.5-1.5B`.
+2. Loads the `train_1M` split of `nvidia/OpenMathInstruct-2` with NeMo RL's own dataset class, which also splits off 5% of the problems, as the training run does. The training run then finds the prepared dataset in the cache instead of preparing it while it holds its GPUs.
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nemo-rl-setup
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: setup
+          image: ${IMAGE}
+          command: ["/opt/nemo_rl_venv/bin/python", "-c"]
+          args:
+            - |
+              from huggingface_hub import snapshot_download
+              from nemo_rl.data.datasets.response_datasets.openmathinstruct2 import OpenMathInstruct2Dataset
+
+              snapshot_download("Qwen/Qwen2.5-1.5B")
+              data = OpenMathInstruct2Dataset(split="train_1M", split_validation_size=0.05, seed=42)
+              print(f"OpenMathInstruct-2: {len(data.dataset):,} training and {len(data.val_dataset):,} held-out problems")
+          env:
+            - name: HF_HOME
+              value: /data/hf-home
+          resources:
+            requests:
+              cpu: "8"
+              memory: 64Gi
+            limits:
+              cpu: "8"
+              memory: 64Gi
+          volumeMounts:
+            - name: nemo-rl-data
+              mountPath: /data
+      volumes:
+        - name: nemo-rl-data
+          persistentVolumeClaim:
+            claimName: nemo-rl-data
+EOF
+```
+
+The Job needs no GPU. Its node selector, a label that the GPU Operator adds to GPU nodes, still runs it on a GPU node: a zonal volume is then created in the GPU nodes' zone, and the node already has the image if the Ray head starts there later. If your GPU nodes have taints, add matching tolerations.
+
+Wait for the Job to finish, then read the end of its log:
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=condition=complete job/nemo-rl-setup --timeout=90m
+kubectl logs -n "$NAMESPACE" job/nemo-rl-setup --tail=1
+```
+
+Pulling the image takes about 12 minutes on a node that doesn't have it. The model downloads in about a minute. The dataset takes about 10 minutes, because `datasets` downloads and prepares all four splits of OpenMathInstruct-2, about 38 GB, to load one. The log ends with the number of problems in the training split and in the 5% split off from it:
+
+```text
+OpenMathInstruct-2: 950,000 training and 50,000 held-out problems
+```
+
+  </Step>
+</Steps>
+
+## Included in the Image
+
+You don't install Dynamo, vLLM, Megatron Core, Ray, etcd, or NATS. The image that you built has NeMo RL in `/opt/nemo-rl`, and it keeps a separate Python environment for each kind of NeMo RL worker:
+
+- The driver environment, `/opt/nemo_rl_venv`, has Ray 2.58.0, PyTorch 2.13 with CUDA 13.0, and Transformers 5.16.1. The image's `PATH` starts with it.
+- The vLLM worker environment has vLLM 0.29.0 and `ai-dynamo` 1.5.1. NeMo RL starts the Dynamo frontend from this environment, so the frontend and the engines run the same Dynamo release.
+- The Megatron worker environment has Megatron Core 0.20.0, Megatron-Bridge 0.7.0, and Transformer Engine 2.18.0.
+- `/opt/dynamo/bin` has etcd 3.5.21 and NATS Server 2.11.6.
+
+KubeRay runs `ray job submit` from Ray's own image, `rayproject/ray:2.58.0-py313`, so you don't need Ray on your workstation.
+
+The tutorial was validated with this image and KubeRay 1.7.1 on Azure Kubernetes Service (AKS) with Kubernetes 1.34, H100 80 GB GPUs, and an Azure Premium SSD volume.
+
+## Hugging Face Access
+
+The setup Job downloads the public `Qwen/Qwen2.5-1.5B` model and `nvidia/OpenMathInstruct-2` dataset, so it needs no token. For a gated model, create a Secret with your token and expose it as `HF_TOKEN` to the setup Job and the Ray head.
+
+## Next Steps
+
+[Train with NeMo RL on KubeRay](train.mdx) to run GRPO with rollouts served by Dynamo.

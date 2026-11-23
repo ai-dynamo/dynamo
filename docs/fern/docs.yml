@@ -3138,6 +3138,11 @@ redirects:
     destination: "/dynamo/dev/reinforcement-learning/:slug"
   - source: "/dynamo/dev/reinforcement-learning/slime-integration"
     destination: "/dynamo/dev/reinforcement-learning/slime-integration/overview"
+  # The single NeMo RL page was published under Fern's derived slug, which splits "NeMo".
+  - source: "/dynamo/dev/reinforcement-learning/ne-mo-rl-integration"
+    destination: "/dynamo/dev/reinforcement-learning/nemo-rl-integration/overview"
+  - source: "/dynamo/dev/reinforcement-learning/nemo-rl-integration"
+    destination: "/dynamo/dev/reinforcement-learning/nemo-rl-integration/overview"
   - source: "/dynamo/dev/multimodal/overview/:slug"
     destination: "/dynamo/dev/multimodal/:slug"
   - source: "/dynamo/dev/diffusion/overview/:slug"

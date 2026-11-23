@@ -1,0 +1,356 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Train with NeMo RL and Dynamo on KubeRay
+subtitle: Run a NeMo RL GRPO job in a KubeRay RayJob that starts its own Dynamo frontend
+---
+
+A KubeRay `RayJob` describes a Ray cluster and the job to run on it. KubeRay creates the cluster, here a single head Pod with 3 GPUs in the NeMo RL image, then starts a submitter Pod that runs `ray job submit` with the job's entrypoint and streams the driver log. When the job ends, KubeRay deletes the Ray cluster and every process in it.
+
+The entrypoint runs NeMo RL's GRPO training with `policy.generation.dynamo: true`. The NeMo RL driver starts etcd, NATS, and a Dynamo frontend with the KV router, and NeMo RL's two vLLM engines register with the frontend, so applying the RayJob starts both Dynamo and training, with no DynamoGraphDeployment. The Megatron Core trainer has the third GPU to itself: NeMo RL doesn't let the engines share the trainer's GPUs with `dynamo: true`. Each training step trains the policy on a batch of rollouts that came through the Dynamo frontend, then sends the new weights to both engines over NCCL. Meanwhile, the engines generate the next step's batch.
+
+## Prerequisites
+
+- Complete [Installation and Setup](installation.mdx). The commands use its `NAMESPACE` variable, and the RayJob uses the image that you built.
+- Have one node with 3 free GPUs, 32 CPUs, and 320 GiB of memory.
+- If your GPU nodes have taints, add matching tolerations to the Ray head's Pod template.
+- Restrict network access to the Ray head, with a NetworkPolicy that your cluster's network plugin enforces, or run the tutorial in an isolated cluster that only trusted users and workloads can reach. The head's dashboard and Jobs API accept requests without authentication, so anyone who can reach the Pod can run code in it. See [Current Limitations](#current-limitations).
+
+## Start Training
+
+<Steps toc={true}>
+  <Step title="Submit the RayJob" id="submit-the-rayjob">
+
+Save the RayJob as `nemo-rl-grpo.yaml`:
+
+```yaml title="nemo-rl-grpo.yaml"
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: nemo-rl-grpo
+spec:
+  entrypoint: >-  # KubeRay pastes this into a shell script unquoted, so it can't hold comments
+    /opt/nemo_rl_venv/bin/python examples/run_grpo_single_controller.py
+    --config examples/configs/grpo_math_1B_dynamo_single_controller.yaml
+    cluster.gpus_per_node=3
+    policy.generation.colocated.resources.gpus_per_node=2
+    grpo.max_num_steps=25
+    logger.monitor_gpus=false
+  shutdownAfterJobFinishes: true  # Delete the Ray cluster when the job ends
+  ttlSecondsAfterFinished: 30     # Wait 30 seconds first
+  activeDeadlineSeconds: 3600     # Stop a run that lasts more than an hour
+  backoffLimit: 0                 # Don't retry a failed run
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: rayproject/ray:2.58.0-py313  # Runs only the ray CLI, at NeMo RL's Ray version
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+  rayClusterSpec:
+    rayVersion: "2.58.0"  # The Ray version in the NeMo RL image
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          enableServiceLinks: false  # Keep other Services' variables out of the Pod's environment
+          containers:
+            - name: ray-head
+              image: <registry>/nemo-rl:d51b2842-dynamo  # The image that you built: the value of $IMAGE
+              workingDir: /opt/nemo-rl  # The job runs here, and NeMo RL's configs use paths relative to it
+              env:
+                - name: HF_HOME          # Read the model and dataset from the volume
+                  value: /data/hf-home
+                - name: VLLM_CACHE_ROOT  # Keep vLLM's compile cache on the volume
+                  value: /data/vllm-cache
+                - name: PYTHONUNBUFFERED # Print each log line when it's written
+                  value: "1"
+                - name: RAY_DEDUP_LOGS   # Print the identical lines of both engines instead of one
+                  value: "0"
+              resources:
+                requests:
+                  cpu: "32"
+                  memory: 320Gi
+                  nvidia.com/gpu: "3"  # 1 for the Megatron Core trainer, 1 for each vLLM engine
+                limits:
+                  cpu: "32"
+                  memory: 320Gi
+                  nvidia.com/gpu: "3"
+              volumeMounts:
+                - name: nemo-rl-data
+                  mountPath: /data
+                - name: dshm
+                  mountPath: /dev/shm  # Shared memory for NCCL, vLLM, and the Ray object store
+          volumes:
+            - name: nemo-rl-data
+              persistentVolumeClaim:
+                claimName: nemo-rl-data
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 128Gi
+```
+
+In `image`, replace `<registry>/nemo-rl:d51b2842-dynamo` with the value of `IMAGE`.
+
+The entrypoint runs NeMo RL's SingleController GRPO launcher with `grpo_math_1B_dynamo_single_controller.yaml`, NeMo RL's example config for Dynamo. That config inherits NeMo RL's `grpo_math_1B_megatron_single_controller.yaml` and turns on `policy.generation.dynamo: true`, which sends the rollouts through a Dynamo frontend that NeMo RL manages. It also spells out the defaults of the optional `dynamo_cfg` block, such as the KV router:
+
+```yaml
+policy:
+  generation:
+    dynamo: true
+    dynamo_cfg:
+      startup_timeout_s: 600     # Time for etcd, NATS, the frontend, and every engine to start
+      request_timeout_s: null    # No deadline for one rollout request
+      frontend_args:
+        router_mode: kv          # Route each request by the engines' KV caches and load
+        extra_cli_args: []       # More dynamo.frontend flags
+```
+
+The base config sets up GRPO on OpenMathInstruct-2: 32 prompts per step with 16 answers each, at most 512 tokens for a prompt and its answer, and Qwen2.5-1.5B trained by Megatron Core. The entrypoint's overrides change only the run's size and layout:
+
+- `cluster.gpus_per_node=3` gives NeMo RL the head's 3 GPUs.
+- `policy.generation.colocated.resources.gpus_per_node=2` gives 2 of them to vLLM engines, one engine each, and leaves the third to the trainer.
+- `grpo.max_num_steps=25` stops after 25 training steps.
+- `logger.monitor_gpus=false` turns off GPU monitoring, which reports only to logging backends that the config doesn't enable.
+
+Apply the RayJob:
+
+```bash
+kubectl apply -n "$NAMESPACE" -f nemo-rl-grpo.yaml
+```
+
+  </Step>
+  <Step title="Follow the training log" id="follow-the-training-log">
+
+Wait for Ray to start the job, then stream the driver log. The submitter is a Kubernetes Job with the same name as the RayJob:
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=jsonpath='{.status.jobStatus}'=RUNNING rayjob/nemo-rl-grpo --timeout=30m
+kubectl logs -n "$NAMESPACE" -f job/nemo-rl-grpo | grep -v 'request_id='
+```
+
+The frontend and both engines log several lines for every rollout request, about 92,000 of the run's 95,000 lines. Each of those lines has a `request_id`, so `grep -v` hides them. If `kubectl logs` returns before the job ends, run it again. While the job runs, `kubectl port-forward -n "$NAMESPACE" svc/nemo-rl-grpo-head-svc 8265:8265` opens the Ray dashboard at `http://localhost:8265`.
+
+<Note>
+`kubectl logs` returns only a container's current log file, and this log grows to about 33 MB. If your kubelet rotates container logs at a smaller size, such as the Kubernetes default `containerLogMaxSize` of 10 MiB, save the whole log while you follow it, for the checks in [Verify the Run](#verify-the-run): `kubectl logs -n "$NAMESPACE" -f job/nemo-rl-grpo | tee nemo-rl-grpo.log | grep -v 'request_id='`.
+</Note>
+
+These lines trace the integration, in order:
+
+```text
+INFO:nemo_rl.distributed.virtual_cluster:virtual_cluster.py:522: Connected to existing Ray cluster: {... 'GPU': 3.0, 'CPU': 32.0, ...}
+  - Loaded training dataset OpenMathInstruct-2 with 950000 samples.
+  [Dynamo] etcd ready on 10.244.4.16:1328
+  [Dynamo] NATS ready on 10.244.4.16:1393
+  [Dynamo] launching frontend argv=['/opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python', '-m', 'dynamo.frontend', ..., '--router-mode', 'kv']
+(VllmAsyncGenerationWorker pid=6067)   [Dynamo] engine publishes KV events: True
+(VllmAsyncGenerationWorker pid=6068)   [Dynamo] engine publishes KV events: True
+  [Dynamo] frontend http://10.244.4.16:3032/v1 routes to 2 engine(s)
+(SingleControllerActor pid=8276) SingleControllerActor: sampler=in_order buffer=64 inflight=32 weight_sync=CollectiveWeightSynchronizer
+(SingleControllerActor pid=8276)   _sync_weights: sync done in 0.126s
+(SingleControllerActor pid=8276) rollout_pump: starting
+...
+(SingleControllerActor pid=8276)   _sync_weights: sync done in 0.112s
+(SingleControllerActor pid=8276)   • Total step time: 45.97s
+(SingleControllerActor pid=8276) step_metrics={..., 'token_mult_prob_error': 1.019520670022704, ..., 'gen_kl_error': 0.000615084201654238, ..., 'reward': 0.072265625, ...}
+(SingleControllerActor pid=8276) train step 1/25  trainer_v=1  lag=0
+...
+(SingleControllerActor pid=8276) train step 25/25  trainer_v=25  lag=1
+  [Dynamo] router applied KV events: {..., "ok": 270223.0, ...}
+  [Dynamo] frontend stopped pid=6310
+  [Dynamo] NATS stopped pid=6120
+  [Dynamo] etcd stopped pid=6069
+SUCC cli.py:67 -- Job 'nemo-rl-grpo-28bgq' succeeded
+```
+
+1. NeMo RL joins the Ray cluster that KubeRay created, instead of starting its own, and loads the dataset that the setup Job prepared.
+2. The driver starts etcd, NATS, and the frontend with the KV router. It runs the frontend from the vLLM workers' Python environment, so the frontend and the engines use the same Dynamo release.
+3. Each vLLM engine registers with the frontend and publishes its KV-cache events, which the router uses to track what each engine has cached. Startup waits until the frontend routes to both engines. Meanwhile, the Megatron Core trainer loads the model. The first run also converts the model to Megatron Core's checkpoint format under `/data/hf-home/nemo_rl`, which later runs reuse.
+4. NeMo RL's training loop starts with the weight-update method that it uses, NCCL from the trainer to the engines (`CollectiveWeightSynchronizer`). It sends the trainer's weights to both engines once, then starts the rollouts.
+5. Each step trains on 512 answers and ends with a weight update (`_sync_weights`). `Total step time` is the step's duration. `step_metrics` holds the step's results: `reward` is the mean reward of its answers, and `gen_kl_error` compares the token log-probabilities that the engines returned with the ones that the trainer computes for the same tokens.
+6. `lag=1` means that the step trained on answers that the engines generated with the weights from one update earlier: the engines generate each step's batch while the trainer works on the step before it.
+7. After step 25, the driver reads from the frontend how many KV-cache events the router applied, then stops the frontend, NATS, and etcd, and the job succeeds.
+
+Startup takes about 2 minutes 15 seconds after the job starts. The first run takes up to a minute longer, because it also converts the model and fills vLLM's compile cache on the volume. The first step takes about 45 seconds. Later steps take about 30 seconds, all of it on the trainer's GPU: about 16 seconds to compute the policy's and the reference model's log-probabilities and about 14 to train. The next batch is ready by then, so the steps don't wait for rollouts. On a node that already has the image, the run takes about 16 minutes from `kubectl apply` to the job's success.
+
+  </Step>
+</Steps>
+
+## Verify the Run
+
+<Steps toc={true}>
+  <Step title="Check the job status" id="check-the-job-status">
+
+```bash
+kubectl get rayjob nemo-rl-grpo -n "$NAMESPACE"
+```
+
+```text
+NAME           JOB STATUS   DEPLOYMENT STATUS   RAY CLUSTER NAME     START TIME             END TIME               AGE
+nemo-rl-grpo   SUCCEEDED    Complete            nemo-rl-grpo-g6dsk   2026-11-13T00:11:44Z   2026-11-13T00:28:18Z   16m
+```
+
+  </Step>
+  <Step title="Save the training log" id="save-the-training-log">
+
+The remaining checks read the driver log. Save it once, unless you already saved it with `tee` while you followed it:
+
+```bash
+kubectl logs -n "$NAMESPACE" job/nemo-rl-grpo > nemo-rl-grpo.log
+```
+
+  </Step>
+  <Step title="Check the training reward" id="check-the-training-reward">
+
+Print the mean reward and the `gen_kl_error` of each step:
+
+```bash
+sed -n -E "s/.*step_metrics=.*'gen_kl_error': ([0-9.e-]+),.*'reward': ([0-9.]+),.*/\2 \1/p" nemo-rl-grpo.log \
+  | awk '{ printf "step %2d: reward %.3f, gen_kl_error %.5f\n", NR, $1, $2 }'
+```
+
+```text
+step  1: reward 0.072, gen_kl_error 0.00062
+step  2: reward 0.088, gen_kl_error 0.00060
+step  3: reward 0.080, gen_kl_error 0.00064
+step  4: reward 0.081, gen_kl_error 0.00068
+step  5: reward 0.066, gen_kl_error 0.00070
+step  6: reward 0.049, gen_kl_error 0.00075
+step  7: reward 0.083, gen_kl_error 0.00073
+step  8: reward 0.051, gen_kl_error 0.00134
+step  9: reward 0.119, gen_kl_error 0.00102
+step 10: reward 0.145, gen_kl_error 0.00102
+step 11: reward 0.260, gen_kl_error 0.00209
+step 12: reward 0.157, gen_kl_error 0.00142
+step 13: reward 0.146, gen_kl_error 0.00093
+step 14: reward 0.176, gen_kl_error 0.00078
+step 15: reward 0.152, gen_kl_error 0.00090
+step 16: reward 0.242, gen_kl_error 0.00086
+step 17: reward 0.328, gen_kl_error 0.00081
+step 18: reward 0.285, gen_kl_error 0.00083
+step 19: reward 0.343, gen_kl_error 0.00097
+step 20: reward 0.182, gen_kl_error 0.00093
+step 21: reward 0.164, gen_kl_error 0.00096
+step 22: reward 0.238, gen_kl_error 0.00071
+step 23: reward 0.338, gen_kl_error 0.00076
+step 24: reward 0.191, gen_kl_error 0.00074
+step 25: reward 0.305, gen_kl_error 0.00098
+```
+
+An answer scores 1 when the answer in its `\boxed{}` matches the reference answer, and 0 otherwise. The mean reward rose from about 0.08 in the first 3 steps to about 0.28 in the last 3, with large swings between steps. Qwen2.5-1.5B is a base model, and many of its answers run out of tokens: the config allows 512 tokens for a prompt and its answer together, and 60% to 68% of the answers reached that limit in steps 1 to 8, against 44% to 54% in steps 23 to 25.
+
+`gen_kl_error` stays between 0.0006 and 0.0015 on 24 of the 25 steps. NeMo RL's CI requires its Dynamo test, a 2-step run of a smaller model, to stay below 0.002. Step 11 went slightly over that, at 0.00209. Engines that kept generating with old weights would make the value grow from step to step.
+
+  </Step>
+  <Step title="Check that the engines received every update" id="check-that-the-engines-received-every-update">
+
+Count the weight updates from the trainer to the engines:
+
+```bash
+grep -c '_sync_weights: sync done' nemo-rl-grpo.log
+```
+
+```text
+26
+```
+
+The trainer sends its weights to both engines once before the first rollout and once after each of the 25 steps, in about 0.11 seconds each.
+
+  </Step>
+  <Step title="Check that Dynamo routed the rollouts" id="check-that-dynamo-routed-the-rollouts">
+
+The frontend logs one `Selected worker` line for each request that it routes. Count them for each engine:
+
+```bash
+grep 'Selected worker' nemo-rl-grpo.log | grep -o 'worker_id=[0-9]*' | sort | uniq -c
+```
+
+```text
+   6549 worker_id=7220855501956877835
+   6763 worker_id=7220855501956877837
+```
+
+The router sent 13,312 requests, or 26 batches of 512, to the two engines. The engines generate one batch ahead of training, so the batch for a 26th step was done when training stopped. Then check that the router applied the engines' KV-cache events without errors:
+
+```bash
+grep 'router applied KV events' nemo-rl-grpo.log
+```
+
+```text
+  [Dynamo] router applied KV events: {"allocation_failed": 0.0, "block_not_found": 0.0, "capacity_exhausted": 0.0, "indexer_invariant_violation": 0.0, "invalid_block": 0.0, "ok": 270223.0, "ownership_degree_overflow": 0.0, "parent_block_not_found": 0.0, "unsupported_residency_domain": 0.0}
+```
+
+  </Step>
+</Steps>
+
+## Routing
+
+The frontend routes with Dynamo's KV router (`router_mode: kv`). The engines publish their KV-cache events through NATS, so the router knows which prompt blocks each engine has cached, and it weighs a request's cached blocks on each engine against each engine's load.
+
+In this run, the cached blocks that the router found were almost always the start of the prompt. Each finished request's log line records them as `overlap_blocks`:
+
+```bash
+grep 'route request completed' nemo-rl-grpo.log | grep -o 'overlap_blocks=[0-9]*' | sort | uniq -c
+```
+
+```text
+    246 overlap_blocks=0
+  12996 overlap_blocks=2
+     20 overlap_blocks=3
+     21 overlap_blocks=4
+     19 overlap_blocks=5
+      1 overlap_blocks=6
+      9 overlap_blocks=7
+```
+
+Every prompt starts with the same chat template and instructions, 2 blocks that both engines hold. A prompt's 16 answers are requested at the same time, before either engine has cached the rest of that prompt, and NeMo RL resets the engines' prefix caches after each weight update. So the router could rarely match more than those 2 blocks, and it mostly balanced the load. These pages don't compare KV-aware routing with other modes. To try one, add an override such as `policy.generation.dynamo_cfg.frontend_args.router_mode=round-robin` to the entrypoint. To decide whether KV-aware routing suits your rollouts, see [KV-Aware Load Balancing for RL Rollouts](../routing.md).
+
+## Clean Up
+
+Delete the namespace. This removes the RayJob, the setup Job, and the PersistentVolumeClaim. If the StorageClass uses the `Delete` reclaim policy, the storage provider also deletes the volume with the model and dataset:
+
+```bash
+kubectl delete namespace "$NAMESPACE"
+```
+
+To train again instead, delete only the RayJob, then apply it again. The next run reuses the converted model and vLLM's compile cache on the volume:
+
+```bash
+kubectl delete rayjob nemo-rl-grpo -n "$NAMESPACE"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| The Ray head Pod stays `Pending`, and its events show `Insufficient nvidia.com/gpu` | No node has 3 free GPUs. Free GPUs on one node, or wait for them. |
+| The Ray head Pod stays `Pending`, and its events show `volume node affinity conflict` | The volume is zonal, and no GPU node with free GPUs is in its zone. Free GPUs on a node in the volume's zone, or delete the namespace and run the setup again. |
+| The job fails with `FileNotFoundError: Prompt file examples/prompts/cot.txt not found` | The driver didn't start in NeMo RL's source directory. Keep `workingDir: /opt/nemo-rl` on the Ray head container: Ray runs the entrypoint in the directory where KubeRay started Ray. |
+| The job fails with `Dynamo frontend did not see every vLLM engine within 600s` | An engine didn't register with the frontend in time. Look for the engine's error earlier in the log. If the engines were still loading, raise `policy.generation.dynamo_cfg.startup_timeout_s`. |
+| The job fails with `policy.generation.dynamo=true requires non-colocated generation` | The engines can't share the trainer's GPUs with `dynamo: true`. Keep `policy.generation.colocated.enabled` at `false`, its value in the config. |
+| The job fails with `policy.generation.dynamo=true does not serve NeMo-Gym rollouts yet` | The config uses NeMo Gym environments, which the frontend doesn't serve. Use a config without NeMo Gym, or set `policy.generation.dynamo=false`. |
+| The checks count fewer than 25 steps or 13,312 requests | The saved log starts partway through the run, because the kubelet rotated the container log. Save the log while you follow it, as the note in [Follow the training log](#follow-the-training-log) shows. |
+
+## Current Limitations
+
+- NeMo RL doesn't publish an image with `dynamo: true` yet, so you build one from a NeMo RL commit. The pages use the `ai-dynamo` release that this commit's lockfile pins, 1.5.1, rather than a Dynamo image.
+- The engines can't share the trainer's GPUs with `dynamo: true`. A colocated engine sleeps while the policy trains, and the frontend would keep routing requests to it.
+- Only NeMo RL's text rollouts go through the frontend. NeMo Gym rollouts aren't served, and NeMo RL sends evaluation and multimodal requests to the engines directly. The SingleController launcher also doesn't run validation, so the pages report the training reward only.
+- Dynamo runs inside the Ray job, so no operator restarts a failed engine or frontend. The job fails instead.
+- The Ray head's dashboard and Jobs API on port 8265 accept requests without authentication, and NeMo RL runs etcd, NATS, and the frontend without authentication in the same Pod. Anyone who can reach the Pod can run code in it. Restrict access to the Ray head, for example with a NetworkPolicy.
+
+## Next Steps
+
+- **Compare routing.** Run again with `policy.generation.dynamo_cfg.frontend_args.router_mode=round-robin` and compare the step times. See [Routing](#routing).
+- **Add engines.** Raise `policy.generation.colocated.resources.gpus_per_node` and `cluster.gpus_per_node` by the same number, and raise the head's `nvidia.com/gpu` to match.
+- **Allow longer answers.** Raise `policy.max_total_sequence_length` so that fewer answers stop at the token limit.
+- **Keep the trained model.** Set `checkpointing.enabled=true` and `checkpointing.checkpoint_dir` to a directory on `/data`. The SingleController config saves after every step, so raise `checkpointing.save_period` to save less often, and make the volume larger.
+- **Train on more nodes.** Add a `workerGroupSpecs` group to the RayJob with the same Pod template, and use a `ReadWriteMany` volume. Raise `cluster.num_nodes`, and set `policy.generation.colocated.resources.num_nodes` to the number of nodes for the engines.
+- **Read NeMo RL's guide.** NeMo RL's [Dynamo generation guide](https://github.com/NVIDIA-NeMo/RL/blob/d51b2842e87403b4d1fbd008d28cd52694ced487/docs/guides/dynamo-generation.md) lists every `dynamo_cfg` key and the settings that `dynamo: true` doesn't support.
