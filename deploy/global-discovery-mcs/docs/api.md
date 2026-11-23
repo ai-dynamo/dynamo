@@ -119,8 +119,8 @@ cluster with the conflict resolution of KEP-1645
   already used by another (port, protocol) is skipped.
 - IP families are intersected; an export without a common family is
   skipped. An export that lists no family does not constrain the result.
-- Type, session affinity and its config, annotations and labels come from
-  the winner.
+- Type, session affinity and its config, internal traffic policy, traffic
+  distribution, annotations and labels come from the winner.
 
 `conflict` is set when any participating export disagrees with the winner
 (on ports, IP families, type, session affinity, its client IP timeout,
@@ -141,6 +141,54 @@ region and counts always set and the endpoint list only with
 `include_endpoints`. An import whose exporting clusters all expired keeps
 its shape with no participants and no endpoints until compaction removes
 the records.
+
+### Traffic policies
+
+The read-side `ServiceImport` carries `internal_traffic_policy` (field 15)
+and `traffic_distribution` (field 16) from the winning export. These are
+computed fields, not separately writable import settings; the existing
+export validation and oldest-active-export ownership rules apply.
+`include_endpoints=false` omits endpoint lists only, not either policy.
+
+For example, the source Kubernetes Service can set:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference
+  namespace: llm
+spec:
+  selector:
+    app: inference
+  internalTrafficPolicy: Local
+  trafficDistribution: PreferClose
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+```
+
+Its winning import includes the following REST/JSON fields:
+
+```json
+{
+  "internalTrafficPolicy": "INTERNAL_TRAFFIC_POLICY_LOCAL",
+  "trafficDistribution": "PreferClose"
+}
+```
+
+An absent source policy remains `INTERNAL_TRAFFIC_POLICY_UNSPECIFIED` on
+the wire; absent traffic distribution remains empty. JSON omits these
+default-valued fields. Kubernetes consumers interpret an unspecified
+internal traffic policy as the Kubernetes default, `Cluster`, and omit an
+empty traffic distribution rather than inventing a preference.
+
+The two fields are additive: older protobuf clients ignore them, while a
+newer client reading an older registry receives their unspecified/empty
+values.
+Upgrade the registry and controller to propagate non-default policies
+end to end. No stored record or table schema changes are required.
 
 ## Watches
 

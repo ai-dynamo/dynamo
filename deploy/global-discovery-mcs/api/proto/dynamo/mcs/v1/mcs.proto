@@ -295,6 +295,10 @@ message ServiceImport
   // Endpoints grouped by source cluster, including the importing cluster.
   repeated ClusterEndpoints endpoints = 13;
   google.protobuf.Timestamp updated_at = 14;
+  // Internal traffic policy of the winning export; unspecified means unset.
+  InternalTrafficPolicy internal_traffic_policy = 15;
+  // Kubernetes spec.trafficDistribution of the winning export; empty means unset.
+  string traffic_distribution = 16;
 }
 
 message PutServiceExportRequest
