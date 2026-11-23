@@ -576,6 +576,14 @@ fn is_configuration_error(error: &DynamoError) -> bool {
 
 /// Name the engine's ZMQ KV-event publishers in its runtime data, by rank, so
 /// the frontend subscribes to them itself.
+///
+/// Only the endpoint and rank reach the router's ZMQ ingress. Unlike the
+/// sidecar's subscriber, that ingress:
+/// - subscribes to every topic on the socket, not only `topic`;
+/// - does not rewrite multimodal events with `image_token_id`, so KV routing
+///   of requests with images is not exact, as when the engine sets none;
+/// - does not watch `heartbeat_timeout`: a publisher that goes quiet keeps
+///   its blocks in the index until the engine is lost.
 fn record_kv_event_sources(
     runtime_data: &mut HashMap<String, serde_json::Value>,
     sources: Vec<KvEventSource>,
@@ -584,7 +592,11 @@ fn record_kv_event_sources(
     for source in sources {
         match source {
             KvEventSource::Zmq {
-                endpoint, dp_rank, ..
+                endpoint,
+                dp_rank,
+                topic: _,
+                image_token_id: _,
+                heartbeat_timeout: _,
             } => {
                 endpoints.insert(dp_rank.to_string(), endpoint.into());
             }
