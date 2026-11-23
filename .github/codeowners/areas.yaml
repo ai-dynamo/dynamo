@@ -1073,6 +1073,10 @@ shared:
   - frontend
   - kv-memory
   - epp
+- glob: lib/error/src/http.rs
+  owners:
+  - runtime
+  - frontend
 - glob: lib/llm/src/http/service/error.rs
   owners:
   - frontend

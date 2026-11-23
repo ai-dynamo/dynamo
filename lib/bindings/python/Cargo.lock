@@ -1651,9 +1651,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.19.8"
+version = "0.19.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
+checksum = "7359bf1de037ddada72729c3acec9b040f3468400c6e9e740b01ba0cd2e89562"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -2108,8 +2108,10 @@ dependencies = [
 name = "dynamo-error"
 version = "1.8.0"
 dependencies = [
+ "http 1.4.2",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2169,6 +2171,7 @@ dependencies = [
  "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
+ "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
@@ -2289,6 +2292,7 @@ dependencies = [
  "dialoguer",
  "dynamo-admission",
  "dynamo-decisions",
+ "dynamo-error",
  "dynamo-global-common",
  "dynamo-global-discovery-client",
  "dynamo-global-view-broadcaster",
@@ -2590,6 +2594,7 @@ dependencies = [
  "dashmap",
  "dynamo-admission",
  "dynamo-backend-common",
+ "dynamo-error",
  "dynamo-generate-format-catalog",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
@@ -2830,6 +2835,7 @@ version = "1.8.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "dynamo-error",
  "dynamo-llm",
  "dynamo-protocols 10.0.1",
  "dynamo-runtime",
@@ -3002,6 +3008,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "dynamo-error",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-llm",
@@ -10201,9 +10208,9 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.21.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97c3940b2cf9b4a7a9ea6afd56520ee21eb46272b5442d3105274b4298404b4b"
+checksum = "cb17718402fd39480f1aca50c6dd625ccc266a3bbc49c45adad8322b06586a1e"
 dependencies = [
  "anyhow",
  "async-stream",

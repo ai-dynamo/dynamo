@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_error::http::{
+    ClientErrorAction, find_canonical_error_in_chain, http_action_for_error, overload_status_code,
+};
 use dynamo_runtime::error::ErrorClass;
 
-use super::{
-    super::{error, metrics},
-    DispatchError,
-};
+use super::{super::metrics, DispatchError};
 
 pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchError {
     if metrics::request_was_cancelled(cause) {
@@ -14,21 +14,21 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
     }
     if metrics::request_was_rejected(cause) {
         return DispatchError {
-            status: error::overload_status_code(),
+            status: overload_status_code(),
             public_message: "SGLang scoring worker capacity is exhausted",
             detail: "backend capacity exhausted".to_string(),
             retry_after: true,
             is_capacity_exhausted: true,
         };
     }
-    if let Some(error) = error::find_canonical_error_in_chain(cause) {
+    if let Some(error) = find_canonical_error_in_chain(cause) {
         if error.reason().as_str() == "runtime.unclassified" {
             return DispatchError::unavailable("native scoring transport failed");
         }
-        if let error::ClientErrorAction::Respond {
+        if let ClientErrorAction::Respond {
             status,
             public_message,
-        } = error::http_action_for_error(error)
+        } = http_action_for_error(error)
         {
             return DispatchError {
                 status,

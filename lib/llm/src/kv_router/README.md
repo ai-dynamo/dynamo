@@ -123,6 +123,8 @@ inline fallback. Successful consumption adds no cleanup wait.
   decode is routed immediately. Otherwise the hop waits for `disaggregated_params`.
 - A prefill that finishes the whole request (for example EOS on the one-token step) is returned
   directly; decode does not run.
+- Its KV router tracks neither active nor output blocks, whatever the prefill card, the decode
+  set or the policy file's `router` section configures: prefill load is prompt-side.
 - `into_decode_request` writes the handoff into the decode request: `bootstrap_info` or
   `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
 - Merges the prefill worker's KV-transfer topology constraints into the decode request's

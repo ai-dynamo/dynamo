@@ -65,11 +65,13 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClientErrorAction, Protocol, SanitizedError, anthropic_context_length_message,
-    find_canonical_error_in_chain, http_action_for_error, invalid_argument, public_message_for,
+    Protocol, anthropic_context_length_message, invalid_argument, public_message_for,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
+use dynamo_error::http::{
+    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
+};
 
 mod validation;
 use validation::ValidatedRequest;

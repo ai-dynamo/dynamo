@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 from io import BytesIO
 from types import SimpleNamespace
@@ -10,12 +11,26 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
+from vllm import SamplingParams
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.media.image import ImageMediaIO
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    VisionChunkProcessorItems,
+    parse_mm_uuids,
+)
+from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.renderers.base import BaseRenderer
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.handlers import _translate_vllm_client_errors
 from dynamo.vllm.multimodal_utils import request_processor as mod
 from dynamo.vllm.multimodal_utils.models import qwen as qwen_mod
 
@@ -928,15 +943,6 @@ def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
 
 
 def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
-    from vllm.multimodal.parse import (
-        MultiModalDataItems,
-        VisionChunkProcessorItems,
-        parse_mm_uuids,
-    )
-    from vllm.multimodal.processing.inputs import ProcessorInputs
-    from vllm.multimodal.processing.processor import BaseMultiModalProcessor
-    from vllm.renderers.base import BaseRenderer
-
     data_items = MultiModalDataItems(
         {"vision_chunk": VisionChunkProcessorItems([None])}
     )
@@ -968,22 +974,63 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
     parse_mm_data.assert_called_once()
-    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.args[0] == {}
     assert parse_mm_data.call_args.kwargs == {"validate": False}
 
-    cache.is_cached.return_value = [False]
-    parse_mm_data.reset_mock()
-    with pytest.raises(
-        ValueError,
-        match="Cache miss for vision_chunk at index 0 but data is not provided",
-    ):
-        BaseMultiModalProcessor._get_cache_missing_items(
-            processor,
-            cache,
-            data_items,
-            mm_hashes,
+
+@pytest.mark.asyncio
+async def test_worker_uuid_cache_miss_has_actionable_recovery_advice():
+    uuid = "catalog/image:v2"
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"UuidOnly": uuid}]},
+        "multi_modal_uuids": {"image_url": [uuid]},
+    }
+    prompt = _processor(unified_vision_chunk=True).build_tokens_prompt(
+        request, {"vision_chunk": [None]}, None
+    )
+    data_items = MultiModalDataItems(
+        {
+            "vision_chunk": VisionChunkProcessorItems(
+                prompt["multi_modal_data"]["vision_chunk"]
+            )
+        }
+    )
+    mm_hashes = prompt["multi_modal_uuids"]
+
+    def parse_mm_data(data, *, validate):
+        return MultiModalDataItems(
+            {
+                modality: VisionChunkProcessorItems(items)
+                for modality, items in data.items()
+            }
         )
-    parse_mm_data.assert_not_called()
+
+    processor = SimpleNamespace(info=SimpleNamespace(parse_mm_data=parse_mm_data))
+    cache = MultiModalProcessorOnlyCache(
+        SimpleNamespace(
+            get_multimodal_config=lambda: SimpleNamespace(mm_processor_cache_gb=0.001)
+        )
+    )
+
+    async def add_request(*args, **kwargs):
+        return BaseMultiModalProcessor._get_cache_missing_items(
+            processor, cache, data_items, mm_hashes
+        )
+
+    # Exercise vLLM's actual wrapping of a processor failure, not a fabricated
+    # exception chain that could diverge from AsyncLLM.generate.
+    engine = SimpleNamespace(add_request=add_request, log_requests=False)
+    stream = AsyncLLM.generate(
+        engine, prompt, SamplingParams(max_tokens=1), "cache-miss"
+    )
+    with pytest.raises(InvalidArgument, match="Resend.*same UUID") as raised:
+        await asyncio.wait_for(
+            anext(_translate_vllm_client_errors(stream, request)), timeout=5
+        )
+    assert isinstance(raised.value.__cause__, EngineGenerateError)
+    assert type(raised.value.__cause__.__cause__) is ValueError
+    assert uuid not in str(raised.value)
 
 
 def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
