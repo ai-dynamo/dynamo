@@ -2662,7 +2662,7 @@ impl ServingLoadCollector {
 ///
 /// [`MetricsRegistry`]: dynamo_runtime::metrics::MetricsRegistry
 struct MetricsHandlerState {
-    registry: Arc<Registry>,
+    registry: Registry,
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 }
 
@@ -2679,7 +2679,7 @@ pub fn scrape_router(
     let path = path.unwrap_or_else(|| "/metrics".to_string());
 
     let metrics_state = MetricsHandlerState {
-        registry: Arc::new(registry),
+        registry,
         drt_metrics,
     };
 
