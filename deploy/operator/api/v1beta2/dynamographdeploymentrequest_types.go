@@ -327,8 +327,11 @@ type ObjectiveSpec struct {
 type AISimSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
 	// the typed fields. It uses the upstream AISimulate JSON contract, including
-	// snake_case names. Values here take precedence, and null deletes a lowered
-	// field. The dgdr_run member must remain an object, and its operator-owned
+	// snake_case names. Server-Side Apply treats the complete override document as
+	// one atomic field: managers cannot independently own its subfields. An apply
+	// that replaces the document removes omitted override entries. This does not
+	// change the merge patch over the lowered input: values here take precedence,
+	// and null deletes a lowered field. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
 	// runtime_image, runtime_version_override, derive_runtime_images,
 	// num_gpus_per_node, and namespace are operator-owned. Request and Run admission
@@ -347,6 +350,7 @@ type AISimSpec struct {
 	// schema. Request spec changes require the same validation; Run specs are immutable.
 	// Unchanged specs remain metadata-updatable after a bundled schema change.
 	// +optional
+	// +mapType=atomic
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	InputOverrides *runtime.RawExtension `json:"inputOverrides,omitempty"`
