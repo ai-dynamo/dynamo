@@ -71,6 +71,7 @@ from dynamo.frontend.sglang_processor import (
     _map_finish_reason,
     _model_eos_token_ids,
     _normalize_eos_token_ids,
+    _normalize_inline_audio,
     _preprocess_worker,
     _runtime_config_parser_name,
     _tokenizer_eos_token_ids,
@@ -307,6 +308,51 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         handler = object.__new__(DiffusionWorkerHandler)
         with pytest.raises(InvalidArgument, match="diffusion language model"):
             await anext(handler.generate(result, None))
+
+    @pytest.mark.multimodal
+    @pytest.mark.parametrize(
+        ("fmt", "mime"), [("wav", "audio/wav"), ("mp3", "audio/mpeg")]
+    )
+    def test_inline_audio_reaches_the_template_and_media_slots_in_source_order(
+        self, fmt, mime
+    ):
+        url = "https://example.com/first.wav"
+        inline = {
+            "type": "input_audio",
+            "input_audio": {"data": "AQ==", "format": fmt},
+        }
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio_url", "audio_url": {"url": url}},
+                        inline,
+                    ],
+                }
+            ]
+        }
+        normalized = _normalize_inline_audio(request)
+        assert normalized["messages"][0]["content"][1] == {
+            "type": "audio_url",
+            "audio_url": {"url": f"data:{mime};base64,AQ=="},
+        }
+        assert request["messages"][0]["content"][1] is inline
+        projected = _build_dynamo_preproc(normalized, [1, 2], "audio", None)
+        assert projected["multi_modal_data"]["audio_url"] == [
+            {"Url": url},
+            {"Url": f"data:{mime};base64,AQ=="},
+        ]
+
+    @pytest.mark.multimodal
+    def test_inline_audio_enforces_data_url_size_before_projection(self, monkeypatch):
+        monkeypatch.setattr(sglang_processor_module, "max_data_url_bytes", lambda: 24)
+        part = {
+            "type": "input_audio",
+            "input_audio": {"format": "wav", "data": "AAAAAA=="},
+        }
+        with pytest.raises(InvalidArgument, match="DYN_MM_MAX_DATA_URL_MB"):
+            _normalize_inline_audio({"messages": [{"role": "user", "content": [part]}]})
 
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):

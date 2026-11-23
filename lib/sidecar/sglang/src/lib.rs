@@ -5,10 +5,12 @@
 //!
 //! A [`SglangSidecarEngine`] implements [`dynamo_backend_common::LLMEngine`] by
 //! proxying inference to an out-of-process SGLang engine over
-//! `sglang.api.v1.SglangService`, the native gRPC contract of SGLang's Rust
-//! server (`SGLANG_RUST_SERVER=1`). Model identity, disaggregation role,
-//! parallelism, KV block sizing, and context length are discovered from the
-//! engine's gRPC metadata RPCs.
+//! a native gRPC endpoint. Language workers use `sglang.api.v1.SglangService`
+//! (`SGLANG_RUST_SERVER=1`). A standalone `--encoder-only --grpc-mode`
+//! process exposes `sglang.grpc.encoder.SglangEncoder`. Its GetEncoderInfo
+//! RPC identifies the Encode role and its Stage RPC produces the transfer
+//! descriptor for the downstream language worker. The native services report
+//! their own model identity and deployment metadata.
 //!
 //! SGLang's Rust server runs one listener per data-parallel group leader. One
 //! sidecar serves every listener of its node as one worker that owns their DP
@@ -29,10 +31,12 @@ use args::Args;
 pub mod args;
 pub mod client;
 mod discovery;
+mod encoder;
 pub mod engine;
 mod listeners;
 mod native_http;
 mod node;
+mod staged_media;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
 /// until SGLang publishes its upstream protocol package.
@@ -65,7 +69,6 @@ fn parse_args(argv: Vec<String>, injected_endpoint: Option<String>) -> clap::err
 pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
     let args = parse_args(argv, std::env::var(SGLANG_GRPC_ENDPOINT_ENV).ok())
         .map_err(SidecarStartupError::from)?;
-    SglangSidecarEngine::validate_args(&args).map_err(SidecarStartupError::from)?;
     dynamo_sidecar_common::run_task(|runtime, shutdown| async move {
         use dynamo_runtime::DistributedRuntime;
         use dynamo_runtime::system_status_server::SystemProbePolicy;

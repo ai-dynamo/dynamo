@@ -426,7 +426,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
         "prompt_embeds",
         "mm_processor_kwargs",
         "multi_modal_uuids",
-        "encoder_result",
     ] {
         let mut request = request();
         let message = match field {
@@ -448,10 +447,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
                     vec![None, Some("image-a".to_string())],
                 )]));
                 "media uuids"
-            }
-            "encoder_result" => {
-                request.encoder_result = Some(json!({}));
-                "encoder_result"
             }
             _ => unreachable!(),
         };
@@ -550,6 +545,14 @@ fn unsupported_media_is_refused() {
         );
         assert_invalid(error, message);
     }
+}
+
+#[test]
+fn stage_moves_the_inline_image_buffer() {
+    let uri = String::from("data:image/png;base64,AAAA");
+    let buffer = uri.as_ptr();
+    let staged = into_media_source(MultimodalData::RawUrl(uri)).unwrap();
+    assert_eq!(staged.as_ptr(), buffer);
 }
 
 #[test]
@@ -1029,4 +1032,348 @@ fn handoff_names_rank_only_when_prefill_named_it() {
         build(&decode_request, DisaggregationMode::Decode).unwrap_err(),
         "disagg_prefill_dp_rank must be a DP rank",
     );
+}
+
+fn visual_capabilities(video: bool, native_model_type: &str) -> crate::encoder::StagedCapabilities {
+    crate::encoder::StagedCapabilities {
+        images: true,
+        video,
+        native_model_type: native_model_type.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn external_handoff_preserves_token_layout_and_hashes_without_raw_media() {
+    let mut req = request();
+    req.token_ids = vec![31, 151655, 32, 151655, 33].into();
+    req.multi_modal_data = Some(HashMap::from([(
+        "image_url".into(),
+        vec![
+            url("https://example.test/a.png"),
+            url("https://example.test/b.png"),
+        ],
+    )]));
+    req.extra_args = Some(json!({"mm_hashes": ["ff", "02"]}));
+    let staged = json!({
+        "version": 1, "request_id": "public", "transfer_id": "10".repeat(16),
+        "part_id": format!("{}_local_part_0", "10".repeat(16)), "num_parts": 1, "part_idx": 0,
+        "peer": "grpc://e2:9100", "image_count": 2,
+        "images": [
+            {"t":1, "h":4, "w":4, "identity":"a".repeat(64)},
+            {"t":1, "h":6, "w":4, "identity":"b".repeat(64)}
+        ]
+    });
+
+    let missing =
+        crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(false, ""))
+            .unwrap_err();
+    assert_eq!(
+        missing.class(),
+        dynamo_backend_common::ErrorType::Unavailable
+    );
+    let mut malformed = req.clone();
+    malformed
+        .multi_modal_data
+        .as_mut()
+        .unwrap()
+        .get_mut("image_url")
+        .unwrap()[0] = MultimodalData::Json(json!({"image": "custom"}));
+    let rejected = crate::encoder::validate_consumer(
+        &malformed,
+        "public",
+        true,
+        &visual_capabilities(false, ""),
+    )
+    .unwrap_err();
+    assert_eq!(
+        rejected.class(),
+        dynamo_backend_common::ErrorType::InvalidRequest
+    );
+    req.encoder_result = Some(staged.clone());
+    assert!(
+        crate::encoder::validate_consumer(&req, "other", true, &visual_capabilities(false, ""))
+            .is_err()
+    );
+    crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(false, ""))
+        .unwrap();
+    req.bootstrap_info = routed_bootstrap(None).bootstrap_info;
+    for mode in [
+        DisaggregationMode::Aggregated,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        let generated = build(&req, mode).unwrap();
+        assert_eq!(input_ids(&generated), [31, 151655, 32, 151655, 33]);
+        assert!(
+            generated.image_data.is_none()
+                && generated.video_data.is_none()
+                && generated.audio_data.is_none()
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(generated.encoder_handoff.as_ref().unwrap()).unwrap(),
+            staged
+        );
+        assert!(
+            matches!(generated.mm_hashes.unwrap().value, Some(pb::string_list_or_list::Value::One(list)) if list.items == ["ff", "02"])
+        );
+    }
+    req.multi_modal_data = None;
+    crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(false, ""))
+        .unwrap();
+    req.encoder_result.as_mut().unwrap()["version"] = json!(2);
+    assert!(
+        crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(false, ""))
+            .is_err()
+    );
+    let mut text = request();
+    crate::encoder::validate_consumer(&text, "public", true, &visual_capabilities(false, ""))
+        .unwrap();
+    // Native /generate envelopes may carry media without canonical media slots.
+    text.extra_args = Some(
+        json!({(dynamo_sglang_generate::PAYLOAD_KEY):{"image_data":"data:image/png;base64,AA=="}}),
+    );
+    assert!(
+        crate::encoder::validate_consumer(&text, "public", true, &visual_capabilities(false, ""))
+            .is_err()
+    );
+}
+
+#[test]
+fn grouped_hashes_require_complete_order_only_for_mixed_media() {
+    let mut req = request();
+    assert_eq!(
+        ordered_media_hashes(&req, &json!({"video":["01", "02"]})).unwrap(),
+        ["01", "02"]
+    );
+    let grouped = json!({"video":["01"], "image":["02"]});
+    assert!(ordered_media_hashes(&req, &grouped).is_err());
+    req.multi_modal_order = serde_json::from_value(json!([
+        {"modality":"video_url", "index":0},
+        {"modality":"video_url", "index":0}
+    ]))
+    .unwrap();
+    assert!(ordered_media_hashes(&req, &grouped).is_err());
+}
+
+#[test]
+fn staged_mixed_media_gates_each_peer_and_preserves_native_layout() {
+    let clip_url = "https://example.test/a.mp4";
+    let second_url = "https://example.test/b.mp4";
+    let image_url = "https://example.test/c.png";
+    let mut req = request();
+    req.token_ids = vec![151656, 5, 151655, 6, 151656].into();
+    req.extra_args = Some(json!({"mm_hashes_by_modality": {
+        "image": ["02"], "video": ["01", "03"]
+    }}));
+    req.multi_modal_order = serde_json::from_value(json!([
+        {"modality":"video_url", "index":0},
+        {"modality":"image_url", "index":0},
+        {"modality":"video_url", "index":1}
+    ]))
+    .unwrap();
+    req.multi_modal_data = Some(HashMap::from([
+        ("image_url".into(), vec![url(image_url)]),
+        ("video_url".into(), vec![url(clip_url), url(second_url)]),
+    ]));
+    assert!(
+        crate::encoder::stage_request(
+            req.clone(),
+            "public".into(),
+            &visual_capabilities(false, "")
+        )
+        .is_err()
+    );
+    let stage =
+        crate::encoder::stage_request(req.clone(), "public".into(), &visual_capabilities(true, ""))
+            .unwrap();
+    assert_eq!(stage.mm_items, [image_url]);
+    assert_eq!(stage.video_urls, [clip_url, second_url]);
+    let transfer_id = "10".repeat(16);
+    let handoff = json!({
+        "version":2, "peer":"grpc://e:9100", "request_id":"public", "transfer_id":transfer_id,
+        "part_id":format!("{transfer_id}_local_part_0"), "part_idx":0, "num_parts":1,
+        "image_count":1, "images":[{"t":1,"h":4,"w":4,"identity":"c".repeat(64)}],
+        "videos":[
+            {"t":2,"h":4,"w":4,"identities":["a".repeat(64),"b".repeat(64)],"timestamps":[0.25,0.75]},
+            {"t":2,"h":4,"w":4,"identities":["d".repeat(64)],"second_per_grid_ts":0.5}
+        ]
+    });
+    req.encoder_result = Some(handoff.clone());
+    assert!(
+        crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(false, ""))
+            .is_err()
+    );
+    crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(true, ""))
+        .unwrap();
+    req.bootstrap_info = routed_bootstrap(None).bootstrap_info;
+    for mode in [
+        DisaggregationMode::Aggregated,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        let generated = build(&req, mode).unwrap();
+        assert_eq!(input_ids(&generated), [151656, 5, 151655, 6, 151656]);
+        assert!(generated.image_data.is_none() && generated.video_data.is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(generated.encoder_handoff.as_deref().unwrap()).unwrap(),
+            handoff
+        );
+        assert!(
+            matches!(generated.mm_hashes.unwrap().value,Some(pb::string_list_or_list::Value::One(list)) if list.items==["01","02","03"])
+        );
+    }
+    for invalid in [json!([-0.2, 0.5]), json!([0.6, 0.5]), json!([0.5])] {
+        req.encoder_result.as_mut().unwrap()["videos"][0]["timestamps"] = invalid;
+        assert!(
+            crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(true, ""))
+                .is_err()
+        );
+    }
+    let mut zero_duration = handoff.clone();
+    zero_duration["videos"][1]["second_per_grid_ts"] = json!(0.0);
+    req.encoder_result = Some(zero_duration);
+    assert!(
+        crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(true, ""))
+            .is_err()
+    );
+    let mut short = handoff;
+    short["videos"].as_array_mut().unwrap().pop();
+    req.encoder_result = Some(short);
+    assert!(
+        crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(true, ""))
+            .is_err()
+    );
+}
+
+#[test]
+fn native_video_handoff_reaches_all_language_roles() {
+    let mut req = request();
+    req.token_ids = vec![8, 31, 32, 9].into();
+    req.multi_modal_data = Some(HashMap::from([(
+        "video_url".into(),
+        vec![url("https://example.test/clip.mp4")],
+    )]));
+    let id = "3a".repeat(16);
+    let handoff = json!({
+        "version": 3, "peer": "grpc://e:9100", "request_id": "public",
+        "transfer_id": id, "part_id": format!("{id}_local_part_0"),
+        "part_idx": 0, "num_parts": 1, "image_count": 0, "images": [],
+        "native_model_type": "glm4v", "embedding_width": 1536,
+        "videos": [{"t": 2, "h": 4, "w": 6, "embedding_rows": 12,
+                    "identities": ["fe".repeat(32)], "timestamps": [0.0, 1.0]}]
+    });
+    req.encoder_result = Some(handoff.clone());
+    req.bootstrap_info = routed_bootstrap(None).bootstrap_info;
+    crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(true, "glm4v"))
+        .unwrap();
+    assert!(
+        crate::encoder::validate_consumer(
+            &req,
+            "public",
+            true,
+            &visual_capabilities(false, "glm4v")
+        )
+        .is_err()
+    );
+    assert!(
+        crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(true, ""))
+            .is_err()
+    );
+    for mode in [
+        DisaggregationMode::Aggregated,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        let generated = build(&req, mode).unwrap();
+        let wire: Value =
+            serde_json::from_str(generated.encoder_handoff.as_ref().unwrap()).unwrap();
+        assert_eq!(wire, handoff);
+        assert!(generated.video_data.is_none());
+        assert_eq!(input_ids(&generated), [8, 31, 32, 9]);
+    }
+    let mut compressed = handoff;
+    compressed["native_model_type"] = json!("mimo_v2");
+    compressed["videos"][0]["t"] = json!(4);
+    compressed["videos"][0]["identities"] = json!(["fe".repeat(32), "ba".repeat(32)]);
+    req.encoder_result = Some(compressed);
+    crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(true, "mimo_v2"))
+        .unwrap();
+    req.encoder_result.as_mut().unwrap()["videos"][0]["t"] = json!(3);
+    assert!(
+        crate::encoder::validate_consumer(
+            &req,
+            "public",
+            true,
+            &visual_capabilities(true, "mimo_v2")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn audio_handoff_binds_the_native_processor_and_reaches_every_language_role() {
+    let first = "https://example.test/first.wav";
+    let second = "https://example.test/second.mp3";
+    let mut req = request();
+    req.token_ids = vec![50, 5, 50].into();
+    req.multi_modal_data = Some(HashMap::from([(
+        "audio_url".into(),
+        vec![url(first), url(second)],
+    )]));
+    let caps = crate::encoder::StagedCapabilities {
+        audio_model_type: "qwen2_audio".into(),
+        ..Default::default()
+    };
+    let legacy = visual_capabilities(true, "");
+    assert!(crate::encoder::stage_request(req.clone(), "public".into(), &legacy).is_err());
+    let stage = crate::encoder::stage_request(req.clone(), "public".into(), &caps).unwrap();
+    assert_eq!(stage.audio_urls, [first, second]);
+    assert!(stage.mm_items.is_empty() && stage.video_urls.is_empty());
+    let id = "32".repeat(16);
+    let handoff = json!({
+        "version": 4, "peer": "grpc://e:9100", "request_id": "public",
+        "transfer_id": id, "part_id": format!("{id}_local_part_0"),
+        "part_idx": 0, "num_parts": 1, "image_count": 0, "images": [],
+        "native_model_type": "qwen2_audio", "embedding_width": 256,
+        "audios": [
+            {"identity":"ab".repeat(32),"feature_length":40,"embedding_rows":10,"embedding_width":256},
+            {"identity":"de".repeat(32),"feature_length":60,"embedding_rows":15,"embedding_width":256}
+        ]
+    });
+    req.encoder_result = Some(handoff.clone());
+    req.bootstrap_info = routed_bootstrap(None).bootstrap_info;
+    assert!(crate::encoder::validate_consumer(&req, "public", true, &legacy).is_err());
+    crate::encoder::validate_consumer(&req, "public", true, &caps).unwrap();
+    for mode in [
+        DisaggregationMode::Aggregated,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        let generated = build(&req, mode).unwrap();
+        assert!(generated.audio_data.is_none());
+        assert_eq!(input_ids(&generated), [50, 5, 50]);
+        let wire: Value =
+            serde_json::from_str(generated.encoder_handoff.as_ref().unwrap()).unwrap();
+        assert_eq!(wire, handoff);
+    }
+    req.multi_modal_data = None;
+    crate::encoder::validate_consumer(&req, "public", true, &caps).unwrap();
+    for (path, value) in [
+        ("/version", json!(3)),
+        ("/native_model_type", json!("dots3_note")),
+        ("/audios/1/embedding_rows", json!(0)),
+        ("/audios/0/feature_length", json!(0)),
+        ("/audios/0/embedding_width", json!(257)),
+        ("/audios/1/embedding_width", json!(128)),
+        ("/audios/1/identity", json!("ab")),
+    ] {
+        let mut invalid = handoff.clone();
+        *invalid.pointer_mut(path).unwrap() = value;
+        req.encoder_result = Some(invalid);
+        assert!(
+            crate::encoder::validate_consumer(&req, "public", true, &caps).is_err(),
+            "{path}"
+        );
+    }
 }

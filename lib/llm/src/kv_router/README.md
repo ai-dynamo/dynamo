@@ -108,7 +108,7 @@ hops.
 | Aggregated | `RoutingHost` of the aggregated set | KV or builtin | Yes (KV) | Owns the request's classifier lifecycle. |
 | Decode | `RoutingHost` of the decode set | KV with the decode profile written by `PrefillRouter` | Yes (KV) | Owns the request's classifier lifecycle. |
 | Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
-| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | On failure, falls back to inline encoding downstream. |
+| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | Required staging propagates encoder errors. Optional staging falls back to inline encoding downstream. |
 
 ### Prefill hop
 

@@ -25,6 +25,7 @@ except ImportError:  # Optional: only `--tokenizer fastokens` needs it.
     fastokens = None
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.http.url_validator import max_data_url_bytes
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
@@ -117,6 +118,44 @@ def _request_logprobs_count(request: dict[str, Any]) -> int | None:
     if isinstance(logprobs, int) and not isinstance(logprobs, bool):
         return logprobs
     return None
+
+
+def _normalize_inline_audio(request: dict[str, Any]) -> dict[str, Any]:
+    """Give the SGLang template renderer and media extractor the same audio URL."""
+    messages = request.get("messages", [])
+    normalized = None
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        parts = None
+        for position, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "input_audio":
+                continue
+            audio = part.get("input_audio")
+            if not isinstance(audio, dict) or audio.get("format") not in ("wav", "mp3"):
+                raise InvalidArgument("input_audio requires wav or mp3 format")
+            data = audio.get("data")
+            if not isinstance(data, str) or not data or not data.isascii():
+                raise InvalidArgument("input_audio requires nonempty base64 data")
+            mime = "audio/wav" if audio["format"] == "wav" else "audio/mpeg"
+            prefix = f"data:{mime};base64,"
+            if len(prefix) + len(data) > max_data_url_bytes():
+                raise InvalidArgument("input_audio exceeds DYN_MM_MAX_DATA_URL_MB")
+            if parts is None:
+                parts = content.copy()
+            converted = part.copy()
+            del converted["input_audio"]
+            converted["type"] = "audio_url"
+            converted["audio_url"] = {"url": prefix + data}
+            parts[position] = converted
+        if parts is not None:
+            if normalized is None:
+                normalized = messages.copy()
+            normalized[index] = {**message, "content": parts}
+    return request if normalized is None else {**request, "messages": normalized}
 
 
 def _normalize_eos_token_ids(value: Any) -> list[int]:
@@ -777,6 +816,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
+        request = _normalize_inline_audio(request)
         if request.get("responses_native_tools") and not (
             self.exclude_tools_when_tool_choice_none
             and request.get("tool_choice") == "none"

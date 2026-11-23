@@ -711,6 +711,7 @@ impl ModelWatcher {
                 Some(EncoderRouter::new_with_task_guard(
                     model_name.clone(),
                     namespace.clone(),
+                    card.runtime_config.requires_encoder_result(),
                     allocator_trim.clone(),
                 ))
             } else {

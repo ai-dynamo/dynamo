@@ -5,3 +5,11 @@
 #![allow(missing_docs)]
 
 tonic::include_proto!("sglang.api.v1");
+
+pub(crate) fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+pub mod encoder {
+    tonic::include_proto!("sglang.grpc.encoder");
+}

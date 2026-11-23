@@ -12,6 +12,7 @@ fn routing_metadata(
         model: "test-model",
         kv_cache_block_size,
         tower_connector_lora_enabled,
+        requires_encoder_result: false,
         lora_name,
     }
 }

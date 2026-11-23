@@ -28,6 +28,20 @@ pub struct Args {
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
 
+    /// Address of this native encoder reachable from the language workers.
+    /// Defaults to --grpc-endpoint. Set it when the sidecar dials a local address.
+    #[arg(long, env = "SGLANG_ENCODER_ADVERTISE_ENDPOINT")]
+    pub encoder_advertise_endpoint: Option<String>,
+
+    /// Maximum seconds to wait for the native encoder's Stage RPC.
+    #[arg(
+        long,
+        env = "DYN_SGLANG_ENCODER_STAGE_TIMEOUT_SECS",
+        default_value_t = 180,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub encoder_stage_timeout_secs: u32,
+
     /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
     /// stream. Each in-flight request may buffer up to this much.
     #[arg(

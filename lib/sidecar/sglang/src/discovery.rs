@@ -97,6 +97,11 @@ pub(crate) struct EngineInfo {
     /// Request context limit, preferring the served model card.
     pub context_length: Option<u32>,
     pub disaggregation_mode: DisaggregationMode,
+    pub accepts_encoder_handoff: bool,
+    pub supports_staged_images: bool,
+    pub supports_staged_video: bool,
+    pub staged_audio_model_type: String,
+    pub native_model_type: String,
     /// Reported prefill bootstrap port, validated only for prefill workers.
     pub disaggregation_bootstrap_port: Option<u64>,
     /// Server host, the preferred prefill bootstrap host when routable.
@@ -134,6 +139,8 @@ pub(crate) struct EngineInfo {
     pub kv_events: Result<NodeMetadata, DynamoError>,
 }
 
+// SglangService hosts language workers. Encoder-only deployments run the
+// separate SglangEncoder service and are identified by GetEncoderInfo.
 pub(crate) fn disaggregation_mode(mode: &str) -> Result<DisaggregationMode, DynamoError> {
     match mode {
         "null" | "agg" | "aggregated" => Ok(DisaggregationMode::Aggregated),
@@ -252,6 +259,11 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         served_model_name,
         context_length: max_model_len,
         disaggregation_mode,
+        accepts_encoder_handoff: server_info.accepts_encoder_handoff,
+        supports_staged_images: server_info.supports_staged_images.unwrap_or(true),
+        supports_staged_video: server_info.supports_staged_video,
+        staged_audio_model_type: server_info.staged_audio_model_type.clone(),
+        native_model_type: server_info.native_model_type.clone(),
         disaggregation_bootstrap_port: deployment.disaggregation_bootstrap_port.map(u64::from),
         host: Some(server_info.host.clone()).filter(|host| !host.is_empty()),
         // The rendezvous names node 0. A Rust-server prefill listener on any

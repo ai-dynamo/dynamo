@@ -1544,6 +1544,12 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0custom_json_v1\0true");
                 }
 
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT,
+                );
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -4140,6 +4146,36 @@ mod ownership_tests {
             .insert(capability.into(), true.into());
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn only_matching_encoder_handoff_contracts_share_a_worker_set() {
+        use crate::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
+
+        let card = |contract: Option<serde_json::Value>| {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            if let Some(contract) = contract {
+                card.runtime_config
+                    .runtime_data
+                    .insert(ENCODER_HANDOFF_CONTRACT.into(), contract);
+            }
+            card
+        };
+        let external = card(Some(serde_json::json!({"protocol":"a", "video":true})));
+        let equivalent = card(Some(serde_json::json!({"video":true, "protocol":"a"})));
+        let legacy = card(None);
+        assert!(external.runtime_config.requires_encoder_result());
+        assert!(!legacy.runtime_config.requires_encoder_result());
+        assert_eq!(external.mdcsum(), equivalent.mdcsum());
+        assert_ne!(external.mdcsum(), legacy.mdcsum());
+        assert_ne!(
+            external.mdcsum(),
+            card(Some(serde_json::json!({"protocol":"b", "video":true}))).mdcsum()
+        );
+        assert_ne!(
+            external.mdcsum(),
+            card(Some(serde_json::json!({"protocol":"a", "video":false}))).mdcsum()
+        );
     }
 
     #[test]

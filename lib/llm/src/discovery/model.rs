@@ -91,6 +91,7 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
+    pub(crate) requires_encoder_result: bool,
 }
 
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
@@ -799,6 +800,7 @@ impl Model {
                     engine,
                     kv_cache_block_size: ws.card().kv_cache_block_size,
                     lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
+                    requires_encoder_result: ws.card().runtime_config.requires_encoder_result(),
                     tower_connector_lora_enabled: ws
                         .card()
                         .runtime_config

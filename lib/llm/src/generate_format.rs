@@ -125,6 +125,8 @@ pub struct Worker<'a> {
     pub kv_cache_block_size: u32,
     pub lora_name: Option<&'a str>,
     pub tower_connector_lora_enabled: bool,
+    /// Route source media through the selected worker set's required encoder.
+    pub requires_encoder_result: bool,
 }
 
 /// A started client request.

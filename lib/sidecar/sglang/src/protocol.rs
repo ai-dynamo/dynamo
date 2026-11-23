@@ -136,7 +136,23 @@ pub(crate) fn build_generate_request(
     };
     let routing = request.routing.as_ref();
     let disaggregated = resolve_disaggregated_params(request, mode, target)?;
-    let [image_data, video_data, audio_data] = media_data(request)?;
+    // The selected encoder already owns the embedding. Omit source media on
+    // this wire even though Dynamo retains it for routing and retries.
+    let encoder_handoff = request.encoder_result.as_ref().map(Value::to_string);
+    let [image_data, video_data, audio_data] = if encoder_handoff.is_some() {
+        [None, None, None]
+    } else {
+        media_data(request)?
+    };
+    let mm_hashes = if encoder_handoff.is_some() {
+        caller_hashes(request)?.map(|items| pb::StringListOrList {
+            value: Some(pb::string_list_or_list::Value::One(pb::StringList {
+                items,
+            })),
+        })
+    } else {
+        None
+    };
 
     // `routed_dp_rank` is not sent: SGLang's Rust listeners run a request on
     // their own rank, so the rank chose the listener.
@@ -172,6 +188,8 @@ pub(crate) fn build_generate_request(
             .and_then(|params| params.disagg_prefill_dp_rank)
             .map(i64::from),
         image_data,
+        encoder_handoff,
+        mm_hashes,
         video_data,
         audio_data,
         priority: routing.and_then(|routing| routing.priority).map(i64::from),
@@ -197,6 +215,75 @@ pub(crate) fn build_generate_request(
     ))
 }
 
+/// Dynamo's frontend supplies these scalar cache-key overrides independently
+/// of the native encoder's 32-byte content identities.
+pub(crate) fn caller_hashes(
+    request: &PreprocessedRequest,
+) -> Result<Option<Vec<String>>, DynamoError> {
+    let Some(extra) = request.extra_args.as_ref() else {
+        return Ok(None);
+    };
+    let items = if let Some(value) = extra.get("mm_hashes") {
+        serde_json::from_value(value.clone()).map_err(|_| {
+            client::invalid_request("extra_args.mm_hashes must be a list of strings")
+        })?
+    } else if let Some(value) = extra.get("mm_hashes_by_modality") {
+        ordered_media_hashes(request, value)?
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(items))
+}
+
+/// Map the frontend's grouped cache identities into SGLang's one hash per
+/// source. Only a mixed-modality list needs explicit prompt ordering.
+fn ordered_media_hashes(
+    request: &PreprocessedRequest,
+    value: &Value,
+) -> Result<Vec<String>, DynamoError> {
+    let mut grouped: std::collections::HashMap<&str, Vec<Option<&str>>> =
+        serde::Deserialize::deserialize(value).map_err(|_| {
+            client::invalid_request("mm_hashes_by_modality must contain lists of strings")
+        })?;
+    let Some(order) = request.multi_modal_order.as_deref() else {
+        if grouped.len() > 1 {
+            return Err(client::invalid_request(
+                "mixed media hashes require multi_modal_order",
+            ));
+        }
+        return grouped
+            .into_values()
+            .flatten()
+            .map(|hash| {
+                hash.map(str::to_owned).ok_or_else(|| {
+                    client::invalid_request("mm_hashes_by_modality must contain lists of strings")
+                })
+            })
+            .collect();
+    };
+    if order.len() != grouped.values().map(Vec::len).sum::<usize>() {
+        return Err(client::invalid_request(
+            "multi_modal_order must cover every grouped media hash",
+        ));
+    }
+    order
+        .iter()
+        .map(|item| {
+            item.modality
+                .strip_suffix("_url")
+                .and_then(|modality| grouped.get_mut(modality))
+                .and_then(|hashes| hashes.get_mut(item.index))
+                .and_then(Option::take)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    client::invalid_request(
+                        "multi_modal_order references a missing or repeated media hash",
+                    )
+                })
+        })
+        .collect()
+}
+
 /// The request's image, video and audio items, one list per modality. SGLang
 /// matches each list to that modality's placeholder runs in `input_ids`, so
 /// each list keeps the request order.
@@ -214,7 +301,7 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Option<pb::MediaInput>; 
             }
         };
         for item in items {
-            data.push(media_source(item)?);
+            data.push(media_source(item)?.to_owned());
         }
     }
     let media = [image_data, video_data, audio_data];
@@ -242,7 +329,7 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Option<pb::MediaInput>; 
 
 /// SGLang would read `file://` URLs and bare paths from its own disk, so only
 /// network and inline sources are forwarded.
-fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
+pub(crate) fn media_source(item: &MultimodalData) -> Result<&str, DynamoError> {
     let source = match item {
         MultimodalData::Json(_) => {
             return Err(client::invalid_request(
@@ -262,11 +349,23 @@ fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
             ));
         }
     };
+    validate_media_url(source)
+}
+
+pub(crate) fn into_media_source(item: MultimodalData) -> Result<String, DynamoError> {
+    match item {
+        MultimodalData::RawUrl(source) => validate_media_url(source),
+        MultimodalData::Url(url) => validate_media_url(String::from(url)),
+        other => media_source(&other).map(str::to_owned),
+    }
+}
+
+fn validate_media_url<S: AsRef<str>>(source: S) -> Result<S, DynamoError> {
     if ["http://", "https://", "data:"]
         .iter()
-        .any(|scheme| source.starts_with(scheme))
+        .any(|scheme| source.as_ref().starts_with(scheme))
     {
-        Ok(source.to_string())
+        Ok(source)
     } else {
         Err(client::invalid_request(
             "the SGLang sidecar accepts media only as http://, https://, or data: URLs",
@@ -495,7 +594,7 @@ fn kv_hint_to_proto(hint: &KvHint) -> pb::KvHintsEnvelope {
 /// Refuse what SGLang's Generate cannot represent. Empty guided-decoding
 /// constraints are refused too: SGLang's Rust server treats them as unset and
 /// would run unconstrained.
-fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
+pub(crate) fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     // prompt_embeds requests arrive with empty token_ids, so check them first.
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_request(
@@ -518,11 +617,6 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     {
         return Err(client::invalid_request(
             "media uuids are not supported by SGLang's native Generate RPC",
-        ));
-    }
-    if request.encoder_result.is_some() {
-        return Err(client::invalid_request(
-            "encoder handoff (encoder_result) is not supported by the SGLang sidecar",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {

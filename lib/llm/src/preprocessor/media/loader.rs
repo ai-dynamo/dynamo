@@ -415,6 +415,12 @@ impl MediaFetcher {
     /// across every outbound HTTP request in the frontend should reuse this
     /// — the connection pool stays warm and SSRF policy can't be bypassed.
     pub fn build_http_client(&self) -> Result<reqwest::Client> {
+        Ok(self.http_client_builder().build()?)
+    }
+
+    /// Create the same DNS- and redirect-checked client with transport options
+    /// left open (for example to disable proxy-side DNS resolution).
+    pub fn http_client_builder(&self) -> reqwest::ClientBuilder {
         let fetcher_for_redirects = self.clone();
         let redirect_policy = Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
@@ -439,7 +445,7 @@ impl MediaFetcher {
             builder = builder.timeout(timeout);
         }
 
-        Ok(builder.build()?)
+        builder
     }
 }
 
