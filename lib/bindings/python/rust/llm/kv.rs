@@ -58,7 +58,6 @@ use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
-use llm_rs::http::service::worker_metrics::{observe_finish_gauges, observe_first_token_gauges};
 use llm_rs::kv_router::RoutingHost;
 type RsRoutingHost = RoutingHost;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
@@ -2261,27 +2260,12 @@ impl KvRouter {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
-                let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
                     if first_item {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
                             inject_worker_id_from_tracker(data, tracker);
-                        }
-                    }
-
-                    if !first_token_gauges_observed {
-                        let has_tokens = response
-                            .data
-                            .as_ref()
-                            .map(|d| !d.token_ids.is_empty())
-                            .unwrap_or(false);
-                        if has_tokens {
-                            if let Some(ref tracker) = tracker {
-                                observe_first_token_gauges(tracker);
-                            }
-                            first_token_gauges_observed = true;
                         }
                     }
 
@@ -2308,10 +2292,6 @@ impl KvRouter {
                     if is_error {
                         break;
                     }
-                }
-
-                if let Some(ref tracker) = tracker {
-                    observe_finish_gauges(tracker);
                 }
             });
 

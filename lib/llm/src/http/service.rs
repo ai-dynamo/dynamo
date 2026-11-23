@@ -42,7 +42,7 @@ pub mod response_headers;
 pub mod router_policy;
 pub mod service_v2;
 pub mod systemone;
-pub mod worker_metrics;
+mod worker_metrics;
 
 pub use axum;
 pub use frontend_extension::{
