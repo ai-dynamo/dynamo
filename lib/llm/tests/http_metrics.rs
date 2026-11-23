@@ -1039,17 +1039,11 @@ mod integration_tests {
         // This simulates what the ModelWatcher polling task would do in production
         let _ = manager.save_model_card("test-mdc-key", card.clone());
 
-        if let Err(e) = dynamo_llm::http::service::metrics::update_metrics_from_mdc(
+        dynamo_llm::http::service::metrics::update_metrics_from_mdc(
             &service.state().metrics_clone(),
             &card,
             0,
-        ) {
-            tracing::debug!(
-                model = %card.display_name,
-                error = %e,
-                "Failed to update MDC metrics in test"
-            );
-        }
+        );
 
         // Start the HTTP service
         let token = CancellationToken::new();

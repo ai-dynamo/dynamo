@@ -300,7 +300,7 @@ pub fn update_metrics_from_mdc(
     metrics: &Metrics,
     card: &ModelDeploymentCard,
     migration_limit: u32,
-) -> anyhow::Result<()> {
+) {
     update_runtime_config_metrics(metrics, &card.display_name, &card.runtime_config);
     metrics.update_deployment_metrics(
         &card.display_name,
@@ -309,7 +309,6 @@ pub fn update_metrics_from_mdc(
         migration_limit,
     );
     tracing::debug!(model = %card.display_name, "Successfully updated MDC metrics");
-    Ok(())
 }
 
 /// Process streaming metrics for annotated responses
@@ -708,7 +707,7 @@ mod tests {
         // Workers publish 0 here; the frontend's own limit must win.
         card.migration_limit = 0;
 
-        update_metrics_from_mdc(&metrics, &card, 3).unwrap();
+        update_metrics_from_mdc(&metrics, &card, 3);
 
         for (name, expected) in [
             ("dynamo_frontend_model_context_length", 8192.0),

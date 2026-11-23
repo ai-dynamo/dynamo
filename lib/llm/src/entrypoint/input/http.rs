@@ -461,13 +461,11 @@ fn update_model_metrics(
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = crate::http::service::metrics::update_metrics_from_mdc(
+            crate::http::service::metrics::update_metrics_from_mdc(
                 &metrics,
                 &card,
                 migration_limit,
-            ) {
-                tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
-            }
+            );
         }
         ModelUpdate::Removed(card) => {
             tracing::debug!(model_name = card.display_name, "Model removed");
