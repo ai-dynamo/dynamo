@@ -1530,8 +1530,7 @@ These values are an underlay, like every value lowered from a typed field:
 `spec.aisim.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
 including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
 or `{$null: true}` override deletes the named field or parent object, and the operator does not
-restore it. The alias must be exactly `{$null: true}` and appear as an object-field value outside
-arrays. For example, this override deletes the lowered traffic configuration:
+restore it. For example, this override deletes the lowered traffic configuration:
 
 ```yaml
 spec:
