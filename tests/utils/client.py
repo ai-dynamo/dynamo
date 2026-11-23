@@ -101,8 +101,7 @@ def send_request(
             )
     logger.log(log_level, "Sending request (curl equivalent):\n%s", curl_command)
 
-    # TODO: restore the original logging after the requested CUDA cache comparison.
-    start_time = time.monotonic()
+    start_time = time.time()
     try:
         if method_upper == "GET":
             response = requests.get(url, params=payload, timeout=timeout)
@@ -114,12 +113,12 @@ def send_request(
                 method_upper, url, json=payload, timeout=timeout
             )
 
-        elapsed = time.monotonic() - start_time
+        elapsed = time.time() - start_time
 
         # Log response details
         logger.log(
             log_level,
-            "Received response: status=%d, elapsed=%.6fs",
+            "Received response: status=%d, elapsed=%.2fs",
             response.status_code,
             elapsed,
         )
@@ -151,11 +150,7 @@ def send_request(
         return response
 
     except requests.exceptions.Timeout:
-        logger.error(
-            "Request timed out: limit=%.2fs, elapsed=%.6fs",
-            timeout,
-            time.monotonic() - start_time,
-        )
+        logger.error("Request timed out after %.2f seconds", timeout)
         raise
     except requests.exceptions.ConnectionError as e:
         logger.error("Connection error: %s", e)
