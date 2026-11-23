@@ -1,29 +1,48 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Explicit object-level soft-pin commands for custom KV policies.
-//!
-//! The caller supplies the active Mooncake master's **admin HTTP** endpoint,
-//! not its Store RPC or KV-event endpoint. Commands do not manage session
-//! references, renew automatically, or retry: a retry can reset a TTL or undo
-//! a newer pin. TTL expiry releases protection; it does not delete the object.
+//! Explicit Mooncake admin commands. Policies coordinate sharing and TTL renewal.
 
 use std::collections::{BTreeSet, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use dynamo_kv_router::{SessionPrefixIndexer, SharedKvCache, protocols::ExternalSequenceBlockHash};
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
+use dynamo_kv_indexer::host::{SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend};
+use dynamo_scheduler::host::SharedKvCache;
 
 use super::KvRouter;
 
-/// One result per input object key. Zero means success; other values are
-/// Mooncake ErrorCode values (for example -704: missing, -703: not ready).
+const MAX_COMMAND_KEYS: usize = 4096;
+
+/// Mooncake's per-object error code; zero means success.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MooncakeKeyResult {
     pub key: String,
     pub error_code: i32,
+}
+
+/// Missing observations are separate from Store-side per-key failures.
+#[derive(Debug, Default, Serialize)]
+pub struct MooncakePinResult {
+    pub key_results: Vec<MooncakeKeyResult>,
+    pub unresolved_hashes: Vec<u64>,
+}
+
+/// A failed batch may have applied. Earlier batches completed; later ones were not sent.
+#[derive(Debug, thiserror::Error)]
+#[error("Mooncake command failed after {} completed keys; failed-batch outcome may be unknown: {source:#}", completed_results.len())]
+pub struct MooncakeCommandError {
+    pub completed_results: Vec<MooncakeKeyResult>,
+    pub uncertain_keys: Vec<String>,
+    pub unattempted_keys: Vec<String>,
+    pub unresolved_hashes: Vec<u64>,
+    #[source]
+    pub source: anyhow::Error,
 }
 
 #[derive(Clone, Debug)]
@@ -56,8 +75,9 @@ impl MooncakeClient {
         ensure!(
             endpoint.host_str().is_some()
                 && endpoint.query().is_none()
-                && endpoint.fragment().is_none(),
-            "expected Mooncake admin URL without query or fragment"
+                && endpoint.fragment().is_none()
+                && endpoint.path() == "/",
+            "expected Mooncake admin URL with a root path and without query or fragment"
         );
         ensure!(!tenant_id.is_empty(), "tenant_id must not be empty");
         Ok(Self {
@@ -70,35 +90,45 @@ impl MooncakeClient {
         })
     }
 
-    /// Reset each object's deadline to the master's current time + ttl_ms.
-    /// A zero TTL clears protection, matching Mooncake's write-time semantics.
-    async fn pin(&self, keys: &[String], ttl_ms: u64) -> Result<Vec<MooncakeKeyResult>> {
-        self.command("/api/v1/soft_pin", keys, Some(ttl_ms)).await
-    }
-
-    /// Clear soft pins unconditionally, without consulting session references.
-    /// Hard pins, read leases and object data are unchanged.
-    async fn unpin(&self, keys: &[String]) -> Result<Vec<MooncakeKeyResult>> {
-        self.command("/api/v1/soft_unpin", keys, None).await
-    }
-
     async fn command(
         &self,
-        path: &str,
         keys: &[String],
         ttl_ms: Option<u64>,
     ) -> Result<Vec<MooncakeKeyResult>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-        ensure!(
-            keys.len() <= 4096,
-            "Mooncake accepts at most 4096 keys per command"
-        );
         ensure!(
             keys.iter().all(|key| !key.is_empty()),
             "object keys must not be empty"
         );
+        let mut results = Vec::with_capacity(keys.len());
+        for (batch_index, batch) in keys.chunks(MAX_COMMAND_KEYS).enumerate() {
+            match self.command_batch(batch, ttl_ms).await {
+                Ok(batch_results) => results.extend(batch_results),
+                Err(source) => {
+                    return Err(MooncakeCommandError {
+                        completed_results: results,
+                        uncertain_keys: batch.to_vec(),
+                        unattempted_keys: keys[(batch_index * MAX_COMMAND_KEYS + batch.len())..]
+                            .to_vec(),
+                        unresolved_hashes: Vec::new(),
+                        source,
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn command_batch(
+        &self,
+        keys: &[String],
+        ttl_ms: Option<u64>,
+    ) -> Result<Vec<MooncakeKeyResult>> {
+        let path = if ttl_ms.is_some() {
+            "/api/v1/soft_pin"
+        } else {
+            "/api/v1/soft_unpin"
+        };
         let response = self
             .client
             .post(self.endpoint.join(path)?)
@@ -109,12 +139,12 @@ impl MooncakeClient {
             })
             .send()
             .await
-            .context("Mooncake command failed; outcome may be unknown")?
+            .context("Mooncake command transport failed")?
             .error_for_status()
             .context("Mooncake admin rejected command")?
             .json::<PinResponse>()
             .await
-            .context("invalid Mooncake command response; outcome may be unknown")?;
+            .context("invalid Mooncake command response")?;
         ensure!(
             response.results.len() == keys.len()
                 && response
@@ -122,14 +152,184 @@ impl MooncakeClient {
                     .iter()
                     .zip(keys)
                     .all(|(result, key)| &result.key == key),
-            "Mooncake returned mismatched key results; outcome may be unknown"
+            "Mooncake returned mismatched key results"
         );
         Ok(response.results)
     }
 }
 
-/// Distinct observed root-first chains across workers and shared storage.
-/// Each owner is read separately; this is an advisory snapshot, not a lease.
+/// Store-specific commands scoped to a router's observed cache and session index.
+#[derive(Clone)]
+pub struct MooncakeControl {
+    cache: Arc<dyn SharedKvCache>,
+    index: Option<Arc<SessionPrefixIndexer>>,
+    client: MooncakeClient,
+}
+
+impl MooncakeControl {
+    pub fn new(
+        cache: Arc<dyn SharedKvCache>,
+        index: Option<Arc<SessionPrefixIndexer>>,
+        client: MooncakeClient,
+    ) -> Result<Self> {
+        cache.enable_object_key_tracking()?;
+        Ok(Self {
+            cache,
+            index,
+            client,
+        })
+    }
+
+    /// All owners contribute lineage; a selected frontier must still be a chain end.
+    pub fn get_session_blocks(
+        &self,
+        session_id: &str,
+        frontier_hash: Option<ExternalSequenceBlockHash>,
+    ) -> Result<Vec<Vec<ExternalSequenceBlockHash>>> {
+        let index = self
+            .index
+            .as_deref()
+            .context("session prefix index is not enabled")?;
+        let chains = session_block_chains(index, session_id, frontier_hash)?;
+        ensure!(
+            frontier_hash.is_none() || !chains.is_empty(),
+            "block is not an observed frontier of session {session_id}"
+        );
+        Ok(chains)
+    }
+
+    pub fn get_session_mooncake_blocks(
+        &self,
+        session_id: &str,
+        tier: StorageTier,
+    ) -> Result<Vec<Vec<ExternalSequenceBlockHash>>> {
+        let index = self
+            .index
+            .as_deref()
+            .context("session prefix index is not enabled")?;
+        Ok(index.get_session_block_lineage_in_tier(
+            session_id,
+            SessionResidencyOwner::SharedCache(SharedCacheBackend::Mooncake),
+            tier,
+            None,
+        )?)
+    }
+
+    fn resolve(
+        &self,
+        hashes: &[ExternalSequenceBlockHash],
+        strict: bool,
+    ) -> Result<(Vec<String>, Vec<u64>)> {
+        // SPI hashes carry no tenant: resolve only within the active writer tenant.
+        let hashes: Vec<_> = hashes
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let groups = self
+            .cache
+            .resolve_object_keys(&hashes, Some(&self.client.tenant_id))?;
+        ensure!(
+            groups.len() == hashes.len(),
+            "cache returned mismatched block resolutions"
+        );
+        let mut keys = BTreeSet::new();
+        let mut unresolved = Vec::new();
+        for (hash, group) in hashes.into_iter().zip(groups) {
+            if group.is_empty() {
+                ensure!(
+                    !strict,
+                    "no observed Mooncake keys for block hash {}",
+                    hash.0
+                );
+                unresolved.push(hash.0);
+            }
+            keys.extend(group);
+        }
+        Ok((keys.into_iter().collect(), unresolved))
+    }
+
+    /// Strict selection: empty input or any unresolved hash fails before HTTP.
+    /// Observed keys do not prove a page's entire component inventory is present.
+    pub async fn pin_blocks(
+        &self,
+        hashes: &[ExternalSequenceBlockHash],
+        ttl_ms: u64,
+    ) -> Result<Vec<MooncakeKeyResult>> {
+        ensure!(!hashes.is_empty(), "no observed blocks to pin");
+        let (keys, _) = self.resolve(hashes, true)?;
+        self.client.command(&keys, Some(ttl_ms)).await
+    }
+
+    /// Clear current observed keys unconditionally; this does not manage session references.
+    pub async fn unpin_blocks(
+        &self,
+        hashes: &[ExternalSequenceBlockHash],
+    ) -> Result<Vec<MooncakeKeyResult>> {
+        let (keys, _) = self.resolve(hashes, false)?;
+        self.client.command(&keys, None).await
+    }
+
+    /// Pin what resolves and report hashes with no observed eligible keys.
+    /// Pin resets TTL, including shortening it; policies coordinate shared prefixes.
+    pub async fn pin_session(&self, session_id: &str, ttl_ms: u64) -> Result<MooncakePinResult> {
+        self.pin_session_selection(session_id, None, ttl_ms).await
+    }
+
+    pub async fn pin_session_frontier(
+        &self,
+        session_id: &str,
+        frontier_hash: ExternalSequenceBlockHash,
+        ttl_ms: u64,
+    ) -> Result<MooncakePinResult> {
+        self.pin_session_selection(session_id, Some(frontier_hash), ttl_ms)
+            .await
+    }
+
+    async fn pin_session_selection(
+        &self,
+        session_id: &str,
+        frontier: Option<ExternalSequenceBlockHash>,
+        ttl_ms: u64,
+    ) -> Result<MooncakePinResult> {
+        let hashes: Vec<_> = self
+            .get_session_blocks(session_id, frontier)?
+            .into_iter()
+            .flatten()
+            .collect();
+        ensure!(
+            !hashes.is_empty(),
+            "no observed blocks for session {session_id}"
+        );
+        let (keys, unresolved_hashes) = self.resolve(&hashes, false)?;
+        let key_results = self
+            .client
+            .command(&keys, Some(ttl_ms))
+            .await
+            .map_err(|mut error| {
+                if let Some(batch) = error.downcast_mut::<MooncakeCommandError>() {
+                    batch.unresolved_hashes.clone_from(&unresolved_hashes);
+                }
+                error
+            })?;
+        Ok(MooncakePinResult {
+            key_results,
+            unresolved_hashes,
+        })
+    }
+}
+
+impl KvRouter {
+    pub fn mooncake_control(&self, client: MooncakeClient) -> Result<MooncakeControl> {
+        MooncakeControl::new(
+            Arc::clone(self.shared_cache().context("shared cache is not enabled")?),
+            self.session_prefix_index().cloned(),
+            client,
+        )
+    }
+}
+
 pub(super) fn session_block_chains(
     index: &SessionPrefixIndexer,
     session_id: &str,
@@ -149,148 +349,6 @@ pub(super) fn session_block_chains(
         }
     }
     Ok(chains.into_iter().collect())
-}
-
-pub(super) async fn command_resolved_blocks(
-    cache: &dyn SharedKvCache,
-    client: &MooncakeClient,
-    block_hashes: &[ExternalSequenceBlockHash],
-    ttl_ms: Option<u64>,
-) -> Result<Vec<MooncakeKeyResult>> {
-    // ponytail: SPI has no tenant keys; scope it before mixing tenants in one router.
-    ensure!(
-        ttl_ms.is_none() || !block_hashes.is_empty(),
-        "no observed blocks to pin"
-    );
-    let hashes: Vec<_> = block_hashes
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let groups = cache.resolve_object_keys(&hashes, Some(&client.tenant_id))?;
-    let mut keys = BTreeSet::new();
-    for (hash, group) in hashes.iter().zip(groups) {
-        ensure!(
-            ttl_ms.is_none() || !group.is_empty(),
-            "no observed Mooncake keys for block hash {}",
-            hash.0
-        );
-        keys.extend(group);
-    }
-    let keys: Vec<_> = keys.into_iter().collect();
-    match ttl_ms {
-        Some(ttl_ms) => client.pin(&keys, ttl_ms).await,
-        None => client.unpin(&keys).await,
-    }
-}
-
-impl KvRouter {
-    /// Read all observed session chains, or one currently observed frontier's chain.
-    /// Frontier hashes identify chain ends, not anchors that truncate a chain.
-    pub fn get_session_blocks(
-        &self,
-        session_id: &str,
-        frontier_hash: Option<ExternalSequenceBlockHash>,
-    ) -> Result<Vec<Vec<ExternalSequenceBlockHash>>> {
-        let index = self
-            .session_prefix_index()
-            .context("session prefix index is not enabled")?;
-        let chains = session_block_chains(index, session_id, frontier_hash)?;
-        ensure!(
-            frontier_hash.is_none() || !chains.is_empty(),
-            "block is not an observed frontier of session {session_id}"
-        );
-        Ok(chains)
-    }
-
-    /// Pin observed Store keys for explicit SPI/engine block hashes.
-    /// Reject empty/unresolved input before HTTP. Results preserve per-key Store errors.
-    /// Observations do not prove all page components arrived; inspect per-key errors.
-    pub async fn pin_blocks(
-        &self,
-        client: &MooncakeClient,
-        block_hashes: &[ExternalSequenceBlockHash],
-        ttl_ms: u64,
-    ) -> Result<Vec<MooncakeKeyResult>> {
-        let cache = self.shared_cache().context("shared cache is not enabled")?;
-        command_resolved_blocks(cache.as_ref(), client, block_hashes, Some(ttl_ms)).await
-    }
-
-    /// Pin the union of the session's observed chains across workers and shared storage.
-    pub async fn pin_session(
-        &self,
-        client: &MooncakeClient,
-        session_id: &str,
-        ttl_ms: u64,
-    ) -> Result<Vec<MooncakeKeyResult>> {
-        let hashes: Vec<_> = self
-            .get_session_blocks(session_id, None)?
-            .into_iter()
-            .flatten()
-            .collect();
-        self.pin_blocks(client, &hashes, ttl_ms).await
-    }
-
-    /// Pin only the root-to-frontier chain, including the specified frontier.
-    /// An unknown, foreign or no-longer-current frontier fails before HTTP.
-    pub async fn pin_session_frontier(
-        &self,
-        client: &MooncakeClient,
-        session_id: &str,
-        frontier_hash: ExternalSequenceBlockHash,
-        ttl_ms: u64,
-    ) -> Result<Vec<MooncakeKeyResult>> {
-        let hashes: Vec<_> = self
-            .get_session_blocks(session_id, Some(frontier_hash))?
-            .into_iter()
-            .flatten()
-            .collect();
-        self.pin_blocks(client, &hashes, ttl_ms).await
-    }
-
-    /// Release currently observed keys for these hashes, skipping unresolved hashes.
-    /// Lost observations do not prove Store deletion; remaining pins expire by TTL.
-    pub async fn unpin_blocks(
-        &self,
-        client: &MooncakeClient,
-        block_hashes: &[ExternalSequenceBlockHash],
-    ) -> Result<Vec<MooncakeKeyResult>> {
-        let cache = self.shared_cache().context("shared cache is not enabled")?;
-        command_resolved_blocks(cache.as_ref(), client, block_hashes, None).await
-    }
-
-    /// Release the session's currently observed chains; an unknown session is a no-op.
-    pub async fn unpin_session(
-        &self,
-        client: &MooncakeClient,
-        session_id: &str,
-    ) -> Result<Vec<MooncakeKeyResult>> {
-        let hashes: Vec<_> = self
-            .get_session_blocks(session_id, None)?
-            .into_iter()
-            .flatten()
-            .collect();
-        self.unpin_blocks(client, &hashes).await
-    }
-
-    /// Release only the currently observed root-to-frontier chain, inclusive.
-    /// An absent/stale/foreign frontier is a no-op, not a release of other chains.
-    pub async fn unpin_session_frontier(
-        &self,
-        client: &MooncakeClient,
-        session_id: &str,
-        frontier_hash: ExternalSequenceBlockHash,
-    ) -> Result<Vec<MooncakeKeyResult>> {
-        let index = self
-            .session_prefix_index()
-            .context("session prefix index is not enabled")?;
-        let hashes: Vec<_> = session_block_chains(index, session_id, Some(frontier_hash))?
-            .into_iter()
-            .flatten()
-            .collect();
-        self.unpin_blocks(client, &hashes).await
-    }
 }
 
 #[cfg(test)]
@@ -320,11 +378,14 @@ mod tests {
             .await;
         let control = MooncakeClient::new(&server.url(), "default").unwrap();
         let results = control
-            .pin(&["a".into(), "missing".into()], 1234)
+            .command(&["a".into(), "missing".into()], Some(1234))
             .await
             .unwrap();
         assert_eq!(results[1].error_code, -704);
-        assert_eq!(control.unpin(&["a".into()]).await.unwrap()[0].error_code, 0);
+        assert_eq!(
+            control.command(&["a".into()], None).await.unwrap()[0].error_code,
+            0
+        );
         pin.assert_async().await;
         unpin.assert_async().await;
     }
@@ -344,12 +405,64 @@ mod tests {
             .create_async()
             .await;
         let control = MooncakeClient::new(&server.url(), "default").unwrap();
-        assert!(control.pin(&["a".into()], 1).await.is_err());
-        assert!(control.unpin(&["a".into()]).await.is_err());
-        assert!(control.pin(&[], 1).await.unwrap().is_empty());
-        assert!(control.pin(&[String::new()], 1).await.is_err());
-        assert!(control.pin(&vec!["a".into(); 4097], 1).await.is_err());
+        assert!(control.command(&["a".into()], Some(1)).await.is_err());
+        assert!(control.command(&["a".into()], None).await.is_err());
+        assert!(control.command(&[], Some(1)).await.unwrap().is_empty());
+        assert!(control.command(&[String::new()], Some(1)).await.is_err());
+
         unavailable.assert_async().await;
         mismatched.assert_async().await;
+    }
+    #[test]
+    fn rejects_admin_url_path_prefixes() {
+        for endpoint in [
+            "http://gw/mooncake/",
+            "http://gw/?x=1",
+            "http://gw/#fragment",
+            "file:///store",
+        ] {
+            assert!(MooncakeClient::new(endpoint, "default").is_err());
+        }
+        assert!(MooncakeClient::new("http://gw", "default").is_ok());
+    }
+
+    #[tokio::test]
+    async fn batches_preserve_progress_without_retrying_failed_requests() {
+        let mut server = mockito::Server::new_async().await;
+        let control = MooncakeClient::new(&server.url(), "default").unwrap();
+        let keys: Vec<_> = (0..8193).map(|i| format!("key-{i:05}")).collect();
+        let results: Vec<_> = keys[..4096]
+            .iter()
+            .map(|key| serde_json::json!({"key":key,"error_code":0}))
+            .collect();
+        let first = server
+            .mock("POST", "/api/v1/soft_pin")
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"tenant_id":"default","keys":&keys[..4096],"ttl_ms":1}),
+            ))
+            .with_body(serde_json::json!({"results":results}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let second = server
+            .mock("POST", "/api/v1/soft_pin")
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"tenant_id":"default","keys":&keys[4096..8192],"ttl_ms":1}),
+            ))
+            .with_status(503)
+            .expect(1)
+            .create_async()
+            .await;
+        let error = control
+            .command(&keys, Some(1))
+            .await
+            .unwrap_err()
+            .downcast::<MooncakeCommandError>()
+            .unwrap();
+        assert_eq!(error.completed_results.len(), 4096);
+        assert_eq!(error.uncertain_keys, keys[4096..8192]);
+        assert_eq!(error.unattempted_keys, keys[8192..]);
+        first.assert_async().await;
+        second.assert_async().await;
     }
 }

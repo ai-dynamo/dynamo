@@ -337,6 +337,76 @@ This approach gives you complete control over routing decisions, allowing you to
 
 See [Router Design](router-design.md) for architecture details and the cost function algorithm.
 
+## Mooncake Retention Commands
+
+**Experimental.** Custom policies can control Mooncake soft pins through a separate controller.
+Enable shared-cache observations (`shared_cache_type="hicache"`) and, for session selections,
+`enable_session_prefix_index=True` with KV events enabled. The router must observe one active
+Mooncake writer tenant. Connect the client to that same Store's admin HTTP endpoint
+(default port 9003), using a root URL path and the writer's tenant ID. Non-default tenants
+require Mooncake multi-tenant mode.
+
+Inside an async policy with an existing router and session ID:
+
+```python
+from dynamo.llm import MooncakeClient, MooncakeCommandError
+
+control = router.mooncake_control(
+    MooncakeClient("http://mooncake-admin:9003", tenant_id="tenant-a")
+)
+try:
+    report = await control.pin_session(session_id, ttl_ms=60_000)
+except MooncakeCommandError as error:
+    # Earlier batches completed. Reconcile these separately before deciding what to retry.
+    completed = error.completed_results
+    uncertain = error.uncertain_keys
+    not_sent = error.unattempted_keys
+    unresolved = error.unresolved_hashes
+    raise
+else:
+    failures = [item for item in report["key_results"] if item["error_code"] != 0]
+    unresolved = report["unresolved_hashes"]
+    # The policy decides whether to pin again as more Store observations arrive.
+```
+
+| Controller method | Behavior |
+| --- | --- |
+| `pin_blocks(block_hashes, ttl_ms)` | Strict explicit selection. Empty input or any unresolved hash fails before HTTP. |
+| `pin_session(session_id, ttl_ms)` | Pins keys resolved from all observed session chains; returns `key_results` and `unresolved_hashes`. |
+| `pin_session_frontier(session_id, frontier_hash, ttl_ms)` | Same best-effort behavior for an inclusive root-to-current-frontier chain. |
+| `unpin_blocks(block_hashes)` | Unconditionally clears soft pins on currently resolved keys; skips unresolved hashes. |
+| `get_session_blocks(session_id, frontier_hash=None)` | Reads distinct root-first chains across worker and Store owners and tiers. |
+| `get_session_mooncake_blocks(session_id, medium="cpu")` | Reads session-tagged Store lineage for `cpu` or `disk`. |
+
+Session pinning tolerates blocks whose write-through has not arrived, blocks already evicted
+from the Store, and blocks never written to it. `unresolved_hashes` means no eligible physical
+key was observed for that block. It does not prove that the Store lacks the block, or identify
+missing components of a partially observed page. A known session with no resolved keys returns
+an empty `key_results` list and all its hashes as unresolved, without HTTP. Unknown/empty
+sessions, invalid frontiers, tenant mismatches, ambiguous keys and invalid configuration raise.
+
+Commands deduplicate keys and send sequential requests of at most 4096 keys, without a total
+4096-key selection limit. Per-key `error_code=0` means success; other values come from Mooncake.
+A failed request, malformed response or mismatched response raises `MooncakeCommandError` with
+completed results, uncertain keys from the failed batch, unattempted keys and unresolved hashes.
+Commands do not retry automatically. Cancellation can also leave a batch's outcome unknown.
+
+> [!WARNING]
+> Soft pins are object-level and have no session reference counting. Pin resets the deadline
+> to the Store's current time plus the supplied TTL, so a later shorter pin can shorten another
+> session's protection on a shared prefix. Policies must coordinate deadlines across sessions
+> and clients. A zero TTL clears protection. There are no session-level unpin helpers; session
+> lifecycle release is separate from these explicit commands. `unpin_blocks` is unconditional,
+> so release a shared block only when the policy has coordinated all its users.
+
+The controller enables a compact reverse key index and backfills existing observations. The
+physical inventory and reverse references share key strings, and both count toward the bounded
+observation budget. A capacity reset, sequence gap, removal or layout change can invalidate
+observations. A later unpin resolves current observations rather than reconstructing a historical
+pin; unresolvable pins remain until TTL expiry. Observations are advisory and do not prove that
+all page components are present or the page can be restored. These commands do not delete data
+or clear read leases.
+
 ## KV Event Publishing for Custom Engines
 
 For full documentation on implementing KV event publishing for custom inference engines, see the dedicated [KV Event Publishing for Custom Engines](../../../advanced-customizations/writing-custom-backends/publish-kv-events.md) guide. It covers:

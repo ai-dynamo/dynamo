@@ -4,7 +4,7 @@
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use pythonize::{depythonize, pythonize};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use clap::Parser;
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent,
 };
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hashing::routing::{BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq};
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
@@ -2234,6 +2235,154 @@ impl MooncakeClient {
     }
 }
 
+pyo3::create_exception!(
+    dynamo._core,
+    MooncakeCommandError,
+    pyo3::exceptions::PyRuntimeError
+);
+
+fn mooncake_into_py<'p, T, F>(py: Python<'p>, future: F) -> PyResult<Bound<'p, PyAny>>
+where
+    T: Serialize + Send + 'static,
+    F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+{
+    crate::future_into_py(py, async move {
+        let result = future.await;
+        Python::with_gil(|py| match result {
+            Ok(value) => pythonize(py, &value)
+                .map(|value| value.unbind())
+                .map_err(to_pyerr),
+            Err(error) => {
+                if let Some(batch) =
+                    error.downcast_ref::<llm_rs::kv_router::mooncake_client::MooncakeCommandError>()
+                {
+                    let exception = MooncakeCommandError::new_err(error.to_string());
+                    let value = exception.value(py);
+                    value.setattr(
+                        "completed_results",
+                        pythonize(py, &batch.completed_results).map_err(to_pyerr)?,
+                    )?;
+                    value.setattr("uncertain_keys", &batch.uncertain_keys)?;
+                    value.setattr("unattempted_keys", &batch.unattempted_keys)?;
+                    value.setattr("unresolved_hashes", &batch.unresolved_hashes)?;
+                    Err(exception)
+                } else {
+                    Err(to_pyerr(error))
+                }
+            }
+        })
+    })
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub(crate) struct MooncakeControl {
+    inner: llm_rs::kv_router::mooncake_client::MooncakeControl,
+}
+
+#[pymethods]
+impl MooncakeControl {
+    fn pin_blocks<'p>(
+        &self,
+        py: Python<'p>,
+        block_hashes: Vec<u64>,
+        ttl_ms: u64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(py, async move {
+            let hashes: Vec<_> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash)
+                .collect();
+            control.pin_blocks(&hashes, ttl_ms).await
+        })
+    }
+
+    fn unpin_blocks<'p>(
+        &self,
+        py: Python<'p>,
+        block_hashes: Vec<u64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(py, async move {
+            let hashes: Vec<_> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash)
+                .collect();
+            control.unpin_blocks(&hashes).await
+        })
+    }
+
+    fn pin_session<'p>(
+        &self,
+        py: Python<'p>,
+        session_id: String,
+        ttl_ms: u64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(
+            py,
+            async move { control.pin_session(&session_id, ttl_ms).await },
+        )
+    }
+
+    fn pin_session_frontier<'p>(
+        &self,
+        py: Python<'p>,
+        session_id: String,
+        frontier_hash: u64,
+        ttl_ms: u64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let control = self.inner.clone();
+        mooncake_into_py(py, async move {
+            control
+                .pin_session_frontier(
+                    &session_id,
+                    ExternalSequenceBlockHash(frontier_hash),
+                    ttl_ms,
+                )
+                .await
+        })
+    }
+
+    #[pyo3(signature = (session_id, frontier_hash=None))]
+    fn get_session_blocks(
+        &self,
+        session_id: &str,
+        frontier_hash: Option<u64>,
+    ) -> PyResult<Vec<Vec<u64>>> {
+        let chains = self
+            .inner
+            .get_session_blocks(session_id, frontier_hash.map(ExternalSequenceBlockHash))
+            .map_err(to_pyerr)?;
+        Ok(chains
+            .into_iter()
+            .map(|chain| chain.into_iter().map(|hash| hash.0).collect())
+            .collect())
+    }
+
+    #[pyo3(signature = (session_id, medium="cpu"))]
+    fn get_session_mooncake_blocks(
+        &self,
+        session_id: &str,
+        medium: &str,
+    ) -> PyResult<Vec<Vec<u64>>> {
+        let tier = match medium {
+            "cpu" => StorageTier::HostPinned,
+            "disk" => StorageTier::Disk,
+            _ => return Err(PyValueError::new_err("medium must be cpu or disk")),
+        };
+        let chains = self
+            .inner
+            .get_session_mooncake_blocks(session_id, tier)
+            .map_err(to_pyerr)?;
+        Ok(chains
+            .into_iter()
+            .map(|chain| chain.into_iter().map(|hash| hash.0).collect())
+            .collect())
+    }
+}
+
 #[pyclass]
 pub(crate) struct KvRouter {
     inner: Arc<RsRoutingHost>,
@@ -2797,218 +2946,15 @@ impl KvRouter {
         })
     }
 
-    /// Resolve observed Mooncake object keys, grouped in block-hash input order.
-    /// Unknown blocks return empty lists; ambiguous page identities raise an error.
-    fn resolve_shared_cache_keys(&self, block_hashes: Vec<u64>) -> PyResult<Vec<Vec<String>>> {
-        let cache = self
-            .inner
-            .kv_router()
-            .shared_cache()
-            .ok_or_else(|| PyValueError::new_err("shared cache is not enabled"))?;
-        let hashes: Vec<_> = block_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash)
-            .collect();
-        cache.resolve_object_keys(&hashes, None).map_err(to_pyerr)
-    }
-
-    /// Read observed root-first chains; optionally select a current frontier hash.
-    #[pyo3(signature = (session_id, frontier_hash=None))]
-    fn get_session_blocks(
-        &self,
-        session_id: &str,
-        frontier_hash: Option<u64>,
-    ) -> PyResult<Vec<Vec<u64>>> {
-        let chains = self
-            .inner
-            .kv_router()
-            .get_session_blocks(session_id, frontier_hash.map(ExternalSequenceBlockHash))
-            .map_err(to_pyerr)?;
-        Ok(chains
-            .into_iter()
-            .map(|chain| chain.into_iter().map(|hash| hash.0).collect())
-            .collect())
-    }
-
-    fn pin_blocks<'p>(
-        &self,
-        py: Python<'p>,
-        client: &MooncakeClient,
-        block_hashes: Vec<u64>,
-        ttl_ms: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = Arc::clone(self.inner.kv_router());
-        let client = client.inner.clone();
-        let hashes: Vec<_> = block_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash)
-            .collect();
-        crate::future_into_py(py, async move {
-            let results = router
-                .pin_blocks(&client, &hashes, ttl_ms)
-                .await
-                .map_err(to_pyerr)?;
-            Python::with_gil(|py| {
-                pythonize(py, &results)
-                    .map(|value| value.unbind())
-                    .map_err(to_pyerr)
-            })
+    /// Create a store-specific controller with the router's observed cache and session index.
+    fn mooncake_control(&self, client: &MooncakeClient) -> PyResult<MooncakeControl> {
+        Ok(MooncakeControl {
+            inner: self
+                .inner
+                .kv_router()
+                .mooncake_control(client.inner.clone())
+                .map_err(to_pyerr)?,
         })
-    }
-
-    fn pin_session<'p>(
-        &self,
-        py: Python<'p>,
-        client: &MooncakeClient,
-        session_id: String,
-        ttl_ms: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = Arc::clone(self.inner.kv_router());
-        let client = client.inner.clone();
-        crate::future_into_py(py, async move {
-            let results = router
-                .pin_session(&client, &session_id, ttl_ms)
-                .await
-                .map_err(to_pyerr)?;
-            Python::with_gil(|py| {
-                pythonize(py, &results)
-                    .map(|value| value.unbind())
-                    .map_err(to_pyerr)
-            })
-        })
-    }
-
-    fn pin_session_frontier<'p>(
-        &self,
-        py: Python<'p>,
-        client: &MooncakeClient,
-        session_id: String,
-        frontier_hash: u64,
-        ttl_ms: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = Arc::clone(self.inner.kv_router());
-        let client = client.inner.clone();
-        crate::future_into_py(py, async move {
-            let results = router
-                .pin_session_frontier(
-                    &client,
-                    &session_id,
-                    ExternalSequenceBlockHash(frontier_hash),
-                    ttl_ms,
-                )
-                .await
-                .map_err(to_pyerr)?;
-            Python::with_gil(|py| {
-                pythonize(py, &results)
-                    .map(|value| value.unbind())
-                    .map_err(to_pyerr)
-            })
-        })
-    }
-
-    fn unpin_blocks<'p>(
-        &self,
-        py: Python<'p>,
-        client: &MooncakeClient,
-        block_hashes: Vec<u64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = Arc::clone(self.inner.kv_router());
-        let client = client.inner.clone();
-        let hashes: Vec<_> = block_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash)
-            .collect();
-        crate::future_into_py(py, async move {
-            let results = router
-                .unpin_blocks(&client, &hashes)
-                .await
-                .map_err(to_pyerr)?;
-            Python::with_gil(|py| {
-                pythonize(py, &results)
-                    .map(|value| value.unbind())
-                    .map_err(to_pyerr)
-            })
-        })
-    }
-
-    fn unpin_session<'p>(
-        &self,
-        py: Python<'p>,
-        client: &MooncakeClient,
-        session_id: String,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = Arc::clone(self.inner.kv_router());
-        let client = client.inner.clone();
-        crate::future_into_py(py, async move {
-            let results = router
-                .unpin_session(&client, &session_id)
-                .await
-                .map_err(to_pyerr)?;
-            Python::with_gil(|py| {
-                pythonize(py, &results)
-                    .map(|value| value.unbind())
-                    .map_err(to_pyerr)
-            })
-        })
-    }
-
-    fn unpin_session_frontier<'p>(
-        &self,
-        py: Python<'p>,
-        client: &MooncakeClient,
-        session_id: String,
-        frontier_hash: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = Arc::clone(self.inner.kv_router());
-        let client = client.inner.clone();
-        crate::future_into_py(py, async move {
-            let results = router
-                .unpin_session_frontier(
-                    &client,
-                    &session_id,
-                    ExternalSequenceBlockHash(frontier_hash),
-                )
-                .await
-                .map_err(to_pyerr)?;
-            Python::with_gil(|py| {
-                pythonize(py, &results)
-                    .map(|value| value.unbind())
-                    .map_err(to_pyerr)
-            })
-        })
-    }
-
-    /// Read Mooncake session lineage; does not pin or track policy references.
-    #[pyo3(signature = (session_id, medium="cpu"))]
-    fn get_session_mooncake_blocks(
-        &self,
-        session_id: &str,
-        medium: &str,
-    ) -> PyResult<Vec<Vec<u64>>> {
-        let tier = match medium {
-            "cpu" => StorageTier::HostPinned,
-            "disk" => StorageTier::Disk,
-            _ => return Err(PyValueError::new_err("medium must be cpu or disk")),
-        };
-        let index = self
-            .inner
-            .kv_router()
-            .session_prefix_index()
-            .ok_or_else(|| PyValueError::new_err("session prefix index is not enabled"))?;
-        let chains = index
-            .get_session_block_lineage_in_tier(
-                session_id,
-                dynamo_kv_router::SessionResidencyOwner::SharedCache(
-                    dynamo_kv_router::SharedCacheBackend::Mooncake,
-                ),
-                tier,
-                None,
-            )
-            .map_err(to_pyerr)?;
-        Ok(chains
-            .into_iter()
-            .map(|chain| chain.into_iter().map(|hash| hash.0).collect())
-            .collect())
     }
 
     /// Dump all events from the KV router's indexer as a JSON string

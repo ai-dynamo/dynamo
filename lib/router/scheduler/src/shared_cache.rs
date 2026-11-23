@@ -30,6 +30,11 @@ pub trait SharedKvCache: Send + Sync {
         cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError>;
 
+    /// Enable optional command-key tracking, including existing observations.
+    fn enable_object_key_tracking(&self) -> Result<(), KvRouterError> {
+        Err(KvRouterError::Unsupported("object key tracking".into()))
+    }
+
     /// Resolve observed object keys in input order; unknown blocks return empty groups.
     fn resolve_object_keys(
         &self,
