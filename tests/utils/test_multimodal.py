@@ -162,17 +162,32 @@ def test_image_content_retry_preserves_first_cache_observation(
     ]
 
 
-@pytest.mark.parametrize("invalid", ["usage", "cache"])
-def test_sidecar_usage_and_cache_failures_are_not_content_retries(invalid) -> None:
-    payload = make_sidecar_media_payload("image-routing")
+@pytest.mark.parametrize("invalid", ["usage", "cache", "probe_worker", "media_usage"])
+def test_sidecar_usage_and_cache_failures_are_not_content_retries(
+    invalid, monkeypatch
+) -> None:
+    payload = make_sidecar_media_payload(
+        "image" if invalid == "media_usage" else "image-routing"
+    )
     payload.body_for_iteration(0)
     process = object.__new__(EngineProcess)
     process.check_response(payload, _sidecar_image_response("red blue", 0, 0.0))
     payload.body_for_iteration(1)
     response = _sidecar_image_response("green", 0, 0.0)
-    if invalid == "usage":
+    if invalid in ("usage", "media_usage"):
         response.json.return_value["usage"]["total_tokens"] = 1
+        if invalid == "media_usage":
+            response.json.return_value["choices"][0]["message"]["content"] = ""
+    elif invalid == "probe_worker":
+        process.check_response(payload, _sidecar_image_response("red blue", 256, 1.0))
+        payload.body_for_iteration(2)
+        response = _sidecar_image_response("green", 64, 0.25)
+        monkeypatch.setattr(
+            "tests.utils.payloads.requests.post", Mock(return_value=response)
+        )
     with pytest.raises(EngineResponseError) as failure:
         process.check_response(payload, response)
     assert not isinstance(failure.value, ResponseValidationError)
-    assert payload._observed == [(256, 0, 0.0)]
+    if invalid != "media_usage":
+        assert payload._observed[0] == (256, 0, 0.0)
+        assert len(payload._observed) == (3 if invalid == "probe_worker" else 1)

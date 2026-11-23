@@ -533,6 +533,10 @@ class MediaAccuracyPayload(ChatPayload):
         self._request_body = body
         return body
 
+    def process_response(self, response: Any) -> str:
+        self._validate_usage(response)
+        return super().process_response(response)
+
     def validate(self, response: Any, content: str) -> None:
         self._validate_usage(response)
         super().validate(response, content)
@@ -595,7 +599,12 @@ class ImageCacheIdentityPayload(MediaAccuracyPayload):
             response = requests.post(self.url(), json=probe, timeout=10)
             response.raise_for_status()
             result = response.json()
-            require_router_worker_id(result)
+            try:
+                require_router_worker_id(result)
+            except AssertionError as error:
+                raise ValueError(
+                    "Image routing probe omitted worker identity"
+                ) from error
             usage = result.get("usage", {})
             if usage.get("prompt_tokens") != prompt:
                 raise ValueError(f"Image probe prompt usage changed: {result}")
