@@ -3,12 +3,8 @@
 
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-#[cfg(feature = "select-service")]
-use pyo3::sync::GILProtected;
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
-#[cfg(feature = "select-service")]
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -80,9 +76,21 @@ mod demand_driven;
 #[cfg(feature = "select-service")]
 #[pyclass(frozen)]
 pub(crate) struct WorkerSequenceEventPublisher {
-    // Publishing holds the GIL, so borrows never overlap.
-    inner: GILProtected<RefCell<Option<selection::WorkerSequenceEventPublisher>>>,
+    // Python threads take turns on this lock; no call holds it across Python code.
+    inner: std::sync::Mutex<Option<selection::WorkerSequenceEventPublisher>>,
     endpoint: String,
+}
+
+#[cfg(feature = "select-service")]
+impl WorkerSequenceEventPublisher {
+    fn publisher(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<selection::WorkerSequenceEventPublisher>> {
+        // Like the RefCell it replaces, a panic does not block later calls.
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[cfg(feature = "select-service")]
@@ -106,7 +114,7 @@ impl WorkerSequenceEventPublisher {
         .map_err(to_pyerr)?;
         Ok(Self {
             endpoint: publisher.endpoint().to_string(),
-            inner: GILProtected::new(RefCell::new(Some(publisher))),
+            inner: std::sync::Mutex::new(Some(publisher)),
         })
     }
 
@@ -115,8 +123,8 @@ impl WorkerSequenceEventPublisher {
         &self.endpoint
     }
 
-    fn mark_prefill_completed(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
-        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+    fn mark_prefill_completed(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.publisher().as_mut() {
             publisher
                 .mark_prefill_completed(request_id)
                 .map_err(to_pyerr)?;
@@ -124,17 +132,17 @@ impl WorkerSequenceEventPublisher {
         Ok(())
     }
 
-    fn free(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
-        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+    fn free(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.publisher().as_mut() {
             publisher.free(request_id).map_err(to_pyerr)?;
         }
         Ok(())
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let publisher = self.inner.get(py).borrow_mut().take();
+        let publisher = self.publisher().take();
         // Dropping the publisher terminates its ZMQ context, which can block.
-        py.allow_threads(move || drop(publisher));
+        py.detach(move || drop(publisher));
         Ok(())
     }
 }
