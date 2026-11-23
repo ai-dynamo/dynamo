@@ -591,10 +591,15 @@ impl DirectEngineHost {
         let (worker_type, needs) = resolve_worker_type_and_needs(&config);
 
         let mut engine_config = engine_config.clone();
-        record_kv_event_sources(
-            &mut engine_config.runtime_data,
-            engine.kv_event_sources().await?,
-        )?;
+        // As `Worker::setup_publishing`: with KV routing off, the engine is
+        // not asked for its KV event sources, so one this frontend could not
+        // subscribe to does not keep the engine from serving.
+        if config.enable_kv_routing {
+            record_kv_event_sources(
+                &mut engine_config.runtime_data,
+                engine.kv_event_sources().await?,
+            )?;
+        }
         let mut builder = local_model_builder(&config, &engine_config).await?;
         if !config.model_name.is_empty() {
             let files = self
@@ -1478,6 +1483,62 @@ mod tests {
             .expect("a rejected engine must not be probed again");
         assert_eq!(state.starts.load(Ordering::SeqCst), 1);
         assert_eq!(state.cleanups.load(Ordering::SeqCst), 1);
+        drt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn kv_event_sources_are_not_asked_for_with_kv_routing_off() {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        // `A` advertises KV events a frontend cannot subscribe to, which a
+        // frontend that routes by KV events rejects.
+        let state = Arc::new(EngineState {
+            up: AtomicBool::new(true),
+            kv_push: AtomicBool::new(true),
+            ..EngineState::default()
+        });
+        let factory_state = state.clone();
+        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
+            Ok(Arc::new(FakeEngine {
+                state: factory_state.clone(),
+                fail_next: Arc::default(),
+                hold_next: Arc::default(),
+                held: Arc::default(),
+            }) as Arc<dyn LLMEngine>)
+        });
+        let spec = DirectEngineSpec {
+            url: A.to_string(),
+            mode: DisaggregationMode::Aggregated,
+        };
+        let config = WorkerConfig {
+            enable_kv_routing: false,
+            ..WorkerConfig::default()
+        };
+        let endpoint = DiscoveryQuery::Endpoint {
+            namespace: config.namespace.clone(),
+            component: config.component.clone(),
+            endpoint: config.endpoint.clone(),
+        };
+        serve_direct_engines(&drt, config, vec![spec], factory)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while drt
+                .discovery()
+                .list(endpoint.clone())
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the engine must serve without KV events");
         drt.shutdown();
     }
 
