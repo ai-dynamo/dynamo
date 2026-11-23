@@ -91,7 +91,8 @@ impl RoutedEngine {
     /// With the `context` of a chat request, the routed request inherits the parent request's
     /// session affinity, and every engine-agnostic field `preprocessed` leaves unset is filled
     /// from the client's request: the agent context, routing hints, sampling and stop values
-    /// and passthrough arguments. A value `preprocessed` sets is kept.
+    /// and passthrough arguments. A value `preprocessed` sets is kept. The request records
+    /// its worker and timing on the tracker the chat response is built from.
     ///
     /// With or without `context`, the engine's token budget is checked against the request as
     /// it will be routed.
@@ -105,16 +106,17 @@ impl RoutedEngine {
         let preprocessed = preprocessed.bind(py);
         let mut request = fast_preprocessed_request(preprocessed)
             .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
-        if request.tracker.is_none() {
-            request.tracker = Some(Arc::new(RequestTracker::new()));
-        }
-        if let Some(scope) = context.as_ref().and_then(|c| c.request_scope()) {
+        let scope = context.as_ref().and_then(|c| c.request_scope()).cloned();
+        if let Some(scope) = &scope {
             scope.complete_request(&mut request);
-            scope.apply_upstream_elapsed(request.tracker.as_deref());
+            scope.record_prompt(&request);
         }
         self.envelope
             .validate_token_budget(&request)
             .map_err(rejected_request_to_pyerr)?;
+        if request.tracker.is_none() {
+            request.tracker = Some(Arc::new(RequestTracker::new()));
+        }
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
@@ -167,6 +169,11 @@ impl RoutedEngine {
                         let Some(response) = response else {
                             break;
                         };
+                        if let Some(scope) = &scope
+                            && let Some(output) = response.data.as_ref()
+                        {
+                            scope.observe_engine_output(output);
+                        }
 
                         let py_response = Python::with_gil(|py| {
                             response.map_data(|data| {

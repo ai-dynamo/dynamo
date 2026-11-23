@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::preprocessor::chat_processor_output::{
+    ChatProcessorItem, ChatResponseStage, ParsedOutput,
+};
 use dynamo_llm::preprocessor::request_envelope::{RequestEnvelope, RequestScope};
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -263,7 +266,8 @@ impl
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let runtime_config = self.runtime_config.clone();
-        let request_scope = self.envelope.begin_chat(&request);
+        let mut request_scope = self.envelope.begin_chat(&request);
+        let stage = ChatResponseStage::new(&request, request.id().to_string(), &mut request_scope);
         generate_python_stream(
             &self.engine,
             request,
@@ -289,7 +293,7 @@ impl
                     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
                 Ok(pythonize(py, &value)?.unbind())
             },
-            buffered_typed_response_stream::<NvCreateChatCompletionStreamResponse>,
+            move |stream, ctx, request_id| chat_response_stream(stream, ctx, request_id, stage),
         )
         .await
     }
@@ -531,18 +535,52 @@ where
     }
 }
 
+/// Converts one object a Python generator yielded. The GIL is held.
+type DecodeItem<Resp> =
+    for<'py> fn(&Bound<'py, PyAny>) -> Result<Annotated<Resp>, pythonize::PythonizeError>;
+
+/// A chat processor yields a finished response chunk, or a parsed step tagged
+/// `_dynamo_parsed: True` for Dynamo to build the chunk from.
+fn decode_chat_item(
+    bound: &Bound<'_, PyAny>,
+) -> Result<Annotated<ChatProcessorItem>, pythonize::PythonizeError> {
+    let is_parsed = bound
+        .downcast::<PyDict>()
+        .ok()
+        .and_then(|d| {
+            d.get_item(pyo3::intern!(bound.py(), "_dynamo_parsed"))
+                .ok()
+                .flatten()
+        })
+        .and_then(|v| v.is_truthy().ok())
+        .unwrap_or(false);
+
+    if is_parsed {
+        let parsed = depythonize::<ParsedOutput>(bound)?;
+        Ok(Annotated::from_data(ChatProcessorItem::Parsed(Box::new(
+            parsed,
+        ))))
+    } else {
+        Ok(
+            depythonize_annotated::<NvCreateChatCompletionStreamResponse>(bound)?
+                .map_data(|chunk| Ok(ChatProcessorItem::Chunk(Box::new(chunk)))),
+        )
+    }
+}
+
 async fn process_item<Resp>(
     item: Result<Py<PyAny>, PyErr>,
+    decode: DecodeItem<Resp>,
 ) -> Result<Annotated<Resp>, ResponseProcessingError>
 where
-    Resp: Data + for<'de> Deserialize<'de>,
+    Resp: Data,
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
         // Per-response Python->Rust deserialization: pure Dynamo overhead paid
         // once per streamed chunk.
         let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
-        Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
+        Python::with_gil(|py| decode(&item.into_bound(py)))
     })
     .await
     .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?
@@ -633,9 +671,10 @@ fn spawn_response_forwarder<Resp>(
     stream: PyItemStream,
     ctx: Arc<dyn AsyncEngineContext>,
     request_id: String,
+    decode: DecodeItem<Resp>,
 ) -> mpsc::Receiver<Annotated<Resp>>
 where
-    Resp: Data + for<'de> Deserialize<'de>,
+    Resp: Data,
 {
     let (tx, rx) = mpsc::channel::<Annotated<Resp>>(RESPONSE_CHANNEL_DEPTH);
 
@@ -660,7 +699,7 @@ where
 
             let mut done = false;
 
-            let response = match process_item::<Resp>(item).await {
+            let response = match process_item::<Resp>(item, decode).await {
                 Ok(response) => response,
                 Err(e) => {
                     done = true;
@@ -674,9 +713,16 @@ where
                                 e
                             ))
                         }
-                        ResponseProcessingError::Dynamo(dynamo_err) => {
-                            Annotated::from_err(dynamo_err)
-                        }
+                        // As `Annotated::from_err`, which needs `Resp: Deserialize`.
+                        ResponseProcessingError::Dynamo(dynamo_err) => Annotated {
+                            data: None,
+                            id: None,
+                            event: Some("error".to_string()),
+                            comment: None,
+                            error: Some(DynamoError::from(
+                                Box::new(dynamo_err) as Box<dyn std::error::Error + 'static>
+                            )),
+                        },
                         ResponseProcessingError::Offload(e) => Annotated::from_error(format!(
                             "critical error: failed to offload the python async generator to a new thread: {}",
                             e
@@ -723,8 +769,27 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     Box::pin(ReceiverStream::new(spawn_response_forwarder::<Resp>(
-        stream, ctx, request_id,
+        stream,
+        ctx,
+        request_id,
+        depythonize_annotated::<Resp>,
     )))
+}
+
+/// The response to a chat request a Python chat processor serves.
+fn chat_response_stream(
+    stream: PyItemStream,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+    stage: ChatResponseStage,
+) -> DataStream<Annotated<NvCreateChatCompletionStreamResponse>> {
+    let items = ReceiverStream::new(spawn_response_forwarder(
+        stream,
+        ctx.clone(),
+        request_id,
+        decode_chat_item,
+    ));
+    Box::pin(stage.stream(items, ctx))
 }
 
 /// [`unbuffered_python_response_stream`], with each item encoded into the
