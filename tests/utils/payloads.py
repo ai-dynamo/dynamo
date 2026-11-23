@@ -533,6 +533,10 @@ class MediaAccuracyPayload(ChatPayload):
         self._request_body = body
         return body
 
+    def process_response(self, response: Any) -> str:
+        self._validate_usage(response)
+        return super().process_response(response)
+
     def validate(self, response: Any, content: str) -> None:
         self._validate_usage(response)
         super().validate(response, content)
