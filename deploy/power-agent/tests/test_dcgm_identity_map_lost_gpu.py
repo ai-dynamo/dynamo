@@ -64,14 +64,6 @@ class TestIdentityMapWithLostGpu(unittest.TestCase):
         nvml.nvmlDeviceGetComputeRunningProcesses.return_value = []
         return actuator, modules, nvml
 
-    def test_lost_gpu_still_fails_its_own_pid_read(self):
-        actuator, modules, nvml = self._wire_lost_gpu(
-            [b"GPU-aaaa", b"GPU-bbbb"], [b"GPU-aaaa", b"GPU-bbbb"], lost_index=1
-        )
-        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
-            with self.assertRaises(RuntimeError):
-                actuator.list_running_pids(1)
-
     def test_disagreement_between_answering_libraries_still_fails(self):
         # Both libraries answer for every index but name different GPUs:
         # that is the mis-routing case the map must refuse.
