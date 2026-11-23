@@ -1246,7 +1246,8 @@ where
 /// The removal watcher behind `on_instance_removed` / `on_instance_added` is
 /// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
 /// holding per-instance state must share it per endpoint (the default cleans up
-/// shared per-runtime state, so it is unaffected).
+/// shared per-runtime state and notifies every registered direct dispatch, so
+/// it is unaffected).
 #[async_trait::async_trait]
 pub trait StreamingDispatch<T, U>: Send + Sync
 where
