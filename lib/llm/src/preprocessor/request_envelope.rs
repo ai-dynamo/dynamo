@@ -26,10 +26,9 @@ use crate::protocols::common::preprocessor::{
     PreprocessedRequest, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{
-    SamplingOptions, SamplingOptionsProvider, StopConditions, StopConditionsProvider,
-};
+use crate::protocols::common::{SamplingOptions, StopConditions, StopConditionsProvider};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use crate::protocols::openai::sampling_scalars;
 
 type JsonObject = serde_json::Map<String, serde_json::Value>;
 
@@ -108,7 +107,7 @@ impl RequestEnvelope {
             request_timestamp_ms: chat.nvext().and_then(|nvext| nvext.request_timestamp_ms),
             // A request these reject is left to the processor's own validation.
             stop_conditions: chat.extract_stop_conditions().ok(),
-            sampling_options: chat.extract_sampling_options().ok(),
+            sampling_options: sampling_scalars(chat).ok(),
             // `token_in` says the tokens came from the client; only the processor knows.
             nvext_args: nvext_passthrough_args(chat).map(|args| {
                 args.into_iter()
@@ -548,6 +547,9 @@ mod tests {
             "logit_bias": {"5": 1.5},
             "max_tokens": 64,
             "response_format": {"type": "json_object"},
+            // Conflicting grammars are the processor's to reject.
+            "guided_regex": "a+",
+            "guided_choice": ["x"],
             "logprobs": true,
             "stop": ["END"],
             "nvext": {
