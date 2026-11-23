@@ -189,8 +189,7 @@ impl RequestClassifier for OutputLengthClassifier {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
-    use dynamo_kv_router::plugins::testing::classify_request;
+    use dynamo_kv_router::plugins::testing::{classify_request, registered_classifier};
 
     use super::*;
 
@@ -286,28 +285,22 @@ mod tests {
     }
 
     #[test]
-    fn the_policy_file_selects_it_and_rejects_parameters() {
-        let resolve = |yaml: &str| {
-            let mut registry = crate::default_registry();
-            crate::register(&mut registry).unwrap();
-            let policy = tempfile::NamedTempFile::new().unwrap();
-            std::fs::write(policy.path(), yaml).unwrap();
-            let config = dynamo_kv_router::config::KvRouterConfig {
-                router_policy_config: Some(policy.path().display().to_string()),
-                ..Default::default()
-            };
-            registry.resolve_plugins(&config)
+    fn it_registers_under_its_type_name_and_rejects_parameters() {
+        let mut registry = RouterPluginRegistry::default();
+        register(&mut registry).unwrap();
+        let build = |parameters| {
+            registered_classifier(
+                &registry,
+                "output_length_prediction",
+                parameters,
+                RequestClassifierContext::new(16, Vec::new),
+            )
         };
 
-        let plugins = resolve("request_classifier:\n  type: output_length_prediction\n").unwrap();
-        let factory = plugins.request_classifier().unwrap();
-        let _classifier = factory(RequestClassifierContext::new(16, Vec::new));
-
-        assert!(
-            resolve(
-                "request_classifier:\n  type: output_length_prediction\n  parameters:\n    predictor: ridge\n"
-            )
-            .is_err()
-        );
+        assert!(build(serde_json::Value::Null).is_ok());
+        assert!(matches!(
+            build(serde_json::json!({ "predictor": "ridge" })),
+            Err(RequestClassifierRegistryError::Provider { .. })
+        ));
     }
 }

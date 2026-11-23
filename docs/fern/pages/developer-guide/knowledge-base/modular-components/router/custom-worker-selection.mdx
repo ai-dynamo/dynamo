@@ -377,7 +377,7 @@ mod tests {
 }
 ```
 
-`SelectionCase::new` takes the prompt length in tokens and the block size. `CaseWorker` sets the cache overlap, load, and capacity a worker reports; a value a test does not set reads as zero or unreported. For a registration test, `plugins::testing::registered_policy` builds the policy a registry holds under a type name from a parameter mapping, so a test can check that the provider accepts good parameters and rejects bad ones. For a request classifier, `plugins::testing::classify_request` builds the request, `plugins::testing::classify` runs the classifier with no worker rows, and `SelectionCase::classify` runs it over the case's workers when it declares worker inputs.
+`SelectionCase::new` takes the prompt length in tokens and the block size. `CaseWorker` sets the cache overlap, load, and capacity a worker reports; a value a test does not set reads as zero or unreported. For a registration test, `plugins::testing::registered_policy` builds the policy a registry holds under a type name from a parameter mapping, so a test can check that the provider accepts good parameters and rejects bad ones. For a request classifier, `plugins::testing::registered_classifier` does the same registration check, `plugins::testing::classify_request` builds the request, `plugins::testing::classify` runs the classifier with no worker rows, and `SelectionCase::classify` runs it over the case's workers when it declares worker inputs.
 
 ## Shared Plugin Construction
 

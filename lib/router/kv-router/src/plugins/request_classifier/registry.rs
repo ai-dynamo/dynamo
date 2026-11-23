@@ -116,20 +116,31 @@ impl RequestClassifierRegistry {
         else {
             return Ok(None);
         };
-        let classifier_type = classifier.classifier_type();
+        self.resolve_type_with(
+            classifier.classifier_type(),
+            classifier.parameters().clone(),
+        )
+        .map(Some)
+    }
+
+    /// Build the factory for one registered classifier type from `parameters`, the mapping a
+    /// policy file would give it.
+    pub(crate) fn resolve_type_with(
+        &self,
+        classifier_type: &str,
+        parameters: serde_yaml::Value,
+    ) -> Result<RequestClassifierFactory, RequestClassifierRegistryError> {
         let provider = self.providers.get(classifier_type).ok_or_else(|| {
             RequestClassifierRegistryError::UnknownType {
                 name: classifier_type.to_owned(),
                 available: self.available_classifier_types(),
             }
         })?;
-        provider(&RequestClassifierParameters(
-            classifier.parameters().clone(),
-        ))
-        .map(Some)
-        .map_err(|source| RequestClassifierRegistryError::Provider {
-            classifier_type: classifier_type.to_owned(),
-            source,
+        provider(&RequestClassifierParameters(parameters)).map_err(|source| {
+            RequestClassifierRegistryError::Provider {
+                classifier_type: classifier_type.to_owned(),
+                source,
+            }
         })
     }
 

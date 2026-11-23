@@ -49,7 +49,7 @@
 //! ```
 //!
 //! [`registered_policy`] builds a policy from a registered type name and parameters, for a
-//! registration test.
+//! registration test, and [`registered_classifier`] does the same for a request classifier.
 //!
 //! For a request classifier, [`classify_request`] builds the request, [`classify`] runs the
 //! classifier with no worker rows, and [`SelectionCase::classify`] runs it over the case's
@@ -60,7 +60,9 @@
 use std::collections::HashMap;
 
 use dynamo_admission::host::ClassifyRequestHostExt;
-use dynamo_admission::{ClassifierError, ClassifyRequest, RequestClassifier, RequestProgress};
+use dynamo_admission::{
+    ClassifierError, ClassifyRequest, RequestClassifier, RequestClassifierContext, RequestProgress,
+};
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::TieredMatchDetails;
 use dynamo_router_protocol::WorkerType;
@@ -82,6 +84,7 @@ use dynamo_worker_selection::{
 use rustc_hash::FxHashMap;
 
 use crate::plugins::RouterPluginRegistry;
+use crate::plugins::request_classifier::RequestClassifierRegistryError;
 use crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError;
 
 /// The signals one worker reports in a [`SelectionCase`]. Every value starts at zero or
@@ -397,16 +400,35 @@ pub fn registered_policy(
     parameters: serde_json::Value,
     worker_type: WorkerType,
 ) -> Result<WorkerSelectionPolicy, WorkerSelectionPolicyRegistryError> {
-    let parameters = match parameters {
-        serde_json::Value::Null => serde_yaml::Value::Mapping(Default::default()),
-        parameters => serde_yaml::to_value(parameters).expect("JSON converts to YAML"),
-    };
-    let factory = registry.resolve_type_with(policy_type, parameters)?;
+    let factory = registry.resolve_type_with(policy_type, policy_file_parameters(parameters))?;
     Ok(factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::default(),
         worker_type,
         RoutingPartitionRef::new("model", "default"),
     )))
+}
+
+/// Build the classifier that `registry` registers under `classifier_type` from `parameters`,
+/// the mapping a policy file would give that type, for the router `context` describes. Use it
+/// to test that a classifier registers under its name and that its provider accepts or
+/// rejects parameters, without resolving a policy file.
+pub fn registered_classifier(
+    registry: &RouterPluginRegistry,
+    classifier_type: &str,
+    parameters: serde_json::Value,
+    context: RequestClassifierContext,
+) -> Result<Box<dyn RequestClassifier>, RequestClassifierRegistryError> {
+    let parameters = policy_file_parameters(parameters);
+    let factory = registry.resolve_classifier_type_with(classifier_type, parameters)?;
+    Ok(factory(context))
+}
+
+/// The parameter mapping a policy file hands a provider; no parameters is an empty mapping.
+fn policy_file_parameters(parameters: serde_json::Value) -> serde_yaml::Value {
+    match parameters {
+        serde_json::Value::Null => serde_yaml::Value::Mapping(Default::default()),
+        parameters => serde_yaml::to_value(parameters).expect("JSON converts to YAML"),
+    }
 }
 
 /// A request to hand to `RequestClassifier::classify`: `isl_tokens` prompt tokens with no
@@ -453,7 +475,10 @@ mod tests {
 
     // Only the harness names: every other name comes from the plugin API, as in a plugin's
     // own tests, and not from this module's kernel and host imports.
-    use super::{CaseWorker, SelectionCase, classify, classify_request, registered_policy};
+    use super::{
+        CaseWorker, SelectionCase, classify, classify_request, registered_classifier,
+        registered_policy,
+    };
     use crate::plugins::request_classifier::*;
     use crate::plugins::worker_selection::*;
 
@@ -793,6 +818,70 @@ mod tests {
                 WorkerType::Aggregated,
             ),
             Err(WorkerSelectionPolicyRegistryError::UnknownType { .. })
+        ));
+    }
+
+    #[test]
+    fn a_registered_classifier_is_built_from_its_parameters() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Parameters {
+            class: String,
+        }
+
+        /// Puts every request in one policy class.
+        struct OneClass(String);
+        impl RequestClassifier for OneClass {
+            fn classify(
+                &mut self,
+                mut request: ClassifyRequest,
+                _workers: WorkerCandidates<'_>,
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+                request.set_policy_class(&self.0);
+                Ok(request)
+            }
+        }
+
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_request_classifier(
+                "one-class",
+                Arc::new(|parameters: &RequestClassifierParameters| {
+                    let parameters: Parameters = parameters.deserialize()?;
+                    let factory: RequestClassifierFactory =
+                        Arc::new(move |_context| Box::new(OneClass(parameters.class.clone())));
+                    Ok(factory)
+                }),
+            )
+            .unwrap();
+        let context = || RequestClassifierContext::new(16, Vec::new);
+
+        let mut classifier = registered_classifier(
+            &registry,
+            "one-class",
+            serde_json::json!({ "class": "batch" }),
+            context(),
+        )
+        .unwrap();
+        let classified = classify(
+            classifier.as_mut(),
+            classify_request(160, Some("r1"), None, None),
+        )
+        .unwrap();
+        assert_eq!(classified.policy_class(), Some("batch"));
+
+        assert!(matches!(
+            registered_classifier(
+                &registry,
+                "one-class",
+                serde_json::json!({ "unknown": 1 }),
+                context(),
+            ),
+            Err(RequestClassifierRegistryError::Provider { .. })
+        ));
+        assert!(matches!(
+            registered_classifier(&registry, "absent", serde_json::Value::Null, context()),
+            Err(RequestClassifierRegistryError::UnknownType { .. })
         ));
     }
 }

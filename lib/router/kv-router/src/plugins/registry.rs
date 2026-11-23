@@ -348,6 +348,17 @@ impl RouterPluginRegistry {
         })
     }
 
+    /// Build the factory for one registered classifier type from `parameters`, the mapping a
+    /// policy file would give it.
+    pub(crate) fn resolve_classifier_type_with(
+        &self,
+        classifier_type: &str,
+        parameters: serde_yaml::Value,
+    ) -> Result<RequestClassifierFactory, RequestClassifierRegistryError> {
+        self.request_classifiers
+            .resolve_type_with(classifier_type, parameters)
+    }
+
     fn available_policy_types(&self) -> String {
         let mut available = self.providers.keys().cloned().collect::<Vec<_>>();
         available.sort_unstable();

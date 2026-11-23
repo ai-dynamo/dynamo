@@ -27,34 +27,34 @@ pub(super) fn register(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+    use dynamo_kv_router::plugins::request_classifier::RequestClassifierContext;
+    use dynamo_kv_router::plugins::testing::{registered_classifier, registered_policy};
+
+    use super::*;
 
     #[test]
     fn registers_classifier_and_worker_selector() {
-        let mut registry = crate::default_registry();
-        crate::register(&mut registry).unwrap();
-        let policy = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            policy.path(),
-            r#"
-request_classifier:
-  type: thunderagent
-worker_selection:
-  aggregated: thunderagent
-"#,
-        )
-        .unwrap();
-        let config = dynamo_kv_router::config::KvRouterConfig {
-            router_policy_config: Some(policy.path().display().to_string()),
-            ..Default::default()
-        };
-        let plugins = registry.resolve_plugins(&config).unwrap();
-        assert!(plugins.worker_selection().is_some());
-        let factory = plugins.request_classifier().unwrap();
-        let context = dynamo_kv_router::plugins::request_classifier::RequestClassifierContext::new(
-            16,
-            Vec::new,
+        let mut registry = RouterPluginRegistry::default();
+        register(&mut registry).unwrap();
+
+        let no_parameters = serde_json::Value::Null;
+        assert!(
+            registered_policy(
+                &registry,
+                "thunderagent",
+                no_parameters.clone(),
+                WorkerType::Aggregated,
+            )
+            .is_ok()
         );
-        let _classifier = factory(context);
+        assert!(
+            registered_classifier(
+                &registry,
+                "thunderagent",
+                no_parameters,
+                RequestClassifierContext::new(16, Vec::new),
+            )
+            .is_ok()
+        );
     }
 }
