@@ -306,10 +306,13 @@ whatever the certificate's validity period.
 
 For every multinode DGD created by operator 1.7.0 or newer, the operator creates Secret
 `<DGD name>-mpi-ssh` in the DGD's namespace. The DGD owns it, it is immutable, and it
-holds the DGD's own `private.key` and `private.key.pub`. The DGD's TensorRT-LLM leader
-and worker Pods mount it read-only at `/ssh-pk` with mode `0400`, so one DGD's key
-does not open another DGD's Pods.
+holds the DGD's own `private.key` and `private.key.pub`. The TensorRT-LLM leader and
+worker Pods that the operator renders for the DGD mount it read-only at `/ssh-pk` with
+mode `0400`, so one DGD's key does not open another DGD's Pods.
 
+- In native sidecar mode the operator does not set up the SSH volume. The DGD's Pod
+  templates must mount Secret `<DGD name>-mpi-ssh` themselves; templates that still
+  name the shared `mpi-run-ssh-secret` keep using the shared key.
 - Kubelet makes the files readable by a non-root user only through the pod `fsGroup`.
   When you set no pod `securityContext`, the operator's default `fsGroup` covers this.
   When you set your own pod `securityContext` and the container runs as non-root, set
