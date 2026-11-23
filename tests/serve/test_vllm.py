@@ -91,8 +91,7 @@ class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
-    # Decode past 128 KV tokens so the FlashAttention-2 split-KV JIT (~1 min cold
-    # on post-sm_80 GPUs) runs in readiness; still fit the 5 s readiness attempt.
+    # Warm the split-KV kernels during readiness, within one 5 s attempt.
     health_check_max_tokens: int = 128
 
 
@@ -716,6 +715,8 @@ vllm_configs = {
             pytest.mark.pre_merge,
         ],
         model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+        # Cold Blackwell decode stalls near KV 256; reach that path in readiness.
+        health_check_max_tokens=256,
         # TinyLlama-1.1B caps at 2048 positions; agg.sh defaults to 4096.
         env={"MAX_MODEL_LEN": "2048"},
         script_args=[
@@ -1134,6 +1135,7 @@ def test_cuda_cache_readiness_comparison(
     manifest_path = cache_root / f"{cuda_cache_config.name}.json"
     run_id = os.environ["GITHUB_RUN_ID"]
     previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+    seed_tokens = cuda_cache_config.health_check_max_tokens
     if previous is None:
         case_path = Path(
             tempfile.mkdtemp(prefix=f"{cuda_cache_config.name}-", dir=cache_root)
@@ -1142,12 +1144,18 @@ def test_cuda_cache_readiness_comparison(
         cold_path = case_path / "cold"
         warm_path.mkdir()
         cold_path.mkdir()
-        trials = (
-            ("cold-128", 128, warm_path),
-            ("warm-128", 128, warm_path),
-            ("warm-8", 8, warm_path),
-            ("cold-8", 8, cold_path),
-        )
+        trials = [
+            (f"cold-{seed_tokens}", seed_tokens, warm_path),
+            (f"warm-{seed_tokens}", seed_tokens, warm_path),
+        ]
+        if seed_tokens != 128:
+            cold_128_path = case_path / "cold-128"
+            cold_128_path.mkdir()
+            trials.append(("warm-128", 128, warm_path))
+        trials.append(("warm-8", 8, warm_path))
+        if seed_tokens != 128:
+            trials.append(("cold-128", 128, cold_128_path))
+        trials.append(("cold-8", 8, cold_path))
     else:
         if previous["run_id"] == run_id:
             raise RuntimeError(
@@ -1170,9 +1178,14 @@ def test_cuda_cache_readiness_comparison(
                 "The previous run's CUDA cache files did not persist unchanged"
             )
         logger.info("Reusing CUDA cache from CI run %s", previous["run_id"])
-        trials = (
-            ("cross-run-warm-128", 128, warm_path),
-            ("cross-run-warm-8", 8, warm_path),
+        trials = []
+        if seed_tokens != 128:
+            trials.append((f"cross-run-warm-{seed_tokens}", seed_tokens, warm_path))
+        trials.extend(
+            [
+                ("cross-run-warm-128", 128, warm_path),
+                ("cross-run-warm-8", 8, warm_path),
+            ]
         )
 
     results = []
@@ -1235,12 +1248,15 @@ def test_cuda_cache_readiness_comparison(
                     trial.outcome = "passed"
             except RuntimeError as error:
                 trial.outcome = "RuntimeError"
-                if label != "cold-8" or not isinstance(
+                baseline = label == "cold-8" or (
+                    label == "cold-128" and seed_tokens > 128
+                )
+                if not baseline or not isinstance(
                     error.__cause__, requests.ReadTimeout
                 ):
                     raise
                 trial.outcome = "ReadTimeout"
-                logger.info("Original 8-token cold-cache request timed out: %s", error)
+                logger.info("Baseline %s request timed out: %s", label, error)
             finally:
                 trial.seconds = time.monotonic() - started
                 results.append(dataclasses.asdict(trial))
