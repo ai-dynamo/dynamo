@@ -34,7 +34,8 @@ use dynamo_runtime::discovery::DiscoveryInstance;
 use dynamo_runtime::pipeline::network::StreamPrologueError;
 use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 use dynamo_runtime::pipeline::{
-    AddressedRequest, AsyncEngine, Context, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
+    AddressedRequest, AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyIn, ManyOut,
+    ResponseStream, SingleIn, StreamingDispatch,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::FutureExt;
@@ -134,6 +135,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
         // As on the request plane: the engine has this long to open its
         // response stream, and a failure before the stream reports the engine
         // down, so a retry does not pick it again.
+        let engine_context = context.context();
         let setup = adapter.generate(Context::rejoin(request, context));
         let stream = match establish_timeout {
             Some(timeout) => tokio::time::timeout(timeout, setup).await.map_err(|_| {
@@ -146,14 +148,22 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
             })?,
             None => setup.await,
         };
-        stream.map_err(|setup_error| {
-            let engine_error: &(dyn std::error::Error + 'static) = setup_error.as_ref();
-            pre_stream_failure_error(StreamPrologueError::new(
-                setup_error.to_string(),
-                DynamoError::from(engine_error),
-            ))
-            .into()
-        })
+        match stream {
+            Ok(stream) => Ok(stream),
+            // The client went away, not the engine: end the stream, as the
+            // request plane does, instead of reporting the engine down.
+            Err(_) if engine_context.is_stopped() || engine_context.is_killed() => Ok(
+                ResponseStream::new(Box::pin(futures::stream::empty()), engine_context),
+            ),
+            Err(setup_error) => {
+                let engine_error: &(dyn std::error::Error + 'static) = setup_error.as_ref();
+                Err(pre_stream_failure_error(StreamPrologueError::new(
+                    setup_error.to_string(),
+                    DynamoError::from(engine_error),
+                ))
+                .into())
+            }
+        }
     }
 
     async fn generate_bidirectional(
@@ -1382,6 +1392,22 @@ mod tests {
             ),
             "{setup_error}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_that_fails_before_its_stream_ends_without_an_error() {
+        let (dispatch, request) = dispatch_to(EngineState {
+            refuses: AtomicBool::new(true),
+            ..EngineState::default()
+        });
+        // The client goes away, and the engine fails the request for it. That
+        // is not the engine's fault: an error here would report it down.
+        let request = Context::new(request);
+        request.context().stop_generating();
+        let Ok(stream) = dispatch.generate(request).await else {
+            panic!("a cancelled request must not fail as a pre-stream failure");
+        };
+        assert_eq!(stream.count().await, 0);
     }
 
     #[tokio::test(start_paused = true)]
