@@ -177,6 +177,8 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             }
         });
 
+        // Keep the listener scoped if startup is cancelled during its readiness delay.
+        let startup_guard = endpoint_cancel.clone().drop_guard();
         // Give the endpoint a moment to start listening
         // This prevents a race condition where discovery registers the endpoint
         // before NATS is actually ready to receive requests
@@ -190,6 +192,8 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
                 join_handle,
             },
         );
+
+        startup_guard.disarm();
 
         Ok(())
     }

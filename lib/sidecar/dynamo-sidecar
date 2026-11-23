@@ -9,10 +9,11 @@ usage() {
 Usage: dynamo-sidecar <engine> [OPTIONS]
 
 Engines:
-  vllm     Run the vLLM sidecar
-  sglang   Run the SGLang sidecar
-  trtllm   Run the TensorRT-LLM sidecar
-  lpx      Run the LPX sidecar
+  vllm        Run the vLLM sidecar
+  sglang      Run the SGLang sidecar
+  trtllm      Run the TensorRT-LLM sidecar
+  lpx         Run the LPX sidecar
+  speech-nim  Run the Speech NIM sidecar (asr or tts)
 EOF
 }
 
@@ -34,6 +35,10 @@ case "$engine" in
     lpx)
         shift
         exec dynamo-lpx-sidecar "$@"
+        ;;
+    speech-nim)
+        shift
+        exec dynamo-speech-nim-sidecar "$@"
         ;;
     help | -h | --help)
         usage

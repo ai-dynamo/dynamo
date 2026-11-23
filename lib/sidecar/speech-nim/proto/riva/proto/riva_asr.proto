@@ -1,0 +1,451 @@
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+// Copyright 2019 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+syntax = "proto3";
+
+package nvidia.riva.asr;
+
+option cc_enable_arenas = true;
+option go_package = "nvidia.com/riva_speech";
+
+import "riva/proto/riva_audio.proto";
+import "riva/proto/riva_common.proto";
+
+/*
+ * The RivaSpeechRecognition service provides two mechanisms for converting
+ * speech to text.
+ */
+service RivaSpeechRecognition {
+  // Recognize expects a RecognizeRequest and returns a RecognizeResponse. This
+  // request will block until the audio is uploaded, processed, and a transcript
+  // is returned.
+  rpc Recognize(RecognizeRequest) returns (RecognizeResponse) {}
+  // StreamingRecognize is a non-blocking API call that allows audio data to be
+  // fed to the server in chunks as it becomes available. Depending on the
+  // configuration in the StreamingRecognizeRequest, intermediate results can be
+  // sent back to the client. Recognition ends when the stream is closed by the
+  // client.
+  rpc StreamingRecognize(stream StreamingRecognizeRequest)
+      returns (stream StreamingRecognizeResponse) {}
+
+  // Enables clients to request the configuration of the current ASR service, or
+  // a specific model within the service.
+  rpc GetRivaSpeechRecognitionConfig(RivaSpeechRecognitionConfigRequest)
+      returns (RivaSpeechRecognitionConfigResponse) {}
+}
+
+/*
+ * RivaSpeechRecognitionConfigRequest
+ */
+
+message RivaSpeechRecognitionConfigRequest {
+  // If model is specified only return config for model, otherwise return all
+  // configs.
+  string model_name = 1;
+}
+
+message RivaSpeechRecognitionConfigResponse {
+  message Config {
+    string model_name = 1;
+    map<string, string> parameters = 2;
+  }
+
+  repeated Config model_config = 1;
+}
+
+/*
+ * RecognizeRequest is used for batch processing of a single audio recording.
+ */
+message RecognizeRequest {
+  // Provides information to recognizer that specifies how to process the
+  // request.
+  RecognitionConfig config = 1;
+  // The raw audio data to be processed. The audio bytes must be encoded as
+  // specified in `RecognitionConfig`.
+  bytes audio = 2;
+
+  // The ID to be associated with the request. If provided, this will be
+  // returned in the corresponding response.
+  RequestId id = 100;
+}
+
+/*
+ * A StreamingRecognizeRequest is used to configure and stream audio content to
+ * the Riva ASR Service. The first message sent must include only a
+ * StreamingRecognitionConfig. Subsequent messages sent in the stream must
+ * contain only raw bytes of the audio to be recognized.
+ */
+message StreamingRecognizeRequest {
+  // The streaming request, which is either a streaming config or audio content.
+  oneof streaming_request {
+    // Provides information to the recognizer that specifies how to process the
+    // request. The first `StreamingRecognizeRequest` message must contain a
+    // `streaming_config`  message.
+    StreamingRecognitionConfig streaming_config = 1;
+    // The audio data to be recognized. Sequential chunks of audio data are sent
+    // in sequential `StreamingRecognizeRequest` messages. The first
+    // `StreamingRecognizeRequest` message must not contain `audio` data
+    // and all subsequent `StreamingRecognizeRequest` messages must contain
+    // `audio` data. The audio bytes must be encoded as specified in
+    // `RecognitionConfig`.
+    bytes audio_content = 2;
+  }
+
+  // Per-chunk runtime configuration passed alongside audio_content messages.
+  // This is an OPTIONAL parameter which should be used when client needs to 
+  // tune server configuration during an ongoing session.
+  // Supported keys:
+  //   "force_eou" = "true" : Forces an immediate end-of-utterance for the
+  //   current stream, emitting a final transcript without ending the stream.
+  //   Unlike closing the stream (is_last), the stream remains open and
+  //   subsequent audio continues as a new utterance. Only supported for
+  //   cache-aware RNNT models.
+  map<string, string> runtime_config = 3;
+
+  // The ID to be associated with the request. If provided, this will be
+  // returned in the corresponding responses.
+  RequestId id = 100;
+}
+
+/*
+ * EndpointingConfig is used for configuring different fields related to start
+ * or end of utterance
+ */
+message EndpointingConfig {
+  // `start_history` is the size of the window, in milliseconds, used to
+  // detect start of utterance.
+  // `start_threshold` is the percentage threshold used to detect start of
+  // utterance. (0.0 to 1.0)
+  // If `start_threshold` of `start_history` ms of the acoustic model output
+  // have non-blank tokens, start of utterance is detected.
+  optional int32 start_history = 1;
+  optional float start_threshold = 2;
+
+  // `stop_history` is the size of the window, in milliseconds, used to
+  // detect end of utterance.
+  // `stop_threshold` is the percentage threshold used to detect end of
+  // utterance. (0.0 to 1.0)
+  // If `stop_threshold` of `stop_history` ms of the acoustic model output have
+  // non-blank tokens, end of utterance is detected and decoder will be reset.
+  optional int32 stop_history = 3;
+  optional float stop_threshold = 4;
+
+  // `stop_history_eou` and `stop_threshold_eou` are used for 2-pass end of utterance.
+  // `stop_history_eou` is the size of the window, in milliseconds, used to
+  // trigger 1st pass of end of utterance and generate a partial transcript
+  // with stability of 1. (stop_history_eou < stop_history)
+  // `stop_threshold_eou` is the percentage threshold used to trigger 1st
+  // pass of end of utterance. (0.0 to 1.0)
+  // If `stop_threshold_eou` of `stop_history_eou` ms of the acoustic model
+  // output have non-blank tokens, 1st pass of end of utterance is triggered.
+  optional int32 stop_history_eou = 5;
+  optional float stop_threshold_eou = 6;
+}
+
+// Provides information to the recognizer that specifies how to process the
+// request
+message RecognitionConfig {
+  // The encoding of the audio data sent in the request.
+  //
+  // All encodings support only 1 channel (mono) audio.
+  AudioEncoding encoding = 1;
+
+  //  The sample rate in hertz (Hz) of the audio data sent in the
+  // `RecognizeRequest` or `StreamingRecognizeRequest` messages.
+  //  The Riva server will automatically down-sample/up-sample the audio to
+  //  match the ASR acoustic model sample rate. The sample rate value below 8kHz
+  //  will not produce any meaningful output.
+  int32 sample_rate_hertz = 2;
+
+  // Required. The language of the supplied audio as a
+  // [BCP-47](https://www.rfc-editor.org/rfc/bcp/bcp47.txt) language tag.
+  // Example: "en-US".
+  string language_code = 3;
+
+  // Maximum number of recognition hypotheses to be returned.
+  // Specifically, the maximum number of `SpeechRecognizeAlternative` messages
+  // within each `SpeechRecognizeResult`.
+  // The server may return fewer than `max_alternatives`.
+  // If omitted, will return a maximum of one.
+  int32 max_alternatives = 4;
+
+  // A custom field that enables profanity filtering for the generated
+  // transcripts. If set to 'true', the server filters out profanities,
+  // replacing all but the initial character in each filtered word with
+  // asterisks. For example, "x**". If set to `false` or omitted, profanities
+  // will not be filtered out. The default is `false`.
+  bool profanity_filter = 5;
+
+  // Array of SpeechContext.
+  // A means to provide context to assist the speech recognition. For more
+  // information, see SpeechContext section
+  repeated SpeechContext speech_contexts = 6;
+
+  // The number of channels in the input audio data.
+  // If `0` or omitted, defaults to one channel (mono).
+  // Note: Only single channel audio input is supported as of now.
+  int32 audio_channel_count = 7;
+
+  // If `true`, the top result includes a list of words and the start and end
+  // time offsets (timestamps), and confidence scores for those words. If
+  // `false`, no word-level time offset information is returned. The default
+  // is `false`.
+  bool enable_word_time_offsets = 8;
+
+  // If 'true', adds punctuation to recognition result hypotheses. The
+  // default 'false' value does not add punctuation to result hypotheses.
+  bool enable_automatic_punctuation = 11;
+
+  // This needs to be set to `true` explicitly and `audio_channel_count` > 1
+  // to get each channel recognized separately. The recognition result will
+  // contain a `channel_tag` field to state which channel that result belongs
+  // to. If this is not true, we will only recognize the first channel. The
+  // request is billed cumulatively for all channels recognized:
+  // `audio_channel_count` multiplied by the length of the audio.
+  // Note: This field is not yet supported.
+  bool enable_separate_recognition_per_channel = 12;
+
+  // Which model to select for the given request.
+  // If empty, Riva will select the right model based on the other
+  // RecognitionConfig parameters. The model should correspond to the name
+  // passed to `riva-build` with the `--name` argument
+  string model = 13;
+
+  // The verbatim_transcripts flag enables or disable inverse text
+  // normalization. 'true' returns exactly what was said, with no
+  // denormalization. 'false' applies inverse text normalization, also this is
+  // the default
+  bool verbatim_transcripts = 14;
+
+  // Config to enable speaker diarization and set additional
+  // parameters. For non-streaming requests, the diarization results will be
+  // provided only in the top alternative of the FINAL SpeechRecognitionResult.
+  SpeakerDiarizationConfig diarization_config = 19;
+
+  // Custom fields for passing request-level
+  // configuration options to plugins used in the
+  // model pipeline.
+  map<string, string> custom_configuration = 24;
+
+  // Config for tuning start or end of utterance parameters.
+  // If empty, Riva will use default values or custom values if specified in riva-build arguments.
+  optional EndpointingConfig endpointing_config = 25;
+}
+
+// Provides information to the recognizer that specifies how to process the
+// request
+message StreamingRecognitionConfig {
+  // Provides information to the recognizer that specifies how to process the
+  // request
+  RecognitionConfig config = 1;
+
+  // If `true`, interim results (tentative hypotheses) may be
+  // returned as they become available (these interim results are indicated with
+  // the `is_final=false` flag).
+  // If `false` or omitted, only `is_final=true` result(s) are returned.
+  bool interim_results = 2;
+}
+
+// Config to enable speaker diarization.
+message SpeakerDiarizationConfig {
+  // If 'true', enables speaker detection for each recognized word in
+  // the top alternative of the recognition result using a speaker_tag provided
+  // in the WordInfo.
+  bool enable_speaker_diarization = 1;
+
+  // Maximum number of speakers in the conversation. This gives flexibility by
+  // allowing the system to automatically determine the correct number of
+  // speakers. If not set, the default value is 8.
+  int32 max_speaker_count = 2;
+}
+
+// Provides "hints" to the speech recognizer to favor specific words and phrases
+// in the results.
+message SpeechContext {
+  // A list of strings containing words and phrases "hints" so that
+  // the speech recognition is more likely to recognize them. This can be used
+  // to improve the accuracy for specific words and phrases, for example, if
+  // specific commands are typically spoken by the user. This can also be used
+  // to add additional words to the vocabulary of the recognizer.
+  repeated string phrases = 1;
+
+  // Hint Boost. Positive value will increase the probability that a specific
+  // phrase will be recognized over other similar sounding phrases. The higher
+  // the boost, the higher the chance of false positive recognition as well.
+  // Though `boost` can accept a wide range of positive values, most use cases
+  // are best served with values between 0 and 20. We recommend using a binary
+  // search approach to finding the optimal value for your use case.
+  float boost = 4;
+}
+
+// The only message returned to the client by the `Recognize` method. It
+// contains the result as zero or more sequential `SpeechRecognitionResult`
+// messages.
+message RecognizeResponse {
+  // Sequential list of transcription results corresponding to
+  // sequential portions of audio. Currently only returns one transcript.
+  repeated SpeechRecognitionResult results = 1;
+
+  // The ID associated with the request
+  RequestId id = 100;
+}
+
+// A speech recognition result corresponding to the latest transcript
+message SpeechRecognitionResult {
+  // May contain one or more recognition hypotheses (up to the
+  // maximum specified in `max_alternatives`).
+  // These alternatives are ordered in terms of accuracy, with the top (first)
+  // alternative being the most probable, as ranked by the recognizer.
+  repeated SpeechRecognitionAlternative alternatives = 1;
+
+  // For multi-channel audio, this is the channel number corresponding to the
+  // recognized result for the audio from that channel.
+  // For audio_channel_count = N, its output values can range from '1' to 'N'.
+  int32 channel_tag = 2;
+
+  // Length of audio processed so far in seconds
+  float audio_processed = 3;
+}
+
+// Alternative hypotheses (a.k.a. n-best list).
+message SpeechRecognitionAlternative {
+  // Transcript text representing the words that the user spoke.
+  string transcript = 1;
+
+  // The confidence estimate. A higher number indicates an estimated greater
+  // likelihood that the recognized word is correct. This field is set only for
+  // a non-streaming result or, for a streaming result where is_final=true.
+  // This field is not guaranteed to be accurate and users should not rely on
+  // it to be always provided. Although confidence can currently be roughly
+  // interpreted as a natural-log probability, the estimate computation varies
+  // with difference configurations, and is subject to change. The default of
+  // 0.0 is a sentinel value indicating confidence was not set.
+  float confidence = 2;
+
+  // A list of word-specific information for each recognized word. Only
+  // populated if is_final=true
+  repeated WordInfo words = 3;
+
+  // List of language codes detected in the transcript.
+  repeated string language_code = 4;
+}
+
+// Word-specific information for recognized words.
+message WordInfo {
+  // Time offset relative to the beginning of the audio in ms
+  // and corresponding to the start of the spoken word.
+  // This field is only set if `enable_word_time_offsets=true` and only
+  // in the top hypothesis.
+  int32 start_time = 1;
+
+  // Time offset relative to the beginning of the audio in ms
+  // and corresponding to the end of the spoken word.
+  // This field is only set if `enable_word_time_offsets=true` and only
+  // in the top hypothesis.
+  int32 end_time = 2;
+
+  // The word corresponding to this set of information.
+  string word = 3;
+
+  // The confidence estimate. A higher number indicates an estimated greater
+  // likelihood that the recognized word is correct. This field is set only for
+  // a non-streaming result or, for a streaming result where is_final=true.
+  // This field is not guaranteed to be accurate and users should not rely on
+  // it to be always provided. Although confidence can currently be roughly
+  // interpreted as a natural-log probability, the estimate computation varies
+  // with difference configurations, and is subject to change. The default of
+  // 0.0 is a sentinel value indicating confidence was not set.
+  float confidence = 4;
+
+  // Output only. A distinct integer value is assigned for every speaker within
+  // the audio. This field specifies which one of those speakers was detected to
+  // have spoken this word. Value ranges from '1' to diarization_speaker_count.
+  // speaker_tag is set if enable_speaker_diarization = 'true' and only in the
+  // top alternative.
+  int32 speaker_tag = 5;
+
+  // The language code of the word.
+  string language_code = 6;
+}
+
+// `StreamingRecognizeResponse` is the only message returned to the client by
+// `StreamingRecognize`. A series of zero or more `StreamingRecognizeResponse`
+// messages are streamed back to the client.
+//
+// Here are few examples of `StreamingRecognizeResponse`s
+//
+// 1. results { alternatives { transcript: "tube" } stability: 0.01 }
+//
+// 2. results { alternatives { transcript: "to be a" } stability: 0.01 }
+//
+// 3. results { alternatives { transcript: "to be or not to be"
+//                             confidence: 0.92 }
+//              alternatives { transcript: "to bee or not to bee" }
+//              is_final: true }
+//
+
+message StreamingRecognizeResponse {
+  // This repeated list contains the latest transcript(s) corresponding to
+  // audio currently being processed.
+  // Currently one result is returned, where each result can have multiple
+  // alternatives
+  repeated StreamingRecognitionResult results = 1;
+
+  // The ID associated with the request
+  RequestId id = 100;
+}
+
+message PipelineStates {
+  // Neural VAD probabilities
+  repeated float vad_probabilities = 1;
+}
+
+// A streaming speech recognition result corresponding to a portion of the audio
+// that is currently being processed.
+message StreamingRecognitionResult {
+  // May contain one or more recognition hypotheses (up to the
+  // maximum specified in `max_alternatives`).
+  // These alternatives are ordered in terms of accuracy, with the top (first)
+  // alternative being the most probable, as ranked by the recognizer.
+  repeated SpeechRecognitionAlternative alternatives = 1;
+
+  // If `false`, this `StreamingRecognitionResult` represents an
+  // interim result that may change. If `true`, this is the final time the
+  // speech service will return this particular `StreamingRecognitionResult`,
+  // the recognizer will not return any further hypotheses for this portion of
+  // the transcript and corresponding audio.
+  bool is_final = 2;
+
+  // An estimate of the likelihood that the recognizer will not
+  // change its guess about this interim result. Values range from 0.0
+  // (completely unstable) to 1.0 (completely stable).
+  // This field is only provided for interim results (`is_final=false`).
+  // The default of 0.0 is a sentinel value indicating `stability` was not set.
+  float stability = 3;
+
+  // For multi-channel audio, this is the channel number corresponding to the
+  // recognized result for the audio from that channel.
+  // For audio_channel_count = N, its output values can range from '1' to 'N'.
+  int32 channel_tag = 5;
+
+  // Length of audio processed so far in seconds
+  float audio_processed = 6;
+
+  // Message for pipeline states
+  optional PipelineStates pipeline_states = 7;
+}

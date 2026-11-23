@@ -217,6 +217,16 @@ const testCases = [
 
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {
+    file: 'lib/sidecar/speech-nim/src/asr/session.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'speech sidecar source triggers its own build and Rust checks'
+  },
+  {
+    file: 'lib/sidecar/speech-nim/proto/riva/proto/riva_asr.proto',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'speech protocol changes trigger Rust checks without LLM E2E'
+  },
+  {
     file: 'lib/sidecar/common/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'common sidecar source avoids unrelated build and E2E filters'
