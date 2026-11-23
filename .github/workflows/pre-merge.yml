@@ -452,17 +452,28 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.19.0
         cargo-deny -L error --all-features check licenses bans --config ${{ github.workspace }}/deny.toml
+    - name: Prepare Rust test logs
+      shell: bash
+      run: mkdir -p rust-test-results
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --no-run
+    - name: Check Rust console report converter
+      if: matrix.dir == '.'
+      run: python3 -m unittest discover -s .github/actions/rust-test-report -p 'test_*.py'
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo doc --no-deps && cargo test --locked --doc
+      shell: bash
+      run: |
+        cargo doc --no-deps
+        cargo test --locked --doc 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/doctests.log"
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      shell: bash
+      run: |
+        cargo test --locked --all-targets 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/unit.log"
     - name: Generate frontend OpenAPI specification
       if: matrix.dir == '.'
       # The preceding integration-test build also builds the normal binary.
@@ -490,7 +501,17 @@ jobs:
     - name: Run Python bindings AIS feature tests
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --features ais-forward-pass -- --nocapture
+      shell: bash
+      run: |
+        cargo test --locked --features ais-forward-pass -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/ais-forward-pass.log"
+
+    - name: Publish Rust test reports
+      if: always()
+      uses: ./.github/actions/rust-test-report
+      with:
+        api-key: ${{ secrets.DD_API_KEY }}
+        workspace: ${{ matrix.dir }}
+        artifact-name: rust-pre-merge-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   rust-feature-builds:
     needs: changed-files
@@ -505,6 +526,9 @@ jobs:
         lfs: true
     - name: Set up Rust CI
       uses: ./.github/actions/setup-rust-ci
+    - name: Prepare Rust test logs
+      shell: bash
+      run: mkdir -p rust-test-results
     - name: Check isolated kv-router feature builds
       # Workspace feature unification hides these; check each feature on its own.
       run: |
@@ -512,15 +536,19 @@ jobs:
         cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
     - name: Run kv-router adapter feature tests
       # No workspace member enables the http adapter, so these tests run only here.
-      run: cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests
+      shell: bash
+      run: |
+        cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/router-adapters.log"
     - name: Run canonical replay feature tests
+      shell: bash
       run: |
         cargo test --locked -p dynamo-bench --features replay-bench \
           --bench offline_replay_bench -- \
           testdata/mooncake_trace_tiny.jsonl \
           --iterations 2 \
-          --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl"
+          --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl" 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/canonical-replay.log"
     - name: Compile feature-gated benchmark entrypoints
+      shell: bash
       run: |
         compile_bench() {
           feature="$1"
@@ -540,9 +568,9 @@ jobs:
         compile_bench selection-replay --bench selection_replay_bench
 
         cargo test --locked --no-default-features -p dynamo-bench \
-          --features request-trace-to-mooncake --test request_trace_to_mooncake
+          --features request-trace-to-mooncake --test request_trace_to_mooncake 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/request-trace-to-mooncake.log"
         cargo test --locked --no-default-features -p dynamo-bench \
-          --features selection-replay --test selection_replay
+          --features selection-replay --test selection_replay 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/selection-replay.log"
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
@@ -551,9 +579,17 @@ jobs:
       # The lint step and the image builds compile it but run no tests. So this
       # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs
       # and lib/runtime/tests/nvtx_payload.rs, which records what reaches NVTX.
+      shell: bash
       run: |
-        cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::
-        cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload
+        cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx:: 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-unit.log"
+        cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-payload.log"
+    - name: Publish Rust test reports
+      if: always()
+      uses: ./.github/actions/rust-test-report
+      with:
+        api-key: ${{ secrets.DD_API_KEY }}
+        workspace: root
+        artifact-name: rust-features-${{ github.run_id }}-${{ github.run_attempt }}
 
   rust-clippy:
     needs: changed-files

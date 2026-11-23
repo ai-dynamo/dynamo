@@ -1530,6 +1530,9 @@ jobs:
         components: llvm-tools-preview
     - name: Install cargo-llvm-cov
       run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
+    - name: Prepare Rust test logs
+      shell: bash
+      run: mkdir -p rust-test-results
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
@@ -1539,8 +1542,9 @@ jobs:
       # NOTE: --all-targets doesn't run doc tests.
       # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
       # so we can generate multiple formats without re-running the tests.
+      shell: bash
       run: |
-        cargo llvm-cov --locked --all-targets --no-report
+        cargo llvm-cov --locked --all-targets --no-report 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/coverage.log"
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
@@ -1556,6 +1560,15 @@ jobs:
           ${{ matrix.dir }}/coverage-rust.txt
           ${{ matrix.dir }}/coverage-rust.lcov
         retention-days: 7
+
+    - name: Publish Rust test reports
+      if: always()
+      uses: ./.github/actions/rust-test-report
+      with:
+        api-key: ${{ secrets.DD_API_KEY }}
+        dd-env: nightly
+        workspace: ${{ matrix.dir }}
+        artifact-name: rust-nightly-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # ============================================================================
   # RELEASE (workflow_call into release.yml)
