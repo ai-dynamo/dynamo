@@ -326,8 +326,6 @@ class KubernetesConnector(PlannerConnector):
         """Get the model name from an already-fetched deployment."""
         try:
             registrations = self._extract_mdc_entries(deployment)
-            # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
-            # and model name logic, should consolidate
             prefill_model_name = None
             decode_model_name = None
             if require_prefill:

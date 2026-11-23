@@ -6108,6 +6108,11 @@ KaiSchedulerConfiguration holds Kai-scheduler settings.
 **Kind:** `type`
 **Appears in:** [OrchestratorConfiguration](#orchestratorconfiguration)
 
+<ParamField path="schedulerName" type="string" default="kai-scheduler">
+SchedulerName is the pod scheduler name used by the KAI integration. Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="enabled" type="boolean">
 Enabled overrides auto-detection. nil = auto-detect.
 **Validation:** Optional: \&#123;\&#125;

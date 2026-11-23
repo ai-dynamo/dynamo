@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rmp_serde::{from_slice, to_vec, to_vec_named};
 use serde::Serialize;
+use serde_bytes::ByteBuf;
 
 use crate::event::KvCacheEventData;
 use crate::placement::{PlacementEvent, PlacementOwner};
@@ -2121,4 +2122,101 @@ fn test_device_unsalted_store_still_marks_cache_namespace_ambiguous() {
             .unwrap_err(),
         ZmqEventFilterReason::AmbiguousCacheNamespace
     );
+}
+
+#[derive(Serialize)]
+struct BinaryKeyStored {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    block_hashes: Vec<u64>,
+    parent_block_hash: Option<u64>,
+    token_ids: Vec<u32>,
+    block_size: usize,
+    extra_keys: Vec<Option<Vec<ByteBuf>>>,
+}
+
+fn binary_key_stored(hash: u64, parent: Option<u64>, key: Option<Vec<u8>>) -> BinaryKeyStored {
+    BinaryKeyStored {
+        event_type: "BlockStored",
+        block_hashes: vec![hash],
+        parent_block_hash: parent,
+        token_ids: vec![0, 0],
+        block_size: 2,
+        extra_keys: vec![key.map(|key| vec![ByteBuf::from(key)])],
+    }
+}
+
+// vLLM publishes a prompt-embeds block's key as a raw SHA-256 digest.
+fn prompt_embeds_digest() -> Vec<u8> {
+    let digest = vec![0xFF_u8; 32];
+    assert!(std::str::from_utf8(&digest).is_err());
+    digest
+}
+
+// A raw key can also be valid UTF-8; on the wire it is still `bin`.
+fn utf8_raw_key() -> Vec<u8> {
+    let key = vec![b'a'; 32];
+    assert!(std::str::from_utf8(&key).is_ok());
+    key
+}
+
+// Decodes one batch and returns the block hashes each event adds to the index.
+fn indexed_block_hashes(events: &[BinaryKeyStored]) -> Vec<Vec<u64>> {
+    let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
+    let batch = decode_event_batch(&payload).unwrap();
+
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    batch
+        .events
+        .into_iter()
+        .enumerate()
+        .map(|(event_id, event)| {
+            let placement = normalizer
+                .normalize(event, event_id as u64, WorkerWithDpRank::new(7, 0))
+                .unwrap();
+            match placement.event.data {
+                KvCacheEventData::Stored(store) => store
+                    .blocks
+                    .iter()
+                    .map(|block| block.block_hash.0)
+                    .collect(),
+                KvCacheEventData::Removed(removed) => {
+                    assert!(removed.block_hashes.is_empty());
+                    Vec::new()
+                }
+                KvCacheEventData::Cleared => panic!("no clear was sent"),
+                KvCacheEventData::Recurrent(_) => panic!("no recurrent event was sent"),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn binary_extra_key_keeps_block_and_children_out_of_the_index() {
+    for key in [prompt_embeds_digest(), utf8_raw_key()] {
+        let events = [
+            binary_key_stored(11, None, Some(key.clone())),
+            binary_key_stored(12, Some(11), None),
+            binary_key_stored(21, None, None),
+        ];
+        assert_eq!(
+            indexed_block_hashes(&events),
+            vec![vec![], vec![], vec![21]],
+            "raw key {key:?}"
+        );
+    }
+}
+
+#[test]
+fn binary_extra_key_on_a_later_block_keeps_the_earlier_blocks() {
+    // The raw key is on block 1, so the store is cut at token 1 * block_size.
+    let store = BinaryKeyStored {
+        event_type: "BlockStored",
+        block_hashes: vec![11, 12],
+        parent_block_hash: None,
+        token_ids: vec![0, 0, 0, 0],
+        block_size: 2,
+        extra_keys: vec![None, Some(vec![ByteBuf::from(prompt_embeds_digest())])],
+    };
+    assert_eq!(indexed_block_hashes(&[store]), vec![vec![11]]);
 }

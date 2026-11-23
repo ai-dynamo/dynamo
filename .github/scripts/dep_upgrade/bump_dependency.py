@@ -25,7 +25,7 @@ TRTLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
     (
         "container/context.yaml",
         # Match runtime_image_tag inside the trtllm: block (first sub-block,
-        # e.g. cuda13.1) without colliding with vllm/sglang earlier in the file.
+        # e.g. cuda13.4) without colliding with vllm/sglang earlier in the file.
         re.compile(
             r"(?m)(^trtllm:\s*?\n(?:[ \t][^\n]*\n)*?[ \t]+runtime_image_tag:\s+)\S+",
         ),

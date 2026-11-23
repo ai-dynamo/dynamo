@@ -467,6 +467,9 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
+        // A missing hash skips only itself, as in the other indexers: returning early
+        // would leave every later block of the batch indexed for this worker.
+        let mut result = Ok(());
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
                 tracing::warn!(
@@ -477,15 +480,27 @@ impl PositionalIndexer {
                     "Failed to find block to remove; skipping remove operation"
                 );
 
-                return Err(KvCacheEventError::BlockNotFound);
+                result = Err(KvCacheEventError::BlockNotFound);
+                continue;
             };
 
-            if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
-                let _ = entry.remove(*seq_hash, worker);
-            }
+            self.remove_from_index((position, local_hash), *seq_hash, worker);
         }
 
-        Ok(())
+        result
+    }
+
+    /// Remove `worker` from `seq_hash` at `key` and drop the entry once it is empty.
+    /// `remove_if_mut` does both under one shard lock, so a store to the same key from
+    /// another event thread cannot land between the emptiness check and the removal.
+    fn remove_from_index(
+        &self,
+        key: (usize, LocalBlockHash),
+        seq_hash: ExternalSequenceBlockHash,
+        worker: WorkerWithDpRank,
+    ) {
+        self.index
+            .remove_if_mut(&key, |_, entry| entry.remove(seq_hash, worker));
     }
 
     fn remove_worker_dp_rank_impl(
@@ -497,9 +512,7 @@ impl PositionalIndexer {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(worker_map) = worker_blocks.remove(&key) {
             for (seq_hash, (position, local_hash)) in worker_map.iter() {
-                if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
-                    let _ = entry.remove(*seq_hash, key);
-                }
+                self.remove_from_index((*position, *local_hash), *seq_hash, key);
             }
         }
     }
@@ -518,9 +531,7 @@ impl PositionalIndexer {
         for worker in workers {
             if let Some(worker_map) = worker_blocks.remove(&worker) {
                 for (seq_hash, (position, local_hash)) in worker_map.iter() {
-                    if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
-                        let _ = entry.remove(*seq_hash, worker);
-                    }
+                    self.remove_from_index((*position, *local_hash), *seq_hash, worker);
                 }
             }
         }
@@ -972,7 +983,9 @@ impl PositionalIndexer {
 mod tests {
     use super::{LevelIndex, PositionalIndexer, SearchMode};
     use crate::prelude::{LocalBlockHash, RouterEvent, WorkerWithDpRank};
-    use crate::testing::{assert_overlap_scores_eq, make_store_event};
+    use crate::testing::{
+        assert_overlap_scores_eq, make_clear_event, make_remove_event, make_store_event,
+    };
     use rustc_hash::FxHashMap;
 
     fn local_hashes(hashes: &[u64]) -> Vec<LocalBlockHash> {
@@ -1033,5 +1046,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Once no worker holds a `(position, local_hash)` entry, every removal path drops it,
+    /// so the index does not keep one empty entry per block it ever stored.
+    #[test]
+    fn removals_drop_emptied_index_entries() {
+        let indexer = PositionalIndexer::new_with_mode(8, SearchMode::Strided);
+        let mut worker_blocks: FxHashMap<WorkerWithDpRank, LevelIndex> = FxHashMap::default();
+        let apply = |worker_blocks: &mut FxHashMap<_, _>, event| {
+            indexer
+                .apply_event(worker_blocks, event, None)
+                .expect("apply_event should succeed");
+        };
+
+        apply(&mut worker_blocks, make_store_event(0, &[1, 2, 3]));
+        apply(&mut worker_blocks, make_remove_event(0, &[1, 2, 3]));
+        assert_eq!(indexer.index.len(), 0, "Removed event");
+
+        apply(&mut worker_blocks, make_store_event(0, &[1, 2, 3]));
+        apply(&mut worker_blocks, make_clear_event(0));
+        assert_eq!(indexer.index.len(), 0, "Cleared event");
+
+        apply(&mut worker_blocks, make_store_event(0, &[1, 2, 3]));
+        indexer.remove_worker_blocks_impl(&mut worker_blocks, 0);
+        assert_eq!(indexer.index.len(), 0, "worker removal");
+
+        // Entries another worker still holds survive and keep matching.
+        apply(&mut worker_blocks, make_store_event(0, &[1, 2, 3]));
+        apply(&mut worker_blocks, make_store_event(1, &[1, 2]));
+        apply(&mut worker_blocks, make_remove_event(0, &[1, 2, 3]));
+        assert_eq!(indexer.index.len(), 2);
+        let scores = indexer.jump_search_matches(&local_hashes(&[1, 2, 3]), false);
+        assert_eq!(scores.scores.len(), 1);
+        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&2));
     }
 }

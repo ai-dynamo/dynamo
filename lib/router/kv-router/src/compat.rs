@@ -508,7 +508,6 @@ pub mod indexer {
     )]
     pub type LowerTierQueryOptions = dynamo_kv_indexer::LowerTierQueryOptions;
     pub use dynamo_kv_indexer::METRIC_EVENT_CLEARED;
-    pub use dynamo_kv_indexer::METRIC_EVENT_RECURRENT;
     pub use dynamo_kv_indexer::METRIC_EVENT_REMOVED;
     pub use dynamo_kv_indexer::METRIC_EVENT_STORED;
     pub use dynamo_kv_indexer::METRIC_STATUS_ALLOCATION_FAILED;
