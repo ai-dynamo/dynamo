@@ -2502,8 +2502,10 @@ func GeneratePodSpecForComponent(
 }
 
 // GeneratePodSpecForComponentStaged retains source layers for providers that
-// still add bindings or omit containers. The caller must finalize with Apply
-// after those transformations. Nil layers preserve the complete legacy path.
+// still add bindings or omit containers. After those transformations, callers must
+// Apply non-nil layers and then run applicable backend post-composition work,
+// such as FinalizeSGLangExporterPorts for the selected SGLang engines.
+// Nil layers retain legacy rendering, including its earlier backend processing.
 func GeneratePodSpecForComponentStaged(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
