@@ -595,7 +595,12 @@ class ImageCacheIdentityPayload(MediaAccuracyPayload):
             response = requests.post(self.url(), json=probe, timeout=10)
             response.raise_for_status()
             result = response.json()
-            require_router_worker_id(result)
+            try:
+                require_router_worker_id(result)
+            except AssertionError as error:
+                raise ValueError(
+                    "Image routing probe omitted worker identity"
+                ) from error
             usage = result.get("usage", {})
             if usage.get("prompt_tokens") != prompt:
                 raise ValueError(f"Image probe prompt usage changed: {result}")
