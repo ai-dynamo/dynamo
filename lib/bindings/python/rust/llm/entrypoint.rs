@@ -32,6 +32,7 @@ use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_llm::preprocessor::request_envelope::RequestEnvelope;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
@@ -804,6 +805,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
 
             Box::pin(async move {
                 let runtime_config = card.runtime_config.clone();
+                let envelope = RequestEnvelope::from_card(&card);
                 // Acquire GIL to call Python callback and convert coroutine to future
                 let py_future = Python::with_gil(|py| {
                     let py_instance_id =
@@ -840,7 +842,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
                         anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
                     })?;
-                    Ok::<_, anyhow::Error>(Arc::new(engine.chat_engine(runtime_config)))
+                    Ok::<_, anyhow::Error>(Arc::new(engine.chat_engine(runtime_config, envelope)))
                 })?;
 
                 Ok(engine)

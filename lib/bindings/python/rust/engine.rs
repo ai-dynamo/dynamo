@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::preprocessor::request_envelope::{RequestEnvelope, RequestScope};
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
@@ -219,10 +220,12 @@ impl PythonAsyncEngine {
     pub(crate) fn chat_engine(
         &self,
         runtime_config: dynamo_llm::local_model::runtime_config::ModelRuntimeConfig,
+        envelope: RequestEnvelope,
     ) -> PythonChatEngine {
         PythonChatEngine {
             engine: self.0.clone(),
             runtime_config: Arc::new(runtime_config),
+            envelope,
         }
     }
 
@@ -244,6 +247,7 @@ impl PythonAsyncEngine {
 pub(crate) struct PythonChatEngine {
     engine: PythonServerStreamingEngine,
     runtime_config: Arc<dynamo_llm::local_model::runtime_config::ModelRuntimeConfig>,
+    envelope: RequestEnvelope,
 }
 
 #[async_trait::async_trait]
@@ -259,9 +263,11 @@ impl
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let runtime_config = self.runtime_config.clone();
+        let request_scope = self.envelope.begin_chat(&request);
         generate_python_stream(
             &self.engine,
             request,
+            Some(request_scope),
             move |py, request| {
                 // Ordinary Chat Completions retain direct typed serialization.
                 if request.responses_tools.is_none() {
@@ -352,6 +358,7 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<EncodedPythonResponse>, Error>
         let generate = generate_python_stream(
             &self.engine,
             request,
+            None,
             |_py, request| Ok(request.into_inner()),
             move |stream, ctx, request_id| {
                 encoded_python_response_stream(
@@ -433,6 +440,7 @@ where
         generate_python_stream(
             self,
             request,
+            None,
             |py, request| Ok(pythonize(py, &request)?.unbind()),
             buffered_typed_response_stream::<Resp>,
         )
@@ -443,6 +451,7 @@ where
 async fn generate_python_stream<Req, Resp, ToPythonInput, ForwardResponses>(
     engine: &PythonServerStreamingEngine,
     request: SingleIn<Req>,
+    request_scope: Option<RequestScope>,
     to_python_input: ToPythonInput,
     forward_responses: ForwardResponses,
 ) -> Result<ManyOut<Resp>, Error>
@@ -465,8 +474,7 @@ where
             Context::new(ctx.clone(), current_trace_context, None, metadata)
                 .with_session_affinity_from(&context)
                 .map_err(anyhow::Error::msg)?
-                .with_agent_context_from(&context)
-                .map_err(anyhow::Error::msg)?
+                .with_request_scope(request_scope)
                 .with_response_headers_from(&context),
         )
     } else {

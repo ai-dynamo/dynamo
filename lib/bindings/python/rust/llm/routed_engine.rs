@@ -82,23 +82,15 @@ fn copy_session_affinity(
     }
 }
 
-/// Give the routed request its parent request's agent context, unless it carries its own. The
-/// router and workers read the session only from this field.
-fn inherit_agent_context(
-    parent_context: &crate::context::Context,
-    request: &mut PreprocessedRequest,
-) {
-    if request.agent_context.is_none() {
-        request.agent_context = parent_context.agent_context().cloned();
-    }
-}
-
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
     ///
-    /// With `context`, the routed request inherits the parent request's session affinity and,
-    /// unless `preprocessed` sets `agent_context`, its agent context.
+    /// With the `context` of a chat request, the routed request inherits the parent request's
+    /// session affinity, and every engine-agnostic field `preprocessed` leaves unset is filled
+    /// from the client's request: the agent context, routing hints, sampling and stop values
+    /// and passthrough arguments. A value `preprocessed` sets is kept. The engine's token
+    /// budget is checked against the prompt in `preprocessed`.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
@@ -113,7 +105,15 @@ impl RoutedEngine {
             request.tracker = Some(Arc::new(RequestTracker::new()));
         }
         let request_context = if let Some(parent_context) = context.as_ref() {
-            inherit_agent_context(parent_context, &mut request);
+            if let Some(scope) = parent_context.request_scope() {
+                scope.complete_request(&mut request);
+                scope
+                    .validate_token_budget(&request)
+                    .map_err(routed_error_to_pyerr)?;
+                if let Some(tracker) = request.tracker.as_deref() {
+                    scope.apply_upstream_elapsed(tracker);
+                }
+            }
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
             let mut child_context = SingleIn::with_id_and_metadata(
@@ -216,9 +216,12 @@ fn dispatch_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::request_envelope::RequestEnvelope;
     use dynamo_llm::protocols::common::extensions::{
         AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SessionAffinityId, session_affinity_from_headers,
     };
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
     use tracing_subscriber::layer::SubscriberExt;
@@ -251,25 +254,40 @@ mod tests {
         assert_eq!(session_affinity.as_str(), "session-123");
     }
 
+    /// The request a chat processor routes is completed from the client's request and its
+    /// HTTP context, and what the processor set is kept.
     #[test]
-    fn processor_agent_context_is_not_overwritten() {
+    fn routed_request_is_completed_from_the_chat_request() {
         let agent_context = |session_id: &str| -> AgentContext {
             serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap()
         };
-        let mut source = SingleIn::new(());
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "seed": 7,
+            "nvext": {"backend_instance_id": 42},
+        }))
+        .unwrap();
+        let mut source = SingleIn::new(chat);
         source.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context("from-headers"));
+        let envelope = RequestEnvelope::from_card(&ModelDeploymentCard::with_name_only("m"));
         let python_context =
             crate::context::Context::new(source.context(), None, None, Default::default())
-                .with_agent_context_from(&source)
-                .expect("pipeline context converts to Python binding context");
+                .with_request_scope(Some(envelope.begin_chat(&source)));
+        let scope = python_context.request_scope().expect("chat request scope");
 
         let mut request = preprocessed_request();
-        inherit_agent_context(&python_context, &mut request);
+        scope.complete_request(&mut request);
         assert_eq!(request.agent_context, Some(agent_context("from-headers")));
+        assert_eq!(request.sampling_options.seed, Some(7));
+        let routing = request.routing.as_ref().expect("routing hints");
+        assert_eq!(routing.backend_instance_id, Some(42));
 
         request.agent_context = Some(agent_context("from-processor"));
-        inherit_agent_context(&python_context, &mut request);
+        request.sampling_options.seed = Some(1);
+        scope.complete_request(&mut request);
         assert_eq!(request.agent_context, Some(agent_context("from-processor")));
+        assert_eq!(request.sampling_options.seed, Some(1));
     }
 
     fn make_trace_context(
