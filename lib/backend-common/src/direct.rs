@@ -211,19 +211,8 @@ pub async fn serve_direct_engines(
     specs: Vec<DirectEngineSpec>,
     factory: DirectEngineFactory,
 ) -> Result<Arc<DirectDispatch>, DynamoError> {
-    serve_engines(drt, config, specs, factory, http_drain_window()).await
-}
-
-/// How long the HTTP service lets the requests it has admitted finish once the
-/// runtime's main token is cancelled (default 5 s, read by dynamo-llm).
-fn http_drain_window() -> Duration {
-    let seconds = std::env::var(
-        dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-    )
-    .ok()
-    .and_then(|seconds| seconds.parse().ok())
-    .unwrap_or(5);
-    Duration::from_secs(seconds)
+    let shutdown_drain = dynamo_runtime::config::http_graceful_shutdown_timeout();
+    serve_engines(drt, config, specs, factory, shutdown_drain).await
 }
 
 /// [`serve_direct_engines`] with the shutdown drain window given.
