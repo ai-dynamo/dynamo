@@ -288,6 +288,7 @@ RUN set -eux; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
 
+{% if context.vllm[device_key].get("enable_vllm_omni", context.vllm.get("enable_vllm_omni", "true")) == "true" %}
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
@@ -298,6 +299,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu

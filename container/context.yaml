@@ -97,19 +97,19 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.33.0
+    # Public Kimi K3.1 image: CUDA 13.0.3, with AMD64 and ARM64 manifests.
+    runtime_image_tag: kimi-k31@sha256:904520f3fefc32414abcedf6ba8dadc9c5978db1bcdaf40f58d6b9036ef30a99
+    # Keep the model image's Transformers/tokenizers stack; Kimi needs no Omni.
+    enable_vllm_omni: "false"
     vllm_omni_ref: "v0.33.0rc1"
-    # Omni caps Transformers below 5.20; the vLLM 0.33 image ships 5.20.2.
-    transformers_version: "5.19.0"
-    tokenizers_version: "0.23.3"
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
+    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.3-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
     # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
     # rather than hiding it. Per-arch stem; the licenses stage appends
     # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
     # the runtime image — see the codec-purge follow-up.)
-    baseline_sbom: cuda@2ab6381d
+    baseline_sbom: cuda@7c7413a5
   # Opt-in runtime variants (render.py --variant <name>). Each entry overlays the
   # matching device block above; keys not set here keep the default values.
   variants:
