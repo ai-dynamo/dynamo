@@ -87,6 +87,7 @@ struct EncodeWorker(
     tokio::sync::mpsc::UnboundedSender<(u64, PreprocessedRequest)>,
     Arc<tokio::sync::Semaphore>,
     Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
 );
 
 #[async_trait]
@@ -104,6 +105,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             == Some(&json!(true))
         {
             self.1.send((self.0, request.content().clone())).unwrap();
+            let attempt = self.4.fetch_add(1, Ordering::SeqCst);
+            if request
+                .encoder_result
+                .as_ref()
+                .and_then(|value| value.get("fail_release_attempt"))
+                == Some(&json!(attempt))
+            {
+                return Err(DynamoError::builder()
+                    .class(ErrorClass::Unavailable)
+                    .message("producer temporarily unavailable")
+                    .build()
+                    .into());
+            }
             if request
                 .encoder_result
                 .as_ref()
@@ -112,10 +126,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             {
                 self.2.acquire().await.unwrap().forget();
             }
+            let reason = match request
+                .encoder_result
+                .as_ref()
+                .and_then(|value| value.get("release_terminal"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("error") => FinishReason::Error("release rejected".into()),
+                Some("cancelled") => FinishReason::Cancelled,
+                _ => FinishReason::Stop,
+            };
             return Ok(ResponseStream::new(
-                Box::pin(stream::iter([
-                    Annotated::from_data(LLMEngineOutput::stop()),
-                ])),
+                Box::pin(stream::iter([Annotated::from_data(LLMEngineOutput {
+                    finish_reason: Some(reason),
+                    ..Default::default()
+                })])),
                 request.context(),
             ));
         }
@@ -468,7 +493,7 @@ async fn release_support_is_negotiated_per_handoff() {
     {
         return;
     }
-    let fixture = Fixture::new().await;
+    let mut fixture = Fixture::new().await;
     let binding = fixture.router.binding.load_full().unwrap();
     let (route, response) = binding
         .router
@@ -493,6 +518,40 @@ async fn release_support_is_negotiated_per_handoff() {
     terminal.extra_args = Some(Box::new(json!({ENCODER_RESULT_RELEASE_SUPPORTED: true})));
     cleanup.observe("model", &terminal).unwrap();
     assert_eq!(cleanup.request.take().unwrap().encoder_result, Some(opaque));
+    for reason in ["stop", "error", "cancelled"] {
+        let mut terminal = LLMEngineOutput::encode_terminal(
+            json!({"release_terminal": reason})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        terminal.extra_args = Some(Box::new(json!({ENCODER_RESULT_RELEASE_SUPPORTED: true})));
+        cleanup.observe("model", &terminal).unwrap();
+        let request = cleanup.request.take().unwrap();
+        let ack = EncoderResultCleanup::release_once(&cleanup.route, &request).await;
+        assert_eq!(ack.is_ok(), reason == "stop", "{reason}: {ack:?}");
+    }
+
+    let producer = cleanup.route.worker_id();
+    let attempt = fixture.release_attempts.load(Ordering::SeqCst);
+    let mut terminal = LLMEngineOutput::encode_terminal(
+        json!({"fail_release_attempt": attempt})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    terminal.extra_args = Some(Box::new(json!({ENCODER_RESULT_RELEASE_SUPPORTED: true})));
+    cleanup.observe("model", &terminal).unwrap();
+    cleanup.release().await;
+    assert!(cleanup.request.is_none());
+    assert_eq!(fixture.release_attempts.load(Ordering::SeqCst), attempt + 2);
+    for _ in 0..attempt + 2 {
+        let released = tokio::time::timeout(Duration::from_secs(5), fixture.released.recv())
+            .await
+            .expect("every release attempt must reach its producer")
+            .unwrap();
+        assert_eq!(released.0, producer);
+    }
     fixture.shutdown().await;
 }
 
@@ -837,6 +896,7 @@ struct Fixture {
     released: tokio::sync::mpsc::UnboundedReceiver<(u64, PreprocessedRequest)>,
     release_gate: Arc<tokio::sync::Semaphore>,
     encode_calls: Arc<AtomicUsize>,
+    release_attempts: Arc<AtomicUsize>,
     card: Arc<ModelDeploymentCard>,
     runtime: Runtime,
     workers: Vec<dynamo_runtime::component::StartedEndpoint>,
@@ -862,6 +922,7 @@ impl Fixture {
         let (releases, released) = tokio::sync::mpsc::unbounded_channel();
         let release_gate = Arc::new(tokio::sync::Semaphore::new(0));
         let encode_calls = Arc::new(AtomicUsize::new(0));
+        let release_attempts = Arc::new(AtomicUsize::new(0));
         for _ in 0..2 {
             let drt = DistributedRuntime::new(runtime.clone(), config())
                 .await
@@ -880,6 +941,7 @@ impl Fixture {
                         releases.clone(),
                         release_gate.clone(),
                         encode_calls.clone(),
+                        release_attempts.clone(),
                     )))
                     .unwrap(),
                 )
@@ -922,6 +984,7 @@ impl Fixture {
             released,
             release_gate,
             encode_calls,
+            release_attempts,
             card: Arc::new(card),
             runtime,
             workers,

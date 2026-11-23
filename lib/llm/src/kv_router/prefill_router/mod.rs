@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -425,6 +425,9 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let handoff = EncoderHandoff::for_request(&request);
+        let requires_prefill = request.encoder_result.is_some()
+            && !request.staged_kv_cleanup
+            && self.required.load(Ordering::Acquire);
         let (mut req, mut context) = request.into_parts();
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
@@ -448,6 +451,7 @@ impl
         if self.lifecycle_state() != PrefillLifecycleState::Active
             && self.binding_for_request(&req)?.is_none()
         {
+            self.validate_passthrough(&req, requires_prefill)?;
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -460,6 +464,7 @@ impl
         let passthrough_phase = req.phase();
         if self.conditional_disagg_policy.is_enabled()
             && handoff != EncoderHandoff::MustConsume
+            && !requires_prefill
             && !(req.encoder_result.is_some() && engine_ctx.is_stopped())
         {
             let conditional_request = context.map(|_| req);
@@ -473,7 +478,7 @@ impl
                     if let Some(ref tracker) = conditional_request.tracker {
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
-                    if decision.allows_encoder_bypass(self) {
+                    if self.allows_encoder_bypass(decision.encoder_binding.as_ref()) {
                         let worker = decision.plan.worker();
                         tracing::info!(
                             request_id = %request_id,
@@ -492,16 +497,30 @@ impl
                             .decode_routing_host
                             .get()
                             .expect("conditional plan requires a decode RoutingHost");
+                        let tracker = conditional_request.tracker.clone();
+                        let encoder_binding = decision.encoder_binding;
                         let response_stream = decode_host
-                            .dispatch_kv_plan(conditional_request, decision.plan)
+                            .dispatch_kv_plan_with_validation(
+                                conditional_request,
+                                decision.plan,
+                                || async {
+                                    if self.allows_encoder_bypass(encoder_binding.as_ref()) {
+                                        return Ok(());
+                                    }
+                                    if let Some(tracker) = &tracker {
+                                        let _permit =
+                                            tracker.set_phase(RequestPhase::Prefill).await;
+                                    }
+                                    Err(prefill_changed_error())
+                                },
+                            )
                             .await?;
                         return with_bypass_marker(response_stream, client_requested_bypass_marker);
                     }
-                    let error: anyhow::Error = DynamoError::builder()
-                        .class(ErrorClass::WorkerUnavailable)
-                        .message("Prefill target changed during conditional decode planning")
-                        .build()
-                        .into();
+                    if let Some(tracker) = &conditional_request.tracker {
+                        let _permit = tracker.set_phase(RequestPhase::Prefill).await;
+                    }
+                    let error = prefill_changed_error();
                     decision.plan.abort(Some(&error)).await;
                     return Err(error);
                 }
@@ -534,9 +553,18 @@ impl
             handoff,
             session_affinity,
             passthrough_phase,
+            requires_prefill,
         )
         .await
     }
+}
+
+fn prefill_changed_error() -> anyhow::Error {
+    DynamoError::builder()
+        .class(ErrorClass::WorkerUnavailable)
+        .message("Prefill target changed during conditional decode planning")
+        .build()
+        .into()
 }
 
 impl PrefillRouter {
@@ -742,6 +770,7 @@ impl PrefillRouter {
         handoff: EncoderHandoff,
         session_affinity: Option<Arc<SessionAffinityId>>,
         passthrough_phase: RequestPhase,
+        requires_prefill: bool,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (mut req, context) = request.into_parts();
         let engine_ctx = context.context();
@@ -763,6 +792,7 @@ impl PrefillRouter {
 
         // A tracker barrier may have outlived the target or its serving generation.
         let Some(binding) = self.binding_for_request(&req)? else {
+            self.validate_passthrough(&req, requires_prefill)?;
             drop(prefill_phase_barrier);
             {
                 let _permit = tracker.set_phase(passthrough_phase).await;

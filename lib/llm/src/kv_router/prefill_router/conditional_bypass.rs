@@ -17,13 +17,16 @@ pub(super) struct ConditionalDisaggDecodeDecision {
     pub plan: RoutePlan,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
-    encoder_binding: Option<Arc<super::PrefillBinding>>,
+    pub(super) encoder_binding: Option<Arc<super::PrefillBinding>>,
 }
 
-impl ConditionalDisaggDecodeDecision {
-    pub(super) fn allows_encoder_bypass(&self, router: &PrefillRouter) -> bool {
-        self.encoder_binding.as_ref().is_none_or(|expected| {
-            matches!(router.activation_snapshot(), super::ActivationSnapshot::Active(current)
+impl PrefillRouter {
+    pub(super) fn allows_encoder_bypass(
+        &self,
+        expected: Option<&Arc<super::PrefillBinding>>,
+    ) -> bool {
+        expected.is_none_or(|expected| {
+            matches!(self.activation_snapshot(), super::ActivationSnapshot::Active(current)
                 if Arc::ptr_eq(&current, expected))
         })
     }
@@ -45,18 +48,21 @@ impl PrefillRouter {
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
-        let has_raw_media = !request.staged_kv_cleanup
+        let has_raw_media = request.encoder_result.is_none()
+            && !request.staged_kv_cleanup
             && request
                 .multi_modal_data
                 .as_ref()
                 .is_some_and(|media| media.values().any(|items| !items.is_empty()));
-        let encoder_binding = if request.encoder_result.is_some() || has_raw_media {
+        if has_raw_media {
+            // Raw-media fallback requires Prefill's inline multimodal support.
+            return Ok(None);
+        }
+        let encoder_binding = if request.encoder_result.is_some() {
             let Some(binding) = self
                 .binding()
                 .filter(|binding| !binding.encoder_result_requires_prefill)
             else {
-                // Keep raw-media fallback on the admitted Prefill path too. Its
-                // handoff policy does not establish Decode's inline-MM support.
                 return Ok(None);
             };
             Some(binding)

@@ -156,7 +156,7 @@ If a binding change invalidates a conditional media plan, the router releases th
 booking, aborts its classifier lifecycle, and returns retryable `WorkerUnavailable`.
 A late untargeted fallback
 restores the request's prior phase before forwarding. Releasable handoffs can fail before Prefill
-on caller cancellation; staged-KV cleanup always reaches its worker.
+on caller cancellation; staged-KV routing continues until dispatch or its cleanup budget expires.
 
 A failed decision falls back to remote prefill, except for `Cancelled` and `InvalidArgument`
 errors, which return to the client.
@@ -242,12 +242,16 @@ newer booking that reused the same request id and worker.
   exact producer after dispatch failure, an unsuccessful stream, or abandonment.
   Tokens or successful completion (EOS, stop, or length) prove consumption and disarm release.
   Error/cancelled terminals and uncertain failures retain cleanup. Error and fallback paths
-  await release for up to two seconds; dropping a pending request schedules release in the
+  await release for up to two seconds, including one retry for a transient transport failure;
+  dropping a pending request schedules release in the
   background. Cleanup uses a fresh controller and never reselects another encoder
   or carries generation sampling constraints or KV state. The resolved transport is retained at
   Encode dispatch, so a live producer remains reachable after leaving admission or discovery;
   an old allocation is never redirected to a replacement worker. Producer release is idempotent after
-  consumption. Backends that do not advertise this extension retain their existing behavior.
+  consumption. A failed or timed-out release logs the producer ID and an explicit unconfirmed
+  release warning: the producer must reclaim that output through its own expiry or shutdown.
+  Frontend retries do not prove physical reclamation. Backends that do not advertise this
+  extension retain their existing behavior.
 
 ## Prefill activation
 

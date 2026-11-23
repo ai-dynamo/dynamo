@@ -8,11 +8,13 @@ use futures::StreamExt;
 use tracing::Instrument;
 
 use dynamo_runtime::{
+    error::{ErrorClass, match_error_chain},
     pipeline::{CleanupRoute, SingleIn},
     protocols::maybe_error::MaybeError,
 };
 
 use crate::protocols::common::{
+    FinishReason,
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::{ENCODER_RESULT_RELEASE_SUPPORTED, RELEASE_ENCODER_RESULT},
 };
@@ -76,29 +78,69 @@ impl EncoderResultCleanup {
     ) {
         let worker_id = route.worker_id();
         let release = async {
-            // A fresh controller lets cleanup run after caller cancellation.
-            // Resource cleanup must reach its producer despite inference overload.
-            let mut stream = route.dispatch(SingleIn::new(request)).await?;
-            let mut terminal = false;
-            while let Some(item) = stream.next().await {
-                if let Some(error) = item.err() {
-                    anyhow::bail!("encoder result release failed: {error}");
+            let mut retried = false;
+            loop {
+                match Self::release_once(&route, &request).await {
+                    Ok(()) => return Ok(()),
+                    Err(error)
+                        if !retried
+                            && match_error_chain(
+                                error.as_ref(),
+                                &[
+                                    ErrorClass::Unavailable,
+                                    ErrorClass::CannotConnect,
+                                    ErrorClass::Disconnected,
+                                    ErrorClass::ConnectionTimeout,
+                                    ErrorClass::ResponseTimeout,
+                                ],
+                                &[],
+                            ) =>
+                    {
+                        retried = true;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(error) => return Err(error),
                 }
-                terminal |= item
-                    .data
-                    .is_some_and(|output| output.finish_reason.is_some());
             }
-            anyhow::ensure!(
-                terminal,
-                "encoder result release ended without a terminal chunk"
-            );
-            Ok::<_, anyhow::Error>(())
         };
         match tokio::time::timeout(Duration::from_secs(2), release).await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, worker_id, "Unable to release encoder result"),
-            Err(_) => tracing::warn!(worker_id, "Encoder result release timed out"),
+            Ok(Err(error)) => tracing::warn!(
+                %error,
+                worker_id,
+                "Encoder result release unconfirmed; producer reclamation required"
+            ),
+            Err(_) => tracing::warn!(
+                worker_id,
+                "Encoder result release timed out; producer reclamation required"
+            ),
         }
+    }
+
+    pub(super) async fn release_once(
+        route: &CleanupRoute<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        request: &PreprocessedRequest,
+    ) -> Result<()> {
+        // A fresh controller keeps cleanup independent of caller cancellation.
+        let mut stream = route.dispatch(SingleIn::new(request.clone())).await?;
+        let mut acknowledged = false;
+        while let Some(item) = stream.next().await {
+            if let Some(error) = item.err() {
+                return Err(anyhow::Error::new(error).context("encoder result release failed"));
+            }
+            if let Some(reason) = item.data.and_then(|output| output.finish_reason) {
+                anyhow::ensure!(
+                    reason == FinishReason::Stop,
+                    "encoder result release rejected: {reason}"
+                );
+                acknowledged = true;
+            }
+        }
+        anyhow::ensure!(
+            acknowledged,
+            "encoder result release ended without a successful terminal chunk"
+        );
+        Ok(())
     }
 }
 
