@@ -1,34 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `disconnect` module provides a mechanism for our axum http services to monitoring and responding
-//! to disconnects from the client.
+//! Stream monitors for the frontend's SSE responses.
 //!
-//! There are two potential phases in any request where we need to handle the disconnect.
-//!
-//! For unary, request-response, there is just a single phase where the primary task that axum kicks off
-//! to handle the request will be dropped if the client disconnects. In order for us to have a long running
-//! task, like an LLM request, we need to spawn our long running task in a separate task and then spawn
-//! a second task that will monitor for disconnects from the client. The primary task which spawned the
-//! two tasks will hold an "armed" [`ConnectionHandle`] which will issue a [`ConnectionStatus::ClosedUnexpectedly`]
-//! if the task is dropped before it is [`ConnectionHandle::disarm`]ed.
-//!
-//! For the streaming case, request in - stream out, we need a second [`ConnectionHandle`] which will be owned
-//! by the stream. A streaming response is when the [`axum::response::Response]] is a [axum::response::Sse] stream.
-//! This means the primary task handle will go out of scope when it returns the stream. When we create our
-//! SSE stream, we capture the second [`ConnectionHandle`] and arm it. If the stream closes gracefully, the
-//! second handle will be disarmed, otherwise, the stream was dropped and the [`Drop`] trait on the [`ConnectionHandle`]
-//! triggers a [`ConnectionStatus::ClosedUnexpectedly`] signal.
-//!
-//! The [`ConnectionHandle`] is a simple wrapper around a [`tokio::sync::oneshot::Sender`] which will send a
-//! [`ConnectionStatus`] enum to the primary task. The primary task will then use this to determine if it should
-//! cancel the request or not.
+//! [`dynamo_http_server::disconnect`] has the connection monitor and its [`ConnectionHandle`], and
+//! describes the two phases of a request in which the client can disconnect. This module is the
+//! streaming phase: the `monitor_for_disconnects*` functions own the stream's [`ConnectionHandle`],
+//! arm it, and disarm it when the stream ends gracefully. A producer reports an application error
+//! to its monitor through a `StreamErrorSignal`.
 //!
 //! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
 //! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
-//!
-//! [`ConnectionStatus`]: dynamo_http_server::disconnect::ConnectionStatus
-//! [`ConnectionStatus::ClosedUnexpectedly`]: dynamo_http_server::disconnect::ConnectionStatus::ClosedUnexpectedly
 
 use axum::{http::StatusCode, response::sse::Event};
 use dynamo_runtime::engine::AsyncEngineContext;
