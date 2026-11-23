@@ -28,11 +28,15 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -528,6 +532,86 @@ func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.
 		Name:      getProfilingJobName(&fetched),
 		Namespace: fetched.Namespace,
 	}, job))
+}
+
+// TestHandlePendingPhaseRetriesProfilingJobConflict checks that a 409 on the
+// profiling Job write requeues the DGDR instead of failing it, so the next
+// reconcile can retry from a fresh observation.
+func TestHandlePendingPhaseRetriesProfilingJobConflict(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Name:       "pending-conflict",
+		Namespace:  "default",
+		Generation: 1,
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "test-model",
+			Backend: nvidiacomv1beta1.BackendTypeVllm,
+			Image:   "test-profiler:latest",
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         new(81920.0),
+				NumGPUsPerNode: new(int32(8)),
+				TotalGPUs:      new(int32(8)),
+			},
+		},
+		Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
+			Phase:              nvidiacomv1beta1.DGDRPhasePending,
+			ObservedGeneration: 1,
+		},
+	}
+	failJobCreate := true
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(dgdr).
+		WithStatusSubresource(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, isJob := obj.(*batchv1.Job); isJob && failJobCreate {
+					return apierrors.NewConflict(batchv1.Resource("jobs"), obj.GetName(), fmt.Errorf("the object has been modified"))
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Client:   fakeClient,
+		Recorder: &events.FakeRecorder{},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: dgdr.Namespace},
+		},
+	}
+	key := types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}
+
+	t.Log("A conflict on the profiling Job write is returned for requeue and does not fail the DGDR")
+	var fetched nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	require.NoError(t, fakeClient.Get(ctx, key, &fetched))
+	_, err := r.handlePendingPhase(ctx, &fetched)
+	require.True(t, apierrors.IsConflict(err), "expected a conflict error, got %v", err)
+	require.NoError(t, fakeClient.Get(ctx, key, &fetched))
+	assert.Equal(t, nvidiacomv1beta1.DGDRPhasePending, fetched.Status.Phase)
+	profiling := meta.FindStatusCondition(fetched.Status.Conditions, nvidiacomv1beta1.ConditionTypeProfiling)
+	if profiling != nil {
+		assert.NotEqual(t, MessageJobCreationFailed, profiling.Reason)
+	}
+
+	t.Log("The retried reconcile creates the Job and waits for its watch event")
+	failJobCreate = false
+	result, err := r.handlePendingPhase(ctx, &fetched)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: getProfilingJobName(&fetched), Namespace: fetched.Namespace}, &batchv1.Job{}))
+
+	t.Log("The next reconcile observes the Job and moves the DGDR to Profiling")
+	require.NoError(t, fakeClient.Get(ctx, key, &fetched))
+	_, err = r.handlePendingPhase(ctx, &fetched)
+	require.NoError(t, err)
+	require.NoError(t, fakeClient.Get(ctx, key, &fetched))
+	assert.Equal(t, nvidiacomv1beta1.DGDRPhaseProfiling, fetched.Status.Phase)
 }
 
 // TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM is the regression test for

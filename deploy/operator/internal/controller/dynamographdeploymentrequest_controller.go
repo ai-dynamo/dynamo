@@ -549,6 +549,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 	// Create profiling job (online or AIC)
 	waitForObservation, err := r.createProfilingJob(ctx, dgdr)
 	if err != nil {
+		// A conflict or already-exists error means a write raced with a stale
+		// cached object. Requeue so the next reconcile reads a fresh one.
+		if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
+			logger.Info("Profiling Job or DGDR changed while creating the profiling Job; retrying", "name", dgdr.Name, "error", err.Error())
+			return ctrl.Result{}, err
+		}
 		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonProfilingJobFailed, "Create", "%s", err.Error())
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
