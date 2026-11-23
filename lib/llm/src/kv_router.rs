@@ -66,6 +66,7 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+pub(crate) mod role_routing;
 mod routing_host;
 pub(crate) use routing_host::hosted_picker;
 pub(crate) use routing_host::hosted_request;
@@ -1982,7 +1983,7 @@ mod tests {
         assert!(error.downcast_ref::<UnknownPolicyClassRefusal>().is_some());
         assert_eq!(error.to_string(), dynamo_error.to_string());
         assert_eq!(
-            crate::http::service::error::find_canonical_error_in_chain(error.as_ref()),
+            dynamo_error::http::find_canonical_error_in_chain(error.as_ref()),
             Some(dynamo_error)
         );
     }

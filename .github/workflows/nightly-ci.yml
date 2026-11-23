@@ -323,7 +323,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       inline_compliance: true
@@ -527,7 +527,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
@@ -690,7 +690,7 @@ jobs:
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       copy_timeout_minutes: 20
     secrets: inherit
 
@@ -1157,7 +1157,7 @@ jobs:
       test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
       amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64"]'
       run_sanity_check: false
       gpu_test_markers: 'sidecar and trtllm and gpu_1'
@@ -1393,7 +1393,7 @@ jobs:
       test_type: Test
       amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -1422,7 +1422,7 @@ jobs:
       test_type: 2-GPU Test
       amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
@@ -1446,7 +1446,7 @@ jobs:
       # 2x 80 GiB H100 lane; runs trtllm single- and dual-GPU tests, incl. h100-only cases.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64"]'
       enable_coverage: true
       run_sanity_check: false

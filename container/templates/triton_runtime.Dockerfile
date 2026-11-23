@@ -80,9 +80,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     printf '%s\n' /opt/tritonserver/lib /opt/tritonserver/backends \
         > /etc/ld.so.conf.d/00-dynamo-triton.conf && \
     ldconfig && \
-    rm -f /usr/local/bin/etcd
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -f /usr/local/bin/etcd && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
