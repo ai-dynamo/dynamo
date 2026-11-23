@@ -723,6 +723,20 @@ impl SglangService for ControlledService {
         self.inner.detokenize(request).await
     }
 
+    async fn pause_generation(
+        &self,
+        request: Request<pb::PauseGenerationRequest>,
+    ) -> Result<Response<pb::GenerationPauseResponse>, Status> {
+        self.inner.pause_generation(request).await
+    }
+
+    async fn continue_generation(
+        &self,
+        request: Request<pb::ContinueGenerationRequest>,
+    ) -> Result<Response<pb::GenerationPauseResponse>, Status> {
+        self.inner.continue_generation(request).await
+    }
+
     async fn abort(
         &self,
         request: Request<pb::AbortRequest>,

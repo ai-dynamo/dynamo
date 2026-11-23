@@ -1453,6 +1453,19 @@ mod tests {
             let _ = self.0.send(request.into_inner().rid);
             Ok(tonic::Response::new(pb::AbortResponse { success: true }))
         }
+        async fn pause_generation(
+            &self,
+            _: tonic::Request<pb::PauseGenerationRequest>,
+        ) -> Result<tonic::Response<pb::GenerationPauseResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("PauseGeneration"))
+        }
+
+        async fn continue_generation(
+            &self,
+            _: tonic::Request<pb::ContinueGenerationRequest>,
+        ) -> Result<tonic::Response<pb::GenerationPauseResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("ContinueGeneration"))
+        }
 
         async fn get_hi_cache_storage(
             &self,

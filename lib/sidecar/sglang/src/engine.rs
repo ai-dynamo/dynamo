@@ -54,6 +54,7 @@ struct StartedState {
     listeners: NodeListeners,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    generation_controls: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -370,6 +371,11 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
+        let generation_controls = client::generation_controls_supported(
+            &mut started[0].0.control_client(),
+            self.transport.connect_attempt_timeout,
+        )
+        .await?;
         let mut native_http = native_http.map(Vec::into_iter);
         let listeners = started
             .into_iter()
@@ -407,6 +413,7 @@ impl LLMEngine for SglangSidecarEngine {
                 listeners,
                 kv_event_sources,
                 combined_token_limit,
+                generation_controls,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -609,6 +616,57 @@ impl LLMEngine for SglangSidecarEngine {
             .listeners
             .abort(&ctx, self.transport.connect_attempt_timeout)
             .await;
+    }
+
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        // Memory occupation stays off the control surface: releasing it must not
+        // re-register the endpoint before weights are refreshed.
+        let supported = self
+            .state
+            .get()
+            .is_some_and(|state| state.generation_controls);
+        if !supported {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            "pause_generation".to_string(),
+            "resume_generation".to_string(),
+        ])
+    }
+
+    fn validate_engine_control(&self, control: &str, body: &Value) -> Result<(), DynamoError> {
+        if control == "pause_generation" {
+            pause_mode(body)?;
+        }
+        Ok(())
+    }
+
+    async fn engine_control(&self, control: String, body: Value) -> Result<Value, DynamoError> {
+        let state = self
+            .state
+            .get()
+            .ok_or_else(|| client::engine_shutdown("sglang sidecar is not started"))?;
+        let timeout = self.transport.connect_attempt_timeout;
+        match control.as_str() {
+            "pause_generation" => {
+                let mode = pause_mode(&body)?;
+                let mut grpc = state.listeners.control();
+                client::pause_generation(&mut grpc, mode.clone(), timeout).await?;
+                tracing::info!(%mode, "paused SGLang generation");
+                Ok(serde_json::json!({"status": "paused"}))
+            }
+            // SGLang calls the reverse direction "continue".
+            "resume_generation" => {
+                let mut grpc = state.listeners.control();
+                client::continue_generation(&mut grpc, timeout).await?;
+                tracing::info!("resumed SGLang generation");
+                Ok(serde_json::json!({"status": "resumed"}))
+            }
+            other => Ok(serde_json::json!({
+                "status": "error",
+                "message": format!("unsupported engine control: {other}"),
+            })),
+        }
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
@@ -824,6 +882,24 @@ fn omitted_max_tokens_default(
         .filter(|remaining| *remaining >= min_tokens.unwrap_or(0).max(1))
 }
 
+/// SGLang's `PauseGenerationReqInput.mode`, in the order its own docs list it.
+const PAUSE_MODES: [&str; 3] = ["abort", "retract", "in_place"];
+
+fn pause_mode(body: &Value) -> Result<String, DynamoError> {
+    let Some(mode) = body.get("mode") else {
+        return Ok("abort".to_string());
+    };
+    let mode = mode
+        .as_str()
+        .filter(|mode| PAUSE_MODES.contains(mode))
+        .ok_or_else(|| {
+            client::invalid_arg(format!(
+                "pause_generation.mode must be one of {PAUSE_MODES:?}, got {mode}"
+            ))
+        })?;
+    Ok(mode.to_string())
+}
+
 /// The node's one worker registration: the start listener's identity and
 /// limits, the least KV capacity of any listener, and DP ranks
 /// `[start_rank, start_rank + size)`.
@@ -915,8 +991,8 @@ mod tests {
     use super::{
         Args, DisaggregationMode, DiscoveredKvEventSource, EngineConfig, EngineInfo,
         SglangSidecarEngine, WORKER_GROUP_KEY, combined_token_limit, discovery_bootstrap_port,
-        lacks_draft_reserve, omitted_max_tokens_default, resolve_bootstrap_host_with_local,
-        sglang_eagle_enabled,
+        lacks_draft_reserve, omitted_max_tokens_default, pause_mode,
+        resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
     use crate::discovery;
     use crate::node::node_of;
@@ -988,6 +1064,17 @@ mod tests {
     /// The engine's view of discovery responses that `update` rewrites.
     fn discovery(update: impl FnOnce(&mut Reported)) -> EngineInfo {
         try_discovery(update).unwrap()
+    }
+
+    #[test]
+    fn pause_mode_defaults_to_abort_and_rejects_unknown_modes() {
+        assert_eq!(pause_mode(&json!({})).unwrap(), "abort");
+        for mode in ["abort", "retract", "in_place"] {
+            assert_eq!(pause_mode(&json!({"mode": mode})).unwrap(), mode);
+        }
+        for mode in [json!(null), json!("abortt"), json!(1)] {
+            assert!(pause_mode(&json!({"mode": mode})).is_err(), "{mode}");
+        }
     }
 
     fn args() -> Args {

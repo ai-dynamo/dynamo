@@ -552,6 +552,36 @@ impl AbortRpc {
     }
 }
 
+/// Stops SGLang's scheduler; `mode` selects what happens to in-flight requests.
+pub async fn pause_generation(
+    client: &mut Client,
+    mode: String,
+    timeout: Duration,
+) -> Result<(), DynamoError> {
+    rpc_with_deadline(
+        "PauseGeneration",
+        Instant::now() + timeout,
+        client.pause_generation(pb::PauseGenerationRequest { mode: Some(mode) }),
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn continue_generation(
+    client: &mut Client,
+    timeout: Duration,
+) -> Result<(), DynamoError> {
+    rpc_with_deadline(
+        "ContinueGeneration",
+        Instant::now() + timeout,
+        client.continue_generation(pb::ContinueGenerationRequest {
+            torch_empty_cache: None,
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
 pub(crate) async fn rpc_with_deadline<T, F>(
     rpc: &str,
     deadline: Instant,
@@ -579,6 +609,30 @@ where
             Err(contract_mismatch(rpc, service))
         }
         result => deadline_result(rpc, result),
+    }
+}
+
+/// `GetServerInfo` reports no capabilities; `ContinueGeneration` is a no-op unless paused.
+pub(crate) async fn generation_controls_supported(
+    client: &mut Client,
+    timeout: Duration,
+) -> Result<bool, DynamoError> {
+    let request = client.continue_generation(pb::ContinueGenerationRequest {
+        torch_empty_cache: None,
+    });
+    match timeout_at(Instant::now() + timeout, request).await {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
+            tracing::warn!(
+                %status,
+                "SGLang has no ContinueGeneration; pause/resume controls are not advertised"
+            );
+            Ok(false)
+        }
+        Ok(Err(status)) => Err(status_to_dynamo("ContinueGeneration", status)),
+        Err(_) => Err(connection_timeout(
+            "ContinueGeneration exceeded the configured deadline",
+        )),
     }
 }
 
