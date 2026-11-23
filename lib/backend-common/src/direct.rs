@@ -128,24 +128,51 @@ impl ModelFiles {
 
 impl DirectDispatch {
     /// The files of the model `source` names, read on first use. A failed
-    /// read is not kept: the next registration tries again. The custom
-    /// template is not part of the key: every engine is hosted with the same
-    /// `WorkerConfig`.
+    /// read is not kept: the next registration tries again. Nor are files
+    /// whose directory has since gone, as when a model cache is pruned: they
+    /// are fetched and read again. A directory that cannot be checked is not
+    /// taken as gone. The custom template is not part of the key: every engine
+    /// is hosted with the same `WorkerConfig`.
     async fn model_files(
         &self,
         source: &str,
         custom_template: Option<&Path>,
     ) -> Result<ModelFiles, DynamoError> {
-        let files = self
-            .models
-            .lock()
-            .entry(source.to_string())
-            .or_default()
-            .clone();
-        files
+        let kept = self.model(source);
+        let files = kept
+            .get_or_try_init(|| ModelFiles::read(source, custom_template))
+            .await?;
+        // Only a directory known to be gone is read again. When the check
+        // itself fails, as on a mount that is briefly unreachable, the files
+        // are kept: `build` then fails in a way the next probe retries, where
+        // a fetch of a local path would end the probing.
+        if !matches!(files.directory.try_exists(), Ok(false)) {
+            return Ok(files.clone());
+        }
+        {
+            // Engines that return together all find the directory gone; the
+            // first to get here forgets it and the others share its new read.
+            let mut models = self.models.lock();
+            if models
+                .get(source)
+                .is_some_and(|current| Arc::ptr_eq(current, &kept))
+            {
+                models.remove(source);
+            }
+        }
+        self.model(source)
             .get_or_try_init(|| ModelFiles::read(source, custom_template))
             .await
             .cloned()
+    }
+
+    /// Where the files of the model `source` names are kept once read.
+    fn model(&self, source: &str) -> Arc<tokio::sync::OnceCell<ModelFiles>> {
+        self.models
+            .lock()
+            .entry(source.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Resolves once runtime shutdown has drained, withdrawn and released
@@ -1305,6 +1332,74 @@ mod tests {
         state.lost.notify_one();
         registered_after(2).await;
         drt.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_model_whose_directory_is_gone_is_fetched_again() {
+        use dynamo_runtime::config::environment_names::model::huggingface;
+
+        // Point `test-org/model`, in an hf-hub cache layout, at a snapshot
+        // that is the sample model.
+        fn snapshot(cache: &Path, revision: &str) -> PathBuf {
+            let repo = cache.join("models--test-org--model");
+            std::fs::create_dir_all(repo.join("refs")).unwrap();
+            std::fs::create_dir_all(repo.join("snapshots")).unwrap();
+            std::fs::write(repo.join("refs/main"), revision).unwrap();
+            let snapshot = repo.join("snapshots").join(revision);
+            std::os::unix::fs::symlink(MODEL, &snapshot).unwrap();
+            snapshot
+        }
+
+        let cache = tempfile::tempdir().unwrap();
+        let first = snapshot(cache.path(), "first");
+        temp_env::async_with_vars(
+            [
+                (huggingface::HF_HUB_CACHE, cache.path().to_str()),
+                (huggingface::HF_HUB_OFFLINE, None),
+                // Nothing in this test should reach the hub.
+                (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
+            ],
+            async {
+                let dispatch = DirectDispatch::default();
+                let files = dispatch.model_files("test-org/model", None).await.unwrap();
+                assert_eq!(files.directory.file_name(), first.file_name());
+
+                // The cache is pruned and the model is downloaded again, to
+                // another snapshot. The directory read before is not kept.
+                std::fs::remove_file(&first).unwrap();
+                let second = snapshot(cache.path(), "second");
+                let files = dispatch.model_files("test-org/model", None).await.unwrap();
+                assert_eq!(files.directory.file_name(), second.file_name());
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_model_whose_directory_cannot_be_checked_keeps_its_files() {
+        // A copy of the sample model below a directory the test can replace.
+        let root = tempfile::tempdir().unwrap();
+        let (mount, model) = (root.path().join("mount"), root.path().join("mount/model"));
+        std::fs::create_dir_all(&model).unwrap();
+        for file in std::fs::read_dir(MODEL).unwrap() {
+            let file = file.unwrap();
+            std::fs::copy(file.path(), model.join(file.file_name())).unwrap();
+        }
+        let source = model.display().to_string();
+        let dispatch = DirectDispatch::default();
+        dispatch.model_files(&source, None).await.unwrap();
+
+        // A file where the directory above the model was: the model's path
+        // cannot be looked up, which does not say that the model is gone.
+        std::fs::remove_dir_all(&mount).unwrap();
+        std::fs::write(&mount, "").unwrap();
+        assert!(model.try_exists().is_err());
+        let files = dispatch
+            .model_files(&source, None)
+            .await
+            .expect("the files read before must be kept");
+        assert_eq!(files.directory, model);
     }
 
     #[tokio::test]
