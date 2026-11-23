@@ -1776,14 +1776,8 @@ func GenerateBasePodSpec(
 	if err != nil {
 		return nil, err
 	}
-	layers := environment.capture(pod)
-	if err := layers.Apply(pod); err != nil {
+	if err := FinalizePodEnvironment(pod, environment.capture(pod), backendFramework, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
 		return nil, err
-	}
-	if layers != nil && backendFramework == BackendFrameworkSGLang {
-		if err := FinalizeSGLangExporterPorts(pod, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
-			return nil, err
-		}
 	}
 	return pod, nil
 }
@@ -2490,21 +2484,15 @@ func GeneratePodSpecForComponent(
 	if err != nil {
 		return nil, err
 	}
-	if err := layers.Apply(pod); err != nil {
+	if err := FinalizePodEnvironment(pod, layers, backendFramework, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
 		return nil, err
-	}
-	if layers != nil && backendFramework == BackendFrameworkSGLang {
-		if err := FinalizeSGLangExporterPorts(pod, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
-			return nil, err
-		}
 	}
 	return pod, nil
 }
 
 // GeneratePodSpecForComponentStaged retains source layers for providers that
 // still add bindings or omit containers. After those transformations, callers must
-// Apply non-nil layers and then run applicable backend post-composition work,
-// such as FinalizeSGLangExporterPorts for the selected SGLang engines.
+// call FinalizePodEnvironment with the selected backend and combined-runtime engines.
 // Nil layers retain legacy rendering, including its earlier backend processing.
 func GeneratePodSpecForComponentStaged(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
@@ -3449,7 +3437,7 @@ func generatePodSpecForRole(
 			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
 		}
 		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount), environment)
-		if err := environment.capture(gmsPodSpec).Apply(gmsPodSpec); err != nil {
+		if err := FinalizePodEnvironment(gmsPodSpec, environment.capture(gmsPodSpec), backendFramework, nil, containerGPUs); err != nil {
 			return nil, err
 		}
 		return gmsPodSpec, nil
@@ -3474,14 +3462,8 @@ func generatePodSpecForRole(
 	if isInterPodGMS {
 		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled(), environment)
 	}
-	layers := environment.capture(podSpec)
-	if err := layers.Apply(podSpec); err != nil {
+	if err := FinalizePodEnvironment(podSpec, environment.capture(podSpec), backendFramework, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
 		return nil, err
-	}
-	if layers != nil && backendFramework == BackendFrameworkSGLang {
-		if err := FinalizeSGLangExporterPorts(podSpec, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
-			return nil, err
-		}
 	}
 
 	return podSpec, nil

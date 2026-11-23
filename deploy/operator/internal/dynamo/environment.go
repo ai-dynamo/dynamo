@@ -27,6 +27,25 @@ type podEnvironment struct {
 	policyBindings []corev1.EnvVar
 }
 
+// FinalizePodEnvironment composes retained sources and applies backend work that
+// depends on the final environment. pod must not be nil. Nil layers retain the
+// legacy path, whose backend processing already ran during rendering.
+// engineNames selects the combined-runtime engines; nil selects none.
+// containerGPUs is resolved lazily for SGLang exporter ports and may be nil when
+// no SGLang engine is selected.
+func FinalizePodEnvironment(pod *corev1.PodSpec, layers *semanticenv.ContainerLayers, backend BackendFramework, engineNames []string, containerGPUs ContainerGPUCount) error {
+	if layers == nil {
+		return nil
+	}
+	if err := layers.Apply(pod); err != nil {
+		return err
+	}
+	if backend == BackendFrameworkSGLang {
+		return finalizeSGLangExporterPorts(pod, engineNames, containerGPUs)
+	}
+	return nil
+}
+
 // DCDUsesOrderedEnvironment follows the origin selected by the workload renderer.
 // dcd must not be nil. Any semantic role consumes the shared root env list.
 func DCDUsesOrderedEnvironment(dcd *v1beta1.DynamoComponentDeployment) bool {

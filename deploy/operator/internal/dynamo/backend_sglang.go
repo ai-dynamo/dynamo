@@ -85,10 +85,10 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	return nil
 }
 
-// FinalizeSGLangExporterPorts reads composed engine environments to validate and
+// finalizeSGLangExporterPorts reads composed engine environments to validate and
 // declare NIXL exporter ports. pod must not be nil; nil engineNames selects none.
 // Engines without scrape-port declarations are validated without recreating ports.
-func FinalizeSGLangExporterPorts(pod *corev1.PodSpec, engineNames []string, containerGPUs ContainerGPUCount) error {
+func finalizeSGLangExporterPorts(pod *corev1.PodSpec, engineNames []string, containerGPUs ContainerGPUCount) error {
 	for i := range pod.Containers {
 		container := &pod.Containers[i]
 		if !slices.Contains(engineNames, container.Name) {

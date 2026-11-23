@@ -1179,13 +1179,8 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	if targetContainerName == consts.MainContainerName && dynamo.GetComponentDynamoSidecar(componentForJob) == nil {
 		engineContainers = []string{consts.MainContainerName}
 	}
-	if err := environment.Apply(&podTemplate.Spec); err != nil {
+	if err := dynamo.FinalizePodEnvironment(&podTemplate.Spec, environment, backendFramework, engineContainers, func() (int64, error) { return 0, nil }); err != nil {
 		return corev1.PodTemplateSpec{}, err
-	}
-	if environment != nil && backendFramework == dynamo.BackendFrameworkSGLang {
-		if err := dynamo.FinalizeSGLangExporterPorts(&podTemplate.Spec, engineContainers, func() (int64, error) { return 0, nil }); err != nil {
-			return corev1.PodTemplateSpec{}, err
-		}
 	}
 	return podTemplate, nil
 }
