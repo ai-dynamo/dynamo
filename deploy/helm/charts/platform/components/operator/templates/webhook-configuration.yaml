@@ -172,7 +172,6 @@ webhooks:
     - dynamographdeploymentrequests
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
-{{- if .Values.dgdrV1Beta2.enabled }}
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -238,7 +237,7 @@ webhooks:
     resources: [dynamographdeploymentcandidates]
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
-{{- end }}
+
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
@@ -364,6 +363,9 @@ webhooks:
     - dynamographdeploymentrequests
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+{{- if .Values.checkpoint.enabled }}
+# Registered only while checkpoint/restore is enabled: the handler admits every pod unchanged
+# when the gate is off. The objectSelector mirrors the handler, which only mutates operator-stamped pods.
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -386,6 +388,10 @@ webhooks:
     matchLabels:
       kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
+  objectSelector:
+    matchExpressions:
+    - key: nvidia.com/dynamo-component-type
+      operator: Exists
   rules:
   - apiGroups:
     - ""
@@ -399,3 +405,4 @@ webhooks:
     - pods
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+{{- end }}

@@ -375,6 +375,10 @@ planner_gym:
 
 planner:
   - 'container/templates/planner.Dockerfile'
+  # The planner image installs requirements.planner.txt, and the planner unit
+  # tests use packages that requirements.test.txt pins, such as fakeredis.
+  - 'container/deps/requirements.planner.txt'
+  - 'container/deps/requirements.test.txt'
   - 'components/src/dynamo/planner/**'
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
