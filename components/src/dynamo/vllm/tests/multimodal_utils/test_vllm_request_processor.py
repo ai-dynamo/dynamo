@@ -166,6 +166,11 @@ async def test_worker_video_media_io_kwargs_control_vllm_decode(monkeypatch):
     contract. With num_frames=2 vLLM linspace-samples the endpoints of a 4-frame
     clip, so it must return source frames 0 and 3.
     """
+    pytest.importorskip(
+        "imageio",
+        reason="Video fixture encoding requires optional imageio",
+        exc_type=ModuleNotFoundError,
+    )
     size = 16
     colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]
     expected_sampled_frame_indices = [0, 3]
@@ -249,6 +254,11 @@ async def test_worker_video_media_io_kwargs_control_nvdec_decode(
     handed to it. How it resolves those two caps against the clip is covered in
     ``test_nvdec_decoder.py``.
     """
+    pytest.importorskip(
+        "imageio",
+        reason="Video fixture encoding requires optional imageio",
+        exc_type=ModuleNotFoundError,
+    )
     frames = np.zeros((8, 16, 16, 3), dtype=np.uint8)
     video_uri = "data:video/mp4;base64," + base64.b64encode(
         encode_to_video_bytes(frames, fps=4, output_format="mp4")

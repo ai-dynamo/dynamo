@@ -1206,6 +1206,11 @@ def test_text_session_starts_next_turn_immediately_after_response_done(
 
 
 def test_transcription_session_streams_canonical_events_and_resamples_audio():
+    pytest.importorskip(
+        "scipy.signal",
+        reason="Realtime audio resampling requires optional scipy",
+        exc_type=ModuleNotFoundError,
+    )
     pcm = np.linspace(-12_000, 12_000, 2_400, dtype=np.int16).tobytes()
     engine = _FakeEngine()
     events = [
@@ -1331,6 +1336,11 @@ def test_server_vad_is_rejected_until_worker_supports_it():
 
 
 def test_clear_cancels_uncommitted_turn_and_allows_next_utterance():
+    pytest.importorskip(
+        "scipy.signal",
+        reason="Realtime audio resampling requires optional scipy",
+        exc_type=ModuleNotFoundError,
+    )
     pcm = base64.b64encode(np.ones(480, dtype=np.int16).tobytes()).decode()
     engine = _FakeEngine()
     result = asyncio.run(
@@ -1356,6 +1366,12 @@ def test_clear_cancels_uncommitted_turn_and_allows_next_utterance():
 
 
 def test_next_turn_is_pumped_while_previous_turn_uses_engine_slot():
+    pytest.importorskip(
+        "scipy.signal",
+        reason="Realtime audio resampling requires optional scipy",
+        exc_type=ModuleNotFoundError,
+    )
+
     class _BlockingFirstEngine:
         def __init__(self, release: asyncio.Event) -> None:
             self.release = release
@@ -1420,6 +1436,12 @@ def test_from_engine_rejects_unsupported_model_at_startup(monkeypatch):
 
 
 def test_native_transcription_emits_before_commit_and_feeds_tokens_back():
+    pytest.importorskip(
+        "scipy.signal",
+        reason="Realtime audio resampling requires optional scipy",
+        exc_type=ModuleNotFoundError,
+    )
+
     async def scenario():
         partial_received = asyncio.Event()
         feedback = []

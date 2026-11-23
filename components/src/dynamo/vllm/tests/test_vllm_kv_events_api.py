@@ -30,14 +30,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from packaging.version import Version
 
 from dynamo.vllm.args import update_engine_config_with_dynamo
 from dynamo.vllm.constants import DisaggregationMode
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
-_vllm = importlib.import_module("vllm")
+importlib.import_module("vllm")
 _kv_events = importlib.import_module("vllm.distributed.kv_events")
 
 # Re-export the classes we need for tests
@@ -138,7 +137,7 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockRemoved):
             expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
+        if "ownership" in BlockRemoved.__struct_fields__:
             expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
@@ -220,12 +219,15 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_sliding_window"] = 128
         if _has_locality(BlockStored):
             event_kwargs["locality"] = "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
+        if "session_id" in BlockStored.__struct_fields__:
             event_kwargs["session_id"] = "session-1"
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            event_kwargs["lookahead_token_ids"] = [[5, 6], [7, 8]]
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
+        assert msgspec.msgpack.decode(encoded, type=BlockStored) == event
 
         assert isinstance(decoded, dict), f"Expected dict, got {type(decoded)}"
         assert decoded["type"] == "BlockStored"
@@ -245,8 +247,10 @@ class TestVllmKvEventsApi:
             assert decoded["kv_cache_spec_sliding_window"] == 128
         if _has_locality(BlockStored):
             assert decoded["locality"] == "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
+        if "session_id" in BlockStored.__struct_fields__:
             assert decoded["session_id"] == "session-1"
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            assert decoded["lookahead_token_ids"] == [[5, 6], [7, 8]]
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
