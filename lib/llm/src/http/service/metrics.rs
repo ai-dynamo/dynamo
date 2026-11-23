@@ -319,11 +319,6 @@ pub fn update_metrics_from_mdc(
 /// This function handles metrics collection and http_queue_guard management for streaming responses.
 /// It observes the current output sequence length, drops the http_queue_guard on the first token,
 /// and records response metrics.
-/// Process streaming metrics for annotated responses
-///
-/// This function handles metrics collection and http_queue_guard management for streaming responses.
-/// It observes the current output sequence length, drops the http_queue_guard on the first token,
-/// and records response metrics.
 pub fn process_response_and_observe_metrics<T>(
     annotated: &crate::types::Annotated<T>,
     response_collector: &mut ResponseMetricCollector,
