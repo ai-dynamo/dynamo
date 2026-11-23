@@ -128,11 +128,12 @@ impl ModelFiles {
 
 impl DirectDispatch {
     /// The files of the model `source` names, read on first use. A failed
-    /// read is not kept: the next registration tries again. Nor are files
-    /// whose directory has since gone, as when a model cache is pruned: they
-    /// are fetched and read again. A directory that cannot be checked is not
-    /// taken as gone. The custom template is not part of the key: every engine
-    /// is hosted with the same `WorkerConfig`.
+    /// read is not kept: the next registration tries again. Nor are fetched
+    /// files whose directory has since gone, as when a model cache is pruned:
+    /// they are fetched and read again. A directory that cannot be checked is
+    /// not taken as gone, and a model given as a path is never fetched. The
+    /// custom template is not part of the key: every engine is hosted with
+    /// the same `WorkerConfig`.
     async fn model_files(
         &self,
         source: &str,
@@ -142,11 +143,14 @@ impl DirectDispatch {
         let files = kept
             .get_or_try_init(|| ModelFiles::read(source, custom_template))
             .await?;
-        // Only a directory known to be gone is read again. When the check
-        // itself fails, as on a mount that is briefly unreachable, the files
-        // are kept: `build` then fails in a way the next probe retries, where
-        // a fetch of a local path would end the probing.
-        if !matches!(files.directory.try_exists(), Ok(false)) {
+        // Only fetched files whose directory is known to be gone are read
+        // again. A model given as a path cannot be fetched: asking the hub
+        // for the path would fail on every probe, so `build` reports the
+        // missing path instead. When the check itself fails, as on a mount
+        // that is briefly unreachable, the files are kept and `build` fails
+        // in a way the next probe retries.
+        let fetched = files.directory != Path::new(source);
+        if !fetched || !matches!(files.directory.try_exists(), Ok(false)) {
             return Ok(files.clone());
         }
         {
@@ -1334,72 +1338,103 @@ mod tests {
         drt.shutdown();
     }
 
+    /// Point `test-org/model`, in an hf-hub cache layout, at a snapshot that
+    /// is the sample model.
+    fn snapshot(cache: &Path, revision: &str) -> PathBuf {
+        let repo = cache.join("models--test-org--model");
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::create_dir_all(repo.join("snapshots")).unwrap();
+        std::fs::write(repo.join("refs/main"), revision).unwrap();
+        let snapshot = repo.join("snapshots").join(revision);
+        std::os::unix::fs::symlink(MODEL, &snapshot).unwrap();
+        snapshot
+    }
+
+    /// Run `test` with `cache` as the hub cache and no hub to reach: a fetch
+    /// that misses the cache fails at once.
+    async fn with_hub_cache<T>(cache: &Path, test: impl Future<Output = T>) -> T {
+        use dynamo_runtime::config::environment_names::model::huggingface;
+        temp_env::async_with_vars(
+            [
+                (huggingface::HF_HUB_CACHE, cache.to_str()),
+                (huggingface::HF_HUB_OFFLINE, None),
+                (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
+            ],
+            test,
+        )
+        .await
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn a_model_whose_directory_is_gone_is_fetched_again() {
-        use dynamo_runtime::config::environment_names::model::huggingface;
-
-        // Point `test-org/model`, in an hf-hub cache layout, at a snapshot
-        // that is the sample model.
-        fn snapshot(cache: &Path, revision: &str) -> PathBuf {
-            let repo = cache.join("models--test-org--model");
-            std::fs::create_dir_all(repo.join("refs")).unwrap();
-            std::fs::create_dir_all(repo.join("snapshots")).unwrap();
-            std::fs::write(repo.join("refs/main"), revision).unwrap();
-            let snapshot = repo.join("snapshots").join(revision);
-            std::os::unix::fs::symlink(MODEL, &snapshot).unwrap();
-            snapshot
-        }
-
         let cache = tempfile::tempdir().unwrap();
         let first = snapshot(cache.path(), "first");
-        temp_env::async_with_vars(
-            [
-                (huggingface::HF_HUB_CACHE, cache.path().to_str()),
-                (huggingface::HF_HUB_OFFLINE, None),
-                // Nothing in this test should reach the hub.
-                (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
-            ],
-            async {
-                let dispatch = DirectDispatch::default();
-                let files = dispatch.model_files("test-org/model", None).await.unwrap();
-                assert_eq!(files.directory.file_name(), first.file_name());
+        with_hub_cache(cache.path(), async {
+            let dispatch = DirectDispatch::default();
+            let files = dispatch.model_files("test-org/model", None).await.unwrap();
+            assert_eq!(files.directory.file_name(), first.file_name());
 
-                // The cache is pruned and the model is downloaded again, to
-                // another snapshot. The directory read before is not kept.
-                std::fs::remove_file(&first).unwrap();
-                let second = snapshot(cache.path(), "second");
-                let files = dispatch.model_files("test-org/model", None).await.unwrap();
-                assert_eq!(files.directory.file_name(), second.file_name());
-            },
-        )
+            // The cache is pruned and the model is downloaded again, to
+            // another snapshot. The directory read before is not kept.
+            std::fs::remove_file(&first).unwrap();
+            let second = snapshot(cache.path(), "second");
+            let files = dispatch.model_files("test-org/model", None).await.unwrap();
+            assert_eq!(files.directory.file_name(), second.file_name());
+        })
         .await;
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn a_model_whose_directory_cannot_be_checked_keeps_its_files() {
-        // A copy of the sample model below a directory the test can replace.
+        let cache = tempfile::tempdir().unwrap();
+        let first = snapshot(cache.path(), "first");
+        with_hub_cache(cache.path(), async {
+            let dispatch = DirectDispatch::default();
+            dispatch.model_files("test-org/model", None).await.unwrap();
+
+            // A file where the directory of snapshots was: the snapshot
+            // cannot be looked up, which does not say that it is gone.
+            let snapshots = first.parent().unwrap();
+            std::fs::remove_dir_all(snapshots).unwrap();
+            std::fs::write(snapshots, "").unwrap();
+            assert!(first.try_exists().is_err());
+            let files = dispatch
+                .model_files("test-org/model", None)
+                .await
+                .expect("the files read before must be kept");
+            assert_eq!(files.directory.file_name(), first.file_name());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_model_given_as_a_path_is_not_fetched_when_its_directory_is_gone() {
+        // A copy of the sample model, so that the test can remove it.
         let root = tempfile::tempdir().unwrap();
-        let (mount, model) = (root.path().join("mount"), root.path().join("mount/model"));
-        std::fs::create_dir_all(&model).unwrap();
+        let model = root.path().join("model");
+        std::fs::create_dir(&model).unwrap();
         for file in std::fs::read_dir(MODEL).unwrap() {
             let file = file.unwrap();
             std::fs::copy(file.path(), model.join(file.file_name())).unwrap();
         }
         let source = model.display().to_string();
-        let dispatch = DirectDispatch::default();
-        dispatch.model_files(&source, None).await.unwrap();
+        with_hub_cache(root.path(), async {
+            let dispatch = DirectDispatch::default();
+            dispatch.model_files(&source, None).await.unwrap();
 
-        // A file where the directory above the model was: the model's path
-        // cannot be looked up, which does not say that the model is gone.
-        std::fs::remove_dir_all(&mount).unwrap();
-        std::fs::write(&mount, "").unwrap();
-        assert!(model.try_exists().is_err());
-        let files = dispatch
-            .model_files(&source, None)
-            .await
-            .expect("the files read before must be kept");
-        assert_eq!(files.directory, model);
+            // There is nowhere to fetch a path from: the files stay, and
+            // building the model reports the missing path.
+            std::fs::remove_dir_all(&model).unwrap();
+            let files = dispatch
+                .model_files(&source, None)
+                .await
+                .expect("a path must not be fetched as a hub model");
+            assert_eq!(files.directory, model);
+        })
+        .await;
     }
 
     #[tokio::test]
