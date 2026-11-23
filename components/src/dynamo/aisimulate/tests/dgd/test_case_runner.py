@@ -226,7 +226,6 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
                     {
                         "case": "qwen",
                         "hardware": "h200-sxm-8gpu",
-                        "automatic": True,
                     }
                 ],
             }
@@ -234,7 +233,7 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
     )
 
     assert run_cases.load_suite(suite) == [
-        run_cases.SuiteEntry(case="qwen", hardware="h200-sxm-8gpu", automatic=True)
+        run_cases.SuiteEntry(case="qwen", hardware="h200-sxm-8gpu")
     ]
     assert run_cases.default_suite_output_root(suite) == (
         run_cases._DEFAULT_OUTPUT_ROOT / "suite"

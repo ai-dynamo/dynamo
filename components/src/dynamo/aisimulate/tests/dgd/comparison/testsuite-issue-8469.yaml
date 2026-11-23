@@ -64,7 +64,6 @@ tests:
 
   - case: gpt-oss-120b-trtllm-agg
     hardware: gb200-sxm-4gpu
-    automatic: true
     exceptions:
       render:
         sweeper-direct:
@@ -167,7 +166,6 @@ tests:
 
   - case: qwen3-235b-fp8-trtllm-agg
     hardware: h200-sxm-16gpu
-    automatic: true
     exceptions:
       render:
         sweeper-direct:
@@ -187,11 +185,9 @@ tests:
 
   - case: qwen3-32b-fp8-trtllm-agg
     hardware: h200-sxm-2gpu
-    automatic: true
 
   - case: qwen3-32b-fp8-trtllm-agg
     hardware: h100-sxm-2gpu
-    automatic: true
 
   - case: qwen3-32b-fp8-trtllm-disagg
     hardware: h200-sxm-8gpu
@@ -212,11 +208,9 @@ tests:
 
   - case: qwen3-32b-vllm-agg
     hardware: h200-sxm-16gpu
-    automatic: true
 
   - case: qwen3-32b-vllm-disagg
     hardware: h200-sxm-16gpu
-    automatic: true
 
   - case: qwen3-vl-30b-fp8-vllm-agg
     hardware: gb200-sxm-1gpu
