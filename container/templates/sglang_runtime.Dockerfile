@@ -279,7 +279,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 {% endif %}
 
 # Kimi-K3: apply the pinned SGLang patches to the source tree in the upstream
-# image, then compare the patched files with the hashes that were benchmarked.
+# image, then compare the patched files with the pinned hashes. The patches and
+# hashes are for the SGLang version in context.yaml (v0.5.23); moving the base
+# image to another SGLang version needs the patches and hashes regenerated.
 # A different hash fails the build.
 {% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang_patches \
