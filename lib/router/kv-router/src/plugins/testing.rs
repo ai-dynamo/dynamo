@@ -623,6 +623,60 @@ mod tests {
     }
 
     #[test]
+    fn a_policy_reads_back_the_request_and_capacity_a_case_describes() {
+        const PINNED: WorkerWithDpRank = WorkerWithDpRank {
+            worker_id: 41,
+            dp_rank: 0,
+        };
+
+        /// Checks what the request and its one row show, then picks that row.
+        struct ReadBack;
+
+        impl WorkerPicker for ReadBack {
+            fn pick(
+                &self,
+                request: &WorkerSelectionRequest<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let info = request.info();
+                assert_eq!(info.request_id(), Some("r1"));
+                assert_eq!(info.isl_tokens(), 320);
+                let session = info.session_context().expect("the case's session");
+                assert_eq!(session.session_id(), "s1");
+                assert_eq!(info.pinned_worker(), Some(PINNED));
+                assert_eq!(request.affinity_target(), Some(PINNED.into()));
+                assert_eq!(request.expected_output_tokens(), Some(64));
+
+                // A pinned request is offered its pin alone.
+                assert_eq!(input.len(), 1);
+                let worker = input.info(0).expect("row 0");
+                assert_eq!(worker.worker(), PINNED);
+                assert_eq!(worker.max_num_batched_tokens(), Some(4096));
+                assert_eq!(worker.total_kv_blocks(), Some(1000));
+                Ok(0)
+            }
+        }
+
+        let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(ReadBack));
+        let selected = SelectionCase::new(320, 16)
+            .request_id("r1")
+            .session_context(SessionContext::new("s1".to_owned(), None, None, None))
+            .pinned_worker(PINNED)
+            .affinity_target(PINNED)
+            .expected_output_tokens(64)
+            .worker(29, CaseWorker::new())
+            .worker(
+                41,
+                CaseWorker::new()
+                    .max_num_batched_tokens(4096)
+                    .total_kv_blocks(1000),
+            )
+            .select(&policy)
+            .unwrap();
+        assert_eq!(selected, PINNED);
+    }
+
+    #[test]
     fn a_registered_policy_is_built_from_its_parameters() {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
