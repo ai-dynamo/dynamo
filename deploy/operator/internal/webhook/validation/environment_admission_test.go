@@ -178,6 +178,38 @@ func environmentDCDAdmissionCases(t *testing.T) []dcdAdmissionTestCase {
 	t.Helper()
 	var tests []dcdAdmissionTestCase
 	for _, alpha := range []bool{false, true} {
+		// CREATE assigns standalone origins using the same ownership rule as rendering.
+		for _, owner := range []struct {
+			name, apiVersion, kind string
+			controller, graphChild bool
+		}{
+			{name: "standalone"},
+			{name: "beta graph controller", apiVersion: nvidiacomv1beta1.GroupVersion.String(), kind: "DynamoGraphDeployment", controller: true, graphChild: true},
+			{name: "alpha graph controller", apiVersion: nvidiacomv1alpha1.GroupVersion.String(), kind: "DynamoGraphDeployment", controller: true, graphChild: true},
+			{name: "foreign graph controller", apiVersion: "example.com/v1", kind: "DynamoGraphDeployment", controller: true},
+			{name: "non-controlling graph owner", apiVersion: nvidiacomv1beta1.GroupVersion.String(), kind: "DynamoGraphDeployment"},
+			{name: "unrelated controller", apiVersion: nvidiacomv1beta1.GroupVersion.String(), kind: "OtherWorkload", controller: true},
+		} {
+			created := betaDCDForAdmission(nil)
+			created.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}
+			if owner.kind != "" {
+				created.OwnerReferences = []metav1.OwnerReference{{APIVersion: owner.apiVersion, Kind: owner.kind, Name: "graph", UID: "graph-uid", Controller: new(owner.controller)}}
+			}
+			entry := dcdAdmissionTestCase{
+				name: fmt.Sprintf("root env CREATE ownership alpha=%t %s", alpha, owner.name), deployment: created,
+				wantOriginVersion: new("1.6.0"), wantPodAnnotations: created.Spec.PodTemplate.Annotations,
+			}
+			if owner.graphChild {
+				entry.wantOriginVersion = new("")
+			}
+			if alpha {
+				converted := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+				require.NoError(t, converted.ConvertFrom(created))
+				entry.deployment = converted
+			}
+			tests = append(tests, entry)
+		}
+
 		for _, envCase := range environmentAdmissionCases() {
 			updated := betaDCDForAdmission(nil)
 			updated.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
@@ -273,7 +305,8 @@ func environmentDCDAdmissionCases(t *testing.T) []dcdAdmissionTestCase {
 			entry := dcdAdmissionTestCase{name: fmt.Sprintf("root env origin alpha=%t %s", alpha, origin.name), deployment: updated, oldDeployment: old, seedWithoutWebhook: true}
 			seed := old.DeepCopy()
 			seed.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
-			if !origin.child {
+			standalone := !origin.child || origin.nonControlling || origin.foreign
+			if standalone {
 				entry.oldBeforeUpdate = seed
 			}
 			if alpha {
@@ -281,7 +314,7 @@ func environmentDCDAdmissionCases(t *testing.T) []dcdAdmissionTestCase {
 				require.NoError(t, converted.ConvertFrom(updated))
 				require.NoError(t, previous.ConvertFrom(old))
 				entry.deployment, entry.oldDeployment = converted, previous
-				if !origin.child {
+				if standalone {
 					require.NoError(t, before.ConvertFrom(seed))
 					entry.oldBeforeUpdate = before
 				}
