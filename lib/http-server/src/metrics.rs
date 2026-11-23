@@ -2338,6 +2338,7 @@ impl ResponseMetricCollector {
     /// Set the worker info for per-worker TTFT/ITL metrics.
     /// In disaggregated mode, TTFT is attributed to prefill worker, ITL to decode worker.
     /// Worker types are stored at routing time to avoid expensive MDC lookup when updating metrics.
+    #[inline]
     pub fn set_worker_info(
         &mut self,
         prefill_worker_id: Option<u64>,
@@ -2367,6 +2368,10 @@ impl ResponseMetricCollector {
         }
     }
 
+    // Called once per streamed chunk from dynamo-llm. The Python wheel is built
+    // without LTO: there, without `#[inline]` here and on `set_worker_info`, these
+    // latch checks are out-of-line calls on every chunk.
+    #[inline]
     pub fn set_worker_info_from_parts(
         &mut self,
         prefill_worker_id: Option<u64>,
@@ -2419,6 +2424,7 @@ impl ResponseMetricCollector {
     }
 
     /// Observe cached tokens (prefix cache hits), observing only once per request when value is available
+    #[inline]
     pub fn observe_cached_tokens(&mut self, cached_tokens: Option<usize>) {
         if let Some(tokens) = cached_tokens
             && !self.cached_tokens_observed
@@ -2439,6 +2445,7 @@ impl ResponseMetricCollector {
         self.observe_multimodal_metrics(image_count, video_count, audio_count, None);
     }
 
+    #[inline]
     pub fn observe_multimodal_metrics(
         &mut self,
         image_count: usize,
