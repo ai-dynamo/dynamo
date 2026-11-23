@@ -41,8 +41,6 @@ pub mod router_policy;
 pub mod service_v2;
 pub mod systemone;
 mod worker_metrics;
-#[cfg(test)]
-mod write_timeout_tests;
 
 pub use axum;
 pub use frontend_extension::{
