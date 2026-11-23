@@ -367,7 +367,7 @@ hash producer with the same algorithm, key, and key ID as the selector.
 
 Both `POST /select` and `POST /select_and_reserve` accept an optional `session_id` string. With `--session-affinity-ttl-secs` enabled, each model and routing group has its own binding table. `/select_and_reserve` binds a new session to the selected worker and holds its lease until the reservation is released or expires. The idle TTL starts when the last lease is released. `/select` can use an existing binding but does not create one.
 
-Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it through `WorkerSelectionRequest::session_id()`, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
+Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it as `session_id()` on the value `WorkerSelectionRequest::info().session_context()` returns, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
 The pending-selection cache keeps the session metadata, so a later `POST /reservations` for that selection binds the session to the booked worker, the same as `/select_and_reserve` does. The frontend uses the same table implementation for request-header affinity; see [Configuration and Tuning](configuration-and-tuning.md).
 
