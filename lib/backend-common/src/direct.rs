@@ -16,7 +16,8 @@
 //! An engine that stops serving ([`LLMEngine::engine_lost`]) leaves discovery and
 //! is probed again until it serves, then registered again. An engine whose
 //! configuration this frontend rejects is logged as an error and not probed
-//! again.
+//! again. On shutdown every engine keeps serving while the HTTP service drains
+//! the requests it has admitted, and is released after that.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -81,10 +82,11 @@ pub type DirectEngineFactory =
 #[derive(Default)]
 pub struct DirectDispatch {
     adapters: parking_lot::RwLock<HashMap<u64, Arc<EngineAdapter>>>,
-    /// One supervisor per engine; on runtime shutdown each withdraws its engine
-    /// and releases it, after any start still running returns. Nothing waits
-    /// for them: an engine's cleanup releases only this process's client, not
-    /// the engine, which runs elsewhere.
+    /// One supervisor per engine; on runtime shutdown each keeps its engine
+    /// serving through the HTTP drain, then withdraws and releases it, after
+    /// any start still running returns. Nothing waits for them: an engine's
+    /// cleanup releases only this process's client, not the engine, which runs
+    /// elsewhere.
     supervisors: TaskTracker,
     /// Held while an engine's model files are fetched, so engines that start
     /// together download a model once and then read the local copy. Not held
@@ -93,7 +95,8 @@ pub struct DirectDispatch {
 }
 
 impl DirectDispatch {
-    /// Resolves once runtime shutdown has withdrawn and released every engine.
+    /// Resolves once runtime shutdown has drained, withdrawn and released
+    /// every engine.
     #[cfg(test)]
     async fn stopped(&self) {
         self.supervisors.wait().await;
@@ -182,11 +185,38 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 /// `drt` must use process-local discovery: the engines are listed by the
 /// operator, not discovered, and their records name addresses only this
 /// frontend can dial.
+///
+/// On runtime shutdown the engines keep serving for the HTTP service's drain
+/// (`DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`), so the requests it has admitted
+/// finish, and are released after it.
 pub async fn serve_direct_engines(
     drt: &DistributedRuntime,
     config: WorkerConfig,
     specs: Vec<DirectEngineSpec>,
     factory: DirectEngineFactory,
+) -> Result<Arc<DirectDispatch>, DynamoError> {
+    serve_engines(drt, config, specs, factory, http_drain_window()).await
+}
+
+/// How long the HTTP service lets the requests it has admitted finish once the
+/// runtime's main token is cancelled (default 5 s, read by dynamo-llm).
+fn http_drain_window() -> Duration {
+    let seconds = std::env::var(
+        dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    )
+    .ok()
+    .and_then(|seconds| seconds.parse().ok())
+    .unwrap_or(5);
+    Duration::from_secs(seconds)
+}
+
+/// [`serve_direct_engines`] with the shutdown drain window given.
+async fn serve_engines(
+    drt: &DistributedRuntime,
+    config: WorkerConfig,
+    specs: Vec<DirectEngineSpec>,
+    factory: DirectEngineFactory,
+    shutdown_drain: Duration,
 ) -> Result<Arc<DirectDispatch>, DynamoError> {
     if !drt.discovery_is_process_local() {
         return Err(error(
@@ -235,6 +265,7 @@ pub async fn serve_direct_engines(
             spec,
             factory: factory.clone(),
             dispatch: dispatch.clone(),
+            shutdown_drain,
         };
         hosts.push((host, engine));
     }
@@ -265,6 +296,8 @@ struct DirectEngineHost {
     instance_id: u64,
     factory: DirectEngineFactory,
     dispatch: Arc<DirectDispatch>,
+    /// How long the engine keeps serving once runtime shutdown starts.
+    shutdown_drain: Duration,
 }
 
 /// An engine that serves and the discovery records that publish it.
@@ -355,7 +388,8 @@ impl DirectEngineHost {
     /// when it stops, withdraw it and probe again. Probes back off from
     /// `REPROBE_INITIAL_DELAY` to `REPROBE_MAX_DELAY`, and so do the returns of
     /// an engine that is lost again soon after it registers. A probe's start runs
-    /// to completion even on shutdown; the engine is then released. Stops probing,
+    /// to completion even on shutdown. On shutdown the engine keeps serving for
+    /// `shutdown_drain`, then is withdrawn and released. Stops probing,
     /// with an error, when the engine cannot be built or its configuration is
     /// rejected, since every later probe would fail the same way.
     async fn supervise(self, engine: Arc<dyn LLMEngine>, shutdown: CancellationToken) {
@@ -417,6 +451,14 @@ impl DirectEngineHost {
                 lost = serving.engine_lost() => Some(lost),
             };
             let Some(lost) = lost else {
+                // The same token starts the HTTP service's drain. The requests
+                // it has admitted, in flight here or still to be routed, need
+                // the engine until that drain ends; cleanup would fail them
+                // with no engine left to migrate to.
+                tokio::select! {
+                    _ = tokio::time::sleep(self.shutdown_drain) => {}
+                    _ = serving.engine_lost() => {}
+                }
                 self.stop(hosted).await;
                 return;
             };
@@ -594,7 +636,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::engine::{GenerateContext, LlmRegistration, chunk};
+    use crate::engine::{GenerateContext, LLMEngineOutputExt, LlmRegistration, chunk};
 
     const MODEL: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -602,6 +644,9 @@ mod tests {
     );
     const A: &str = "http://engine-a:30001";
     const B: &str = "http://engine-b:30001";
+    /// How long the hosted engines keep serving after shutdown, unless a test
+    /// asks for longer.
+    const SHUTDOWN_DRAIN: Duration = Duration::from_millis(200);
 
     /// What the test controls about one listed engine, across incarnations.
     #[derive(Default)]
@@ -611,6 +656,8 @@ mod tests {
         lost: Notify,
         /// Signalled by `cleanup`, which ends a held request as cancelled.
         cleaned: Notify,
+        /// Signalled by the test to complete a held request.
+        released: Notify,
         /// The ZMQ KV-event publisher the engine advertises, if any.
         kv_events: Option<String>,
         cleanups: AtomicUsize,
@@ -635,8 +682,9 @@ mod tests {
     /// One incarnation of a listed engine: answers every request with one token.
     /// `fail_next`, shared by every engine, makes the next request any of them
     /// receives fail mid-stream as if its engine went away. `hold_next` makes
-    /// the next request wait until its engine is cleaned up, then end as
-    /// cancelled; the engine that holds it is posted to `held`.
+    /// the next request wait until its engine is cleaned up, which ends it as
+    /// cancelled, or until the test releases it, which completes it; the engine
+    /// that holds it is posted to `held`.
     struct FakeEngine {
         state: Arc<EngineState>,
         fail_next: Arc<AtomicBool>,
@@ -698,8 +746,12 @@ mod tests {
                 *self.held.lock() = Some(self.state.clone());
                 let state = self.state.clone();
                 return Ok(futures::stream::once(async move {
-                    state.cleaned.notified().await;
-                    Ok(LLMEngineOutput::cancelled())
+                    tokio::select! {
+                        _ = state.cleaned.notified() => Ok(LLMEngineOutput::cancelled()),
+                        _ = state.released.notified() => {
+                            Ok(LLMEngineOutput::stop().with_tokens(vec![1]))
+                        }
+                    }
                 })
                 .boxed());
             }
@@ -767,18 +819,21 @@ mod tests {
                 RouterConfig::default(),
                 None,
                 true,
+                SHUTDOWN_DRAIN,
             )
             .await
         }
 
         /// `a_kv_events` is the KV-event publisher engine `A` advertises; `B`
         /// advertises none. `a_up` is whether `A` serves at startup; `B` does.
+        /// `shutdown_drain` is how long the engines keep serving after shutdown.
         async fn start_with(
             namespace: &str,
             migration_limit: u32,
             router_config: RouterConfig,
             a_kv_events: Option<String>,
             a_up: bool,
+            shutdown_drain: Duration,
         ) -> Self {
             let runtime = Runtime::from_current().unwrap();
             let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
@@ -820,7 +875,7 @@ mod tests {
                 namespace: namespace.to_string(),
                 ..WorkerConfig::default()
             };
-            let dispatch = serve_direct_engines(&drt, config, specs, factory)
+            let dispatch = serve_engines(&drt, config, specs, factory, shutdown_drain)
                 .await
                 .unwrap();
 
@@ -896,6 +951,20 @@ mod tests {
             .expect("routing did not reach the expected state");
         }
 
+        /// The engine that holds the request `hold_next` asked for.
+        async fn holding(&self) -> Arc<EngineState> {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(state) = self.held.lock().take() {
+                        return state;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("an engine must hold the request")
+        }
+
         async fn listed(&self, url: &str) -> bool {
             let config = WorkerConfig::default();
             let query = DiscoveryQuery::Endpoint {
@@ -950,7 +1019,8 @@ mod tests {
         frontend.chat_until(|f| f.served(A) > a_before).await;
         assert!(frontend.listed(A).await);
 
-        // Shutdown releases both engines before the dispatch reports stopped.
+        // Shutdown releases both engines, once they have served through the
+        // drain, before the dispatch reports stopped.
         let cleanups = |url: &str| frontend.states[url].cleanups.load(Ordering::SeqCst);
         let (a_cleanups, b_cleanups) = (cleanups(A), cleanups(B));
         frontend.drt.primary_token().cancel();
@@ -1002,6 +1072,7 @@ mod tests {
             RouterConfig::default(),
             None,
             false,
+            SHUTDOWN_DRAIN,
         )
         .await;
         let a = frontend.states[A].clone();
@@ -1184,21 +1255,46 @@ mod tests {
         frontend.hold_next.store(true, Ordering::SeqCst);
         let before = frontend.served(A) + frontend.served(B);
         let (completed, ()) = tokio::join!(frontend.chat(), async {
-            let state = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if let Some(state) = frontend.held.lock().take() {
-                        return state;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await
-            .expect("an engine must hold the request");
+            let state = frontend.holding().await;
             state.up.store(false, Ordering::SeqCst);
             state.lost.notify_one();
         });
         assert!(completed, "the request must complete on the other engine");
         assert_eq!(frontend.served(A) + frontend.served(B), before + 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_lets_a_request_in_flight_finish_before_releasing_its_engine() {
+        // The drain outlasts the test, which waits only for the request.
+        let frontend = Frontend::start_with(
+            "direct-drain",
+            0,
+            RouterConfig::default(),
+            None,
+            true,
+            Duration::from_secs(60),
+        )
+        .await;
+        frontend
+            .chat_until(|f| f.served(A) > 0 && f.served(B) > 0)
+            .await;
+
+        // Shutdown starts while a request is in flight. Its engine is not
+        // cleaned up, which would end the request, and the request finishes.
+        frontend.hold_next.store(true, Ordering::SeqCst);
+        let (completed, ()) = tokio::join!(frontend.chat(), async {
+            let state = frontend.holding().await;
+            let cleanups = state.cleanups.load(Ordering::SeqCst);
+            frontend.drt.primary_token().cancel();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(
+                state.cleanups.load(Ordering::SeqCst),
+                cleanups,
+                "the engine must keep serving while the frontend drains"
+            );
+            state.released.notify_one();
+        });
+        assert!(completed, "a request in flight at shutdown must finish");
     }
 
     /// A dispatch that hosts one engine, and a request routed to that engine.
@@ -1306,6 +1402,7 @@ mod tests {
             router_config,
             Some(format!("tcp://127.0.0.1:{port}")),
             true,
+            SHUTDOWN_DRAIN,
         )
         .await;
         frontend
