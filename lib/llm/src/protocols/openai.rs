@@ -171,7 +171,45 @@ pub(crate) trait OpenAIOutputOptionsProvider {
 
 impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
     fn extract_sampling_options(&self) -> Result<common::SamplingOptions> {
-        let mut sampling_options = sampling_scalars(self)?;
+        // let result = self.validate();
+        // if let Err(e) = result {
+        //     return Err(format!("Error validating sampling options: {}", e));
+        // }
+
+        let mut temperature = validate_range(self.get_temperature(), &TEMPERATURE_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating temperature: {}", e))?;
+        // `top_p` must be in (MIN_TOP_P_EXCLUSIVE, MAX_TOP_P].
+        let mut top_p: Option<f32> = self.get_top_p();
+        validate_top_p(top_p).map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
+        let frequency_penalty =
+            validate_range(self.get_frequency_penalty(), &FREQUENCY_PENALTY_RANGE)
+                .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
+        let presence_penalty = validate_range(self.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
+        // Canonicalize the public disabled sentinels before backend dispatch.
+        // Backend adapters translate -1 when their native API uses a different value.
+        let top_k = CommonExtProvider::get_top_k(self).map(|k| if k == 0 { -1 } else { k });
+        let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
+        let include_stop_str_in_output = CommonExtProvider::get_include_stop_str_in_output(self);
+        let seed = self.get_seed();
+        let n = validate_range(self.get_n(), &N_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating n: {}", e))?;
+        let best_of = validate_range(self.get_best_of(), &BEST_OF_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating best_of: {}", e))?;
+
+        let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
+            .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
+
+        let logit_bias = self.get_logit_bias();
+
+        if let Some(nvext) = self.nvext() {
+            let greedy = nvext.greed_sampling.unwrap_or(false);
+            if greedy {
+                top_p = None;
+                temperature = None;
+            }
+        }
+
         let guided_decoding_backend = self.get_guided_decoding_backend();
         let guided_json = self.get_guided_json();
         let guided_regex = self.get_guided_regex();
@@ -187,71 +225,24 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_whitespace_pattern,
             None,
         )?;
-        sampling_options.guided_decoding = guided_decoding;
-        Ok(sampling_options)
+        Ok(common::SamplingOptions {
+            n,
+            best_of,
+            frequency_penalty,
+            presence_penalty,
+            repetition_penalty,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+            seed,
+            use_beam_search: None,
+            length_penalty: None,
+            logit_bias,
+            guided_decoding,
+            include_stop_str_in_output,
+        })
     }
-}
-
-/// The sampling options of `request` apart from guided decoding, which is left unset.
-pub(crate) fn sampling_scalars<T: OpenAISamplingOptionsProvider + CommonExtProvider>(
-    request: &T,
-) -> Result<common::SamplingOptions> {
-    // let result = request.validate();
-    // if let Err(e) = result {
-    //     return Err(format!("Error validating sampling options: {}", e));
-    // }
-
-    let mut temperature = validate_range(request.get_temperature(), &TEMPERATURE_RANGE)
-        .map_err(|e| anyhow::anyhow!("Error validating temperature: {}", e))?;
-    // `top_p` must be in (MIN_TOP_P_EXCLUSIVE, MAX_TOP_P].
-    let mut top_p: Option<f32> = request.get_top_p();
-    validate_top_p(top_p).map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
-    let frequency_penalty =
-        validate_range(request.get_frequency_penalty(), &FREQUENCY_PENALTY_RANGE)
-            .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
-    let presence_penalty = validate_range(request.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
-        .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
-    // Canonicalize the public disabled sentinels before backend dispatch.
-    // Backend adapters translate -1 when their native API uses a different value.
-    let top_k = CommonExtProvider::get_top_k(request).map(|k| if k == 0 { -1 } else { k });
-    let repetition_penalty = CommonExtProvider::get_repetition_penalty(request);
-    let include_stop_str_in_output = CommonExtProvider::get_include_stop_str_in_output(request);
-    let seed = request.get_seed();
-    let n = validate_range(request.get_n(), &N_RANGE)
-        .map_err(|e| anyhow::anyhow!("Error validating n: {}", e))?;
-    let best_of = validate_range(request.get_best_of(), &BEST_OF_RANGE)
-        .map_err(|e| anyhow::anyhow!("Error validating best_of: {}", e))?;
-
-    let min_p = validate_range(CommonExtProvider::get_min_p(request), &MIN_P_RANGE)
-        .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
-
-    let logit_bias = request.get_logit_bias();
-
-    if let Some(nvext) = request.nvext() {
-        let greedy = nvext.greed_sampling.unwrap_or(false);
-        if greedy {
-            top_p = None;
-            temperature = None;
-        }
-    }
-
-    Ok(common::SamplingOptions {
-        n,
-        best_of,
-        frequency_penalty,
-        presence_penalty,
-        repetition_penalty,
-        temperature,
-        top_p,
-        top_k,
-        min_p,
-        seed,
-        use_beam_search: None,
-        length_penalty: None,
-        logit_bias,
-        guided_decoding: None,
-        include_stop_str_in_output,
-    })
 }
 
 impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {

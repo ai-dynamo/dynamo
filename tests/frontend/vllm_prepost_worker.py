@@ -14,6 +14,7 @@ from typing import Any
 import uvloop
 from transformers import AutoTokenizer
 
+from dynamo.common.token_budget import TokenBudget, publish_token_budget
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -23,7 +24,10 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
-from tests.frontend.test_vllm_prepost_integration import CAPTURE_PATH_ENV
+from tests.frontend.test_vllm_prepost_integration import (
+    CAPTURE_PATH_ENV,
+    TOKEN_BUDGET_LIMIT,
+)
 from tests.utils.constants import QWEN
 
 
@@ -80,6 +84,16 @@ async def main():
     endpoint = runtime.endpoint("test.vllm-prepost.generate")
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_structural_tag({"scope": "always", "schema": "strict"})
+    # As a vLLM worker publishes it: an oversized prompt is rejected, an oversized
+    # output limit is capped by the engine.
+    publish_token_budget(
+        runtime_config,
+        TokenBudget(
+            combined_limit=TOKEN_BUDGET_LIMIT,
+            reject_prompt_overflow=True,
+            reject_total_overflow=False,
+        ),
+    )
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,

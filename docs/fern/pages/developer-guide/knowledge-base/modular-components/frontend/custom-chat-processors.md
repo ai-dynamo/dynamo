@@ -77,17 +77,21 @@ is filled.
 | `agent_context`, `image_cache_scope` | The request's session headers |
 | `routing` (worker targets, priority, expected output tokens, routing constraints, LoRA name, cache salt), `router`, `request_timestamp_ms`, `mdc_sum` | `nvext` and the model card |
 | `stop_conditions`: `max_tokens`, `min_tokens`, `ignore_eos`, `max_thinking_tokens` | The request |
-| `sampling_options`: `n`, `best_of`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `logit_bias`, and the presence, frequency and repetition penalties | The request |
+| `sampling_options`: `n`, `best_of`, `temperature`, `top_p`, `seed`, `logit_bias`, and the presence, frequency and repetition penalties | The request |
 | `extra_args.nvext`: `extra_fields`, `metadata_upload`, `cache_salt` | `nvext` |
 | `extra_args.sampling_options`: `allowed_token_ids`, `bad_words_token_ids`, `logprob_token_ids`, `vllm_xargs`, `detokenize` | The request |
 
 Dynamo never fills the fields that only the processor can decide: `token_ids`, stop strings and
-stop token IDs, `sampling_options.guided_decoding`, `output_options`, `eos_token_ids`,
+stop token IDs, `sampling_options.guided_decoding`, `top_k` and `min_p` (an engine turns these
+two off itself, for example for greedy sampling), `output_options`, `eos_token_ids`,
 `annotations`, `require_reasoning` and the multimodal fields.
 
+The router and the worker use one cache salt. A salt the processor sets in `routing.cache_salt`
+or in `extra_args.nvext.cache_salt` is written to both. Otherwise both get the client's.
+
 `routed_engine.generate` also checks the engine's token budget against the length of `token_ids`
-and the client's `max_tokens`. A request that does not fit raises `RoutedEngineError`, which the
-Frontend returns as a context-length error.
+and the completed request's `max_tokens`. A request that does not fit raises `RoutedEngineError`,
+which the Frontend returns as a context-length error.
 
 ## Register and run it
 

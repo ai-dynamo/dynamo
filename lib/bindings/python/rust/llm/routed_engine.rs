@@ -19,7 +19,7 @@ use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
 
 use super::py_convert;
-use crate::errors::routed_error_to_pyerr;
+use crate::errors::{rejected_request_to_pyerr, routed_error_to_pyerr};
 use crate::to_pyerr;
 
 #[pyclass]
@@ -90,7 +90,7 @@ impl RoutedEngine {
     /// session affinity, and every engine-agnostic field `preprocessed` leaves unset is filled
     /// from the client's request: the agent context, routing hints, sampling and stop values
     /// and passthrough arguments. A value `preprocessed` sets is kept. The engine's token
-    /// budget is checked against the prompt in `preprocessed`.
+    /// budget is checked against the completed request.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
@@ -109,10 +109,8 @@ impl RoutedEngine {
                 scope.complete_request(&mut request);
                 scope
                     .validate_token_budget(&request)
-                    .map_err(routed_error_to_pyerr)?;
-                if let Some(tracker) = request.tracker.as_deref() {
-                    scope.apply_upstream_elapsed(tracker);
-                }
+                    .map_err(rejected_request_to_pyerr)?;
+                scope.apply_upstream_elapsed(request.tracker.as_deref());
             }
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
@@ -216,12 +214,9 @@ fn dispatch_span(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_llm::preprocessor::request_envelope::RequestEnvelope;
     use dynamo_llm::protocols::common::extensions::{
-        AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SessionAffinityId, session_affinity_from_headers,
+        SessionAffinityId, session_affinity_from_headers,
     };
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
     use tracing_subscriber::layer::SubscriberExt;
@@ -252,42 +247,6 @@ mod tests {
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity restored after Python boundary");
         assert_eq!(session_affinity.as_str(), "session-123");
-    }
-
-    /// The request a chat processor routes is completed from the client's request and its
-    /// HTTP context, and what the processor set is kept.
-    #[test]
-    fn routed_request_is_completed_from_the_chat_request() {
-        let agent_context = |session_id: &str| -> AgentContext {
-            serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap()
-        };
-        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "m",
-            "messages": [{"role": "user", "content": "hi"}],
-            "seed": 7,
-            "nvext": {"backend_instance_id": 42},
-        }))
-        .unwrap();
-        let mut source = SingleIn::new(chat);
-        source.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context("from-headers"));
-        let envelope = RequestEnvelope::from_card(&ModelDeploymentCard::with_name_only("m"));
-        let python_context =
-            crate::context::Context::new(source.context(), None, None, Default::default())
-                .with_request_scope(Some(envelope.begin_chat(&source)));
-        let scope = python_context.request_scope().expect("chat request scope");
-
-        let mut request = preprocessed_request();
-        scope.complete_request(&mut request);
-        assert_eq!(request.agent_context, Some(agent_context("from-headers")));
-        assert_eq!(request.sampling_options.seed, Some(7));
-        let routing = request.routing.as_ref().expect("routing hints");
-        assert_eq!(routing.backend_instance_id, Some(42));
-
-        request.agent_context = Some(agent_context("from-processor"));
-        request.sampling_options.seed = Some(1);
-        scope.complete_request(&mut request);
-        assert_eq!(request.agent_context, Some(agent_context("from-processor")));
-        assert_eq!(request.sampling_options.seed, Some(1));
     }
 
     fn make_trace_context(

@@ -10,9 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_renderer::OAIChatLikeRequest;
 use dynamo_runtime::pipeline::Context;
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
 use super::{LORA_NAME_CONTEXT_KEY, OpenAIPreprocessor};
 use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
@@ -22,13 +20,12 @@ use crate::protocols::common::extensions::{
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
     request_cache_salt, routing_constraints_to_kv,
 };
-use crate::protocols::common::preprocessor::{
-    PreprocessedRequest, PreprocessedRequestBuilder, RoutingHints,
-};
+use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{SamplingOptions, StopConditions, StopConditionsProvider};
+use crate::protocols::common::{
+    SamplingOptions, SamplingOptionsProvider, StopConditions, StopConditionsProvider,
+};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-use crate::protocols::openai::sampling_scalars;
 
 type JsonObject = serde_json::Map<String, serde_json::Value>;
 
@@ -38,9 +35,10 @@ type JsonObject = serde_json::Map<String, serde_json::Value>;
 /// renders prompts itself can build one.
 #[derive(Debug, Clone)]
 pub struct RequestEnvelope {
-    mdcsum: String,
-    lora_name: Option<String>,
-    token_budget: Option<TokenBudget>,
+    pub(super) mdcsum: String,
+    pub(super) lora_name: Option<String>,
+    /// The engine-published request-token admission policy.
+    pub(super) token_budget: Option<TokenBudget>,
 }
 
 impl RequestEnvelope {
@@ -63,35 +61,6 @@ impl RequestEnvelope {
         }
     }
 
-    pub(crate) fn mdcsum(&self) -> &str {
-        &self.mdcsum
-    }
-
-    /// The engine-published request-token admission policy.
-    pub(crate) fn token_budget(&self) -> Option<TokenBudget> {
-        self.token_budget
-    }
-
-    /// Write the routing and bookkeeping fields of `request` onto `builder`.
-    ///
-    /// `lora_name_override` names the adapter when the model card does not.
-    pub(crate) fn apply_request_facts<R>(
-        &self,
-        request: &R,
-        lora_name_override: Option<String>,
-        builder: &mut PreprocessedRequestBuilder,
-    ) where
-        R: OAIChatLikeRequest + AnnotationsProvider + NvExtProvider,
-    {
-        builder.annotations(request.annotations().unwrap_or_default());
-        builder.mdc_sum(Some(self.mdcsum.clone()));
-        let lora_name = self.lora_name.clone().or(lora_name_override);
-        builder.routing(routing_hints(request, lora_name));
-        builder.request_timestamp_ms(request.nvext().and_then(|nvext| nvext.request_timestamp_ms));
-        // e.g. `use_audio_in_video`
-        builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
-    }
-
     /// Start a chat request whose processor renders the prompt itself.
     ///
     /// The scope keeps what the request and its context say about routing, sampling and
@@ -107,13 +76,15 @@ impl RequestEnvelope {
             request_timestamp_ms: chat.nvext().and_then(|nvext| nvext.request_timestamp_ms),
             // A request these reject is left to the processor's own validation.
             stop_conditions: chat.extract_stop_conditions().ok(),
-            sampling_options: sampling_scalars(chat).ok(),
+            sampling_options: chat.extract_sampling_options().ok(),
             // `token_in` says the tokens came from the client; only the processor knows.
-            nvext_args: nvext_passthrough_args(chat).map(|args| {
-                args.into_iter()
-                    .filter(|(key, _)| key != "token_in")
-                    .collect()
-            }),
+            nvext_args: nvext_passthrough_args(chat)
+                .map(|args| {
+                    args.into_iter()
+                        .filter(|(key, _)| key != "token_in")
+                        .collect::<JsonObject>()
+                })
+                .filter(|args| !args.is_empty()),
             sampling_args: sampling_passthrough_args(chat),
             token_budget: self.token_budget,
         }));
@@ -122,7 +93,10 @@ impl RequestEnvelope {
 }
 
 /// Where the router should send a request, from its `nvext` and `lora_name`.
-fn routing_hints<R: NvExtProvider>(request: &R, lora_name: Option<String>) -> Option<RoutingHints> {
+pub(super) fn routing_hints<R: NvExtProvider>(
+    request: &R,
+    lora_name: Option<String>,
+) -> Option<RoutingHints> {
     let cache_namespace = request_cache_salt(request).map(str::to_owned);
     let Some(nvext) = request.nvext() else {
         // LoRA and a legacy top-level `cache_salt` route without nvext too.
@@ -215,7 +189,7 @@ pub(super) fn sampling_passthrough_args<R: NvExtProvider>(request: &R) -> Option
     (!sampling_passthrough.is_empty()).then_some(sampling_passthrough)
 }
 
-/// What one request says, apart from its prompt, about the request to route.
+/// The part of a [`RequestScope`] read from the chat request itself.
 #[derive(Debug)]
 struct RequestFacts {
     mdc_sum: String,
@@ -241,7 +215,6 @@ pub struct RequestScope {
     request: Option<Arc<RequestFacts>>,
 }
 
-/// Take `value` where the processor left `slot` unset.
 fn fill<T: Clone>(slot: &mut Option<T>, value: &Option<T>) {
     if slot.is_none() {
         slot.clone_from(value);
@@ -286,15 +259,17 @@ impl RequestScope {
 
     /// Start `tracker`'s arrival age from the time a gateway reports it held the request, so a
     /// backend that orders admission by arrival counts the wait in front of this process too.
-    pub fn apply_upstream_elapsed(&self, tracker: &RequestTracker) {
-        if let Some(upstream_elapsed) = self.upstream_elapsed {
+    pub fn apply_upstream_elapsed(&self, tracker: Option<&RequestTracker>) {
+        if let Some(tracker) = tracker
+            && let Some(upstream_elapsed) = self.upstream_elapsed
+        {
             tracker.set_upstream_elapsed(upstream_elapsed);
         }
     }
 
     /// Give `request` the fields its processor left unset. A value the processor set is kept.
+    /// Every field is named below, so a new one does not compile until it has an owner.
     pub fn complete_request(&self, request: &mut PreprocessedRequest) {
-        // No `..`: a new field does not compile until it is given an owner here.
         let PreprocessedRequest {
             // Filled here when unset.
             agent_context,
@@ -358,9 +333,25 @@ impl RequestScope {
         fill(router, &facts.router);
         fill(request_timestamp_ms, &facts.request_timestamp_ms);
 
-        match (routing.as_mut(), &facts.routing) {
-            (None, hints) => routing.clone_from(hints),
-            (Some(routing), Some(hints)) => fill_unset!(
+        // The router and the worker must use one cache salt, so a salt the processor set in
+        // either place goes to both. The client's fills both below when it set neither.
+        let processor_salt = routing
+            .as_ref()
+            .and_then(|routing| routing.cache_namespace.clone())
+            .or_else(|| {
+                let salt = extra_args.as_ref()?.get("nvext")?.get("cache_salt")?;
+                salt.as_str().map(str::to_owned)
+            });
+        if let Some(salt) = processor_salt {
+            routing.get_or_insert_default().cache_namespace = Some(salt.clone());
+            if let Some(nvext) = extra_args_group(extra_args, "nvext") {
+                nvext.insert("cache_salt".to_string(), salt.into());
+            }
+        }
+
+        if let Some(hints) = &facts.routing {
+            let routing = routing.get_or_insert_default();
+            fill_unset!(
                 routing,
                 hints,
                 RoutingHints {
@@ -381,8 +372,7 @@ impl RequestScope {
                     allowed_worker_ids,
                     routing_constraints,
                 } keep {}
-            ),
-            (Some(_), None) => {}
+            );
         }
 
         // Stop strings and stop tokens are matched where the output is detokenized, so they
@@ -404,7 +394,9 @@ impl RequestScope {
                 }
             );
         }
-        // A grammar depends on the processor's tool-call and reasoning parsers.
+        // A grammar depends on the processor's tool-call and reasoning parsers. An engine
+        // turns `top_k` and `min_p` off for greedy sampling and from its generation config,
+        // so an unset one is the processor's decision, not a gap.
         if let Some(sampling) = &facts.sampling_options {
             fill_unset!(
                 sampling_options,
@@ -417,11 +409,11 @@ impl RequestScope {
                     repetition_penalty,
                     temperature,
                     top_p,
-                    top_k,
-                    min_p,
                     seed,
                     logit_bias,
                 } keep {
+                    top_k,
+                    min_p,
                     use_beam_search,
                     length_penalty,
                     include_stop_str_in_output,
@@ -434,41 +426,33 @@ impl RequestScope {
         fill_extra_args(extra_args, "sampling_options", facts.sampling_args.as_ref());
     }
 
-    /// Apply the engine-published token budget to the prompt the processor rendered and the
-    /// output length the client asked for.
+    /// Apply the engine-published token budget to the request as it will reach the worker.
     pub fn validate_token_budget(&self, request: &PreprocessedRequest) -> anyhow::Result<()> {
         let Some(facts) = self.request.as_deref() else {
             return Ok(());
         };
-        if request.prompt_embeds.is_some() {
-            return Ok(());
-        }
-        let exact_prompt_len = OpenAIPreprocessor::exact_prompt_len(
-            request
-                .mm_routing_info
-                .as_ref()
-                .map(|mm| mm.expanded_prompt_len),
-            request.multi_modal_data.as_ref(),
-            request.token_ids.len(),
-        );
-        let Some(prompt_len) = exact_prompt_len else {
-            return Ok(());
-        };
-        // The client's limit, not the processor's: a processor may have replaced an omitted
-        // one with the room it computed was left.
-        let max_tokens = facts
-            .stop_conditions
-            .as_ref()
-            .and_then(|stop| stop.max_tokens);
-        OpenAIPreprocessor::validate_requested_token_budget(
-            prompt_len,
-            max_tokens,
-            facts.token_budget.as_ref(),
-        )
+        OpenAIPreprocessor::validate_preprocessed_token_budget(request, facts.token_budget.as_ref())
+            .map(drop)
     }
 }
 
-/// Add the entries of `args` that `extra_args[group]` does not have.
+/// `extra_args[group]` as an object, created when it is absent or null.
+fn extra_args_group<'a>(
+    extra_args: &'a mut Option<serde_json::Value>,
+    group: &str,
+) -> Option<&'a mut JsonObject> {
+    let entry = extra_args
+        .get_or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()?
+        .entry(group)
+        .or_insert(serde_json::Value::Null);
+    if entry.is_null() {
+        *entry = serde_json::json!({});
+    }
+    entry.as_object_mut()
+}
+
+/// Add the entries of `args` that `extra_args[group]` does not have, or has as null.
 fn fill_extra_args(
     extra_args: &mut Option<serde_json::Value>,
     group: &str,
@@ -477,18 +461,11 @@ fn fill_extra_args(
     let Some(args) = args else {
         return;
     };
-    let extra_args = extra_args.get_or_insert_with(|| serde_json::json!({}));
-    let Some(extra_args) = extra_args.as_object_mut() else {
-        return;
-    };
-    let entry = extra_args
-        .entry(group)
-        .or_insert_with(|| serde_json::json!({}));
-    let Some(entry) = entry.as_object_mut() else {
+    let Some(entry) = extra_args_group(extra_args, group) else {
         return;
     };
     for (key, value) in args {
-        if !entry.contains_key(key) {
+        if entry.get(key).is_none_or(serde_json::Value::is_null) {
             entry.insert(key.clone(), value.clone());
         }
     }
@@ -539,19 +516,18 @@ mod tests {
     }
 
     /// A model card with no tokenizer or chat template is enough to complete the request a
-    /// chat processor rendered, from the request and its context.
+    /// chat processor rendered.
     #[test]
     fn rendered_request_gets_what_the_processor_left_unset() {
-        let mut request = chat_request(serde_json::json!({
+        let request = chat_request(serde_json::json!({
             "seed": 7,
             "logit_bias": {"5": 1.5},
             "max_tokens": 64,
+            "min_p": 0.05,
             "response_format": {"type": "json_object"},
-            // Conflicting grammars are the processor's to reject.
-            "guided_regex": "a+",
-            "guided_choice": ["x"],
             "logprobs": true,
             "stop": ["END"],
+            "allowed_token_ids": [1, 2],
             "nvext": {
                 "backend_instance_id": 42,
                 "agent_hints": {"priority": 3, "osl": 128},
@@ -560,33 +536,15 @@ mod tests {
                 "annotations": ["query_instance_id"],
             },
         }));
-        request.insert(
-            AGENT_CONTEXT_CONTEXT_KEY,
-            AgentContext {
-                session_id: "from-headers".to_string(),
-                parent_session_id: None,
-                session_final: None,
-                agent_headers: Default::default(),
-                input_trigger: None,
-            },
-        );
-        request.insert(
-            SESSION_AFFINITY_CONTEXT_KEY,
-            SessionAffinityId::new("routing-session"),
-        );
         let scope = envelope(None).begin_chat(&request);
 
         let mut rendered = rendered_request();
+        // A null entry is unset, like a missing one.
+        rendered.extra_args = Some(serde_json::json!({
+            "sampling_options": {"allowed_token_ids": null},
+        }));
         scope.complete_request(&mut rendered);
 
-        assert_eq!(
-            rendered.agent_context.as_ref().unwrap().session_id,
-            "from-headers"
-        );
-        assert_eq!(
-            rendered.image_cache_scope.as_deref(),
-            Some("routing-session")
-        );
         assert!(rendered.mdc_sum.is_some());
         let routing = rendered.routing.as_ref().unwrap();
         assert_eq!(routing.backend_instance_id, Some(42));
@@ -600,13 +558,18 @@ mod tests {
         );
         assert_eq!(rendered.stop_conditions.max_tokens, Some(64));
         assert_eq!(
-            rendered.extra_args.as_ref().unwrap()["nvext"],
-            serde_json::json!({"extra_fields": ["worker_id"], "cache_salt": "tenant-a"})
+            rendered.extra_args.unwrap(),
+            serde_json::json!({
+                "nvext": {"extra_fields": ["worker_id"], "cache_salt": "tenant-a"},
+                "sampling_options": {"allowed_token_ids": [1, 2]},
+            })
         );
 
-        // The processor's own: a grammar, logprobs, stop strings and annotations are never
-        // filled, even though the request has them.
+        // The processor's own are never filled, even though the request has them: a
+        // grammar, logprobs, stop strings, annotations, and the `min_p` an engine may
+        // have turned off.
         assert!(rendered.sampling_options.guided_decoding.is_none());
+        assert!(rendered.sampling_options.min_p.is_none());
         assert!(rendered.output_options.logprobs.is_none());
         assert!(rendered.stop_conditions.stop.is_none());
         assert!(rendered.annotations.is_empty());
@@ -614,14 +577,20 @@ mod tests {
 
     #[test]
     fn values_the_processor_set_are_kept() {
-        let scope = envelope(None).begin_chat(&chat_request(serde_json::json!({
+        let agent_context = |session_id: &str| -> AgentContext {
+            serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap()
+        };
+        let mut request = chat_request(serde_json::json!({
             "seed": 7,
             "temperature": 0.2,
             "max_tokens": 64,
             "nvext": {"backend_instance_id": 42, "cache_salt": "tenant-a"},
-        })));
+        }));
+        request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context("from-headers"));
+        let scope = envelope(None).begin_chat(&request);
 
         let mut rendered = rendered_request();
+        rendered.agent_context = Some(agent_context("from-processor"));
         rendered.sampling_options.temperature = Some(1.0);
         rendered.stop_conditions.max_tokens = Some(900);
         rendered.routing = Some(RoutingHints {
@@ -634,12 +603,17 @@ mod tests {
         }));
         scope.complete_request(&mut rendered);
 
+        assert_eq!(
+            rendered.agent_context,
+            Some(agent_context("from-processor"))
+        );
         assert_eq!(rendered.sampling_options.temperature, Some(1.0));
         assert_eq!(rendered.sampling_options.seed, Some(7));
         assert_eq!(rendered.stop_conditions.max_tokens, Some(900));
         let routing = rendered.routing.as_ref().unwrap();
         assert_eq!(routing.backend_instance_id, Some(7));
-        assert_eq!(routing.cache_namespace.as_deref(), Some("tenant-a"));
+        // The router keys on the salt the processor gave the worker.
+        assert_eq!(routing.cache_namespace.as_deref(), Some("from-processor"));
         assert_eq!(
             rendered.extra_args.unwrap(),
             serde_json::json!({
@@ -649,24 +623,28 @@ mod tests {
         );
     }
 
-    /// The budget is checked against the client's `max_tokens`. A processor that replaced an
-    /// omitted one with the room left in the context must not trip it.
+    /// The budget is checked against the output limit the worker will get: the
+    /// processor's, or the client's where the processor left it unset.
     #[test]
-    fn token_budget_uses_the_clients_output_limit() {
+    fn token_budget_checks_the_completed_request() {
         let budget = TokenBudget {
             combined_limit: 10,
             reject_prompt_overflow: true,
             reject_total_overflow: true,
         };
         let envelope = envelope(Some(budget));
-        let mut rendered = rendered_request();
-        rendered.stop_conditions.max_tokens = Some(1_000);
+        let check = |client: serde_json::Value, processor_max_tokens: Option<u32>| {
+            let scope = envelope.begin_chat(&chat_request(client));
+            let mut rendered = rendered_request();
+            rendered.stop_conditions.max_tokens = processor_max_tokens;
+            scope.complete_request(&mut rendered);
+            scope.validate_token_budget(&rendered)
+        };
 
-        let omitted = envelope.begin_chat(&chat_request(serde_json::json!({})));
-        omitted.validate_token_budget(&rendered).unwrap();
-
-        let too_long = envelope.begin_chat(&chat_request(serde_json::json!({"max_tokens": 8})));
-        let error = too_long.validate_token_budget(&rendered).unwrap_err();
+        check(serde_json::json!({}), Some(7)).unwrap();
+        let error = check(serde_json::json!({}), Some(1_000)).unwrap_err();
+        assert!(error.to_string().contains("asks for 1000 output tokens"));
+        let error = check(serde_json::json!({"max_tokens": 8}), None).unwrap_err();
         assert!(error.to_string().contains("asks for 8 output tokens"));
     }
 }

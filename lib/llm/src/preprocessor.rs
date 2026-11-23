@@ -115,7 +115,7 @@ use crate::preprocessor::prompt::{
     MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
 };
 use crate::preprocessor::request_envelope::{
-    RequestEnvelope, RequestScope, nvext_passthrough_args, sampling_passthrough_args,
+    RequestEnvelope, RequestScope, nvext_passthrough_args, routing_hints, sampling_passthrough_args,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
@@ -3652,21 +3652,21 @@ impl OpenAIPreprocessor {
         // the MM-expanded length when available, else defer to the backend.
         let exact_prompt_len = Self::validate_preprocessed_token_budget(
             &preprocessed,
-            self.envelope.token_budget().as_ref(),
+            self.envelope.token_budget.as_ref(),
         )?;
         if preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(prompt_len) = exact_prompt_len
             // Preserve omission when the prompt itself is backend-owned. In
             // particular, setting a saturating zero here would interfere with
             // SGLang's auto-truncation before the backend sees the request.
-            && !self.envelope.token_budget().is_some_and(|token_budget| {
+            && !self.envelope.token_budget.is_some_and(|token_budget| {
                 prompt_len >= token_budget.combined_limit as usize
                     && !token_budget.reject_prompt_overflow
             })
             && let Some(max_tokens) = Self::omitted_max_tokens_default(
                 prompt_len,
                 self.envelope
-                    .token_budget()
+                    .token_budget
                     .map(|token_budget| token_budget.combined_limit),
                 options,
             )
@@ -3677,7 +3677,7 @@ impl OpenAIPreprocessor {
             // already-over-limit prompt fails before streaming begins.
             Self::validate_preprocessed_token_budget(
                 &preprocessed,
-                self.envelope.token_budget().as_ref(),
+                self.envelope.token_budget.as_ref(),
             )?;
         }
 
@@ -3837,8 +3837,11 @@ impl OpenAIPreprocessor {
             });
         }
         builder.output_options(output_options);
-        self.envelope
-            .apply_request_facts(request, lora_name_override, &mut builder);
+        builder.annotations(request.annotations().unwrap_or_default());
+        builder.mdc_sum(Some(self.envelope.mdcsum.clone()));
+        let lora_name = self.envelope.lora_name.clone().or(lora_name_override);
+        builder.routing(routing_hints(request, lora_name));
+        builder.request_timestamp_ms(request.nvext().and_then(|nvext| nvext.request_timestamp_ms));
 
         if let Some(extra_args) = Self::backend_extra_args(
             request,
@@ -3854,6 +3857,9 @@ impl OpenAIPreprocessor {
             self.runtime_config.reasoning_parser.as_deref(),
             has_thinking_budget,
         ));
+
+        // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         // Forward media_io_kwargs untouched only when the worker owns decoding. With a
         // media loader the frontend consumes them itself, so re-sending would risk the
@@ -5729,7 +5735,7 @@ impl OpenAIPreprocessor {
         builder.dimensions(request.inner.dimensions);
 
         builder.annotations(request.annotations().unwrap_or_default());
-        builder.mdc_sum(Some(self.envelope.mdcsum().to_string()));
+        builder.mdc_sum(Some(self.envelope.mdcsum.clone()));
 
         Ok((builder.build()?, annotations))
     }
@@ -8731,9 +8737,7 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
         let scope = RequestScope::from_context(&context);
         let tracker = Some(response_generator.tracker());
-        if let Some(tracker) = &tracker {
-            scope.apply_upstream_elapsed(tracker);
-        }
+        scope.apply_upstream_elapsed(tracker.as_deref());
         let preprocess_options = PreprocessRequestOptions {
             preserve_omitted_max_tokens: context
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
@@ -8961,9 +8965,7 @@ impl
         let mut response_generator = Box::new(response_generator);
         let scope = RequestScope::from_context(&context);
         let tracker = Some(response_generator.tracker());
-        if let Some(tracker) = &tracker {
-            scope.apply_upstream_elapsed(tracker);
-        }
+        scope.apply_upstream_elapsed(tracker.as_deref());
         // convert the chat completion request to a common completion request
         let mut builder = self.builder_with_lora(&request, scope.lora_name())?;
 
@@ -9002,7 +9004,7 @@ impl
         extra_args.insert("request_type".to_string(), "completions".into());
         Self::validate_preprocessed_token_budget(
             &common_request,
-            self.envelope.token_budget().as_ref(),
+            self.envelope.token_budget.as_ref(),
         )?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
@@ -9411,12 +9413,12 @@ mod token_data_tests {
             let preprocessor =
                 OpenAIPreprocessor::new_for_completions(completion_card, tokenizer.clone())
                     .unwrap();
-            assert_eq!(preprocessor.envelope.mdcsum(), checksum);
+            assert_eq!(preprocessor.envelope.mdcsum, checksum);
         }
         let checksum = card.mdcsum().to_string();
         let preprocessor =
             OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer.clone()).unwrap();
-        assert_eq!(preprocessor.envelope.mdcsum(), checksum);
+        assert_eq!(preprocessor.envelope.mdcsum, checksum);
         assert_eq!(
             preprocessor.runtime_config.tool_call_parser,
             card.runtime_config.tool_call_parser
@@ -16460,13 +16462,14 @@ mod tests {
 
         let mut context = PipelineContext::new(());
         let untouched = RequestTracker::new();
-        RequestScope::from_context(&context).apply_upstream_elapsed(&untouched);
+        RequestScope::from_context(&context).apply_upstream_elapsed(Some(&untouched));
         assert!(untouched.elapsed_since_arrival() < Duration::from_secs(1));
 
         context.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, Duration::from_secs(40));
         let tracker = RequestTracker::new();
-        RequestScope::from_context(&context).apply_upstream_elapsed(&tracker);
+        RequestScope::from_context(&context).apply_upstream_elapsed(Some(&tracker));
         assert!(tracker.elapsed_since_arrival() >= Duration::from_secs(40));
+        RequestScope::from_context(&context).apply_upstream_elapsed(None);
     }
 
     #[test]
