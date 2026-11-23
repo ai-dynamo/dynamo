@@ -15,10 +15,11 @@ use super::multi_worker::{
 use super::prompt_registry::WorkerLoadSnapshot;
 use super::single::PrefillCompletion;
 use crate::booking::SchedulerBookingDescriptor;
-use crate::prelude::{
+use crate::wire::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[derive(Default)]
 struct ReplicaBatchEffects {
@@ -53,7 +54,8 @@ impl ReplicaBatchEffects {
 }
 
 impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
-    /// Apply one decoded replica-sync batch and flush its deferred effects once.
+    /// Test hook: apply one decoded replica-sync batch and flush its deferred effects once.
+    #[cfg(any(test, feature = "testing"))]
     pub fn apply_replica_batch(&self, events: Vec<ActiveSequenceEvent>) {
         let mut effects = ReplicaBatchEffects::default();
         for event in events {

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::http::StatusCode;
+use dynamo_error::http::SanitizedError;
 use dynamo_llm::generate_format::{ErrorPhase, WorkerError};
-use dynamo_llm::http::service::{error::SanitizedError, metrics::*};
+use dynamo_llm::http::service::metrics::*;
 use dynamo_runtime::error::DynamoError;
 
 pub(super) fn classify(

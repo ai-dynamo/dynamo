@@ -55,7 +55,7 @@ use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
 fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
-    config.validate_config().map_err(PyValueError::new_err)
+    config.validate().map_err(PyValueError::new_err)
 }
 
 fn warn_overlap_score_weight_deprecated() {

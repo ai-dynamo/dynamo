@@ -430,6 +430,7 @@ pub struct WorkerInputView<'a> {
     load: Option<&'a [WorkerLoadInput]>,
     // Set only on the KV path, for a picker that declared RESIDENT_BLOCKS.
     resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    decode_progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
 }
 
 /// Where a picker's rows come from.
@@ -520,7 +521,8 @@ impl ScoredWorkerCandidate {
 impl<'a> WorkerCacheInput<'a> {
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
-    /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
+    /// Use `loadable_beyond(prefix)` for the blocks the engine can load after a worker's local
+    /// prefix; `hits_beyond(prefix)` also counts hits after a gap, which the engine cannot load.
     #[inline]
     pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
         self.snapshot.shared_hits
@@ -652,6 +654,7 @@ impl<'a> WorkerInputView<'a> {
             cache,
             load,
             resident_blocks,
+            decode_progress: None,
         }
     }
 
@@ -671,7 +674,27 @@ impl<'a> WorkerInputView<'a> {
             cache: None,
             load: None,
             resident_blocks: None,
+            decode_progress: None,
         }
+    }
+
+    pub(crate) fn with_decode_progress(
+        mut self,
+        progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        self.decode_progress = progress;
+        self
+    }
+
+    pub(crate) fn decode_progress_for_row(
+        self,
+        row: usize,
+    ) -> Option<dynamo_slot_tracker::host::DecodeProgress> {
+        let lookup = self.decode_progress?;
+        let PickerRows::Materialized { candidates, .. } = self.rows else {
+            return None;
+        };
+        lookup(candidates.get(row)?.worker)
     }
 
     /// Number of rows, equal to the length of [`Self::candidates`].

@@ -1,11 +1,18 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Public grammar diagnostics at the vLLM worker error boundary."""
+"""Safe validation diagnostics at the vLLM worker error boundary."""
 
 import asyncio
 
 import pytest
+from vllm.v1.engine.exceptions import EngineGenerateError
+
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.errors import (
+    _translate_vllm_client_errors,
+    uuid_image_cache_miss_error,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -222,3 +229,102 @@ def test_compiler_location_guard_uses_untruncated_diagnostic(error_name, prefix_
     public_error = vllm_client_error_to_public_error(error)
     assert isinstance(public_error, InvalidArgument)
     assert str(public_error) == "Invalid structured-output constraint"
+
+
+def test_direct_image_cache_miss_identifies_the_aligned_uuid_only_slot():
+    request = {
+        "multi_modal_data": {
+            "image_url": [
+                {"Url": "https://example.com/image?token=SECRET"},
+                {"UuidOnly": "SECRET-UUID"},
+            ]
+        },
+        "multi_modal_uuids": {"image_url": ["other-image", "SECRET-UUID"]},
+    }
+    error = uuid_image_cache_miss_error(
+        ValueError("Cache miss for image at index 1 but data is not provided."), request
+    )
+    assert isinstance(error, InvalidArgument)
+    assert "Resend the request" in str(error)
+    assert "same UUID" in str(error)
+    assert "SECRET" not in str(error)
+
+
+@pytest.mark.parametrize(
+    "message,slot,uuid",
+    [
+        ("Invalid sampling parameters", {"UuidOnly": "image-key"}, "image-key"),
+        (
+            "Cache miss for image at index 0 but data is not provided.",
+            {"Url": "https://example.com/image"},
+            "image-key",
+        ),
+        (
+            "Cache miss for image at index 1 but data is not provided.",
+            {"UuidOnly": "image-key"},
+            "image-key",
+        ),
+        (
+            "Cache miss for image at index 0 but data is not provided.",
+            {"UuidOnly": "image-key"},
+            "different-key",
+        ),
+    ],
+    ids=["unrelated-validation", "url-backed", "wrong-index", "different-uuid"],
+)
+def test_unrelated_errors_are_not_reported_as_uuid_cache_misses(message, slot, uuid):
+    request = {
+        "multi_modal_data": {"image_url": [slot]},
+        "multi_modal_uuids": {"image_url": [uuid]},
+    }
+    cause = ValueError(message)
+    wrapped = EngineGenerateError()
+    wrapped.__cause__ = cause
+    for error in (cause, wrapped):
+        assert uuid_image_cache_miss_error(error, request) is None
+
+
+def test_wrapped_server_failure_is_not_reported_as_a_cache_miss():
+    request = {
+        "multi_modal_data": {"image_url": [{"UuidOnly": "image-key"}]},
+        "multi_modal_uuids": {"image_url": ["image-key"]},
+    }
+    error = EngineGenerateError()
+    error.__cause__ = RuntimeError(
+        "Cache miss for image at index 0 but data is not provided."
+    )
+    assert uuid_image_cache_miss_error(error, request) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["direct", "wrapped"])
+@pytest.mark.parametrize("uuid_matches", [True, False], ids=["matching", "mismatched"])
+async def test_generator_translates_only_aligned_uuid_cache_misses(
+    wrapped, uuid_matches
+):
+    request = {
+        "multi_modal_data": {"image_url": [{"UuidOnly": "SECRET-UUID"}]},
+        "multi_modal_uuids": {
+            "image_url": ["SECRET-UUID" if uuid_matches else "other-image"]
+        },
+    }
+    cause = ValueError("Cache miss for image at index 0 but data is not provided.")
+    error = EngineGenerateError() if wrapped else cause
+    if wrapped:
+        error.__cause__ = cause
+
+    async def engine_output():
+        yield {"token_ids": [1]}
+        raise error
+
+    stream = _translate_vllm_client_errors(engine_output(), request)
+    assert await anext(stream) == {"token_ids": [1]}
+    if uuid_matches:
+        with pytest.raises(InvalidArgument, match="Resend.*same UUID") as rejected:
+            await anext(stream)
+        assert rejected.value.__cause__ is error
+        assert "SECRET" not in str(rejected.value)
+    else:
+        with pytest.raises(type(error)) as rejected:
+            await anext(stream)
+        assert rejected.value is error

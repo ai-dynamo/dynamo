@@ -6,7 +6,7 @@
 import re
 import sys
 from collections.abc import AsyncIterator
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from vllm.exceptions import (
     VLLMClientError,
@@ -14,7 +14,9 @@ from vllm.exceptions import (
     VLLMUnprocessableEntityError,
     VLLMValidationError,
 )
+from vllm.v1.engine.exceptions import EngineGenerateError
 
+from dynamo.common.constants import UUID_ONLY_VARIANT_KEY
 from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 ResponseT = TypeVar("ResponseT")
@@ -68,6 +70,7 @@ def _structured_output_message(exc: VLLMValidationError) -> str | None:
 
 async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
+    request: dict[str, Any] | None = None,
 ) -> AsyncIterator[ResponseT]:
     """Keep request-side vLLM errors client-visible on worker endpoints."""
     try:
@@ -75,6 +78,48 @@ async def _translate_vllm_client_errors(
             yield chunk
     except VLLMClientError as exc:
         raise vllm_client_error_to_http_error(exc) from exc
+    except (ValueError, EngineGenerateError) as exc:
+        if request is not None:
+            if error := uuid_image_cache_miss_error(exc, request):
+                raise error from exc
+        raise
+
+
+_IMAGE_CACHE_MISS = re.compile(
+    r"Cache miss for (?:image|vision_chunk) at index ([0-9]{1,10}) but data is not provided\."
+)
+
+
+def uuid_image_cache_miss_error(
+    exc: ValueError | EngineGenerateError, request: dict[str, Any]
+) -> InvalidArgument | None:
+    # vLLM 0.33 wraps processor ValueErrors in EngineGenerateError. Keep this
+    # adapter at the engine boundary until vLLM exposes a typed cache miss.
+    cause = exc.__cause__ if isinstance(exc, EngineGenerateError) else exc
+    if type(cause) is not ValueError:
+        return None
+    match = _IMAGE_CACHE_MISS.fullmatch(str(cause))
+    if match is None:
+        return None
+    index = int(match[1])
+    images = (request.get("multi_modal_data") or {}).get("image_url") or []
+    uuids = (request.get("multi_modal_uuids") or {}).get("image_url") or []
+    if index >= len(images) or index >= len(uuids):
+        return None
+    image = images[index]
+    if (
+        not isinstance(image, dict)
+        or len(image) != 1
+        or not isinstance(uuids[index], str)
+        or not uuids[index]
+        or image.get(UUID_ONLY_VARIANT_KEY) != uuids[index]
+    ):
+        return None
+    return InvalidArgument(
+        "Cached image is unavailable on this worker. Resend the request with the "
+        "image URL or inline image data and the same UUID; UUID-only reuse "
+        "requires the image to be cached on every worker that processes the image."
+    )
 
 
 def vllm_client_error_to_http_error(
@@ -84,7 +129,6 @@ def vllm_client_error_to_http_error(
     if isinstance(exc, VLLMValidationError):
         if message := _structured_output_message(exc):
             return InvalidArgument(message)
-
     if isinstance(exc, VLLMUnprocessableEntityError):
         status_code = 422
     elif isinstance(exc, VLLMNotFoundError):

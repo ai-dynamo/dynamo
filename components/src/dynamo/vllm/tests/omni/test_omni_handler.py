@@ -1248,11 +1248,12 @@ class TestI2VEngineInputs:
             "input_reference": f"data:image/png;base64,{encoded}",
         }
 
-        with pytest.raises(InvalidArgument) as excinfo:
+        with pytest.raises(HttpStatusError) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pytest.fail("Invalid reference must not yield a video response")
 
-        assert str(excinfo.value) == "Failed to load input_reference"
+        assert excinfo.value.status == 413
+        assert excinfo.value.message == "Image exceeds the decoded pixel limit"
         assert isinstance(excinfo.value.__cause__, Image.DecompressionBombError)
         handler.engine_client.generate.assert_not_called()
 

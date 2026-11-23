@@ -46,7 +46,10 @@ from .structural_tag_policy import (
     effective_tool_strict,
     should_attempt_structural_tag,
 )
-from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .thinking import (
+    apply_default_thinking_mode_to_template_kwargs,
+    glm_prompt_reasoning_open,
+)
 from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
 logger = logging.getLogger(__name__)
@@ -196,7 +199,7 @@ def _client_wants_separate_reasoning(request: dict[str, Any]) -> bool:
     Matches sglang's ChatCompletionRequest.separate_reasoning: a client
     sending ``separate_reasoning=False`` asks for thinking text to land in
     ``delta.content`` instead of ``delta.reasoning_content``. We implement
-    that by skipping reasoning-parser creation entirely for the request.
+    that without disabling the boundary needed for forced tool calls.
     """
     value = request.get("separate_reasoning", True)
     if isinstance(value, bool):
@@ -204,6 +207,23 @@ def _client_wants_separate_reasoning(request: dict[str, Any]) -> bool:
     if isinstance(value, str):
         return value.lower() not in ("0", "false", "no", "off")
     return bool(value)
+
+
+def _effective_reasoning_parser_name(
+    request: dict[str, Any], parser_name: str | None, force_reasoning: bool
+) -> str | None:
+    """Keep a tool response's reasoning boundary even when reasoning is content."""
+    tool_choice = request.get("tool_choice", "auto")
+    needs_tool_boundary = (
+        force_reasoning
+        and bool(request.get("tools"))
+        and (tool_choice == "required" or _is_named_tool_choice(tool_choice))
+    )
+    return (
+        parser_name
+        if _client_wants_separate_reasoning(request) or needs_tool_boundary
+        else None
+    )
 
 
 def convert_tools(
@@ -313,14 +333,17 @@ def create_parsers(
     Shared by both the single-process preprocessing path and the pool path
     (which must recreate non-picklable parsers in the main process).
 
-    If ``sglang_tools`` is provided, reuses them; otherwise converts from
-    the request's ``tools`` field.
+    Output recognition uses the declared catalog when ``allowed_tools``
+    restricts generation. This lets the HTTP allowlist reject a parsed call
+    to a declared tool outside the subset.
 
     Required and named choices use the model-specific :class:`FunctionCallParser`
     when the effective guidance is a structural tag. Their JSON fallback keeps
     :class:`JsonArrayParser`. Automatic choices use :class:`FunctionCallParser`.
     """
-    if sglang_tools is None:
+    if catalog := request.get("chat_template_tools"):
+        sglang_tools = convert_tools(catalog)
+    elif sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
     tool_choice = request.get("tool_choice", "auto")
 
@@ -801,9 +824,6 @@ def preprocess_chat_request(
         reasoning_parser_name,
         template_force_reasoning,
     )
-    effective_reasoning_parser_name = (
-        reasoning_parser_name if _client_wants_separate_reasoning(request) else None
-    )
 
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
@@ -834,9 +854,10 @@ def preprocess_chat_request(
             "structural_tag response format"
         )
 
+    catalog = request.get("chat_template_tools")
     template_tools = _filter_template_tools(
         request,
-        sglang_tools=sglang_tools,
+        sglang_tools=convert_tools(catalog) if catalog else sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         filter_named_choice=not kimi_k3_bridge,
     )
@@ -847,6 +868,27 @@ def preprocess_chat_request(
         template_tools=template_tools,
         resolved_responses_template=resolved_responses_template,
     )
+    # A known GLM prompt state overrides the thinking flags, as in the Rust
+    # preprocessor; the request's template kwargs stay as rendered.
+    if _normalize_sglang_parser_name(reasoning_parser_name) == "glm45":
+        template_kwargs = (
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        glm_open = glm_prompt_reasoning_open(
+            prompt_token_ids,
+            tokenizer,
+            # The renderer always adds a generation prompt unless the template
+            # kwargs override it, and has no continue_final_message mode.
+            add_generation_prompt=template_kwargs.get("add_generation_prompt", True)
+            is not False,
+            continue_final_message=bool(
+                template_kwargs.get("continue_final_message", False)
+            ),
+        )
+        if glm_open is not None:
+            force_reasoning = glm_open
 
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
@@ -907,7 +949,9 @@ def preprocess_chat_request(
     tool_call_parser, reasoning_parser = create_parsers(
         request,
         tool_call_parser_name=tool_call_parser_name,
-        reasoning_parser_name=effective_reasoning_parser_name,
+        reasoning_parser_name=_effective_reasoning_parser_name(
+            request, reasoning_parser_name, force_reasoning
+        ),
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
         guided_decoding=guided_decoding,
@@ -1054,10 +1098,12 @@ class SglangStreamingPostProcessor:
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
         guided_json_is_content: bool = False,
+        separate_reasoning: bool = True,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
+        self._separate_reasoning = separate_reasoning
         self.history_tool_calls_count = history_tool_calls_count
         self._sglang_tools = sglang_tools or []
         self._tool_call_parser_name = _normalize_sglang_parser_name(
@@ -1568,17 +1614,16 @@ class SglangStreamingPostProcessor:
             return None, ""
 
         self._pending_guided_reasoning_parts = None
-        if finish_reason and _try_parse_json_array(buffered) is not None:
-            return None, buffered
-
         if finish_reason and stripped and stripped[0] in "[{" and not starts_reasoning:
-            reasoning_text, normal_text = self.reasoning_parser.parse_non_stream(
-                buffered
-            )
-        else:
-            reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(
-                buffered
-            )
+            # Accept only a complete bare JSON value. Substring recovery can
+            # turn a tool-shaped array inside reasoning into an actual call.
+            try:
+                json.loads(buffered)
+            except json.JSONDecodeError:
+                pass
+            else:
+                return None, buffered
+        reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(buffered)
         return reasoning_text or None, normal_text or ""
 
     def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
@@ -1950,7 +1995,10 @@ class SglangStreamingPostProcessor:
             delta["content"] = content_text
             has_content = True
         if reasoning_text:
-            delta["reasoning_content"] = reasoning_text
+            if self._separate_reasoning:
+                delta["reasoning_content"] = reasoning_text
+            else:
+                delta["content"] = reasoning_text + (delta.get("content") or "")
             has_content = True
 
         # On finish, re-parse the full accumulated text to recover tool
@@ -2119,7 +2167,7 @@ class SglangStreamingPostProcessor:
                 # so restore it when no zero-argument tool call was recovered.
                 fallback_content = "".join(self._tool_text_parts)
                 if fallback_content.strip() != "{}":
-                    delta["content"] = fallback_content
+                    delta["content"] = (delta.get("content") or "") + fallback_content
                     has_content = True
 
         if finish_reason and self._tool_call_names:

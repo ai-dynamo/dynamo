@@ -295,20 +295,6 @@ impl LocalKvIndexer {
         )
     }
 
-    /// Construct a local indexer with a delegate for its primary device index.
-    pub fn new_with_delegate(
-        token: CancellationToken,
-        kv_block_size: u32,
-        metrics: Arc<KvIndexerMetrics>,
-        max_buffer_size: usize,
-        delegate: Arc<dyn super::KvIndexerDelegate>,
-    ) -> Self {
-        let indexer = KvIndexer::builder(token, kv_block_size, metrics.clone())
-            .delegate(delegate)
-            .build();
-        Self::from_primary(indexer, metrics, max_buffer_size)
-    }
-
     fn from_primary(
         indexer: KvIndexer,
         metrics: Arc<KvIndexerMetrics>,

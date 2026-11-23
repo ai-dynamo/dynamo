@@ -363,6 +363,15 @@ type RecommendationSpec struct {
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
 }
 
+// RerunSpec records explicit intent to create another Run without changing search inputs.
+type RerunSpec struct {
+	// Reason records why the user requested another Run. Changing this value creates a new
+	// Request generation and the value is frozen into that generation's immutable Run.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Reason string `json:"reason"`
+}
+
 // OverridesSpec patches the generated deployment independently for every selected Candidate.
 type OverridesSpec struct {
 	// DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
@@ -436,6 +445,12 @@ type NativeSearchInput struct {
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
 
+	// Rerun intentionally creates a new Request generation when the search inputs otherwise
+	// remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry
+	// the same immutable Run.
+	// +optional
+	Rerun *RerunSpec `json:"rerun,omitempty"`
+
 	// Overrides customizes the generated DGD without changing AISimulate execution.
 	// +optional
 	Overrides *OverridesSpec `json:"overrides,omitempty"`
@@ -449,7 +464,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.rerun) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
@@ -509,6 +524,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta1) || has(self.status.observedGeneration) || has(self.status.activeRunRef) || has(self.status.recentRunRefs) || has(self.status.conditions)) || has(self.spec.v1beta1) == has(self.status.v1beta1)",message="nonempty status must use the representation selected by spec"
 
 // DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+// Available without a feature gate. This API is not feature complete.
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

@@ -51,12 +51,6 @@ impl WorkerCapacitySnapshot {
         self.capacities.keys().any(|&worker| self.is_live(worker))
     }
 
-    pub(crate) fn has_live_worker(&self) -> bool {
-        self.live_workers
-            .as_ref()
-            .is_none_or(|workers| !workers.is_empty())
-    }
-
     pub(crate) fn is_live(&self, worker: WorkerWithDpRank) -> bool {
         self.live_workers
             .as_ref()

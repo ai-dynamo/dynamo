@@ -40,10 +40,10 @@ dynamo:
   planner_build_image: python
   planner_build_image_tag: 3.13.18-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.10
+  planner_runtime_image_tag: 3.13-v4.2.1
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@c718fc95
+  planner_baseline_sbom: python@794a5902
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -61,10 +61,10 @@ dynamo:
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.13.5"
-  go_version: "1.27.3"
+  go_version: "1.27.4"
 
-  nats_version: v2.14.8
-  nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
+  nats_version: v2.14.9
+  nats_commit: 9ece5884153a3e39a3904d53210b9b8b26dd7364
   etcd_version: v3.5.35
   etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
@@ -85,7 +85,7 @@ dynamo:
   # wheel vendors. Keep in sync with native_packages.yaml's ffmpeg entry and with
   # the ffmpeg-next/video-rs pins in lib/llm/Cargo.toml, which track the FFmpeg
   # major.
-  ffmpeg_version: "9.0.1"
+  ffmpeg_version: "9.0.2"
   # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
@@ -196,10 +196,11 @@ sglang:
   modelexpress_version: "0.7.0"
 
 trtllm:
-  cuda13.1:
+  cuda13.4:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
-    base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
+    # Keep on the cuda-dl-base release whose CUDA matches the runtime image (13.4.1 in 1.4.0rc3).
+    base_image_tag: 26.09-cuda13.4-devel-ubuntu24.04
     runtime_image_tag: 1.4.0rc3
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
     baseline_sbom: release@aa9c10c5
@@ -220,6 +221,6 @@ triton:
     # The wheels load CUDA dynamically, so they run on the 13.4 runtime image regardless.
     # Matches trtllm's base_image_tag so Triton reuses the trtllm BuildKit pool cache (route_buildkit.sh); if it diverges, route Triton back to general.
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 26.09-py3
+    runtime_image_tag: 26.11-py3
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

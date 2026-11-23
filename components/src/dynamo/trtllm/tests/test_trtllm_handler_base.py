@@ -38,6 +38,7 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
+    _abort_unless_finished,
 )
 from dynamo.trtllm.utils.disagg_utils import TRTLLM_HAS_ORIG_ELAPSED_S
 
@@ -1085,6 +1086,263 @@ class TestGenerateLocally:
         ]
 
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.multimodal
+    async def test_audio_inputs_reach_generate_async(self):
+        handler = self._make_handler()
+        audio = object()
+        handler.multimodal_processor = MagicMock()
+        handler.multimodal_processor.process_openai_request = mock.AsyncMock(
+            return_value={
+                "prompt": "<|audio|> Transcribe this",
+                "multi_modal_data": {"audio": [(audio, 16000)]},
+            }
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+
+        request = {
+            "token_ids": [1],
+            "multi_modal_data": {"audio_url": [{"Url": "data:audio/wav;base64,AA=="}]},
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks
+        inputs = handler.engine.llm.generate_async.call_args.kwargs["inputs"]
+        assert inputs["multi_modal_data"]["audio"] == [(audio, 16000)]
+        assert inputs["prompt"] == "<|audio|> Transcribe this"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        (
+            "mode",
+            "max_tokens",
+            "engine_steps",
+            "expected_tokens",
+            "expected_finish",
+            "expected_stop_reason",
+            "logprob_kind",
+        ),
+        [
+            # TensorRT-LLM 1.4.0rc2 imports the prefill token without a length
+            # check and then samples one more token.
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11],
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11, 12], "stop", 12)],
+                [11],
+                "length",
+                None,
+                "dict",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                2,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11, 12],
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                8,
+                [([11], None, None), (list(range(11, 19)), "length", None)],
+                list(range(11, 19)),
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.AGGREGATED,
+                1,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11, 12],
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                2,
+                [([11], None, None), ([11, 12], "stop", 12)],
+                [11, 12],
+                "stop",
+                12,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11, 12], "stop", 12)],
+                [11],
+                "length",
+                None,
+                "dict-missing-discarded",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [
+                    ([11], None, None),
+                    ([11, 12], None, None),
+                    ([11, 12, 13], "stop", 13),
+                ],
+                [11],
+                "length",
+                None,
+                "dict",
+            ),
+        ],
+        ids=[
+            "decode-1-extra-step",
+            "decode-1-stop-cut-off",
+            "decode-2",
+            "decode-8",
+            "aggregated-not-capped",
+            "decode-2-stop-at-cap",
+            "decode-1-missing-discarded-logprob",
+            "decode-1-drain-extra-steps",
+        ],
+    )
+    async def test_generation_only_output_is_capped_at_max_tokens(
+        self,
+        mode,
+        max_tokens,
+        engine_steps,
+        expected_tokens,
+        expected_finish,
+        expected_stop_reason,
+        logprob_kind,
+        monkeypatch,
+        caplog,
+    ):
+        """Cap decode output without finishing before the engine or losing logprobs."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base._decode_token_cap_warned",
+            False,
+        )
+        handler = self._make_handler()
+        handler.disaggregation_mode = mode
+        params = (
+            SimpleNamespace(request_type="generation_only", disagg_request_id=None)
+            if mode == DisaggregationMode.DECODE
+            else None
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+
+        results = []
+        for token_ids, finish_reason, stop_reason in engine_steps:
+            output = MagicMock()
+            output.index = 0
+            output.token_ids = token_ids
+            if logprob_kind == "flat":
+                output.logprobs = [-0.5] * len(token_ids)
+            else:
+                output.logprobs = [
+                    {
+                        token_id: SimpleNamespace(
+                            logprob=-0.5, rank=1, decoded_token=str(token_id)
+                        )
+                    }
+                    for token_id in token_ids
+                ]
+                if logprob_kind == "dict-missing-discarded":
+                    output.logprobs[-1] = None
+            output.finish_reason = finish_reason
+            output.stop_reason = stop_reason
+            output.request_perf_metrics = None
+            output.prompt_logprobs = []
+            res = MagicMock()
+            res.outputs = [output]
+            res.finished = finish_reason is not None
+            res.cached_tokens = None
+            results.append(res)
+
+        generation_result = MagicMock()
+        generation_result.finished = False
+        consumed = []
+
+        async def mock_aiter(self_mock):
+            """Record engine steps and set completion before yielding its final output."""
+            for res in results:
+                consumed.append(res)
+                generation_result.finished = res.finished
+                yield res
+
+        generation_result.__aiter__ = mock_aiter
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": max_tokens},
+            "sampling_options": {},
+            "output_options": {"logprobs": 0},
+        }
+        context = self._make_context()
+        chunks = []
+        with caplog.at_level(logging.WARNING):
+            async for chunk in handler.generate_locally(request, context):
+                chunks.append(chunk)
+                if "finish_reason" in chunk:
+                    assert generation_result.finished
+                    assert len(consumed) == len(engine_steps)
+                    # A client disconnect after the terminal chunk must not abort.
+                    _abort_unless_finished(generation_result, context.id())
+
+        assert [t for c in chunks for t in c["token_ids"]] == expected_tokens
+        assert [lp for c in chunks for lp in c.get("log_probs", [])] == [-0.5] * len(
+            expected_tokens
+        )
+        if logprob_kind != "flat":
+            assert [
+                entry[0]["token_id"]
+                for c in chunks
+                for entry in c.get("top_logprobs", [])
+            ] == expected_tokens
+        assert chunks[-1]["finish_reason"] == expected_finish
+        assert chunks[-1].get("stop_reason") == expected_stop_reason
+        assert chunks[-1]["completion_usage"]["completion_tokens"] == len(
+            expected_tokens
+        )
+        assert sum("finish_reason" in c for c in chunks) == 1
+        # The engine must run to completion so the KV transfer finishes.
+        assert len(consumed) == len(engine_steps)
+        generation_result.abort.assert_not_called()
+        cap_warnings = [
+            record
+            for record in caplog.records
+            if "Clamping TensorRT-LLM decode output" in record.message
+        ]
+        overshot = mode == DisaggregationMode.DECODE and any(
+            len(tokens) > max_tokens for tokens, _, _ in engine_steps
+        )
+        assert len(cap_warnings) == int(overshot)
+        if overshot:
+            assert context.id() in cap_warnings[0].message
+            first_overshoot = next(
+                len(tokens) for tokens, _, _ in engine_steps if len(tokens) > max_tokens
+            )
+            assert f"{first_overshoot} tokens exceed max_tokens={max_tokens}" in (
+                cap_warnings[0].message
+            )
 
     @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):

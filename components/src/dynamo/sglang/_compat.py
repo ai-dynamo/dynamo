@@ -197,13 +197,13 @@ def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None
     prefill = getattr(resolved, "dsa_prefill_backend", None)
     decode = getattr(resolved, "dsa_decode_backend", None)
     if any(
-        kernel is not None and kernel not in {"trtllm", "flashmla_kv"}
+        kernel is not None and kernel not in {"trtllm", "flashmla_kv", "prims_ts"}
         for kernel in (prefill, decode)
     ):
         return False
     if prefill is not None and decode is not None and prefill != decode:
         return False
-    # K3.1's sharded DCP path adds FlashMLA and Rubin TRT-LLM support.
+    # K3.1's sharded DCP path adds FlashMLA, Prims-TS and Rubin TRT-LLM support.
     model_config = get_sglang_model_config(server_args)
     hf_config = getattr(model_config, "hf_config", None)
     kimi_k31 = "KimiK31ForConditionalGeneration" in (
@@ -211,10 +211,17 @@ def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None
     )
     sharded = kimi_k31 and _sglang_has_dsa_dcp_module(_SGLANG_DSA_SHARDED_DCP_MODULE)
     if not sharded:
-        if "flashmla_kv" in (prefill, decode):
+        if {"flashmla_kv", "prims_ts"} & {prefill, decode}:
             return False
         if sglang_get_platform().device_sm not in (100, 103):
             return False
+    elif "prims_ts" in (prefill, decode) and sglang_get_platform().device_sm not in (
+        100,
+        103,
+        107,
+    ):
+        # SGLang checks the Prims-TS GPU only at backend init.
+        return False
     # K3.1's native validator owns its model-specific platform constraints.
     if prefill is None or decode is None:
         return None
@@ -556,6 +563,35 @@ def kv_events_config_with_dynamo_format(kv_events_config: str | None) -> str | N
         return kv_events_config
     config["format"] = "dynamo"
     return json.dumps(config)
+
+
+@lru_cache(maxsize=32)
+def _dp_rank_keyword(async_generate: Any) -> str:
+    try:
+        param = inspect.signature(async_generate).parameters.get("routed_dp_rank")
+    except (TypeError, ValueError):
+        param = None
+    if param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    ):
+        return "routed_dp_rank"
+    # Compatibility with engines predating SGLang #19268 and opaque wrappers.
+    # Remove this adapter when all supported engines accept routed_dp_rank.
+    return "data_parallel_rank"
+
+
+def routed_dp_rank_kwargs(engine: Any, dp_rank: int | None) -> dict[str, int]:
+    """Pass a selected DP rank using the engine's keyword spelling."""
+    if dp_rank is None:
+        return {}
+    method = engine.async_generate
+    signature_source = getattr(method, "__func__", method)
+    try:
+        keyword = _dp_rank_keyword(signature_source)
+    except TypeError:  # Unhashable callable: inspect it without caching.
+        keyword = _dp_rank_keyword.__wrapped__(signature_source)
+    return {keyword: dp_rank}
 
 
 def prefill_dp_rank_kwargs(engine: Any, prefill_dp_rank: Any) -> dict[str, Any]:
