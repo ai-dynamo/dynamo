@@ -10,34 +10,10 @@ use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-struct TrackerFinishGuard {
-    tracker: Option<Arc<RequestTracker>>,
-}
-
-impl TrackerFinishGuard {
-    fn new(tracker: Option<Arc<RequestTracker>>) -> Self {
-        Self { tracker }
-    }
-
-    fn observe(&mut self) {
-        if let Some(tracker) = self.tracker.take() {
-            tracker.observe_finish_gauges();
-        }
-    }
-}
-
-impl Drop for TrackerFinishGuard {
-    fn drop(&mut self) {
-        self.observe();
-    }
-}
-
 struct KvDemandStream {
     stream: Option<rs::pipeline::EngineStream<RsAnnotated<LLMEngineOutput>>>,
     tracker: Option<Arc<RequestTracker>>,
-    finish_guard: TrackerFinishGuard,
     first_item: bool,
-    first_token_gauges_observed: bool,
     finished: bool,
 }
 
@@ -48,10 +24,8 @@ impl KvDemandStream {
     ) -> Self {
         Self {
             stream: Some(stream),
-            finish_guard: TrackerFinishGuard::new(tracker.clone()),
             tracker,
             first_item: true,
-            first_token_gauges_observed: false,
             finished: false,
         }
     }
@@ -64,20 +38,6 @@ impl KvDemandStream {
             self.first_item = false;
             if let (Some(tracker), Some(data)) = (&self.tracker, &mut response.data) {
                 inject_worker_id_from_tracker(data, tracker);
-            }
-        }
-
-        if !self.first_token_gauges_observed {
-            let has_tokens = response
-                .data
-                .as_ref()
-                .map(|data| !data.token_ids.is_empty())
-                .unwrap_or(false);
-            if has_tokens {
-                if let Some(ref tracker) = self.tracker {
-                    tracker.observe_first_token_gauges();
-                }
-                self.first_token_gauges_observed = true;
             }
         }
 
@@ -100,7 +60,6 @@ impl KvDemandStream {
         if terminal || response.is_error() {
             self.finished = true;
             self.stream.take();
-            self.finish_guard.observe();
         }
 
         response
@@ -126,7 +85,6 @@ impl Stream for KvDemandStream {
             Poll::Ready(Some(response)) => Poll::Ready(Some(this.process_response(response))),
             Poll::Ready(None) => {
                 this.finished = true;
-                this.finish_guard.observe();
                 Poll::Ready(None)
             }
         }
