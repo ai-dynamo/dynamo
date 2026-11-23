@@ -1537,7 +1537,7 @@ arrays. For example, this override deletes the lowered traffic configuration:
 spec:
   aisim:
     inputOverrides:
-      traffic: {$null: true}
+      traffic: null  # or equivalent {$null: true} for kubectl apply
 ```
 
 The typed `persistentVolumeClaim` source alone decides which claim the Run's Job mounts and which
