@@ -202,7 +202,7 @@ and list every location. Put findings about names, types, units, labels, stabili
 unbounded series first, because they are hardest to change after release. For example:
 
 ```text
-lib/llm/src/http/service/metrics.rs:1412 (N2, N3)
+lib/http-server/src/metrics.rs:1412 (N2, N3)
 Problem: new IntCounterVec "prefill_wait_ms" exports dynamo_frontend_prefill_wait_ms{model}.
 Consequence: the unit is not base form and the counter has no _total, so rate() panels show
   milliseconds per second under a name that reads as a gauge; renaming after release breaks them.
