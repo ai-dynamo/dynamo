@@ -546,7 +546,19 @@ class EncoderImagePayload(ChatPayload):
         if not self.is_baseline:
             self._before = self._stage_counts(require_present=False)
 
-    def validate(self, response: Any, content: str) -> None:
+    def process_response(self, response: Any) -> str:
+        if self.baseline_path is None:
+            raise ValueError("Missing aggregate baseline path")
+        observation = self._validate_observation(response, self.baseline_path)
+        content = self.response_handler(response)
+        self.validate(response, content)
+        if self.is_baseline:
+            self.baseline_path.write_text(json.dumps(observation))
+        return content
+
+    def _validate_observation(
+        self, response: Any, baseline_path: Path
+    ) -> dict[str, Any]:
         result = response.json()
         usage = result["usage"]
         if type(usage["prompt_tokens"]) is not int or usage["prompt_tokens"] <= 64:
@@ -560,15 +572,13 @@ class EncoderImagePayload(ChatPayload):
             raise ValueError(f"Inconsistent token usage: {usage!r}")
         if (usage.get("prompt_tokens_details") or {}).get("cached_tokens") != 0:
             raise ValueError(f"Expected uncached image request: {usage!r}")
-        if self.baseline_path is None:
-            raise ValueError("Missing aggregate baseline path")
         observation = {
             "request": {k: v for k, v in self.body.items() if k != "model"},
             "color": self.color,
             "usage": usage,
         }
         if not self.is_baseline:
-            if observation != json.loads(self.baseline_path.read_text()):
+            if observation != json.loads(baseline_path.read_text()):
                 raise ValueError(
                     f"EPD response differs from aggregate baseline: {observation!r}"
                 )
@@ -590,13 +600,14 @@ class EncoderImagePayload(ChatPayload):
                     raise ValueError(
                         f"Expected distinct prefill and decode workers: {workers!r}"
                     )
+        return observation
+
+    def validate(self, response: Any, content: str) -> None:
         # Only generated-content failures may retry; stage and usage failures are final.
         super().validate(response, content)
         colors = re.findall(r"\b(red|green)\b", content.lower())
         if not colors or colors[0] != self.color:
             raise AssertionError(content)
-        if self.is_baseline:
-            self.baseline_path.write_text(json.dumps(observation))
 
 
 @dataclass
