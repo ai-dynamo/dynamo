@@ -562,11 +562,7 @@ mod tests {
         )
     }
 
-    fn model_ready_value_with_name(
-        registry: &Registry,
-        metric_name: &str,
-        model: &str,
-    ) -> Option<f64> {
+    fn model_gauge_value(registry: &Registry, metric_name: &str, model: &str) -> Option<f64> {
         registry
             .gather()
             .into_iter()
@@ -583,7 +579,7 @@ mod tests {
     }
 
     fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
-        model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+        model_gauge_value(registry, &model_ready_metric_name(None), model)
     }
 
     #[test]
@@ -664,7 +660,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            model_ready_value_with_name(
+            model_gauge_value(
                 &custom_registry,
                 "custom_frontend_model_ready",
                 "test-model"
@@ -721,7 +717,7 @@ mod tests {
             ("dynamo_frontend_model_migration_limit", 3.0),
         ] {
             assert_eq!(
-                model_ready_value_with_name(&registry, name, "test-model"),
+                model_gauge_value(&registry, name, "test-model"),
                 Some(expected),
                 "{name}"
             );
