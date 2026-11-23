@@ -245,10 +245,11 @@ mod tests {
             Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
             Ok(Frame::trailers(trailers.clone())),
         ]);
-        let mut body = InflightResponseBody {
-            body: Body::new(StreamBody::new(frames)),
-            _permit: observer.acquire_inflight(),
-        };
+        let mut body = track_inflight_response(
+            Response::new(Body::new(StreamBody::new(frames))),
+            observer.acquire_inflight(),
+        )
+        .into_body();
 
         assert_eq!(body.size_hint().exact(), None);
         assert!(!body.is_end_stream());
