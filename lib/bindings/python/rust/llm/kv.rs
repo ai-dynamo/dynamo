@@ -286,6 +286,11 @@ struct KvIndexerCli {
     #[arg(long)]
     engine_owned_mm_identity: bool,
 
+    /// Initial workers registered via --workers send one remove per block however
+    /// many times they stored it (SGLang), so repeated stores are not counted
+    #[arg(long)]
+    idempotent_stores: bool,
+
     /// Legacy compatibility input; accepted but ignored
     #[arg(long = "tenant-id", default_value = "default", hide = true)]
     _tenant_id: String,
@@ -336,6 +341,7 @@ where
             model_name: cli.model_name,
             routing_group: cli.routing_group,
             engine_owned_mm_identity: cli.engine_owned_mm_identity,
+            idempotent_stores: cli.idempotent_stores,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -2362,27 +2368,12 @@ impl KvRouter {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
-                let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
                     if first_item {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
                             inject_worker_id_from_tracker(data, tracker);
-                        }
-                    }
-
-                    if !first_token_gauges_observed {
-                        let has_tokens = response
-                            .data
-                            .as_ref()
-                            .map(|d| !d.token_ids.is_empty())
-                            .unwrap_or(false);
-                        if has_tokens {
-                            if let Some(ref tracker) = tracker {
-                                tracker.observe_first_token_gauges();
-                            }
-                            first_token_gauges_observed = true;
                         }
                     }
 
@@ -2409,10 +2400,6 @@ impl KvRouter {
                     if is_error {
                         break;
                     }
-                }
-
-                if let Some(ref tracker) = tracker {
-                    tracker.observe_finish_gauges();
                 }
             });
 

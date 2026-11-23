@@ -5,8 +5,8 @@
 //!
 //! The crate holds the radix trees (`radix_tree`, `positional`, the concurrent compressed
 //! tree), the thread-pool and branch-sharded wrappers, `KvIndexer` and `LocalKvIndexer`,
-//! approximate LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the hash
-//! lifecycle delegate (`delegate`), the indexer counters (`metrics`), the residency
+//! approximate LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the
+//! indexer counters (`metrics`), the residency
 //! projection (`residency`), overlap scores (`overlap`), KV transfer candidates (`kv_hints`),
 //! the lower-tier continuation index with its per-tier registry, the ingest backend
 //! (`backend`, `lookup`, `recording`, `session_updates`), the session prefix index, the
@@ -61,7 +61,6 @@ mod compressed_radix;
 mod concurrent_radix_tree_compressed;
 mod config;
 pub mod cuckoo;
-mod delegate;
 pub mod host;
 mod identity;
 mod kv_hints;
@@ -93,8 +92,6 @@ mod thread_pool;
 mod traits;
 mod types;
 
-#[cfg(test)]
-mod delegate_tests;
 #[cfg(test)]
 mod local_tests;
 #[cfg(test)]
@@ -146,7 +143,6 @@ pub use branch_sharded::AnchorAwareBranchShardedIndexer;
 pub use branch_sharded::BranchShardedIndexer;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{ApproximateCachePolicyKind, IndexerConfig};
-pub use delegate::{HashLifecycle, KvIndexerDelegate};
 pub use identity::{
     CanonicalIdentityMaterial, ExplicitIdentityMap, IdentitySpecError, IndexerIdentitySpec,
     MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
@@ -156,7 +152,7 @@ pub use kv_hints::{
     CacheOwnerKvTransferKeys, KvTransferCandidateSource, KvTransferCandidates,
     KvTransferSourceInterval, label_key, topology_keys,
 };
-pub use kv_indexer::{KvEventSender, KvIndexer, KvIndexerBuilder};
+pub use kv_indexer::{KvEventSender, KvIndexer};
 pub use local::LocalKvIndexer;
 pub use lookup::HashInput;
 pub use lower_tier::{

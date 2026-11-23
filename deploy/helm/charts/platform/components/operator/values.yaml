@@ -56,14 +56,7 @@ lpx:
   modelRegistryURL: ""
 
 dgdrV1Beta2:
-  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
-  # Request API with conversion and install the Run and Candidate APIs. Run and
-  # Candidate objects are persisted in etcd; incompatible schema changes may make
-  # them unreadable or block future CRD upgrades. When false, the CRD init container
-  # installs the legacy Request schemas without v1beta2 conversion envelopes and
-  # omits Run and Candidate. When true, the operator reconciles v1beta2
-  # Requests into Runs and executes each Run as an AISimulate planner Job with
-  # a publisher sidecar that persists deployment Candidates.
+  # -- Legacy prerequisite for Planner live-retune RBAC. This does not gate DGDR v1beta2 API availability.
   enabled: false
   # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
   # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:

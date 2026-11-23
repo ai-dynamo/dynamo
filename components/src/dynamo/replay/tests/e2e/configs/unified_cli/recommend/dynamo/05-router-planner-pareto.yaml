@@ -25,6 +25,7 @@ engine:
       timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
 router:
   policy: kv_router
+  # No ais_perf_model on purpose: this case keeps the old form, which warns.
   prefill_load_model: {type: ais}
   overlap_score_credit: {choices: [0.5, 1.0]}
   prefill_load_scale: {choices: [0.5, 1.0, 2.0]}

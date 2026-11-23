@@ -12,9 +12,9 @@ The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream NVIDIA Tensor
 
 ```yaml
 trtllm:
-  cuda13.1:
+  cuda13.4:
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
-    runtime_image_tag: 1.3.0rc14
+    runtime_image_tag: 1.4.0rc3
 ```
 
 For `--target=runtime` (the focus of this guide), `container/render.py` emits a stage that:
@@ -31,11 +31,11 @@ The upstream `nvcr.io/nvidia/tensorrt-llm/release` image ships a multi-arch mani
 
 ```bash
 # On an x86_64 host:
-python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.4
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 
 # On an arm64 host (Grace, arm64 EC2, etc.):
-python container/render.py --framework=trtllm --target=runtime --platform=linux/arm64 --output-short-filename --cuda-version=13.1
+python container/render.py --framework=trtllm --target=runtime --platform=linux/arm64 --output-short-filename --cuda-version=13.4
 docker buildx build --platform=linux/arm64 -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 ```
 
@@ -50,7 +50,7 @@ Run the resulting image:
 To pick up a different upstream TRT-LLM release (newer rc tag, a hotfix tag, etc.) without editing `context.yaml`, override the runtime image ARGs at `docker build` time:
 
 ```bash
-python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.4
 docker build --pull \
   --build-arg RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
   --build-arg RUNTIME_IMAGE_TAG=<your-tag> \
@@ -75,7 +75,7 @@ Dynamo no longer builds TensorRT-LLM itself. If you need a custom TRT-LLM build 
 3. Render and build the Dynamo image against your custom base:
 
    ```bash
-   python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+   python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.4
    docker build \
      --build-arg RUNTIME_IMAGE=my-registry/tensorrt-llm \
      --build-arg RUNTIME_IMAGE_TAG=<commit-sha> \

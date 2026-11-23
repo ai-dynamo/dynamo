@@ -20,6 +20,12 @@ engine:
 router:
   policy: kv_router
   prefill_load_model: {type: ais}
+  # The engine has fixed timing and no perf model to share, so the router's is written here.
+  ais_perf_model:
+    model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+    system: h200_sxm
+    backend: vllm
+    worker_type: aggregated
   overlap_score_credit: 1.0
   prefill_load_scale: 1.0
   temperature: 0.0
