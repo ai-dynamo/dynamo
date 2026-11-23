@@ -4,9 +4,7 @@
 """DcgmActuator identity map with one GPU that NVML cannot query.
 
 NVML documents NVML_ERROR_GPU_IS_LOST for nvmlDeviceGetHandleByIndex and
-nvmlDeviceGetUUID when a GPU has fallen off the bus. The identity map walks
-every NVML index and caches only a complete map, so today one lost GPU makes
-list_running_pids raise for every GPU on every reconcile cycle.
+nvmlDeviceGetUUID when a GPU has fallen off the bus.
 """
 
 from __future__ import annotations
@@ -93,6 +91,23 @@ class TestIdentityMapWithLostGpu(unittest.TestCase):
         with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
             with self.assertRaises(RuntimeError):
                 actuator.list_running_pids(0)
+
+    def test_recovered_gpu_is_mapped_again(self):
+        actuator, modules, nvml = self._wire_lost_gpu(
+            [b"GPU-aaaa", b"GPU-bbbb"], [b"GPU-aaaa", b"GPU-bbbb"], lost_index=1
+        )
+        nvml.nvmlDeviceGetComputeRunningProcesses.return_value = [MagicMock(pid=42)]
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            with self.assertRaises(RuntimeError):
+                actuator.list_running_pids(1)
+            # The healthy GPU reads from the cached map: no new NVML walk.
+            builds = nvml.nvmlDeviceGetCount.call_count
+            self.assertEqual(actuator.list_running_pids(0), [42])
+            self.assertEqual(nvml.nvmlDeviceGetCount.call_count, builds)
+
+            # GPU 1 recovers: the next read for it rebuilds the map.
+            nvml.nvmlDeviceGetHandleByIndex.side_effect = lambda i: f"nvml_handle_{i}"
+            self.assertEqual(actuator.list_running_pids(1), [42])
 
 
 if __name__ == "__main__":

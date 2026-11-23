@@ -652,6 +652,9 @@ class DcgmActuator:
         # because DCGM may re-enumerate after the hostengine restart.
         self._dcgm_uuid_by_idx: Optional[list[str]] = None
         self._nvml_index_by_uuid: Optional[dict[str, int]] = None
+        # DCGM UUIDs left out of the map because NVML could not query
+        # their GPU when it was built. A lookup for one rebuilds the map.
+        self._unresolved_uuids: frozenset[str] = frozenset()
 
         # In-process restore identity snapshot. `_managed_gpu_indices` stores
         # the reconcile-loop integer index, but DCGM may re-enumerate after a
@@ -997,6 +1000,15 @@ class DcgmActuator:
             uuid = expected_uuid
         else:
             uuid = self._dcgm_uuid_by_idx[gpu_idx]
+        if uuid not in self._nvml_index_by_uuid and uuid in self._unresolved_uuids:
+            # NVML could not query this GPU when the map was built. Rebuild
+            # once in case it has recovered; the other GPUs keep their
+            # entries if it has not.
+            self._dcgm_uuid_by_idx = None
+            self._nvml_index_by_uuid = None
+            self._ensure_identity_map()
+            if expected_uuid is None:
+                uuid = self._dcgm_uuid_by_idx[gpu_idx]
         try:
             nvml_idx = self._nvml_index_by_uuid[uuid]
         except KeyError as err:
@@ -1081,7 +1093,9 @@ class DcgmActuator:
             nvml_index_by_uuid[uuid] = nvml_idx
 
         missing = [u for u in dcgm_uuids if u not in nvml_index_by_uuid]
+        unresolved: frozenset[str] = frozenset()
         if missing and len(missing) <= len(unreadable_nvml_indices):
+            unresolved = frozenset(missing)
             # Every DCGM UUID that NVML did not name can be one of the GPUs
             # NVML could not query, so this is not a disagreement about the
             # GPU set. Those GPUs fail on their own; the rest are mapped.
@@ -1108,6 +1122,7 @@ class DcgmActuator:
         # single-threaded today, but a future caller might not be).
         self._dcgm_uuid_by_idx = dcgm_uuids
         self._nvml_index_by_uuid = nvml_index_by_uuid
+        self._unresolved_uuids = unresolved
 
         logger.info(
             "DcgmActuator identity map built: %d GPUs reconciled "
