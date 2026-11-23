@@ -86,13 +86,12 @@ from tensorrt_llm.grpc.openengine.bindings import (
     SCHEMA_RELEASE, encoding_pb2, openengine_pb2
 )
 expected = Path(os.environ["TRTLLM_EPD_SCHEMA_REVISION_FILE"]).read_text().strip()
-service = openengine_pb2.DESCRIPTOR.services_by_name["Inference"]
-control = openengine_pb2.DESCRIPTOR.services_by_name["Control"]
+service = openengine_pb2.DESCRIPTOR.services_by_name["Encoder"]
 if (
     SCHEMA_RELEASE != expected
     or "Encode" not in service.methods_by_name
     or service.methods_by_name["Encode"].server_streaming
-    or "ReleaseEncodedMedia" not in control.methods_by_name
+    or "ReleaseEncodedMedia" not in service.methods_by_name
     or "encoded_media" not in encoding_pb2.EncodeResponse.DESCRIPTOR.fields_by_name
 ):
     raise RuntimeError("Install the matching native encoded-media TRT-LLM build")

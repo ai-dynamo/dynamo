@@ -419,6 +419,63 @@ async fn leader_monitor_rejects_restarted_native_engine() {
 }
 
 #[tokio::test]
+async fn follower_shutdown_cancels_initial_reconnect() {
+    use clap::Parser;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use tokio_util::sync::CancellationToken;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let args = crate::args::Args::try_parse_from([
+        "sidecar",
+        "--grpc-endpoint",
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "--model-path",
+        "model-source",
+    ])
+    .unwrap();
+    let drt = DistributedRuntime::new(
+        Runtime::from_current().unwrap(),
+        DistributedConfig::process_local(),
+    )
+    .await
+    .unwrap();
+    let node = crate::node::NodeMetadata {
+        version: 1,
+        engine_id: "engine".into(),
+        node_id: "follower".into(),
+        leader: false,
+        node_count: 2,
+        kv_block_size: 32,
+        local_dp_ranks: vec![],
+        source_owners: Default::default(),
+    };
+    let cancel = CancellationToken::new();
+    let relay = crate::headless::relay(
+        drt,
+        args,
+        node,
+        cancel.clone(),
+        RoutingSupervision::default(),
+    );
+    tokio::pin!(relay);
+    let (socket, _) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            connection = listener.accept() => connection.unwrap(),
+            result = &mut relay => panic!("relay ended before reconnect: {result:?}"),
+        }
+    })
+    .await
+    .expect("follower never attempted reconnect");
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(1), relay)
+        .await
+        .expect("follower must stop promptly")
+        .expect("clean cancellation");
+    drop(socket);
+}
+
+#[tokio::test]
 async fn sustained_metadata_outage_withdraws_worker() {
     let service = FakeTrtllm::default();
     service.kv_routing.store(true, Ordering::SeqCst);

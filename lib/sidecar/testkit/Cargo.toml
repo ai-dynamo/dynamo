@@ -12,6 +12,13 @@ repository.workspace = true
 description = "CPU-only test infrastructure for Dynamo sidecars"
 publish = false
 
+[features]
+integration = []
+
+[[test]]
+name = "trtllm_encoder"
+required-features = ["integration"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-stream = { workspace = true }

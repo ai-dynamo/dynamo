@@ -15,7 +15,8 @@ use dynamo_backend_common::{
 };
 use dynamo_llm::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT;
 use dynamo_sidecar_common::{
-    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+    connection_timeout, startup_deadline,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
@@ -89,6 +90,7 @@ pub struct TrtllmSidecarEngine {
     route_to_encoder: bool,
     /// Connection and model information may be discovered in the cancellable sidecar bootstrap.
     connection: OnceCell<(TrtllmClient, ModelInfo)>,
+    encoder_identity: OnceCell<pb::ServerInfo>,
     started: OnceCell<()>,
     routing: OnceCell<RoutingState>,
     supervision: RoutingSupervision,
@@ -116,6 +118,7 @@ impl TrtllmSidecarEngine {
             allow_remote_media_urls: true,
             route_to_encoder: false,
             connection: OnceCell::new(),
+            encoder_identity: OnceCell::new(),
             started: OnceCell::new(),
             routing: OnceCell::new(),
             supervision: RoutingSupervision::PRODUCTION,
@@ -329,9 +332,16 @@ impl TrtllmSidecarEngine {
             )
             .await?;
         if self.mode.is_encode() || self.route_to_encoder {
-            let server = client.server_info().await?.ok_or_else(|| {
-                client::invalid_argument("encoder routing requires OpenEngine server identity")
-            })?;
+            let server = tokio::time::timeout_at(deadline, client.server_info())
+                .await
+                .map_err(|_| {
+                    connection_timeout(
+                        "Encoder identity discovery exceeded the gRPC startup deadline",
+                    )
+                })??
+                .ok_or_else(|| {
+                    client::invalid_argument("encoder routing requires OpenEngine server identity")
+                })?;
             if server.schema_release != include_str!("../proto/REVISION").trim() {
                 return Err(client::invalid_argument(
                     "encoder routing requires the pinned OpenEngine schema release",
@@ -342,6 +352,9 @@ impl TrtllmSidecarEngine {
                     "sidecar role does not match native encoder role",
                 ));
             }
+            self.encoder_identity
+                .set(server)
+                .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
         }
         Ok((client, info))
     }
@@ -366,6 +379,15 @@ impl LLMEngine for TrtllmSidecarEngine {
             let routing_deadline = startup_deadline(self.transport.startup_deadline)?;
             let routing_discovery = async {
                 let server = client.server_info().await?.unwrap_or_default();
+                if self.encoder_identity.get().is_some_and(|expected| {
+                    expected.instance_id != server.instance_id
+                        || expected.engine_role != server.engine_role
+                        || expected.schema_release != server.schema_release
+                }) {
+                    return Err(client::protocol_error(
+                        "Native encoder identity changed between discovery and registration",
+                    ));
+                }
                 let node = crate::node::NodeMetadata::from_info(Some(&server))?;
                 if node.as_ref().is_some_and(|node| !node.leader) {
                     return Err(client::protocol_error(

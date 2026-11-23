@@ -15,6 +15,7 @@ use dynamo_backend_common::{
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{Controller, Event, OpenAction, RequestPlan};
 use dynamo_sidecar_testkit::fixtures::{collect, request};
+use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto as pb;
 use futures::StreamExt;
 use serde_json::json;
@@ -222,6 +223,99 @@ async fn encoder_rejects_wrong_schema_or_role_before_dispatch() {
         assert_eq!(fixture.encoder.encode.received_count(), 0);
         fixture.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn encoder_registration_rejects_identity_changed_after_bootstrap() {
+    for changed in ["instance", "role", "schema"] {
+        let (mut fixture, _) = fixture(DisaggregationMode::Encode).await;
+        let mut initial = server_info(true);
+        initial.instance_id = "encoder-a".into();
+        let mut replacement = initial.clone();
+        match changed {
+            "instance" => replacement.instance_id = "encoder-b".into(),
+            "role" => replacement.engine_role = pb::EngineRole::Aggregated as i32,
+            "schema" => replacement.schema_release = "different-release".into(),
+            _ => unreachable!(),
+        }
+        fixture
+            .discovery
+            .server_info_sequence
+            .lock()
+            .unwrap()
+            .extend([initial, replacement]);
+        let encoder = fixture.engine().await;
+        let error = encoder
+            .start(0)
+            .await
+            .expect_err("changed engine must not register");
+        assert!(error.to_string().contains("identity changed"), "{error}");
+        encoder.cleanup().await.unwrap();
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn encoder_identity_discovery_uses_remaining_startup_budget() {
+    let (mut fixture, _) = fixture(DisaggregationMode::Encode).await;
+    fixture
+        .discovery
+        .server_info_hold
+        .store(true, Ordering::SeqCst);
+    let encoder = TrtllmSidecarEngine::from_args(vec![
+        "dynamo-trtllm-sidecar".into(),
+        "--grpc-endpoint".into(),
+        fixture.endpoint(),
+        "--model-path".into(),
+        "mocker-model".into(),
+        "--disaggregation-mode".into(),
+        "encode".into(),
+        "--grpc-startup-deadline-secs".into(),
+        "1".into(),
+    ])
+    .unwrap()
+    .0;
+    let error = tokio::time::timeout(Duration::from_secs(2), encoder.start(0))
+        .await
+        .expect("identity RPC exceeded startup budget")
+        .expect_err("stalled identity must not register");
+    assert!(error.to_string().contains("startup deadline"), "{error}");
+    encoder.cleanup().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn reference_release_retries_transient_failure_at_same_encoder() {
+    let (mut fixture, generate) = fixture(DisaggregationMode::Encode).await;
+    let encoder = fixture.engine().await;
+    encoder.start(0).await.unwrap();
+    let first = fixture.encoder.release.next_request(RequestPlan {
+        open: OpenAction::Fail,
+        ..Default::default()
+    });
+    let retry = fixture.encoder.release.next_request(RequestPlan::default());
+    let output = collect(
+        &encoder,
+        release_request(),
+        GenerateContext::new(mock_context(), None),
+    )
+    .await;
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0].as_ref().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    for handle in [&first, &retry] {
+        bounded("release completed", handle.wait(Event::Dropped)).await;
+        assert_eq!(
+            handle.native_request().unwrap().native.encoded_media,
+            Some(reference())
+        );
+    }
+    assert_eq!(fixture.encoder.release.received_count(), 2);
+    assert_eq!(generate.received_count(), 0);
+    encoder.cleanup().await.unwrap();
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -467,7 +561,7 @@ async fn probe_release_failure_is_not_success_and_retries_cleanup() {
         let encoder = fixture.engine().await;
         encoder.start(0).await.unwrap();
         let plan = RequestPlan {
-            open: OpenAction::Fail,
+            open: OpenAction::Reject,
             ..Default::default()
         };
         let first = fixture.encoder.release.next_request(plan);
@@ -532,6 +626,14 @@ async fn encoder_abort_uses_native_abort_even_after_stream_ends() {
     encoder.start(0).await.unwrap();
     let context = mock_context();
     let request_id = context.id().to_owned();
+    let output = collect(
+        &encoder,
+        image_request(),
+        GenerateContext::new(context.clone(), None),
+    )
+    .await;
+    assert_eq!(output.len(), 1);
+    assert!(output[0].as_ref().unwrap().encoder_result.is_some());
     encoder.abort(context).await;
     assert_eq!(
         fixture.encoder.aborts.lock().unwrap().as_slice(),

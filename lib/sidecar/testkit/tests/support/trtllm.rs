@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,10 +44,12 @@ pub struct Discovery {
     pub calls: AtomicUsize,
     pub server_info_calls: AtomicUsize,
     pub server_info_hold_after: AtomicUsize,
+    pub server_info_hold: AtomicBool,
     pub server_info_blocked: AtomicUsize,
     pub load_calls: AtomicUsize,
     pub kv_source_calls: AtomicUsize,
     pub server_info: Mutex<Option<pb::ServerInfo>>,
+    pub server_info_sequence: Mutex<VecDeque<pb::ServerInfo>>,
     pub unavailable: AtomicBool,
     pub hold: AtomicBool,
     pub model_info: Mutex<Option<pb::ModelInfo>>,
@@ -326,11 +328,22 @@ impl Control for ControlledControl {
             .fetch_add(1, Ordering::SeqCst)
             + 1;
         let hold_after = self.discovery.server_info_hold_after.load(Ordering::SeqCst);
-        if hold_after > 0 && call > hold_after {
+        if self.discovery.server_info_hold.load(Ordering::SeqCst)
+            || (hold_after > 0 && call > hold_after)
+        {
             self.discovery
                 .server_info_blocked
                 .fetch_add(1, Ordering::SeqCst);
             std::future::pending::<()>().await;
+        }
+        if let Some(info) = self
+            .discovery
+            .server_info_sequence
+            .lock()
+            .unwrap()
+            .pop_front()
+        {
+            return Ok(Response::new(info));
         }
         if let Some(info) = self.discovery.server_info.lock().unwrap().clone() {
             return Ok(Response::new(info));

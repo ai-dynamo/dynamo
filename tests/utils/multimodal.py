@@ -480,7 +480,7 @@ def make_encoder_image_payloads(*, split: bool) -> list[EncoderImagePayload]:
             temperature=0,
             max_tokens=16,
             expected_response=[color],
-            extra_body={"nvext": {"extra_fields": ["worker_id"]}},
+            extra_body={"seed": 0, "nvext": {"extra_fields": ["worker_id"]}},
         )
         payloads.append(
             EncoderImagePayload(
@@ -489,6 +489,8 @@ def make_encoder_image_payloads(*, split: bool) -> list[EncoderImagePayload]:
                 split=split,
                 expected_response=payload.expected_response,
                 expected_log=payload.expected_log,
+                # Content-only retry: https://github.com/ai-dynamo/dynamo/pull/19290
+                max_attempts=3,
             )
         )
     return payloads

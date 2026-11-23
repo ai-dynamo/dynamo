@@ -36,6 +36,8 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const ENCODER_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+const ENCODER_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Media modalities confirmed by both OpenEngine capability signals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -425,17 +427,33 @@ impl TrtllmClient {
         &self,
         handoff: pb::EncodedMediaRef,
     ) -> Result<(), DynamoError> {
-        tokio::time::timeout(
-            RPC_TIMEOUT,
-            self.encoder()
-                .release_encoded_media(pb::ReleaseEncodedMediaRequest {
-                    encoded_media: Some(handoff),
-                }),
-        )
-        .await
-        .map_err(|_| connection_timeout("ReleaseEncodedMedia timed out"))?
-        .map_err(|status| status_to_dynamo("ReleaseEncodedMedia", status))?;
-        Ok(())
+        let deadline = Instant::now() + ENCODER_RELEASE_TIMEOUT;
+        let mut attempt = 0;
+        loop {
+            let response = timeout_at(
+                deadline,
+                self.encoder()
+                    .release_encoded_media(pb::ReleaseEncodedMediaRequest {
+                        encoded_media: Some(handoff.clone()),
+                    }),
+            )
+            .await
+            .map_err(|_| connection_timeout("ReleaseEncodedMedia timed out"))?;
+            match response {
+                Ok(_) => return Ok(()),
+                Err(status)
+                    if attempt < 2
+                        && matches!(
+                            status.code(),
+                            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                        ) =>
+                {
+                    attempt += 1;
+                    sleep_until((Instant::now() + ENCODER_RELEASE_RETRY_DELAY).min(deadline)).await;
+                }
+                Err(status) => return Err(status_to_dynamo("ReleaseEncodedMedia", status)),
+            }
+        }
     }
 
     async fn abort_target(&self, target: pb::abort_request::Target) -> Result<(), DynamoError> {

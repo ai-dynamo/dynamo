@@ -537,7 +537,8 @@ class EncoderImagePayload(ChatPayload):
             samples = find_metric_samples(
                 response.text, name, {prometheus_names.labels.ENDPOINT: "generate"}
             )
-            assert samples or not require_present, f"Missing {name} on port {port}"
+            if require_present and not samples:
+                raise ValueError(f"Missing {name} on port {port}")
             counts.append(sum(samples))
         return tuple(counts)
 
@@ -546,44 +547,56 @@ class EncoderImagePayload(ChatPayload):
             self._before = self._stage_counts(require_present=False)
 
     def validate(self, response: Any, content: str) -> None:
-        super().validate(response, content)
-        colors = re.findall(r"\b(red|green)\b", content.lower())
-        assert colors and colors[0] == self.color, content
         result = response.json()
         usage = result["usage"]
-        assert (
-            type(usage["prompt_tokens"]) is int and usage["prompt_tokens"] > 64
-        ), usage
-        assert (
-            type(usage["completion_tokens"]) is int and usage["completion_tokens"] > 0
-        ), usage
-        assert (
-            usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
-        ), usage
-        assert (usage.get("prompt_tokens_details") or {}).get(
-            "cached_tokens"
-        ) == 0, usage
-        assert self.baseline_path is not None
+        if type(usage["prompt_tokens"]) is not int or usage["prompt_tokens"] <= 64:
+            raise ValueError(f"Expected expanded prompt usage: {usage!r}")
+        if (
+            type(usage["completion_tokens"]) is not int
+            or usage["completion_tokens"] <= 0
+        ):
+            raise ValueError(f"Expected positive completion usage: {usage!r}")
+        if usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]:
+            raise ValueError(f"Inconsistent token usage: {usage!r}")
+        if (usage.get("prompt_tokens_details") or {}).get("cached_tokens") != 0:
+            raise ValueError(f"Expected uncached image request: {usage!r}")
+        if self.baseline_path is None:
+            raise ValueError("Missing aggregate baseline path")
         observation = {
             "request": {k: v for k, v in self.body.items() if k != "model"},
-            "color": colors[0],
+            "color": self.color,
             "usage": usage,
         }
+        if not self.is_baseline:
+            if observation != json.loads(self.baseline_path.read_text()):
+                raise ValueError(
+                    f"EPD response differs from aggregate baseline: {observation!r}"
+                )
+            after = self._stage_counts(require_present=True)
+            if len(self._before) != len(after) or any(
+                end - start != 1 for start, end in zip(self._before, after)
+            ):
+                raise ValueError(
+                    f"Expected one request per stage: {self._before!r} -> {after!r}"
+                )
+            if self.split:
+                workers = (result.get("nvext") or {}).get("worker_id")
+                if (
+                    not isinstance(workers, dict)
+                    or type(workers.get("prefill_worker_id")) is not int
+                    or type(workers.get("decode_worker_id")) is not int
+                    or workers["prefill_worker_id"] == workers["decode_worker_id"]
+                ):
+                    raise ValueError(
+                        f"Expected distinct prefill and decode workers: {workers!r}"
+                    )
+        # Only generated-content failures may retry; stage and usage failures are final.
+        super().validate(response, content)
+        colors = re.findall(r"\b(red|green)\b", content.lower())
+        if not colors or colors[0] != self.color:
+            raise AssertionError(content)
         if self.is_baseline:
             self.baseline_path.write_text(json.dumps(observation))
-            return
-        assert observation == json.loads(self.baseline_path.read_text()), observation
-        after = self._stage_counts(require_present=True)
-        assert len(self._before) == len(after)
-        assert all(end - start == 1 for start, end in zip(self._before, after)), (
-            self._before,
-            after,
-        )
-        if self.split:
-            workers = require_router_worker_id(result)
-            assert type(workers.get("prefill_worker_id")) is int, workers
-            assert type(workers.get("decode_worker_id")) is int, workers
-            assert workers["prefill_worker_id"] != workers["decode_worker_id"], workers
 
 
 @dataclass
