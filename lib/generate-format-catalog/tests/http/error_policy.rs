@@ -44,6 +44,7 @@ impl AsyncEngine<Input, Output, Error> for ErrorEngine {
 #[tokio::test]
 async fn native_error_phase_and_nested_chain_compatibility() {
     use ErrorType::{Cancelled, Internal, Overload, Unavailable, Validation};
+    let overload = dynamo_runtime::error::http::overload_status_code().as_u16();
     for (kinds, expected) in [
         (
             vec![Backend::DeadlineExceeded],
@@ -106,6 +107,48 @@ async fn native_error_phase_and_nested_chain_compatibility() {
             [
                 (429, Cancelled, "request deadline exceeded"),
                 (499, Cancelled, "request deadline exceeded"),
+                (499, Cancelled, "request was cancelled"),
+            ],
+        ),
+        // Canonical classifier rejections, plain and behind a legacy wrapper.
+        // Dispatch takes the shared class policy; the stream phase is unchanged.
+        (
+            vec![Backend::RateLimited],
+            [
+                (429, Unavailable, "Rate limit exceeded"),
+                (500, Internal, "Internal server error"),
+                (500, Internal, "internal server error"),
+            ],
+        ),
+        (
+            vec![Backend::Unknown, Backend::RateLimited],
+            [
+                (429, Unavailable, "Rate limit exceeded"),
+                (500, Internal, "Internal server error"),
+                (500, Internal, "internal server error"),
+            ],
+        ),
+        (
+            vec![Backend::CapacityExhausted],
+            [
+                (overload, Unavailable, "Service temporarily overloaded"),
+                (500, Internal, "Internal server error"),
+                (500, Internal, "internal server error"),
+            ],
+        ),
+        (
+            vec![Backend::Unknown, Backend::CapacityExhausted],
+            [
+                (overload, Unavailable, "Service temporarily overloaded"),
+                (500, Internal, "Internal server error"),
+                (500, Internal, "internal server error"),
+            ],
+        ),
+        (
+            vec![Backend::CapacityExhausted, Backend::Cancelled],
+            [
+                (499, Cancelled, "request was cancelled"),
+                (499, Cancelled, "Request cancelled"),
                 (499, Cancelled, "request was cancelled"),
             ],
         ),
@@ -193,7 +236,18 @@ async fn native_error_phase_and_nested_chain_compatibility() {
                         state
                             .metrics_clone()
                             .get_rejection_count("test-model", Endpoint::Generate),
-                        u64::from(!after_dispatch && kinds == [Backend::WorkerOverloaded])
+                        u64::from(
+                            !after_dispatch
+                                && matches!(
+                                    kinds.last(),
+                                    Some(
+                                        Backend::WorkerOverloaded
+                                            | Backend::RateLimited
+                                            | Backend::CapacityExhausted
+                                    )
+                                )
+                        ),
+                        "{kinds:?}"
                     );
                 }
             }

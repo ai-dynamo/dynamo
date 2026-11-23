@@ -3,7 +3,8 @@
 
 use axum::http::StatusCode;
 
-use dynamo_error::http::SanitizedError;
+use dynamo_error::ErrorClass;
+use dynamo_error::http::{ClientErrorAction, SanitizedError};
 
 use crate::http::service::metrics::*;
 
@@ -48,6 +49,10 @@ impl WorkerError {
     /// Common pre-stream policy of the native Generate endpoints. The format
     /// supplies its validation message; transport failures take precedence.
     /// Dispatch counts `Overload` as an unavailable request plus a rejection.
+    /// A canonical `RateLimited` or `CapacityExhausted` rejection, such as a
+    /// request classifier's, takes its status from the shared HTTP policy. It
+    /// is checked after the legacy rejection row, because legacy overload
+    /// classes normalize to `CapacityExhausted` and keep their 503.
     pub fn dispatch(error: &(dyn std::error::Error + 'static), invalid: Option<String>) -> Self {
         if request_deadline_exceeded(error) {
             Self::new(
@@ -67,6 +72,19 @@ impl WorkerError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "engine rejected the request",
             )
+        } else if let Some(rejection) = dynamo_error::http::find_canonical_error_in_chain(error)
+            .filter(|error| {
+                matches!(
+                    error.class(),
+                    ErrorClass::RateLimited | ErrorClass::CapacityExhausted
+                )
+            })
+            && let ClientErrorAction::Respond {
+                status,
+                public_message,
+            } = dynamo_error::http::http_action_for_error(rejection)
+        {
+            Self::new(ErrorType::Overload, status, public_message)
         } else if request_was_unavailable(error) {
             Self::new(
                 ErrorType::Unavailable,
