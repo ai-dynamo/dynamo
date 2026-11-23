@@ -37,6 +37,9 @@ type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutpu
 
 pub(crate) struct EncoderResultReleaseSupported(pub(crate) bool);
 
+pub(super) const INLINE_ENCODER_FALLBACK: &str = "inline_encoder_fallback";
+pub(super) struct InlineEncoderFallback;
+
 struct EncoderBinding {
     target_id: WorkerSetTargetId,
     router: Arc<EncodePushRouter>,
@@ -505,6 +508,7 @@ impl
                     namespace = %self.namespace,
                     "Encoder hop failed; falling back to downstream inline encoding"
                 );
+                context.insert(INLINE_ENCODER_FALLBACK, InlineEncoderFallback);
                 return next.generate(context.map(|_| request)).await;
             }
         };
