@@ -6,15 +6,17 @@
 //! Declare [`DECODE_PROGRESS`] and import [`DecodeProgressByRow`] to read a candidate.
 //! Supported aggregated requests have one choice and a positive effective output limit.
 //! A limit derived by the frontend from the remaining context also counts.
-//! A rank returns `None` while any active request is prefilling, unobserved or invalid,
-//! or when the input or host is unavailable. Filters and scorers receive none.
+//! The complete accessor requires a valid observation for every active request and
+//! completed prefill for every request. The partial accessor covers the active requests
+//! with valid output observations and counts the remaining requests as unknown. Both
+//! accessors require a supported host and a picker that declared the input.
 //!
-//! Budgets are raw-token upper bounds, not completion-time estimates. Observations stay
-//! local to this frontend. Use [`DecodeProgress::observed_age`] for a freshness limit.
+//! Budgets are raw-token upper bounds over the reported requests. Observations stay
+//! local to this frontend. Use the reported observation age to apply a freshness limit.
 
 use crate::{WorkerInputView, WorkerInputs};
 
-pub use dynamo_slot_tracker::host::DecodeProgress;
+pub use dynamo_slot_tracker::host::{DecodeProgress, PartialDecodeProgress};
 
 /// Request live decode progress during the picker callback.
 pub const DECODE_PROGRESS: WorkerInputs = WorkerInputs::DECODE_PROGRESS;
@@ -27,6 +29,9 @@ mod sealed {
 pub trait DecodeProgressByRow: sealed::Sealed {
     /// Read the summary for candidate `row`, or `None` for missing data or an invalid row.
     fn decode_progress(self, row: usize) -> Option<DecodeProgress>;
+
+    /// Read the observed subset for candidate `row`, or `None` when no valid observation is available.
+    fn partial_decode_progress(self, row: usize) -> Option<PartialDecodeProgress>;
 }
 
 impl sealed::Sealed for WorkerInputView<'_> {}
@@ -34,5 +39,9 @@ impl sealed::Sealed for WorkerInputView<'_> {}
 impl DecodeProgressByRow for WorkerInputView<'_> {
     fn decode_progress(self, row: usize) -> Option<DecodeProgress> {
         self.decode_progress_for_row(row)
+    }
+
+    fn partial_decode_progress(self, row: usize) -> Option<PartialDecodeProgress> {
+        self.partial_decode_progress_for_row(row)
     }
 }

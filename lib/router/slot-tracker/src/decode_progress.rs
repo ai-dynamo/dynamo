@@ -76,6 +76,35 @@ impl DecodeProgress {
     }
 }
 
+/// Frontend-local observations of a subset of the active requests on a worker rank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartialDecodeProgress {
+    observed: DecodeProgress,
+    unknown_requests: usize,
+}
+
+impl PartialDecodeProgress {
+    /// Number of active requests with valid output observations.
+    pub fn observed_requests(&self) -> usize {
+        self.observed.observed_requests()
+    }
+
+    /// Number of active requests without a valid output observation from this frontend.
+    pub fn unknown_requests(&self) -> usize {
+        self.unknown_requests
+    }
+
+    /// Sum of remaining output limits in tokens for the observed requests.
+    pub fn observed_remaining_token_budget(&self) -> usize {
+        self.observed.remaining_token_budget()
+    }
+
+    /// Age of the oldest valid observation at this call.
+    pub fn observed_age(&self) -> Duration {
+        self.observed.observed_age()
+    }
+}
+
 /// Incremental output observations owned by one worker's active sequences.
 #[derive(Debug, Default)]
 pub(crate) struct DecodeProgressAggregate {
@@ -156,8 +185,21 @@ impl DecodeProgressAggregate {
         if active_requests == 0 || self.invalid != 0 || self.tracked != active_requests {
             return None;
         }
+        self.observed_summary(self.tracked)
+    }
+
+    pub(crate) fn partial_summary(&self, active_requests: usize) -> Option<PartialDecodeProgress> {
+        let observed_requests = self.tracked - self.invalid;
+        let unknown_requests = active_requests.checked_sub(self.tracked)? + self.invalid;
+        Some(PartialDecodeProgress {
+            observed: self.observed_summary(observed_requests)?,
+            unknown_requests,
+        })
+    }
+
+    fn observed_summary(&self, observed_requests: usize) -> Option<DecodeProgress> {
         Some(DecodeProgress {
-            observed_requests: self.tracked,
+            observed_requests,
             remaining_token_budget: self.remaining.try_into().ok()?,
             oldest_observed_at: *self.times.first_key_value()?.0,
         })
@@ -174,9 +216,36 @@ mod tests {
         let mut owner = None;
         aggregate.update(&mut owner, DecodeProgressUpdate::observed(128, 8));
         let value = aggregate.summary(1).unwrap();
+        let partial = aggregate.partial_summary(2).unwrap();
         assert_eq!(value.observed_age(), Duration::ZERO);
+        assert_eq!(partial.observed_age(), Duration::ZERO);
         tokio::time::advance(Duration::from_millis(5)).await;
         assert_eq!(value.observed_age(), Duration::from_millis(5));
+        assert_eq!(partial.observed_age(), Duration::from_millis(5));
+    }
+
+    #[test]
+    fn partial_budget_covers_only_valid_observations() {
+        let mut aggregate = DecodeProgressAggregate::default();
+        let (mut a, mut b) = (None, None);
+        aggregate.update(&mut a, DecodeProgressUpdate::observed(8, 8));
+        aggregate.update(&mut b, DecodeProgressUpdate::observed(24, 8));
+        let full = aggregate.partial_summary(2).unwrap();
+        assert_eq!(full.unknown_requests(), 0);
+        assert_eq!(full.observed_remaining_token_budget(), 16);
+
+        aggregate.update(&mut b, DecodeProgressUpdate::unavailable());
+        let partial = aggregate.partial_summary(3).unwrap();
+        assert_eq!(partial.observed_requests(), 1);
+        assert_eq!(partial.unknown_requests(), 2);
+        assert_eq!(partial.observed_remaining_token_budget(), 0);
+        assert!(aggregate.summary(3).is_none());
+
+        aggregate.retire(b.take());
+        assert_eq!(aggregate.partial_summary(2).unwrap().unknown_requests(), 1);
+        aggregate.retire(a.take());
+        assert!(aggregate.partial_summary(1).is_none());
+        assert!(aggregate.partial_summary(0).is_none());
     }
 
     #[test]
@@ -187,8 +256,16 @@ mod tests {
         assert!(aggregate.summary(2).is_none());
         aggregate.update(&mut b, DecodeProgressUpdate::observed(24, 8));
         assert_eq!(aggregate.summary(2).unwrap().remaining_token_budget, 136);
+        let before = aggregate.partial_summary(3).unwrap();
+        assert_eq!(before.observed_remaining_token_budget(), 136);
         aggregate.retire(a.take());
         assert_eq!(aggregate.summary(1).unwrap().remaining_token_budget, 16);
+        let after = aggregate.partial_summary(2).unwrap();
+        assert_eq!(after.observed_remaining_token_budget(), 16);
+        assert_eq!(
+            (after.observed_requests(), after.unknown_requests()),
+            (1, 1)
+        );
         aggregate.retire(b.take());
         assert!(aggregate.summary(0).is_none());
         assert!(aggregate.times.is_empty());

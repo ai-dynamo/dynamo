@@ -134,6 +134,9 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         resident_blocks: Option<&'a ResidentBlockCounts>,
         /// Live lookup for this selection; never retained in prepared rows.
         decode_progress: Option<&'a dynamo_worker_selection::host::DecodeProgressSource<'a>>,
+        /// Live lookup for partial observations in this selection.
+        partial_decode_progress:
+            Option<&'a dynamo_worker_selection::host::PartialDecodeProgressSource<'a>>,
     },
 }
 
@@ -158,6 +161,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             block_size,
             resident_blocks: None,
             decode_progress: None,
+            partial_decode_progress: None,
         }
     }
 
@@ -191,6 +195,19 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             decode_progress, ..
         } = self;
         *decode_progress
+    }
+
+    /// Lend the owning scheduler's on-demand lookup for partial progress.
+    pub fn with_partial_decode_progress(
+        mut self,
+        source: Option<&'a dynamo_worker_selection::host::PartialDecodeProgressSource<'a>>,
+    ) -> Self {
+        let Self::Configured {
+            partial_decode_progress,
+            ..
+        } = &mut self;
+        *partial_decode_progress = source;
+        self
     }
 
     /// The resident block counts lent to this selection, if any.
@@ -286,6 +303,8 @@ pub(super) struct SelectionRowSource<'a, C: WorkerConfigLike> {
     /// The partition's live resident block counts, when the host lent them for this selection.
     resident_blocks: Option<&'a ResidentBlockCounts>,
     decode_progress: Option<&'a dynamo_worker_selection::host::DecodeProgressSource<'a>>,
+    partial_decode_progress:
+        Option<&'a dynamo_worker_selection::host::PartialDecodeProgressSource<'a>>,
     /// The cache-owner block counts, pinned from `resident_blocks` on the first read: a
     /// selection that reads none pins nothing.
     cache_owner_counts: OnceCell<Option<CacheOwnerBlockCounts>>,
@@ -311,6 +330,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             block_size,
             resident_blocks: None,
             decode_progress: None,
+            partial_decode_progress: None,
             cache_owner_counts: OnceCell::new(),
             tracked: request.mode.is_tracked(),
             kv_transfer_sources: OnceCell::new(),
@@ -323,6 +343,10 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     fn from_input(input: WorkerSelectionInput<'a, C>) -> Result<Self, KvSchedulerError> {
         let resident_blocks = input.resident_blocks();
         let decode_progress = input.decode_progress();
+        let WorkerSelectionInput::Configured {
+            partial_decode_progress,
+            ..
+        } = input;
         let (workers, request, eligibility, block_size) = input.into_configured();
         eligibility.validate_pinned_worker_allowed()?;
         if let Some(worker) = eligibility.pinned_worker() {
@@ -339,6 +363,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         let mut source = Self::new(request, workers, eligibility, block_size);
         source.resident_blocks = resident_blocks;
         source.decode_progress = decode_progress;
+        source.partial_decode_progress = partial_decode_progress;
         Ok(source)
     }
 
@@ -348,6 +373,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         selection_context(self.request, self.block_size)
             .with_pinned_worker(self.eligibility.pinned_worker())
             .with_decode_progress(self.decode_progress)
+            .with_partial_decode_progress(self.partial_decode_progress)
             .with_resident_blocks(
                 self.resident_blocks
                     .is_some()

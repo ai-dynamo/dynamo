@@ -766,12 +766,13 @@ impl ComposedPolicyState {
                 .then_some(cache_snapshot.resident_blocks)
                 .flatten(),
         );
-        let picker_input = picker_input.with_decode_progress(
-            picker_inputs
-                .contains(WorkerInputs::DECODE_PROGRESS)
-                .then_some(context.decode_progress)
-                .flatten(),
-        );
+        let picker_input = if picker_inputs.contains(WorkerInputs::DECODE_PROGRESS) {
+            picker_input
+                .with_decode_progress(context.decode_progress)
+                .with_partial_decode_progress(context.partial_decode_progress)
+        } else {
+            picker_input
+        };
         let row = picker.pick(context, picker_input)?;
         let Some(candidate) = candidates.get(row) else {
             return Err(WorkerSelectionPolicyError::InvalidPickerRow {
@@ -1408,7 +1409,9 @@ mod row_source_tests {
 
     #[test]
     fn decode_progress_reads_are_lazy_and_scoped_to_the_declaring_picker() {
-        use crate::experimental::decode_progress::{DECODE_PROGRESS, DecodeProgressByRow};
+        use crate::experimental::decode_progress::{
+            DECODE_PROGRESS, DecodeProgress, DecodeProgressByRow,
+        };
 
         struct DeclaresProgress;
         impl WorkerFilter for DeclaresProgress {
@@ -1455,8 +1458,10 @@ mod row_source_tests {
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert!(input.decode_progress(input.len()).is_none());
+                assert!(input.partial_decode_progress(input.len()).is_none());
                 for _ in 0..self.reads {
                     assert!(input.decode_progress(1).is_none());
+                    assert!(input.partial_decode_progress(1).is_none());
                 }
                 Ok(1)
             }
@@ -1483,12 +1488,18 @@ mod row_source_tests {
             ("missing source", DECODE_PROGRESS, false, 1, 0),
         ] {
             let calls = RefCell::new(Vec::new());
-            let provider = |worker| {
+            let provider = |worker| -> Option<DecodeProgress> {
                 calls.borrow_mut().push(worker);
                 None
             };
+            let partial_calls = RefCell::new(Vec::new());
+            let partial_provider = |worker| {
+                partial_calls.borrow_mut().push(worker);
+                None
+            };
             let context = WorkerSelectionContext::new(64, 16)
-                .with_decode_progress(has_source.then_some(&provider));
+                .with_decode_progress(has_source.then_some(&provider))
+                .with_partial_decode_progress(has_source.then_some(&partial_provider));
             let policy = WorkerSelectionPolicy::new_with_filters(
                 SelectionConfig::default(),
                 "test",
@@ -1501,6 +1512,11 @@ mod row_source_tests {
             assert_eq!(pick.worker, expected_worker, "{case}");
             assert_eq!(
                 *calls.borrow(),
+                vec![expected_worker; expected_calls],
+                "{case}"
+            );
+            assert_eq!(
+                *partial_calls.borrow(),
                 vec![expected_worker; expected_calls],
                 "{case}"
             );
