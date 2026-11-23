@@ -736,6 +736,8 @@ impl DistributedRuntime {
     /// The dispatch's `on_instance_added` and `on_instance_removed` hooks see every
     /// instance of those routers, not only `Direct` ones, so a dispatch should
     /// open per-instance connections on its first request, not in those hooks.
+    /// Register before publishing `Direct` workers: a router still finds a
+    /// dispatch registered later, but events from before then are not replayed.
     pub fn register_direct_dispatch<T, U>(
         &self,
         dispatch: Arc<dyn crate::pipeline::StreamingDispatch<T, U>>,
