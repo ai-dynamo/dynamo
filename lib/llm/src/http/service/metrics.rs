@@ -3184,6 +3184,7 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
     fn response_collector(metrics: &Arc<Metrics>, model: &str) -> ResponseMetricCollector {
         ResponseMetricCollector::new(
@@ -4494,7 +4495,7 @@ mod tests {
         collector.observe_response(10, 1);
         // Elapse measurable time so ITL > 0, then a second chunk drives the cached
         // per-worker ITL gauge.
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        sleep(Duration::from_millis(2));
         collector.observe_response(10, 1);
 
         let worker_id_str = worker_id.to_string();
@@ -4508,6 +4509,39 @@ mod tests {
             "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",
             gauge.get()
         );
+    }
+
+    #[test]
+    fn test_worker_last_gauges_use_unset_label_without_dp_rank() {
+        let metrics = Arc::new(Metrics::new());
+        // Distinctive worker id, as above: the per-worker gauges are process-global.
+        let worker_id: u64 = 9_876_543_211;
+        let mut collector = response_collector(&metrics, "unset-rank-model");
+        collector.set_worker_info(
+            Some(worker_id),
+            None,
+            Some(WORKER_TYPE_PREFILL.to_string()),
+            Some(worker_id),
+            None,
+            Some(WORKER_TYPE_DECODE.to_string()),
+        );
+
+        // The first chunk writes TTFT and ISL for the prefill worker. The second,
+        // after measurable time, writes ITL for the decode worker.
+        collector.observe_response(10, 1);
+        sleep(Duration::from_millis(2));
+        collector.observe_response(10, 1);
+
+        // The scrape filter and the worker cleanup match an unset rank by this value.
+        let worker_id = worker_id.to_string();
+        let isl = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            .with_label_values(&[worker_id.as_str(), "none", WORKER_TYPE_PREFILL])
+            .get();
+        assert_eq!(isl, 10);
+        let itl = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            .with_label_values(&[worker_id.as_str(), "none", WORKER_TYPE_DECODE])
+            .get();
+        assert!(itl > 0.0, "ITL gauge should be positive, got {itl}");
     }
 
     #[test]
