@@ -40,7 +40,8 @@ use tokio_util::sync::CancellationToken;
 
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
-/// A type-erased `Arc<dyn StreamingDispatch<T, U>>`.
+/// A type-erased `Arc<dyn StreamingDispatch<T, U>>`, boxed so `dyn Any` can
+/// downcast to it: a downcast target must be sized.
 type DirectDispatchEntry = Box<dyn std::any::Any + Send + Sync>;
 
 fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
