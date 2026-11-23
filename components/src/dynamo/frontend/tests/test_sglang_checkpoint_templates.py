@@ -112,9 +112,8 @@ def test_hunyuan_checkpoint_tokens(weather_request, use_pool, tool_choice, monke
 
         output = asyncio.run(collect())
 
-    choices = [
-        choice for item in output for choice in item.get("data", {}).get("choices", [])
-    ]
+    # Each parsed step with a delta is one choice of the chunk Dynamo builds.
+    choices = [item for item in output if "delta" in item]
     assert (
         "".join(c["delta"].get("reasoning_content", "") for c in choices) == reasoning
     )
@@ -126,7 +125,9 @@ def test_hunyuan_checkpoint_tokens(weather_request, use_pool, tool_choice, monke
     assert json.loads(calls[0]["function"]["arguments"]) == {
         "location": {"city": "Paris"}
     }
-    assert choices[-1]["finish_reason"] == "tool_calls"
+    # The step reports the engine's reason; Dynamo names it `tool_calls` for a
+    # choice that called a tool and then stopped.
+    assert choices[-1]["finish_reason"] == "stop"
 
 
 def test_auto_guidance_receives_checkpoint_tokens(weather_request, monkeypatch):

@@ -62,6 +62,10 @@ pub struct ParsedOutput {
     /// them. Used where the engine reports none.
     #[serde(default)]
     pub reasoning_tokens: Option<u32>,
+    /// The ids to return as `nvext.completion_token_ids` with this step, when they are not
+    /// `token_ids`: a processor that withholds text may release its ids with a later step.
+    #[serde(default)]
+    pub completion_token_ids: Option<Vec<TokenIdType>>,
 }
 
 /// What a chat processor yields.
@@ -78,6 +82,7 @@ struct MessageParts {
     delta: Option<ChatCompletionStreamResponseDelta>,
     logprobs: Option<ChatChoiceLogprobs>,
     reasoning_tokens: Option<u32>,
+    completion_token_ids: Option<Vec<TokenIdType>>,
 }
 
 impl ParsedOutput {
@@ -104,6 +109,7 @@ impl ParsedOutput {
             delta: self.delta,
             logprobs: self.logprobs,
             reasoning_tokens: self.reasoning_tokens,
+            completion_token_ids: self.completion_token_ids,
         };
         (output, parts)
     }
@@ -144,6 +150,9 @@ impl MessageWriter {
             if let Some(reasoning_tokens) = parts.reasoning_tokens {
                 self.reasoning_tokens.insert(choice.index, reasoning_tokens);
             }
+            if let Some(released) = parts.completion_token_ids {
+                release_completion_token_ids(&mut chunk.nvext, released);
+            }
         }
 
         // A processor that counts reasoning tokens reports zero for a reply without any.
@@ -155,6 +164,24 @@ impl MessageWriter {
                 details.reasoning_tokens = Some(self.reasoning_tokens.values().sum());
             }
         }
+    }
+}
+
+/// Return `released` as the chunk's `completion_token_ids`, where the client asked for them.
+fn release_completion_token_ids(nvext: &mut Option<serde_json::Value>, released: Vec<TokenIdType>) {
+    let Some(fields) = nvext.as_mut().and_then(|nvext| nvext.as_object_mut()) else {
+        return;
+    };
+    if !fields.contains_key("completion_token_ids") {
+        return;
+    }
+    if released.is_empty() {
+        fields.remove("completion_token_ids");
+        if fields.is_empty() {
+            *nvext = None;
+        }
+    } else {
+        fields.insert("completion_token_ids".to_string(), released.into());
     }
 }
 
@@ -366,6 +393,46 @@ mod tests {
         assert_eq!(usage["prompt_tokens"], 3);
         assert_eq!(usage["completion_tokens"], 4);
         assert_eq!(usage["completion_tokens_details"]["reasoning_tokens"], 2);
+    }
+
+    /// A processor that withholds text releases the ids with the text, and the media parts of
+    /// the request are counted for the response's metrics.
+    #[tokio::test]
+    async fn released_ids_and_media_counts() {
+        let chunks = respond(
+            serde_json::json!({
+                "stream": true,
+                "nvext": {"extra_fields": ["completion_token_ids"]},
+            }),
+            vec![
+                step(serde_json::json!({"token_ids": [10], "completion_token_ids": []})),
+                step(serde_json::json!({
+                    "delta": {"content": "hi"},
+                    "token_ids": [11],
+                    "completion_token_ids": [10, 11],
+                    "finish_reason": "stop",
+                })),
+            ],
+        )
+        .await;
+        assert!(chunks[0].get("nvext").is_none());
+        assert_eq!(
+            chunks[1]["nvext"]["completion_token_ids"],
+            serde_json::json!([10, 11])
+        );
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": "http://x/a.png"}},
+                {"type": "image_url", "image_url": {"url": "http://x/b.png"}},
+                {"type": "video_url", "video_url": {"url": "http://x/c.mp4"}},
+            ]}],
+        }))
+        .unwrap();
+        let counts = MultimodalCounts::from_messages(&request.inner.messages);
+        assert_eq!((counts.image, counts.video, counts.audio), (2, 1, 0));
     }
 
     /// A processor that builds its own chunks is passed through untouched.

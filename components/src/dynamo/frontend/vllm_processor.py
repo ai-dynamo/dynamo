@@ -66,6 +66,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
+    parsed_finish_reason,
     request_id_from_context,
     resolve_chat_template,
 )
@@ -375,9 +376,8 @@ def _parsed_step(
 ) -> dict[str, Any]:
     """One step of a choice for Dynamo to build a response chunk from.
 
-    ``choice`` is what the post-processor parsed. A finished choice reports the
-    engine's finish reason, or ``stop`` when vLLM matched the stop itself. The
-    reasoning-token count is this choice's running total from its parser.
+    ``choice`` is what the post-processor parsed. The reasoning-token count is
+    this choice's running total from its parser.
     """
     step = {
         "_dynamo_parsed": True,
@@ -386,8 +386,9 @@ def _parsed_step(
         "logprobs": choice.get("logprobs"),
         "reasoning_tokens": post.reasoning_token_total,
     }
-    if choice.get("finish_reason") is not None:
-        step["finish_reason"] = raw_finish_reason or "stop"
+    finish_reason = parsed_finish_reason(choice.get("finish_reason"), raw_finish_reason)
+    if finish_reason is not None:
+        step["finish_reason"] = finish_reason
         if stop_reason is not None:
             step["stop_reason"] = stop_reason
     return step

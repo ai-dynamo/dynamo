@@ -53,7 +53,6 @@ from .sglang_prepost import (
 from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
-from .usage import response_usage, update_usage_metadata
 from .utils import (
     PreprocessError,
     PromptLogprobsAccumulator,
@@ -62,6 +61,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
+    parsed_finish_reason,
     read_jinja_chat_template,
     request_id_from_context,
     resolve_chat_template,
@@ -79,16 +79,6 @@ except ModuleNotFoundError as exc:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
-    if not isinstance(usage, dict):
-        return None
-    prompt_details = usage.get("prompt_tokens_details")
-    if not isinstance(prompt_details, dict):
-        return None
-    cached_tokens = prompt_details.get("cached_tokens")
-    return cached_tokens if isinstance(cached_tokens, int) else None
 
 
 def _request_logprobs_count(request: dict[str, Any]) -> int | None:
@@ -857,17 +847,22 @@ class SglangProcessor:
         post: SglangStreamingPostProcessor,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Shared streaming logic for both single-process and pool paths."""
+        """Shared streaming logic for both single-process and pool paths.
+
+        Each step yielded is what SGLang's parsers made of the engine tokens
+        consumed. Dynamo builds the response chunk around it: id, usage, finish
+        reason, metrics and nvext.
+        """
         token_count = 0
         post_proc_total_ms = 0.0
-        created_ts = int(time.time())
         stream_interval = self.stream_interval
+        # Tracks whether the worker still owes the prompt logprobs the client
+        # asked for; Dynamo reads them from the engine data a step carries.
         prompt_logprobs = PromptLogprobsAccumulator(request)
         logprobs_count = _request_logprobs_count(request)
         include_completion_ids = nvext_extra_field_requested(
             request, "completion_token_ids"
         )
-        include_prompt_ids = nvext_extra_field_requested(request, "prompt_token_ids")
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -883,31 +878,23 @@ class SglangProcessor:
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
             # Requested generated IDs wait here while parsing emits no chunk.
             completion_ids: list[int] = []
-            latest_usage: dict[str, Any] = {}
+            # The engine's own usage report and engine data since the last step.
+            engine_report: dict[str, Any] = {}
             pending_terminal: dict[str, Any] | None = None
             first_chunk = True
-            input_tokens = len(tokens)
-            cumulative_output_tokens = 0
-            # Rust postprocessor is bypassed on this path, so emit the multimodal
-            # content-part counts here too (else frontend metrics report zero media).
-            _mm_counts, _ = extract_mm_urls(request.get("messages", []))
-            _mm_counts = _mm_counts or {}
-            image_count = len(_mm_counts.get("image_url", []))
-            video_count = len(_mm_counts.get("video_url", []))
-            audio_count = len(_mm_counts.get("audio_url", []))
 
             def flush_pending(
                 *,
                 finish_reason: str | None,
+                raw_finish_reason: Any,
                 stop_reason: Any | None,
                 stop_terminated: bool,
-                engine_data: Any | None,
             ) -> dict[str, Any]:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
                 nonlocal completion_ids
-                nonlocal latest_usage
+                nonlocal engine_report
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
                 nonlocal token_count
@@ -935,105 +922,46 @@ class SglangProcessor:
                         dropped = post.post_stop_token_count()
                         del completion_ids[len(completion_ids) - dropped :]
 
-                if post.locally_finished and not latest_usage:
-                    latest_usage = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": cumulative_output_tokens,
-                        "total_tokens": input_tokens + cumulative_output_tokens,
-                    }
-                usage_for_metrics = latest_usage
-
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
                     post_proc_total_ms += (t_pp1 - t_pp0) * 1000.0
                     token_count += chunk_token_count
 
-                envelope: dict[str, Any] = {"_dynamo_annotated": True}
-                if choice:
-                    dynamo_out: dict[str, Any] = {
-                        "id": f"chatcmpl-{request_id}",
-                        "choices": [choice],
-                        "created": created_ts,
-                        "model": request["model"],
-                        "object": "chat.completion.chunk",
-                    }
-                    if usage := response_usage(
-                        request,
-                        latest_usage,
-                        prompt_tokens=input_tokens,
-                        completion_tokens=cumulative_output_tokens,
-                        finished=bool(finish_reason or post.locally_finished),
-                    ):
-                        dynamo_out["usage"] = usage
-                    response_nvext: dict[str, Any] = {}
-                    effective_stop_reason = (
-                        stop_reason
-                        if stop_reason is not None
-                        else post.local_stop_reason
-                    )
-                    if (
-                        effective_stop_reason is not None
-                        and nvext_extra_field_requested(request, "stop_reason")
-                    ):
-                        response_nvext["stop_reason"] = effective_stop_reason
-                    if engine_data is not None and nvext_extra_field_requested(
-                        request, "engine_data"
-                    ):
-                        response_nvext["engine_data"] = engine_data
-                    if include_completion_ids:
-                        response_nvext["completion_token_ids"] = completion_ids
-                        completion_ids = []
-                    if include_prompt_ids and (finish_reason or post.locally_finished):
-                        response_nvext["prompt_token_ids"] = tokens
-                    if response_nvext:
-                        dynamo_out["nvext"] = response_nvext
-
-                    prompt_logprobs.attach(dynamo_out)
-                    envelope["data"] = dynamo_out
-
-                metrics: dict[str, Any] = {
-                    "input_tokens": input_tokens,
-                    "output_tokens": cumulative_output_tokens,
-                    "chunk_tokens": chunk_token_count,
+                # Every generated token counts, whether or not the parsers
+                # released anything for it.
+                step: dict[str, Any] = {
+                    "_dynamo_parsed": True,
+                    "index": 0,
+                    "token_ids": pending_token_ids,
+                    **engine_report,
                 }
-                # Include nonzero counts on every frame (text-only carries nothing).
-                if image_count:
-                    metrics["image_count"] = image_count
-                if video_count:
-                    metrics["video_count"] = video_count
-                if audio_count:
-                    metrics["audio_count"] = audio_count
-                cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
-                if cached_tokens is not None:
-                    metrics["cached_tokens"] = cached_tokens
-                # Attach metrics to data when available; otherwise use an annotation.
-                if data := envelope.get("data"):
-                    data["llm_metrics"] = metrics
-                else:
-                    envelope["event"] = "llm_metrics"
-                    envelope["comment"] = [json.dumps(metrics)]
+                if include_completion_ids:
+                    # IDs go out with the text they belong to.
+                    step["completion_token_ids"] = completion_ids if choice else []
+                if choice:
+                    step["delta"] = choice["delta"]
+                    step["logprobs"] = choice.get("logprobs")
+                    step_finish = parsed_finish_reason(
+                        choice.get("finish_reason"), raw_finish_reason
+                    )
+                    if step_finish is not None:
+                        step["finish_reason"] = step_finish
+                        effective_stop_reason = (
+                            stop_reason
+                            if stop_reason is not None
+                            else post.local_stop_reason
+                        )
+                        if effective_stop_reason is not None:
+                            step["stop_reason"] = effective_stop_reason
+                    if include_completion_ids:
+                        completion_ids = []
 
                 pending_token_ids = []
                 pending_log_probs = None
                 pending_top_logprobs = None
+                engine_report = {}
                 first_chunk = False
-                return envelope
-
-            def finalize_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
-                data = terminal["data"]
-                if usage := response_usage(
-                    request,
-                    latest_usage,
-                    prompt_tokens=input_tokens,
-                    completion_tokens=cumulative_output_tokens,
-                    finished=True,
-                ):
-                    data["usage"] = usage
-                cached_tokens = _cached_tokens_from_usage(latest_usage)
-                if cached_tokens is not None:
-                    data["llm_metrics"]["cached_tokens"] = cached_tokens
-                prompt_logprobs.attach(data)
-                return terminal
+                return step
 
             async for dynamo_response in dynamo_stream:
                 if dynamo_response.is_error():
@@ -1079,12 +1007,16 @@ class SglangProcessor:
                 finish_reason = _map_finish_reason(raw_finish_reason)
                 backend_finished = raw_finish_reason is not None
                 prompt_logprobs.update(engine_response)
-                if usage := engine_response.get("completion_usage"):
-                    update_usage_metadata(latest_usage, usage)
+                for key in ("completion_usage", "engine_data"):
+                    if engine_response.get(key) is not None:
+                        engine_report[key] = engine_response[key]
                 if pending_terminal is not None:
                     if prompt_logprobs.needs_payload and not backend_finished:
                         continue
-                    yield finalize_terminal(pending_terminal)
+                    # The held step ends the choice with the worker's late report.
+                    pending_terminal.update(engine_report)
+                    yield pending_terminal
+                    pending_terminal = None
                     break
 
                 new_ids = engine_response["token_ids"]
@@ -1111,29 +1043,25 @@ class SglangProcessor:
                         top_logprobs is not None,
                     )
                     if pending_logprob_shape != chunk_logprob_shape:
-                        envelope = flush_pending(
+                        step = flush_pending(
                             finish_reason=None,
+                            raw_finish_reason=None,
                             stop_reason=None,
                             stop_terminated=False,
-                            engine_data=None,
                         )
                         if (
                             post.locally_finished
                             and prompt_logprobs.needs_payload
                             and not backend_finished
                         ):
-                            pending_terminal = envelope
+                            pending_terminal = step
                             continue
-                        yield envelope
+                        yield step
                         if post.locally_finished:
                             break
 
-                chunk_tokens = len(new_ids)
-                cumulative_output_tokens += chunk_tokens
                 stop_reason = engine_response.get("stop_reason")
                 stop_terminated = raw_finish_reason in {"eos", "stop"}
-
-                engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
                 if log_probs is not None:
@@ -1151,11 +1079,11 @@ class SglangProcessor:
                     1 if first_chunk or post.has_pending_stop_text else stream_interval
                 )
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
-                    envelope = flush_pending(
+                    step = flush_pending(
                         finish_reason=finish_reason,
+                        raw_finish_reason=raw_finish_reason,
                         stop_reason=stop_reason,
                         stop_terminated=stop_terminated,
-                        engine_data=engine_data,
                     )
                     if (
                         post.locally_finished
@@ -1163,14 +1091,14 @@ class SglangProcessor:
                         and not backend_finished
                     ):
                         # Preserve terminal metadata without emitting post-stop text.
-                        pending_terminal = envelope
+                        pending_terminal = step
                         continue
-                    yield envelope
+                    yield step
                     if post.locally_finished:
                         break
             else:
                 if pending_terminal is not None:
-                    yield finalize_terminal(pending_terminal)
+                    yield pending_terminal
         except (InvalidArgument, RoutedEngineError, Unknown, WorkerUnavailable):
             raise
         except Exception as e:

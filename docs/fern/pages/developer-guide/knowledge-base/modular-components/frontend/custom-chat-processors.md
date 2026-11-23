@@ -93,6 +93,36 @@ With or without `context`, `routed_engine.generate` checks the engine's token bu
 length of `token_ids` and the request's `max_tokens` after completion. A request that does not
 fit raises `RoutedEngineError`, which the Frontend returns as a context-length error.
 
+### What a processor yields
+
+A processor can yield finished OpenAI chat completion chunks, which the Frontend sends on as they
+are. It can instead yield parsed steps and let Dynamo build the chunks: the id, the role, usage,
+the finish reason, `nvext` and the Frontend's metrics. The built-in `vllm` and `sglang` processors
+do this. A stream is one or the other from its first item on.
+
+A parsed step is a dict tagged `_dynamo_parsed`:
+
+```python
+yield {
+    "_dynamo_parsed": True,
+    "index": 0,                      # the choice
+    "delta": {"content": "Hello"},   # content, reasoning_content, tool_calls
+    "token_ids": [9906],             # the generated tokens this step accounts for
+    "finish_reason": "stop",         # only on the step that ends the choice
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `delta` | The content, `reasoning_content` and `tool_calls` parsed in this step. Omit it for a step that only accounts for tokens. |
+| `token_ids` | The generated tokens the step accounts for. Dynamo counts them as completion tokens, so report each token once. |
+| `finish_reason` | The engine's `finish_reason` for the choice, or `"stop"` when the processor matched a stop itself. Dynamo reports `tool_calls` for a choice that called a tool and then stopped. |
+| `stop_reason` | The stop string or token ID that ended the choice. |
+| `logprobs` | The OpenAI `logprobs` object for the tokens behind `delta`. |
+| `completion_usage`, `engine_data` | The engine's own values from the item the step was parsed from. Dynamo reads the prompt token count, cached tokens and prompt logprobs from them. |
+| `reasoning_tokens` | The choice's running count of reasoning tokens, when the processor's parser counts them. |
+| `completion_token_ids` | The IDs to return as `nvext.completion_token_ids` with this step, when they differ from `token_ids`. |
+
 ## Register and run it
 
 For an installable package, register the provider under the `dynamo.frontend.chat_processors`
