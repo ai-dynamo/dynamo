@@ -694,14 +694,17 @@ mod tests {
     }
 
     #[test]
-    fn mdc_gauges_report_card_sizes_and_frontend_migration_limit() {
+    fn mdc_gauges_report_card_values_and_frontend_migration_limit() {
         // The assertions read the exported names, so do not take a prefix from the environment.
         let metrics = Metrics::new_with_prefix(None);
         let registry = Registry::new();
         metrics.register(&registry).unwrap();
         let mut card = ModelDeploymentCard::default();
         card.display_name = "test-model".to_string();
-        // Three different values: each gauge must get its own.
+        // Six different values: each gauge must get its own.
+        card.runtime_config.total_kv_blocks = Some(4096);
+        card.runtime_config.max_num_seqs = Some(256);
+        card.runtime_config.max_num_batched_tokens = Some(2048);
         card.runtime_config.context_length = Some(8192);
         card.kv_cache_block_size = 32;
         // Workers publish 0 here; the frontend's own limit must win.
@@ -710,6 +713,9 @@ mod tests {
         update_metrics_from_mdc(&metrics, &card, 3);
 
         for (name, expected) in [
+            ("dynamo_frontend_model_total_kv_blocks", 4096.0),
+            ("dynamo_frontend_model_max_num_seqs", 256.0),
+            ("dynamo_frontend_model_max_num_batched_tokens", 2048.0),
             ("dynamo_frontend_model_context_length", 8192.0),
             ("dynamo_frontend_model_kv_cache_block_size", 32.0),
             ("dynamo_frontend_model_migration_limit", 3.0),
