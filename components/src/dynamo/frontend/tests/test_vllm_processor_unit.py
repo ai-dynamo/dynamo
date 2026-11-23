@@ -6956,6 +6956,7 @@ class TestBufferedToolPathReasoningSplit:
         self, tokenizer, stream_response, chunk_size
     ):
         from vllm.reasoning import ReasoningParserManager
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
         request = SimpleNamespace(
             include_reasoning=True, tool_choice="auto", model_fields=frozenset()
@@ -6967,7 +6968,7 @@ class TestBufferedToolPathReasoningSplit:
             prompt_token_ids=tokenizer.encode(
                 "<|im_start|>assistant\n<think>", add_special_tokens=False
             ),
-            tool_parser=_resolve_qwen3_tool_parser_class()(tokenizer),
+            tool_parser=Qwen3EngineToolParser(tokenizer),
             reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("qwen3"),
             chat_template_kwargs={},
             stream_response=stream_response,
@@ -7004,6 +7005,7 @@ class TestBufferedToolPathReasoningSplit:
         with the text it stands for.
         """
         from vllm.reasoning import ReasoningParserManager
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
         pieces = [
             (14023, "<"),
@@ -7035,7 +7037,7 @@ class TestBufferedToolPathReasoningSplit:
             prompt_token_ids=tokenizer.encode(
                 "<|im_start|>assistant\n", add_special_tokens=False
             ),
-            tool_parser=_resolve_qwen3_tool_parser_class()(tokenizer),
+            tool_parser=Qwen3EngineToolParser(tokenizer),
             reasoning_parser_class=ReasoningParserManager.get_reasoning_parser(
                 "hunyuan_a13b"
             ),
