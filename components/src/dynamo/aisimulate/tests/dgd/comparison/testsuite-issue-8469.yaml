@@ -7,6 +7,11 @@ tests:
   - case: deepseek-r1-sglang-disagg-16gpu
     hardware: h200-sxm-32gpu
     exceptions:
+      recommend:
+        aic:
+          status: broken
+          reason: AISim's SGLang H200 performance data lacks the required FP8 context-MLA measurements.
+          match: '(?s)context MLA data missing.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -18,6 +23,11 @@ tests:
   - case: deepseek-r1-sglang-disagg-8gpu
     hardware: h200-sxm-16gpu
     exceptions:
+      recommend:
+        aic:
+          status: broken
+          reason: AISim's SGLang H200 performance data lacks the required FP8 context-MLA measurements.
+          match: '(?s)context MLA data missing.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -37,6 +47,11 @@ tests:
   - case: deepseek-r1-vllm-disagg
     hardware: h200-sxm-32gpu
     exceptions:
+      recommend:
+        aic:
+          status: broken
+          reason: The DGD output adapter refuses implicit remote-code trust for a mutable model ref.
+          match: "Refusing to auto-inject --trust-remote-code for mutable remote model ref 'deepseek-ai/DeepSeek-R1'"
       render:
         profiler-v1beta1:
           status: broken

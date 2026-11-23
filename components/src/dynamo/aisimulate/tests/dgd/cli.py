@@ -15,9 +15,8 @@ import pytest
 import yaml
 from aisim.sweeper.result import SweepResult
 
-from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden
+from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden, repository_root
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
 _YAML_SPDX_HEADER = (
     "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & "
     "AFFILIATES. All rights reserved.\n"
@@ -31,8 +30,9 @@ def run_dgd_recommend(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> tuple[list[str], subprocess.CompletedProcess[str]]:
+    root = repository_root()
     try:
-        config_argument = config_path.relative_to(_REPOSITORY_ROOT)
+        config_argument = config_path.relative_to(root)
     except ValueError:
         config_argument = config_path
     command = [
@@ -53,7 +53,7 @@ def run_dgd_recommend(
     ]
     return command, subprocess.run(
         command,
-        cwd=_REPOSITORY_ROOT,
+        cwd=root,
         env={**os.environ, **(environment or {})},
         text=True,
         capture_output=True,

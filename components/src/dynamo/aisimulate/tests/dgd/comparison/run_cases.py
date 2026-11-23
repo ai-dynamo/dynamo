@@ -374,10 +374,6 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
         else {"prefill": copy.deepcopy(worker), "decode": copy.deepcopy(worker)}
     )
 
-    max_rounds = sweep.get("max_rounds", 20)
-    candidates_per_round = sweep.get(
-        "candidates_per_round", sweep.get("parallel_evals", 16)
-    )
     max_eval_seconds = sweep.get("max_eval_seconds", 600.0)
     sla = goal.get("sla")
     engine = {
@@ -414,7 +410,9 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
         },
         "optimizer": {
             "algorithm": sweep.get("algorithm", "bayesian"),
-            "max_trials": max_rounds * candidates_per_round,
+            # One seeded suggestion keeps full-table smoke coverage bounded and
+            # avoids architecture-sensitive winner selection between candidates.
+            "max_trials": 1,
             "parallelism": sweep.get("parallel_evals", 16),
             "candidate_timeout_seconds": max_eval_seconds,
             "seed": sweep.get("seed", 42),

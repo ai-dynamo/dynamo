@@ -196,7 +196,7 @@ def test_recommendation_config_preserves_comparison_intent(
         },
         "optimizer": {
             "algorithm": "bayesian",
-            "max_trials": 6,
+            "max_trials": 1,
             "parallelism": 1,
             "candidate_timeout_seconds": 120,
             "seed": 42,
