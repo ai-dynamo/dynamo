@@ -341,7 +341,7 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 </ParamField>
 
 <ParamField path="DYN_BENCH_KV_WARMUP_DATASET" type="string">
-  Seeding-text dataset: a local path or an `https` URL. Defaults to the ShareGPT V3 conversation dump; the default download is verified against a digest pinned in code. Any other URL requires `DYN_BENCH_KV_WARMUP_SHA256`.
+  Seeding-text dataset: a local path or an `https` URL. Defaults to the ShareGPT V3 conversation dump; the default download is verified against a digest pinned in code. Any other URL requires `DYN_BENCH_KV_WARMUP_SHA256`. A redirect must also go to an `https` URL, or to plain `http` when `DYN_BENCH_KV_WARMUP_ALLOW_HTTP` is on.
 </ParamField>
 
 <ParamField path="DYN_BENCH_KV_WARMUP_ALLOW_HTTP" type="boolean" default="false">

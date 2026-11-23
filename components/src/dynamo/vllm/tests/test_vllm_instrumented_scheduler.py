@@ -25,6 +25,7 @@ import sys
 import textwrap
 import threading
 import time
+import urllib.request
 import uuid
 from collections import deque
 from dataclasses import asdict, replace
@@ -6991,9 +6992,8 @@ _KVWARM_PAYLOAD_SHA256 = hashlib.sha256(_KVWARM_PAYLOAD).hexdigest()
 @pytest.fixture
 def kvwarm_dataset_env(monkeypatch, tmp_path):
     """Isolate the dataset settings, point the cache at ``tmp_path`` and
-    record every ``urlopen`` call instead of touching the network."""
-    import urllib.request
-
+    record every opened URL and redirect handler instead of touching the
+    network."""
     for name in (
         "DYN_BENCH_KV_WARMUP_DATASET",
         "DYN_BENCH_KV_WARMUP_SHA256",
@@ -7002,16 +7002,22 @@ def kvwarm_dataset_env(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_CACHE_DIR", str(tmp_path))
     opened: list[str] = []
+    handlers: list = []
 
-    def _urlopen(url, timeout=None):
+    def _open(url, timeout=None):
         opened.append(url)
         return io.BytesIO(_KVWARM_PAYLOAD)
 
-    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    def _build_opener(*added):
+        handlers.extend(added)
+        return SimpleNamespace(open=_open)
+
+    monkeypatch.setattr(urllib.request, "build_opener", _build_opener)
     return SimpleNamespace(
         stub=InstrumentedScheduler.__new__(InstrumentedScheduler),
         cache=tmp_path,
         opened=opened,
+        handlers=handlers,
     )
 
 
@@ -7085,7 +7091,6 @@ def test_kvwarm_dataset_downloads_custom_https_url_with_pinned_sha256(
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_SHA256", _KVWARM_PAYLOAD_SHA256)
     with caplog.at_level(logging.INFO, logger=instrumented_scheduler_module.__name__):
         path = InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
-        # The second call reuses the verified cached file without a download.
         again = InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
     assert path == again == str(kvwarm_dataset_env.cache / "data.json")
     assert kvwarm_dataset_env.opened == [url]
@@ -7093,6 +7098,36 @@ def test_kvwarm_dataset_downloads_custom_https_url_with_pinned_sha256(
         f"KVWARM: dataset source={url} path={path} sha256={_KVWARM_PAYLOAD_SHA256}"
     )
     assert [r.getMessage() for r in caplog.records].count(expected_log) == 2
+
+
+@pytest.mark.parametrize(
+    "allow_http, target, allowed",
+    [
+        (None, "https://mirror.example.com/data.json", True),
+        (None, "http://mirror.example.com/data.json", False),
+        (None, "ftp://mirror.example.com/data.json", False),
+        ("1", "http://mirror.example.com/data.json", True),
+        ("1", "ftp://mirror.example.com/data.json", False),
+    ],
+)
+def test_kvwarm_dataset_download_checks_redirect_scheme(
+    kvwarm_dataset_env, monkeypatch, allow_http, target, allowed
+):
+    url = "https://example.com/data.json"
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_DATASET", url)
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_SHA256", _KVWARM_PAYLOAD_SHA256)
+    if allow_http:
+        monkeypatch.setenv("DYN_BENCH_KV_WARMUP_ALLOW_HTTP", allow_http)
+    InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
+    (handler,) = kvwarm_dataset_env.handlers
+    assert isinstance(handler, urllib.request.HTTPRedirectHandler)
+    req = urllib.request.Request(url)
+    if allowed:
+        redirected = handler.redirect_request(req, None, 302, "Found", {}, target)
+        assert redirected.full_url == target
+    else:
+        with pytest.raises(ValueError, match="https"):
+            handler.redirect_request(req, None, 302, "Found", {}, target)
 
 
 def test_kvwarm_dataset_default_url_needs_no_sha256_env(kvwarm_dataset_env):
@@ -7104,7 +7139,6 @@ def test_kvwarm_dataset_default_url_needs_no_sha256_env(kvwarm_dataset_env):
     cached.write_bytes(_KVWARM_PAYLOAD)
     assert InstrumentedScheduler._kvwarm_resolve_dataset(stub) == str(cached)
     assert kvwarm_dataset_env.opened == []
-    # The pinned default digest is still enforced on the cached copy.
     stub._KVWARM_DEFAULT_DATASET_SHA256 = "0" * 64
     with pytest.raises(RuntimeError, match="cache sha mismatch"):
         InstrumentedScheduler._kvwarm_resolve_dataset(stub)

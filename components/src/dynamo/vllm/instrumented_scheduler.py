@@ -102,6 +102,8 @@ import shutil
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from array import array
 from collections import deque
@@ -164,6 +166,31 @@ ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 ENV_FPM_BENCH_COLLECT_IMBALANCED = "DYN_FPM_BENCH_COLLECT_IMBALANCED"
 ENV_BENCH_CONTENT_SEED = "DYN_BENCH_CONTENT_SEED"
 EPHEMERAL_PORT_RANGE_PATH = "/proc/sys/net/ipv4/ip_local_port_range"
+
+
+def _kvwarm_check_url_scheme(url: str, allow_http: bool) -> None:
+    """Accept an https dataset URL, or plain http when ``allow_http`` is set."""
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme == "https" or (scheme == "http" and allow_http):
+        return
+    if scheme == "http":
+        raise ValueError(
+            f"KVWARM dataset URL must use https: {url} "
+            "(set DYN_BENCH_KV_WARMUP_ALLOW_HTTP=1 to allow plain http)"
+        )
+    raise ValueError(f"KVWARM dataset must be a local path or an https URL: {url}")
+
+
+class _KvwarmRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Apply the dataset URL scheme rule to every redirect before following it."""
+
+    def __init__(self, allow_http: bool) -> None:
+        super().__init__()
+        self._allow_http = allow_http
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _kvwarm_check_url_scheme(newurl, self._allow_http)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _utc_now_rfc3339() -> str:
@@ -6006,20 +6033,10 @@ class InstrumentedScheduler(AsyncScheduler):
             if not os.path.exists(spec):
                 raise RuntimeError(f"KVWARM dataset path does not exist: {spec}")
             return spec
-        import urllib.parse
-
-        scheme = urllib.parse.urlsplit(spec).scheme.lower()
-        if scheme == "http":
-            allow_http = os.environ.get("DYN_BENCH_KV_WARMUP_ALLOW_HTTP", "")
-            if allow_http.strip().lower() not in ("1", "true", "on", "yes"):
-                raise ValueError(
-                    f"KVWARM dataset URL must use https: {spec} "
-                    "(set DYN_BENCH_KV_WARMUP_ALLOW_HTTP=1 to allow plain http)"
-                )
-        elif scheme != "https":
-            raise ValueError(
-                f"KVWARM dataset must be a local path or an https URL: {spec}"
-            )
+        allow_http = os.environ.get(
+            "DYN_BENCH_KV_WARMUP_ALLOW_HTTP", ""
+        ).strip().lower() in ("1", "true", "on", "yes")
+        _kvwarm_check_url_scheme(spec, allow_http)
         # A non-default URL needs a pinned digest before the cache or the
         # network is touched, so no unverified bytes are ever used.
         expected_sha = os.environ.get("DYN_BENCH_KV_WARMUP_SHA256") or (
@@ -6051,16 +6068,14 @@ class InstrumentedScheduler(AsyncScheduler):
                 "KVWARM: dataset source=%s path=%s sha256=%s", spec, cached, digest
             )
             return cached
-        import urllib.request
-
         logger.info("KVWARM: downloading dataset %s -> %s", spec, cached)
         # Per-process temp name: same-host ranks may download concurrently;
         # the final os.replace is atomic and both produce identical bytes.
         tmp = f"{cached}.{os.getpid()}.part"
-        with urllib.request.urlopen(
-            spec, timeout=self._KVWARM_DOWNLOAD_TIMEOUT_S
-        ) as resp, open(tmp, "wb") as out:
-            shutil.copyfileobj(resp, out)
+        opener = urllib.request.build_opener(_KvwarmRedirectHandler(allow_http))
+        with opener.open(spec, timeout=self._KVWARM_DOWNLOAD_TIMEOUT_S) as resp:
+            with open(tmp, "wb") as out:
+                shutil.copyfileobj(resp, out)
         digest = self._kvwarm_sha256(tmp)
         if digest != expected_sha:
             os.unlink(tmp)
