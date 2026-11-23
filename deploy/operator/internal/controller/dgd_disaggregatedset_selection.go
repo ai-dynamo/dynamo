@@ -18,13 +18,11 @@
 package controller
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"strings"
+
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,26 +39,10 @@ var disaggregatedSetGVK = schema.GroupVersionKind{
 }
 
 const (
-	maxDisaggregatedSetRoles                    = 10
-	disaggregatedSetRevisionLength              = 8
-	maxDisaggregatedSetGeneratedNameLength      = 63
-	maxDisaggregatedSetRoleNameLength           = 10
-	maxDisaggregatedSetSliceIndexLength         = len("99")
-	maxDisaggregatedSetGroupIndexLength         = len("2147483647")
-	maxDisaggregatedSetWorkerRevisionHashLength = 10
-	disaggregatedSetChildNameSeparatorLength    = 3 * len("-")
-	disaggregatedSetWorkerRevisionSuffixLength  = 2*len("-") + maxDisaggregatedSetGroupIndexLength + maxDisaggregatedSetWorkerRevisionHashLength
-	maxDisaggregatedSetNameLength               = maxDisaggregatedSetGeneratedNameLength - maxDisaggregatedSetRoleNameLength - maxDisaggregatedSetSliceIndexLength - disaggregatedSetRevisionLength - disaggregatedSetChildNameSeparatorLength - disaggregatedSetWorkerRevisionSuffixLength
-	disaggregatedSetServiceSuffixLength         = len("-prv")
-	disaggregatedSetNameHashLength              = 8
-	dynamoGraphDeploymentKind                   = "DynamoGraphDeployment"
-	dynamoComponentDeploymentKind               = "DynamoComponentDeployment"
+	disaggregatedSetServiceSuffixLength = len("-prv")
+	dynamoGraphDeploymentKind           = "DynamoGraphDeployment"
+	dynamoComponentDeploymentKind       = "DynamoComponentDeployment"
 )
-
-type disaggregatedSetSelection struct {
-	componentToRole map[string]string
-	desiredReplicas map[string]int32
-}
 
 type disaggregatedSetChildIdentity struct {
 	slice int
@@ -80,11 +62,11 @@ func disaggregatedSetEligibilityReason(
 	if dgd == nil {
 		return "DynamoGraphDeployment is nil"
 	}
-	selection, reason := selectDisaggregatedSetComponents(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	if reason != "" {
 		return reason
 	}
-	if len(selection.componentToRole) < 2 {
+	if len(selection.ComponentToRole) < 2 {
 		return "DisaggregatedSet requires at least two eligible multinode worker roles"
 	}
 	for i := range dgd.Spec.Components {
@@ -92,7 +74,7 @@ func disaggregatedSetEligibilityReason(
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
-		if _, selected := selection.componentToRole[component.ComponentName]; !selected {
+		if _, selected := selection.ComponentToRole[component.ComponentName]; !selected {
 			return fmt.Sprintf(
 				"mixed DS/DCD worker rollout unsupported: worker component %q is not selected by DisaggregatedSet",
 				component.ComponentName,
@@ -105,7 +87,7 @@ func disaggregatedSetEligibilityReason(
 			if component.GetNumberOfNodes() <= 1 {
 				continue
 			}
-			if _, selected := selection.componentToRole[component.ComponentName]; !selected {
+			if _, selected := selection.ComponentToRole[component.ComponentName]; !selected {
 				return fmt.Sprintf(
 					"multinode component %q is not eligible for DisaggregatedSet and requires LeaderWorkerSet support",
 					component.ComponentName,
@@ -123,12 +105,12 @@ func coalesceDisaggregatedSetRestartState(
 	if restartState == nil || dynamo.IsParallelRestart(dgd) {
 		return restartState
 	}
-	selection, reason := selectDisaggregatedSetComponents(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	if reason != "" {
 		return restartState
 	}
 	selectedRestarting := false
-	for componentName := range selection.componentToRole {
+	for componentName := range selection.ComponentToRole {
 		if restartState.ShouldAnnotateComponent(componentName) {
 			selectedRestarting = true
 			break
@@ -137,116 +119,10 @@ func coalesceDisaggregatedSetRestartState(
 	if !selectedRestarting {
 		return restartState
 	}
-	for componentName := range selection.componentToRole {
+	for componentName := range selection.ComponentToRole {
 		restartState.ComponentsToAnnotate[componentName] = true
 	}
 	return restartState
-}
-
-func selectDisaggregatedSetComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (disaggregatedSetSelection, string) {
-	selection := disaggregatedSetSelection{
-		componentToRole: make(map[string]string),
-		desiredReplicas: make(map[string]int32),
-	}
-	if dgd == nil {
-		return selection, "DynamoGraphDeployment is nil"
-	}
-
-	usedRoles := make(map[string]struct{})
-	zeroReplicas := 0
-	positiveReplicas := 0
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
-		if !isDisaggregatedSetEligibleComponent(component) {
-			continue
-		}
-		if component.ScalingAdapter != nil {
-			return selection, fmt.Sprintf(
-				"component %q uses scalingAdapter, but DisaggregatedSet does not support scale subresource integration",
-				component.ComponentName,
-			)
-		}
-		roleName := disaggregatedSetRoleName(component, usedRoles)
-		usedRoles[roleName] = struct{}{}
-		selection.componentToRole[component.ComponentName] = roleName
-
-		desiredReplicas := desiredComponentReplicas(component)
-		selection.desiredReplicas[component.ComponentName] = desiredReplicas
-		if desiredReplicas == 0 {
-			zeroReplicas++
-		} else {
-			positiveReplicas++
-		}
-	}
-
-	if len(selection.componentToRole) == 0 {
-		return selection, "no eligible multinode worker roles found"
-	}
-	if len(selection.componentToRole) > maxDisaggregatedSetRoles {
-		return selection, fmt.Sprintf("DisaggregatedSet supports at most %d roles", maxDisaggregatedSetRoles)
-	}
-	if zeroReplicas > 0 && positiveReplicas > 0 {
-		return selection, "DisaggregatedSet requires replicas to be zero for all selected roles or positive for all selected roles"
-	}
-	return selection, ""
-}
-
-func isDisaggregatedSetEligibleComponent(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return component != nil && component.GetNumberOfNodes() > 1 && dynamo.IsWorkerComponent(string(component.ComponentType))
-}
-
-func desiredComponentReplicas(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) int32 {
-	if component == nil || component.Replicas == nil {
-		return 1
-	}
-	return *component.Replicas
-}
-
-func disaggregatedSetRoleName(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, used map[string]struct{}) string {
-	preferred := strings.ToLower(string(component.ComponentType))
-	if preferred != consts.ComponentTypePrefill && preferred != consts.ComponentTypeDecode {
-		preferred = ""
-	}
-	if preferred == "" || roleNameUsed(preferred, used) {
-		preferred = dynamo.NormalizeKubeResourceName(component.ComponentName)
-	}
-	preferred = truncateDNSLabelWithHash(preferred, maxDisaggregatedSetRoleNameLength)
-	roleName := preferred
-	for i := 2; roleNameUsed(roleName, used); i++ {
-		suffix := fmt.Sprintf("-%d", i)
-		roleName = truncateDNSLabel(preferred, maxDisaggregatedSetRoleNameLength-len(suffix)) + suffix
-	}
-	return roleName
-}
-
-func roleNameUsed(roleName string, used map[string]struct{}) bool {
-	_, ok := used[roleName]
-	return ok
-}
-
-func truncateDNSLabel(value string, maxLength int) string {
-	if len(value) <= maxLength {
-		return value
-	}
-	return strings.TrimRight(value[:maxLength], "-")
-}
-
-func truncateDNSLabelWithHash(value string, maxLength int) string {
-	if len(value) <= maxLength {
-		return value
-	}
-	hash := sha256.Sum256([]byte(value))
-	hashText := hex.EncodeToString(hash[:])[:disaggregatedSetNameHashLength]
-	if maxLength <= len(hashText) {
-		return hashText[:maxLength]
-	}
-	suffix := "-" + hashText
-	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-")
-	return prefix + suffix
-}
-
-func disaggregatedSetName(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
-	return truncateDNSLabelWithHash(dynamo.NormalizeKubeResourceName(dgd.Name), maxDisaggregatedSetNameLength)
 }
 
 func disaggregatedSetTargetRevision(ds *unstructured.Unstructured) (string, error) {

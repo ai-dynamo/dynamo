@@ -103,6 +103,8 @@ async def worker(argv: list[str] | None = None):
         event_plane=dynamo_args.event_plane,
         response_plane=dynamo_args.response_plane,
     )
+    # Manual drain checks the plane; record the one the runtime resolved.
+    dynamo_args.response_plane = runtime.response_plane
 
     # Keep the flock alive for process lifetime. Linux releases it on exit.
     if snapshot_controller is not None:

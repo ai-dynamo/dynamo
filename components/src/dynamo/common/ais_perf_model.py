@@ -213,6 +213,38 @@ def normalized_config(resolved: Mapping[str, Any]) -> dict[str, Any]:
     return config.to_dict()
 
 
+def save_tuned_state_snapshot(
+    config: Mapping[str, Any],
+    iterations: list[list[dict[str, Any]]],
+    path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Tune a new perf model with observed forward passes and save its state.
+
+    ``config`` is a resolved config. ``iterations`` holds one list per forward
+    pass, with one forward pass metrics mapping per attention-DP rank. The
+    state goes to the new folder ``path``, which a value restores with
+    ``from: {state_snapshot: {path}}``. Returns the saved config.
+
+    A workload that has observations but no usable fit, and a model without
+    any observation, are a ``ValueError``; nothing is saved then.
+    """
+    model = _sdk().RustForwardPassPerfModel.best_available(dict(config))
+    model.tune_with_fpms(iterations)
+    stores = model.readiness_report()["stores"]
+    unready = [
+        f"{store['workload_kind']} ({store['retained_observations']} observations, "
+        f"{store['not_ready_reason']})"
+        for store in stores
+        if store["retained_observations"] and not store["ready"]
+    ]
+    if unready or not any(store["ready"] for store in stores):
+        raise ValueError(
+            "ais_perf_model: the model is not ready after tuning: "
+            + (", ".join(unready) or "no observation was kept")
+        )
+    return model.save_state_snapshot(path)
+
+
 def has_relative_paths(value: Any) -> bool:
     """Return whether a mapping or list value holds a relative path.
 

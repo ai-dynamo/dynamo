@@ -106,6 +106,26 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### Unreleased
 
+#### API Availability
+
+##### DGDR v1beta2 Available by Default
+
+**Change:** The operator installs and serves the DGDR v1beta2 Request, Run, and Candidate APIs
+and starts their controllers without a feature gate. The API is available but not feature complete.
+Existing v1beta1 Requests retain their API and behavior; the Request storage version and conversion
+contract are unchanged.
+
+**Affected:** All operator installations, including those that previously left
+`dynamo-operator.dgdrV1Beta2.enabled` unset or set it to `false`. Installations with
+`dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, require the matching
+CRDs to be installed before upgrading the operator.
+
+**Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
+Ordinary Helm upgrades remove the flag automatically. The legacy
+`dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability; it remains solely
+for the existing Planner live-retune RBAC condition. Retune behavior and its disabled defaults are
+unchanged. Review API migration notes before future upgrades.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract
@@ -839,6 +859,49 @@ global:
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```
+
+
+To use a KAI-compatible scheduler under a different name (for example, Run:ai),
+install it separately and set its name:
+
+```yaml
+global:
+  kai-scheduler:
+    install: false        # A custom name requires an externally managed scheduler
+    enabled: true
+    schedulerName: runai-scheduler
+  grove:
+    enabled: true
+```
+
+> [!WARNING]
+> This setting changes only the scheduler name in Dynamo's pod templates. It does not
+> rename or reconfigure KAI or Grove. Before using a custom name, confirm that your Grove
+> version maps that name to its KAI backend and that the scheduler reads Grove's PodGroups
+> and queue metadata. The bundled Grove `v0.2.0-beta1` KAI profile is named `kai-scheduler`
+> and does not support a custom name. Changing this value alone does not enable Run:ai.
+> Custom KAI scheduler identity support is tracked in
+> [Grove PR #962](https://github.com/ai-dynamo/grove/pull/962); verify release availability
+> before choosing an external Grove version.
+
+The default is `kai-scheduler`. An empty value also uses that default. For a directly
+managed `OperatorConfiguration`, set `orchestrators.kaiScheduler.schedulerName` instead.
+Names must be DNS subdomains, like `PodSpec.schedulerName`: lowercase letters, digits,
+`-` and `.`, at most 253 characters, with each dot-separated part starting and ending
+in a letter or digit. An invalid name such as `Runai_Scheduler` stops the operator at
+startup with an error on `orchestrators.kaiScheduler.schedulerName`.
+
+The operator sets `schedulerName` and the `kai.scheduler/queue` label when a component
+omits `schedulerName` or sets it to the configured name. A component that sets a
+different scheduler name is left unchanged, without injecting a KAI queue label.
+The queue comes from the DGD's `nvidia.com/kai-scheduler-queue` annotation (default
+`dynamo`), and the operator checks that the KAI Queue exists.
+
+> [!NOTE]
+> Changing the configured scheduler name can change the pod templates and roll Grove
+> workloads using the KAI integration. Explicit component overrides selecting another
+> scheduler stay unchanged. Coordinate the change with your scheduler and Grove
+> configuration. Leaving the value unset keeps current templates.
 
 Volcano:
 

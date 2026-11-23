@@ -203,8 +203,10 @@ file that changes only the scheduling of a default Mocker is:
 ## Performance modeling
 
 <ParamField path="--planner-profile-data" type="path" default="null">
-  Path to either a mocker-format `.npz` file or a profiler results directory. Cannot be combined
-  with `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL`; see
+  Path to either a mocker-format `.npz` file with timing lookup tables or a profiler results
+  directory. With a directory, the mocker tunes an AIS perf model with the measured points when it
+  starts; see [Profiler results directory](#profiler-results-directory). Cannot be combined with
+  `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL`; see
   [AIS performance model](#ais-performance-model).
 </ParamField>
 
@@ -260,6 +262,58 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
   `DYN_AIS_PERF_MODEL` to an empty value for that mocker; an empty value counts as not set. With
   `--extra-engine-args` the profile data is not used for timing, so the combination is accepted.
 </ParamField>
+
+### Profiler results directory
+
+A profiler results directory holds the prefill and decode points that the profiler's thorough mode
+measured: `selected_prefill_interpolation/raw_data.npz` and
+`selected_decode_interpolation/raw_data.npz`, or `prefill_raw_data.json` and
+`decode_raw_data.json`.
+
+```bash
+python -m dynamo.mocker --planner-profile-data PROFILE_RESULTS_DIR --model-path MODEL
+```
+
+When it starts, the mocker tunes an AISimulate `fpm_regression` model with the measured points, as
+the Planner reads the same directory, and uses it as its AIS perf model. The model records
+`--model-path` as the model name (the name of the directory when the flag is not given),
+`--engine-type` as the backend and `--ais-nextn` as the speculative decoding depth. The hardware
+and the parallelism are recorded as unknown. Each phase needs at least five measured points; with
+fewer, or with points that do not allow a fit, the mocker does not start. A deprecated AIS input
+next to the directory is an error: `choose one timing provider: AIS or planner_profile_data`.
+With `--extra-engine-args` the directory is not used for timing.
+
+To keep the tuned models, or to give them to the Python replay API as `ais_perf_model=`, write
+them to a directory that does not exist yet:
+
+```bash
+python -m dynamo.mocker.utils.planner_profiler_perf_data_converter \
+    PROFILE_RESULTS_DIR OUTPUT_DIR --model MODEL
+python -m dynamo.mocker --ais-perf-model OUTPUT_DIR/ais_perf_model.json --model-path MODEL
+```
+
+`OUTPUT_DIR` gets one saved model for each worker type (`prefill`, `decode`, `aggregated`) and
+`ais_perf_model.json`, which names the three, so a mocker of any worker type takes the same file.
+`--backend` (default `vllm`) and `--nextn` (default `0`) set what the mocker takes from
+`--engine-type` and `--ais-nextn`. The saved models are tied to the AISimulate version that wrote
+them; write them with the Dynamo release that reads them.
+
+Since v1.8 the directory is read this way. Earlier releases fitted one line to the prefill points
+and one plane to the decode points and built lookup tables from them. Timing differs from those
+lookup tables:
+
+- Prefill time depends on the number of requests in the batch and on their cached prefix, not
+  only on the total of new tokens, and it is not a straight line in the input length. For the
+  profile `H200_TP1P_TP1D` in the repository, one request of 100 input tokens takes 18.0 ms
+  (measured 19.5 ms; the lookup table gave 0.6 ms) and one of 8,000 takes 164.9 ms (lookup
+  table 175.3 ms).
+- Decode time for the same profile is within 2.5% of the lookup table for contexts of 350 tokens
+  and more, the range that was profiled, and within 0.3% from 1,000 tokens. For shorter contexts
+  the lookup table was higher, because it interpolated between a context of 1 token and the next
+  grid point: 64 requests with 50 tokens each take 7.5 ms, and took 48.2 ms through the lookup
+  table.
+- A mocker without `--num-gpu-blocks-override` takes its KV capacity from the profiled decode
+  engine (`max_kv_tokens` of the decode data) instead of the default of 16,384 blocks.
 
 The inputs below are deprecated. They still work and print one warning that names the inputs in
 use, for example

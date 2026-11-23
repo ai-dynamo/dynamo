@@ -3417,6 +3417,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3454,6 +3455,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3562,6 +3564,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -4316,6 +4319,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `schedulerName` _string_ | SchedulerName is the pod scheduler name used by the KAI integration.<br />Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend. | kai-scheduler | Optional: \{\} <br /> |
 | `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
 
 

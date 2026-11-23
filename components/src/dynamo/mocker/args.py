@@ -33,12 +33,20 @@ _SGLANG_ALIAS_REMOVAL = "Dynamo 1.8.0 (two releases after 1.6.0)"
 
 
 class ProfileDataResult:
-    """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion."""
+    """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion.
+
+    ``npz_path`` is the lookup-table file, ``ais_perf_model`` the AIS perf model
+    file written for a profiler results directory; at most one is set.
+    """
 
     def __init__(
-        self, npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None
+        self,
+        npz_path: Path | None,
+        tmpdir: tempfile.TemporaryDirectory | None,
+        ais_perf_model: Path | None = None,
     ):
         self.npz_path = npz_path
+        self.ais_perf_model = ais_perf_model
         self._tmpdir = tmpdir
 
     def __del__(self):
@@ -52,48 +60,68 @@ class ProfileDataResult:
 
 def resolve_planner_profile_data(
     planner_profile_data: Path | None,
+    *,
+    model: str | None = None,
+    backend: str = "vllm",
+    nextn: int = 0,
 ) -> ProfileDataResult:
     """
-    Resolve --planner-profile-data to an NPZ file path.
+    Resolve --planner-profile-data to a timing source.
 
-    Handles backward compatibility by accepting either:
-    1. A mocker-format NPZ file (returned as-is)
-    2. A profiler-style results directory (converted to mocker-format NPZ)
+    Accepts either:
+    1. A mocker-format NPZ file with lookup tables (returned as-is)
+    2. A profiler-style results directory. An AIS perf model is tuned with
+       its measured points and written to a temporary directory.
 
     Args:
         planner_profile_data: Path from --planner-profile-data argument.
+        model: Model name recorded in the AIS perf model of a directory; the
+            name of the directory when ``None``.
+        backend: Engine backend recorded in that AIS perf model.
+        nextn: Speculative decoding depth recorded in that AIS perf model.
 
     Returns:
-        ProfileDataResult with npz_path and optional tmpdir for cleanup.
+        ProfileDataResult with npz_path or ais_perf_model, and the tmpdir for cleanup.
 
     Raises:
         FileNotFoundError: If path doesn't contain valid profile data in any supported format.
+        ValueError: If the points of a directory do not allow a fit.
     """
     if planner_profile_data is None:
         return ProfileDataResult(npz_path=None, tmpdir=None)
 
     from .utils.planner_profiler_perf_data_converter import (
-        convert_profile_results_to_npz,
         is_mocker_format_npz,
         is_profile_results_dir,
+        write_ais_perf_model,
     )
 
-    # Case 1: Already a mocker-format NPZ file
     if is_mocker_format_npz(planner_profile_data):
         logger.info(f"Using mocker-format NPZ file: {planner_profile_data}")
         return ProfileDataResult(npz_path=planner_profile_data, tmpdir=None)
 
-    # Case 2: Profiler-style results directory - needs conversion
     if is_profile_results_dir(planner_profile_data):
         logger.info(
-            f"Detected profiler-style results directory at {planner_profile_data}, converting to NPZ..."
+            "Detected profiler-style results directory at %s, tuning an AIS perf "
+            "model with it...",
+            planner_profile_data,
         )
         tmpdir = tempfile.TemporaryDirectory(prefix="mocker_perf_data_")
-        npz_path = Path(tmpdir.name) / "perf_data.npz"
-        convert_profile_results_to_npz(planner_profile_data, npz_path)
-        return ProfileDataResult(npz_path=npz_path, tmpdir=tmpdir)
+        try:
+            ais_perf_model = write_ais_perf_model(
+                planner_profile_data,
+                Path(tmpdir.name) / "ais_perf_model",
+                model=model or planner_profile_data.resolve().name,
+                backend=backend,
+                nextn=nextn,
+            )
+        except Exception:
+            tmpdir.cleanup()
+            raise
+        return ProfileDataResult(
+            npz_path=None, tmpdir=tmpdir, ais_perf_model=ais_perf_model
+        )
 
-    # Case 3: Invalid path - neither mocker-format NPZ nor profiler-style directory
     raise FileNotFoundError(
         f"Path '{planner_profile_data}' is neither a mocker-format NPZ file nor a valid profiler results directory.\n"
         f"Expected either:\n"
@@ -101,6 +129,33 @@ def resolve_planner_profile_data(
         f"  - A directory containing selected_prefill_interpolation/raw_data.npz and selected_decode_interpolation/raw_data.npz\n"
         f"  - A directory containing prefill_raw_data.json and decode_raw_data.json"
     )
+
+
+def use_planner_profile_data(args: argparse.Namespace) -> ProfileDataResult:
+    """Resolve ``--planner-profile-data`` and make it the timing input of ``args``.
+
+    A lookup-table file stays in ``args.planner_profile_data``. A profiler
+    results directory becomes the AIS perf model value of ``args``, tuned for
+    ``--model-path``, ``--engine-type`` and ``--ais-nextn``; together with an
+    old AIS input it is a ``ValueError``. With ``--extra-engine-args`` the
+    profile data is not used for timing, as before.
+
+    The result owns the temporary directory of that AIS perf model: keep it
+    until the workers have stopped.
+    """
+    result = resolve_planner_profile_data(
+        args.planner_profile_data,
+        model=args.model_path,
+        backend=args.engine_type,
+        nextn=args.ais_nextn or 0,
+    )
+    args.planner_profile_data = result.npz_path
+    if result.ais_perf_model is not None and args.extra_engine_args is None:
+        if old_ais_perf_inputs(args):
+            raise ValueError("choose one timing provider: AIS or planner_profile_data")
+        args.ais_perf_model_value = str(result.ais_perf_model)
+        args.ais_perf_model_source = "--planner-profile-data"
+    return result
 
 
 def validate_worker_type_args(args: argparse.Namespace) -> None:
@@ -342,8 +397,10 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         "--planner-profile-data",
         type=Path,
         default=None,
-        help="Path to profile results directory containing selected_prefill_interpolation/ and "
-        "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
+        help="Path to a mocker-format .npz file with timing lookup tables, or to a "
+        "profiler results directory containing selected_prefill_interpolation/ and "
+        "selected_decode_interpolation/ subdirectories, which tunes an AIS perf model "
+        "(default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
         "--ais-perf-model",
@@ -739,7 +796,7 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         "--response-plane",
         type=str,
         choices=["tcp", "quic", "velo"],
-        default=environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        default=environ.get("DYN_RESPONSE_PLANE"),
         help="Select the response transport. Frontend and workers must match.",
     )
     parser.add_argument(

@@ -4857,6 +4857,7 @@ See [CandidateProgress](#candidateprogress).
 
 <Accordion id="dynamographdeploymentcandidate" title="DynamoGraphDeploymentCandidate">
 DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+Available without a feature gate. This API is not feature complete.
 
 
 **Kind:** `resource`
@@ -4915,6 +4916,7 @@ See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1
 
 <Accordion id="v1beta2-dynamographdeploymentrequest" title="v1beta2 DynamoGraphDeploymentRequest">
 DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+Available without a feature gate. This API is not feature complete.
 
 
 **Kind:** `resource`
@@ -5145,6 +5147,7 @@ See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 
 <Accordion id="dynamographdeploymentrun" title="DynamoGraphDeploymentRun">
 DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+Available without a feature gate. This API is not feature complete.
 
 
 **Kind:** `resource`
@@ -6107,6 +6110,11 @@ KaiSchedulerConfiguration holds Kai-scheduler settings.
 
 **Kind:** `type`
 **Appears in:** [OrchestratorConfiguration](#orchestratorconfiguration)
+
+<ParamField path="schedulerName" type="string" default="kai-scheduler">
+SchedulerName is the pod scheduler name used by the KAI integration. Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 
 <ParamField path="enabled" type="boolean">
 Enabled overrides auto-detection. nil = auto-detect.

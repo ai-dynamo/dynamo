@@ -117,14 +117,14 @@ dynamo-parsers = { version = "=11.0.11" }
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "=0.10.2" }
+dynamo-parsers-v2 = { version = "=0.10.3" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.8.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.8.0" }
 
 
 
 # velo
-velo = { version = "=0.21.0", default-features = false }
+velo = { version = "=0.22.1", default-features = false }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -148,7 +148,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"] }
+cudarc = { version = "=0.19.10", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
 moka = { version = "0.12", features = ["future"] }
 derive_builder = { version = "0.20" }
