@@ -86,7 +86,8 @@ def _send(processor, cache, caller: str, image: Image.Image):
     return cache.resolve(prompt)
 
 
-def test_same_uuid_with_different_images_gets_distinct_cache_identity():
+def test_same_uuid_with_different_images_gets_distinct_cache_identity(monkeypatch):
+    monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
     processor = _processor()
     cache = _FakeEngineCache()
     red = _image((255, 0, 0))
@@ -100,7 +101,8 @@ def test_same_uuid_with_different_images_gets_distinct_cache_identity():
     assert served_b.tobytes() == blue.tobytes()
 
 
-def test_same_uuid_and_same_image_reuses_cache_identity():
+def test_same_uuid_and_same_image_reuses_cache_identity(monkeypatch):
+    monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
     processor = _processor()
     cache = _FakeEngineCache()
     red = _image((255, 0, 0))

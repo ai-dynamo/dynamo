@@ -259,7 +259,9 @@ To let clients choose cache identities, set `DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1`
 on the frontend and on every vLLM worker, including the gRPC sidecar. Enable it
 only when every client that can reach the endpoint is trusted to manage these
 keys: the first image cached under a UUID is the one every later request with
-that UUID receives.
+that UUID receives. On the gRPC sidecar the setting forwards UUIDs of
+URL-backed images only: the sidecar rejects image parts that carry only a
+`uuid` with either setting, so reuse by UUID alone needs the Python vLLM worker.
 
 Dynamo forwards UUIDs with URL-backed image, video, and audio inputs.
 The extension is specific to vLLM; it is not part of the OpenAI Chat Completions

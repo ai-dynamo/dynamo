@@ -59,6 +59,10 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.metadata_upload import _backend_metadata_upload_settings
+from dynamo.common.multimodal.cache_uuid import (
+    UUID_ONLY_IMAGE_REJECTED_MESSAGE,
+    client_cache_uuids_allowed,
+)
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
@@ -4570,13 +4574,14 @@ class EmbeddingWorkerHandler:
         renderer = self.engine_client.renderer
         mm_config = model_config.multimodal_config
         try:
-            chat_request = request_cls.model_validate(
-                {
-                    key: request[key]
-                    for key in _CHAT_EMBEDDING_REQUEST_FIELDS
-                    if request.get(key) is not None
-                }
-            )
+            fields = {
+                key: request[key]
+                for key in _CHAT_EMBEDDING_REQUEST_FIELDS
+                if request.get(key) is not None
+            }
+            if not client_cache_uuids_allowed():
+                fields["messages"] = _drop_client_cache_uuids(messages)
+            chat_request = request_cls.model_validate(fields)
             # ``--custom-jinja-template``, or None for the model's own, as with
             # ``vllm serve`` without ``--chat-template``. vLLM caches the load.
             chat_params = chat_request.build_chat_params(
@@ -4906,6 +4911,57 @@ _CHAT_EMBEDDING_REQUEST_FIELDS = (
     "add_special_tokens",
     "truncate_prompt_tokens",
 )
+
+
+# Keys that hold the media of a chat content part, as vLLM's chat parser reads
+# them. vLLM uses a part's ``uuid`` as the cache identity of that media.
+_CHAT_MEDIA_PART_KEYS = (
+    "image_url",
+    "image_pil",
+    "image_embeds",
+    "audio_embeds",
+    "video_embeds",
+    "audio_url",
+    "input_audio",
+    "video_url",
+)
+
+
+def _drop_client_cache_uuids(messages: Any) -> Any:
+    """Return chat ``messages`` without the ``uuid`` of any content part.
+
+    Used when client cache uuids are off, so vLLM derives each cache identity
+    from the media content, as on the generate path. A media part that has a
+    ``uuid`` and no media is rejected, as the frontend rejects UUID-only
+    images. Accepts one conversation or a batch of them, and leaves anything
+    that is not a content part for vLLM's request model to validate.
+    """
+
+    def strip_part(part: Any) -> Any:
+        if not isinstance(part, dict) or part.get("uuid") is None:
+            return part
+        media_key = next((key for key in _CHAT_MEDIA_PART_KEYS if key in part), None)
+        if media_key is not None:
+            media = part[media_key]
+            if isinstance(media, dict) and "url" in media:
+                media = media["url"]
+            if media is None:
+                if media_key.startswith("image"):
+                    raise InvalidArgument(UUID_ONLY_IMAGE_REJECTED_MESSAGE)
+                raise InvalidArgument(
+                    f"`{media_key}` parts that carry only a `uuid` are not "
+                    "accepted. Send the media data."
+                )
+        return {key: value for key, value in part.items() if key != "uuid"}
+
+    def strip(item: Any) -> Any:
+        if isinstance(item, list):
+            return [strip(entry) for entry in item]
+        if isinstance(item, dict) and isinstance(item.get("content"), list):
+            return {**item, "content": [strip_part(p) for p in item["content"]]}
+        return item
+
+    return strip(messages)
 
 
 def _is_token_id(x: Any) -> bool:
