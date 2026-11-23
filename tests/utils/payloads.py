@@ -534,27 +534,37 @@ class MediaAccuracyPayload(ChatPayload):
         return body
 
     def validate(self, response: Any, content: str) -> None:
+        self._validate_usage(response)
         super().validate(response, content)
         words = re.findall(r"[a-z]+", content.lower())
         if self.media == "image":
             colors = [word for word in words if word in ("red", "blue")]
-            assert colors[:2] == list(self.expected_colors), content
+            if colors[:2] != list(self.expected_colors):
+                raise AssertionError(content)
         elif self.media == "video":
-            assert {"triangle", "triangular"}.intersection(words), content
+            if not {"triangle", "triangular"}.intersection(words):
+                raise AssertionError(content)
         else:
-            assert "thoughts affected hester" in " ".join(words), content
+            if "thoughts affected hester" not in " ".join(words):
+                raise AssertionError(content)
+
+    def _validate_usage(self, response: Any) -> dict[str, Any]:
         result = response.json()
         usage = result["usage"]
         for name in ("prompt_tokens", "completion_tokens"):
-            assert type(usage.get(name)) is int and usage[name] > 0, usage
-        assert (
-            usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
-        ), usage
-        assert result["choices"][0]["finish_reason"] in ("stop", "length"), result
+            if type(usage.get(name)) is not int or usage[name] <= 0:
+                raise ValueError(f"Invalid media token usage: {usage}")
+        if usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]:
+            raise ValueError(f"Invalid media token usage: {usage}")
+        if result["choices"][0]["finish_reason"] not in ("stop", "length"):
+            raise ValueError(f"Unexpected media finish reason: {result}")
         if self.media != "audio":
             prompt_ids = result.get("nvext", {}).get("prompt_token_ids")
-            assert isinstance(prompt_ids, list) and prompt_ids, result
-            assert usage["prompt_tokens"] > len(prompt_ids), usage
+            if not isinstance(prompt_ids, list) or not prompt_ids:
+                raise ValueError(f"Missing media prompt token IDs: {result}")
+            if usage["prompt_tokens"] <= len(prompt_ids):
+                raise ValueError(f"Media prompt usage was not expanded: {usage}")
+        return result
 
 
 @dataclass
@@ -567,7 +577,7 @@ class ImageCacheIdentityPayload(MediaAccuracyPayload):
     )
 
     def before_request(self) -> None:
-        if self._iteration != 1:
+        if self._iteration != 1 or len(self._observed) > 1:
             return
         self._wait_for_complete_prompt(self._observed[0][0])
 
@@ -587,54 +597,70 @@ class ImageCacheIdentityPayload(MediaAccuracyPayload):
             result = response.json()
             require_router_worker_id(result)
             usage = result.get("usage", {})
-            assert usage.get("prompt_tokens") == prompt, result
+            if usage.get("prompt_tokens") != prompt:
+                raise ValueError(f"Image probe prompt usage changed: {result}")
             cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
             # Fail before a readiness probe can repair missing primary-request caching.
             complete_tokens = (
                 (prompt - 1) // self.cache_block_size * self.cache_block_size
             )
-            assert type(cached) is int and cached >= complete_tokens, usage
+            if type(cached) is not int or cached < complete_tokens:
+                raise ValueError(f"Image probe found incomplete cached prompt: {usage}")
             observed = result.get("nvext", {}).get("timing", {}).get("kv_hit_rate")
             if isinstance(observed, (float, int)) and observed >= expected - 1e-9:
                 return
             time.sleep(0.1)
-        raise AssertionError(
+        raise ValueError(
             f"Image KV events did not cover complete prompt blocks: {observed} < {expected}"
         )
 
-    def validate(self, response: Any, content: str) -> None:
+    def process_response(self, response: Any) -> str:
         self.expected_colors = (
             ("blue", "red") if self._iteration == 3 else ("red", "blue")
         )
-        super().validate(response, content)
-        result = response.json()
+        result = self._validate_usage(response)
         usage = result["usage"]
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
-        assert type(cached) is int and 0 <= cached <= usage["prompt_tokens"], usage
+        if type(cached) is not int or not 0 <= cached <= usage["prompt_tokens"]:
+            raise ValueError(f"Invalid image cached token count: {usage}")
         hit_rate = result.get("nvext", {}).get("timing", {}).get("kv_hit_rate")
-        assert type(hit_rate) in (float, int) and 0 <= hit_rate <= 1, result
+        if type(hit_rate) not in (float, int) or not 0 <= hit_rate <= 1:
+            raise ValueError(f"Invalid image KV hit rate: {result}")
         prompt = usage["prompt_tokens"]
-        assert prompt >= self.cache_block_size * 2, usage
-        assert len(self._observed) == self._iteration
-        if self._iteration:
-            assert prompt == self._observed[0][0], (prompt, self._observed)
-        if self._iteration == 1:
-            complete_tokens = (
-                (prompt - 1) // self.cache_block_size * self.cache_block_size
-            )
-            expected = (prompt // self.cache_block_size) / math.ceil(
-                prompt / self.cache_block_size
-            )
-            assert cached > self._observed[0][1] and cached >= complete_tokens, usage
-            assert hit_rate >= expected - 1e-9, (hit_rate, expected)
-        elif self._iteration in (2, 3):
-            assert cached < self._observed[1][1], (cached, self._observed)
+        if prompt < self.cache_block_size * 2:
+            raise ValueError(f"Image prompt does not span enough cache blocks: {usage}")
+        if self._observed and prompt != self._observed[0][0]:
+            raise ValueError(f"Image prompt usage changed: {prompt}, {self._observed}")
+        if len(self._observed) == self._iteration:
+            if self._iteration == 1:
+                complete_tokens = (
+                    (prompt - 1) // self.cache_block_size * self.cache_block_size
+                )
+                expected = (prompt // self.cache_block_size) / math.ceil(
+                    prompt / self.cache_block_size
+                )
+                if cached <= self._observed[0][1] or cached < complete_tokens:
+                    raise ValueError(f"Repeated image did not reuse its cache: {usage}")
+                if hit_rate < expected - 1e-9:
+                    raise ValueError(
+                        f"Repeated image KV hit rate is too low: {hit_rate}"
+                    )
+            elif self._iteration in (2, 3):
+                if cached >= self._observed[1][1]:
+                    raise ValueError(
+                        f"Different image identity reused cached tokens: {usage}"
+                    )
+                if self._iteration == 2 and hit_rate >= self._observed[1][2]:
+                    raise ValueError(
+                        f"Alias image identity reused router cache: {hit_rate}"
+                    )
+            # Content retries warm this request; retain only its first cache observation.
+            self._observed.append((prompt, cached, hit_rate))
             if self._iteration == 2:
-                assert hit_rate < self._observed[1][2], (hit_rate, self._observed)
-        self._observed.append((prompt, cached, hit_rate))
-        if self._iteration == 2:
-            # Alias pixels must publish a complete, independently routable KV chain.
-            self._wait_for_complete_prompt(prompt)
+                self._wait_for_complete_prompt(prompt)
+        elif len(self._observed) != self._iteration + 1:
+            raise ValueError("Image identity requests ran out of order")
+        return super().process_response(response)
 
     def final_validation(self) -> None:
         assert len(self._observed) == 4, "All image identity cases must execute"
