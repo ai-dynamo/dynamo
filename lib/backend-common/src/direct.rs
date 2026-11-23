@@ -647,6 +647,8 @@ mod tests {
     /// How long the hosted engines keep serving after shutdown, unless a test
     /// asks for longer.
     const SHUTDOWN_DRAIN: Duration = Duration::from_millis(200);
+    /// Tokens per KV block, as the engines report it.
+    const BLOCK_SIZE: usize = 16;
 
     /// What the test controls about one listed engine, across incarnations.
     #[derive(Default)]
@@ -677,6 +679,10 @@ mod tests {
         refuses: AtomicBool,
         /// Never open a response stream.
         stalls: AtomicBool,
+        /// The prompt tokens of the last request served.
+        prompt: parking_lot::Mutex<Vec<u32>>,
+        /// The most prompt tokens the router took as cached here for a request.
+        cached_tokens: AtomicUsize,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
@@ -713,7 +719,7 @@ mod tests {
                 model: MODEL.to_string(),
                 served_model_name: Some("direct-test-model".to_string()),
                 llm: Some(LlmRegistration {
-                    kv_cache_block_size: Some(16),
+                    kv_cache_block_size: Some(BLOCK_SIZE as u32),
                     context_length: Some(4096),
                     ..LlmRegistration::default()
                 }),
@@ -723,7 +729,7 @@ mod tests {
 
         async fn generate(
             &self,
-            _request: PreprocessedRequest,
+            request: PreprocessedRequest,
             _ctx: GenerateContext,
         ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
             if self.state.refuses.load(Ordering::SeqCst) {
@@ -756,6 +762,10 @@ mod tests {
                 .boxed());
             }
             self.state.served.fetch_add(1, Ordering::SeqCst);
+            if let Some(cached) = request.tracker.as_ref().and_then(|t| t.cached_tokens()) {
+                self.state.cached_tokens.fetch_max(cached, Ordering::SeqCst);
+            }
+            *self.state.prompt.lock() = request.token_ids.to_vec();
             Ok(futures::stream::iter([Ok(chunk::token(1)), Ok(LLMEngineOutput::stop())]).boxed())
         }
 
@@ -921,10 +931,14 @@ mod tests {
 
         /// One chat request; `true` when it completed without an error.
         async fn chat(&self) -> bool {
+            self.chat_with("hello").await
+        }
+
+        async fn chat_with(&self, prompt: &str) -> bool {
             let request: NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
                     "model": self.model,
-                    "messages": [{"role": "user", "content": "hello"}],
+                    "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 4,
                     "stream": true,
                 }))
@@ -1384,14 +1398,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_routing_reaches_engines_with_and_without_kv_publishers() {
-        // A port nothing listens on: the router's subscriber keeps reconnecting
-        // in the background, which does not hold the engine back.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+    async fn kv_routing_scores_published_blocks_and_reaches_engines_without_publishers() {
+        // `A` publishes its KV events on this socket; `B` advertises none.
+        let context = zmq::Context::new();
+        let publisher = context.socket(zmq::PUB).unwrap();
+        publisher.bind("tcp://127.0.0.1:*").unwrap();
+        let kv_events = publisher.get_last_endpoint().unwrap().unwrap();
         let router_config = RouterConfig {
             router_mode: dynamo_runtime::pipeline::RouterMode::KV,
             ..RouterConfig::default()
@@ -1400,7 +1412,7 @@ mod tests {
             "direct-kv",
             0,
             router_config,
-            Some(format!("tcp://127.0.0.1:{port}")),
+            Some(kv_events),
             true,
             SHUTDOWN_DRAIN,
         )
@@ -1408,6 +1420,49 @@ mod tests {
         frontend
             .chat_until(|f| f.served(A) > 0 && f.served(B) > 0)
             .await;
+
+        // The sample tokenizer knows only its special tokens: a prompt of
+        // them fills two KV blocks.
+        let prompt = "<|reserved_special_token_0|>".repeat(2 * BLOCK_SIZE);
+        let a = frontend.states[A].clone();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while a.prompt.lock().len() < 2 * BLOCK_SIZE {
+                frontend.chat_with(&prompt).await;
+            }
+        })
+        .await
+        .expect("the prompt must reach `A`");
+        let tokens = a.prompt.lock().clone();
+        let blocks = tokens.len() / BLOCK_SIZE;
+
+        // `A` reports the prompt's blocks as stored, in vLLM's event format.
+        // The router has subscribed to `A`'s publisher, so it indexes them and
+        // routes the prompt to `A` with those blocks as its overlap.
+        let stored = (
+            "BlockStored",
+            (0..blocks as u64).collect::<Vec<_>>(),
+            Option::<u64>::None,
+            tokens[..blocks * BLOCK_SIZE].to_vec(),
+            BLOCK_SIZE,
+            Option::<u64>::None,
+            "GPU",
+        );
+        let batch = rmp_serde::to_vec(&(0.0_f64, vec![stored], Some(0_i32))).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while a.cached_tokens.load(Ordering::SeqCst) == 0 {
+                // A subscriber misses what is published before it connects;
+                // it applies sequence 0 once.
+                publisher
+                    .send_multipart([Vec::new(), 0_u64.to_be_bytes().to_vec(), batch.clone()], 0)
+                    .unwrap();
+                frontend.chat_with(&prompt).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the router must score the blocks `A` published");
+        assert_eq!(a.cached_tokens.load(Ordering::SeqCst), blocks * BLOCK_SIZE);
+        assert_eq!(frontend.states[B].cached_tokens.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
