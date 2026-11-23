@@ -61,6 +61,33 @@ import (
 
 const testTopologyLabelKey = "topology.kubernetes.io/zone"
 
+// GeneratePodSpecForComponent finalizes staged graph rendering for tests.
+// component and dynamoDeployment must not be nil.
+// deployerOverride may be nil to use the default multinode deployer from the factory.
+func GeneratePodSpecForComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+	role Role,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
+	deployerOverride MultinodeDeployer,
+	containerGPUs ContainerGPUCount,
+) (*corev1.PodSpec, error) {
+	pod, layers, err := GeneratePodSpecForComponentStaged(component, backendFramework, secretsRetriever, dynamoDeployment,
+		role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, containerGPUs, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := FinalizePodEnvironment(pod, layers, backendFramework, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
+		return nil, err
+	}
+	return pod, nil
+}
+
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment

@@ -22,7 +22,7 @@ import (
 type podEnvironment struct {
 	general        []corev1.EnvVar
 	containers     *semanticenv.ContainerLayers
-	overrides      []map[string]semanticenv.Layer
+	overrides      map[string]semanticenv.Layer
 	policyRuntime  string
 	policyBindings []corev1.EnvVar
 }
@@ -146,10 +146,8 @@ func (p *podEnvironment) register(container *corev1.Container, source string, de
 		layers = append(layers[:2],
 			semanticenv.Layer{Source: "operator.kvTransferPolicy", Env: p.policyBindings}, original)
 	}
-	for _, overrides := range p.overrides {
-		if layer, exists := overrides[container.Name]; exists {
-			layers = append(layers, layer)
-		}
+	if layer, exists := p.overrides[container.Name]; exists {
+		layers = append(layers, layer)
 	}
 	p.containers.Register(container, layers...)
 }

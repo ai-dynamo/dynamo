@@ -2462,38 +2462,11 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	return componentContext, nil
 }
 
-// GeneratePodSpecForComponent creates a PodSpec for Grove deployments.
-// component and dynamoDeployment must not be nil.
-// deployerOverride may be nil to use the default multinode deployer from the factory.
-func GeneratePodSpecForComponent(
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	backendFramework BackendFramework,
-	secretsRetriever SecretsRetriever,
-	dynamoDeployment *v1beta1.DynamoGraphDeployment,
-	role Role,
-	numberOfNodes int32,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
-	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
-	serviceName string,
-	deployerOverride MultinodeDeployer,
-	containerGPUs ContainerGPUCount,
-	additionalEnvironment ...map[string]semanticenv.Layer,
-) (*corev1.PodSpec, error) {
-	pod, layers, err := GeneratePodSpecForComponentStaged(component, backendFramework, secretsRetriever, dynamoDeployment,
-		role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, containerGPUs, additionalEnvironment...)
-	if err != nil {
-		return nil, err
-	}
-	if err := FinalizePodEnvironment(pod, layers, backendFramework, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
-		return nil, err
-	}
-	return pod, nil
-}
-
 // GeneratePodSpecForComponentStaged retains source layers for providers that
 // still add bindings or omit containers. After those transformations, callers must
 // call FinalizePodEnvironment with the selected backend and combined-runtime engines.
 // Nil layers retain legacy rendering, including its earlier backend processing.
+// overrides may be nil; otherwise it supplies one more-specific user layer per container.
 func GeneratePodSpecForComponentStaged(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
@@ -2506,7 +2479,7 @@ func GeneratePodSpecForComponentStaged(
 	serviceName string,
 	deployerOverride MultinodeDeployer,
 	containerGPUs ContainerGPUCount,
-	additionalEnvironment ...map[string]semanticenv.Layer,
+	overrides map[string]semanticenv.Layer,
 ) (*corev1.PodSpec, *semanticenv.ContainerLayers, error) {
 	// Validate the complete component before selecting its authored role template.
 	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
@@ -2515,7 +2488,7 @@ func GeneratePodSpecForComponentStaged(
 	}
 	environment := newPodEnvironment(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env)
 	if environment != nil {
-		environment.overrides = additionalEnvironment
+		environment.overrides = overrides
 	}
 	pod, err := generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
