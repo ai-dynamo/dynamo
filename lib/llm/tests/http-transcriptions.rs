@@ -334,7 +334,14 @@ async fn upload_too_large_for_the_request_plane_returns_payload_too_large() {
         .await
         .expect("transcription request failed");
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let body: serde_json::Value = response.json().await.unwrap();
+    response
+        .content_length()
+        .expect("the fixed-size 413 JSON body must retain its length");
+    let bytes = response
+        .bytes()
+        .await
+        .expect("incomplete 413 response body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(
         body["message"]
             .as_str()

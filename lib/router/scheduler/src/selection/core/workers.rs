@@ -11,9 +11,9 @@ use super::*;
 use crate::hint_policy::RoleHintPolicies;
 use crate::kv_hints::hint_capable_partition;
 use crate::resolve::resolve_role;
+use dynamo_kv_indexer::Indexer;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
-use dynamo_kv_indexer::backend::Indexer;
-use dynamo_slot_tracker::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
+use dynamo_slot_tracker::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
     pub async fn upsert_worker(

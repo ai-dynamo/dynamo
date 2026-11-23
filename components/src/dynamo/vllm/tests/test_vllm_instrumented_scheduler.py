@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for ``InstrumentedScheduler._compute_queued`` classification.
 
-Focus: correct handling of ``self.skipped_waiting`` and disaggregated-serving
+Focus: correct handling of ``self.kv_holding_waiting`` and disaggregated-serving
 request states. The production scheduler is heavy to construct (needs a real
 ``VllmConfig`` + ``KVCacheConfig`` + ``StructuredOutputManager``), so these
 tests invoke ``_compute_queued`` as an unbound method against a minimal stub
@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import hashlib
+import inspect
 import json
 import logging
 import subprocess
@@ -90,9 +91,7 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-STRUCTURED_OUTPUT_WAITING_STATUS = getattr(
-    RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None
-) or getattr(RequestStatus, "WAITING_FOR_FSM")
+STRUCTURED_OUTPUT_WAITING_STATUS = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
 
 
 def _benchmark_capacity(
@@ -145,7 +144,7 @@ def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
     )
 
 
-def _run_compute_queued(waiting, skipped_waiting):
+def _run_compute_queued(waiting, kv_holding_waiting):
     """Invoke the real ``InstrumentedScheduler._compute_queued`` on a stub.
 
     Bypasses ``__init__`` (which needs full vLLM config) and populates only
@@ -153,7 +152,7 @@ def _run_compute_queued(waiting, skipped_waiting):
     """
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.waiting = waiting
-    stub.skipped_waiting = skipped_waiting
+    stub.kv_holding_waiting = kv_holding_waiting
     return InstrumentedScheduler._compute_queued(stub)
 
 
@@ -357,6 +356,7 @@ def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("graph_observation", ["observed", "absent", "incomplete"])
+@pytest.mark.parametrize("skip_drafts", [None, False, True])
 def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     monkeypatch,
     phase,
@@ -365,6 +365,7 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     expected_start,
     expected_wall,
     graph_observation,
+    skip_drafts,
 ):
     point = BenchmarkPoint(
         phase,
@@ -409,9 +410,10 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     monotonic = MagicMock(return_value=20.0)
     monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", monotonic)
 
-    result = stub.update_from_output(
-        SimpleNamespace(total_num_scheduled_tokens=80), model_output
-    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=80)
+    if skip_drafts is not None:
+        scheduler_output.skip_drafts = skip_drafts
+    result = stub.update_from_output(scheduler_output, model_output)
 
     assert result == "parent-result"
     raw = stub._bench_current_fpms[-1]
@@ -419,6 +421,7 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     sample = raw["benchmark_sample"]
     assert sample["sample_index"] == int(steady)
     assert sample["forward_index"] == 12
+    assert sample["scheduler_skip_drafts"] is skip_drafts
     assert sample["timing"] == {
         "basis": expected_basis,
         "start_monotonic": expected_start,
@@ -472,7 +475,7 @@ def test_waiting_new_requests_count_as_queued_prefill():
             _make_request(RequestStatus.WAITING, num_tokens=100),
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
-        skipped_waiting=[],
+        kv_holding_waiting=[],
     )
     assert q.num_prefill_requests == 2
     assert q.sum_prefill_tokens == 300
@@ -490,7 +493,7 @@ def test_waiting_preempted_requests_count_as_queued_decode():
                 RequestStatus.PREEMPTED, num_tokens=256, num_computed_tokens=240
             ),
         ],
-        skipped_waiting=[],
+        kv_holding_waiting=[],
     )
     assert q.num_prefill_requests == 0
     assert q.sum_prefill_tokens == 0
@@ -500,18 +503,18 @@ def test_waiting_preempted_requests_count_as_queued_decode():
 
 
 # ---------------------------------------------------------------------------
-# self.skipped_waiting classification (the fix)
+# self.kv_holding_waiting classification
 # ---------------------------------------------------------------------------
 
 
-def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
+def test_kv_holding_waiting_for_remote_kvs_counts_as_queued_decode():
     """Disagg decode-engine: request has KV being transferred; should count
     as queued decode, not queued prefill.
     """
 
     q = _run_compute_queued(
         waiting=[],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1000,
@@ -532,12 +535,12 @@ def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
     assert q.sum_decode_kv_tokens == 1500
 
 
-def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
+def test_kv_holding_waiting_for_structured_output_counts_as_queued_prefill():
     """Structured-output grammar compile wait has no KV computed yet; prefill."""
 
     q = _run_compute_queued(
         waiting=[],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128),
         ],
     )
@@ -547,10 +550,10 @@ def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
     assert q.sum_decode_kv_tokens == 0
 
 
-def test_skipped_waiting_for_streaming_req_counts_as_queued_prefill():
+def test_kv_holding_waiting_for_streaming_req_counts_as_queued_prefill():
     q = _run_compute_queued(
         waiting=[],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(RequestStatus.WAITING_FOR_STREAMING_REQ, num_tokens=64),
         ],
     )
@@ -566,7 +569,7 @@ def test_skipped_waiting_for_streaming_req_counts_as_queued_prefill():
 
 def test_mixed_disagg_decode_engine_snapshot():
     """Realistic decode-engine snapshot: some local preempts in ``self.waiting``
-    plus many ``WAITING_FOR_REMOTE_KVS`` in ``self.skipped_waiting``.
+    plus many ``WAITING_FOR_REMOTE_KVS`` in ``self.kv_holding_waiting``.
     """
 
     q = _run_compute_queued(
@@ -575,7 +578,7 @@ def test_mixed_disagg_decode_engine_snapshot():
                 RequestStatus.PREEMPTED, num_tokens=800, num_computed_tokens=780
             ),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1024,
@@ -609,7 +612,7 @@ def test_mixed_prefill_engine_snapshot():
             _make_request(RequestStatus.WAITING, num_tokens=100),
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
@@ -619,7 +622,7 @@ def test_mixed_prefill_engine_snapshot():
 
 
 def test_empty_queues():
-    q = _run_compute_queued(waiting=[], skipped_waiting=[])
+    q = _run_compute_queued(waiting=[], kv_holding_waiting=[])
     assert q.num_prefill_requests == 0
     assert q.sum_prefill_tokens == 0
     assert q.num_decode_requests == 0
@@ -664,7 +667,7 @@ def test_variance_spans_both_queues():
         waiting=[
             _make_request(RequestStatus.WAITING, num_tokens=100),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
@@ -988,20 +991,16 @@ def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
     assert common.max_num_running_reqs == 128
 
 
-@pytest.mark.parametrize(
-    "cap_attribute",
-    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
-)
-def test_capacity_digest_tracks_admission_cap(cap_attribute):
+def test_capacity_digest_tracks_admission_cap():
     stub = _digest_stub(max_num_running_reqs=128)
     manager = SimpleNamespace(block_size=16)
     stub.kv_cache_manager = SimpleNamespace(
         coordinator=SimpleNamespace(single_type_managers=[manager])
     )
-    setattr(manager, cap_attribute, 32)
+    manager.max_admission_blocks_per_request = 32
     initial_digest = stub._bench_grid_invariants_digest()
 
-    setattr(manager, cap_attribute, 64)
+    manager.max_admission_blocks_per_request = 64
 
     assert stub._bench_grid_invariants_digest() != initial_digest
 
@@ -1699,7 +1698,7 @@ def heartbeat_scheduler(monkeypatch):
 
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.waiting = deque()
-    stub.skipped_waiting = deque()
+    stub.kv_holding_waiting = deque()
     stub.running = []
     stub.requests = {}
     stub.finished_req_ids = set()
@@ -1734,7 +1733,7 @@ def heartbeat_scheduler(monkeypatch):
         """Remove scheduler-visible requests while batches may still be in flight."""
         aborted = list(self.waiting) + self.running
         self.waiting.clear()
-        self.skipped_waiting.clear()
+        self.kv_holding_waiting.clear()
         self.running.clear()
         return aborted
 
@@ -1757,12 +1756,15 @@ def heartbeat_scheduler(monkeypatch):
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "has_unfinished_requests",
-        lambda self: bool(self.running or self.waiting or self.skipped_waiting),
+        lambda self: bool(self.running or self.waiting or self.kv_holding_waiting),
     )
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "get_request_counts",
-        lambda self: (len(self.running), len(self.waiting) + len(self.skipped_waiting)),
+        lambda self: (
+            len(self.running),
+            len(self.waiting) + len(self.kv_holding_waiting),
+        ),
     )
 
     def heartbeat():
@@ -1933,9 +1935,7 @@ def test_waiting_abort_restores_idle_without_a_scheduled_batch(heartbeat_schedul
     assert heartbeat()[-1].is_idle()
 
 
-@pytest.mark.parametrize(
-    "queue_name", ["skipped_waiting", "kv_holding_waiting", "async_kv_waiting"]
-)
+@pytest.mark.parametrize("queue_name", ["kv_holding_waiting", "async_kv_waiting"])
 def test_secondary_waiting_queue_prevents_idle(heartbeat_scheduler, queue_name):
     """Supported vLLM secondary waiting queues contribute to heartbeats."""
     stub, _, heartbeat = heartbeat_scheduler
@@ -2122,7 +2122,7 @@ def test_dp_rank_multi_node_start_offset():
 
 def test_decode_variance_spans_both_queues():
     """Decode variance mixes local-preempted (``self.waiting``) and
-    remote-KV-waiting (``self.skipped_waiting``) into one accumulator.
+    remote-KV-waiting (``self.kv_holding_waiting``) into one accumulator.
     KV lengths 500 and 1500 → mean 1000, population variance 250000.
     """
 
@@ -2132,7 +2132,7 @@ def test_decode_variance_spans_both_queues():
                 RequestStatus.PREEMPTED, num_tokens=520, num_computed_tokens=500
             ),
         ],
-        skipped_waiting=[
+        kv_holding_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1500,
@@ -2632,6 +2632,7 @@ def _explicit_grid_stub(mode="agg", points=None):
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    stub.num_spec_tokens = 0
     stub._bench_skipped_points = []
     stub._bench_explicit_points = BenchmarkPoints.model_validate(
         points
@@ -2799,7 +2800,10 @@ def test_explicit_runtime_failure_is_not_silently_skipped():
 # ---------------------------------------------------------------------------
 
 
-def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
+@pytest.mark.parametrize("hash_lookahead", [None, 0, 1, 3])
+def test_benchmark_hasher_uses_vllm_hash_granularity(
+    monkeypatch, tmp_path, hash_lookahead
+):
     parent_init_args = {}
 
     def fake_parent_init(self, **kwargs):
@@ -2853,6 +2857,8 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
             "benchmark": {"output_path": str(tmp_path / "benchmark.json")}
         },
     )
+    if hash_lookahead is not None:
+        vllm_config.num_hash_lookahead_tokens = hash_lookahead
     scheduler = InstrumentedScheduler(
         vllm_config=vllm_config,
         kv_cache_config=object(),
@@ -2864,7 +2870,10 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     assert parent_init_args["hash_block_size"] == 16
     assert scheduler._bench_hash_block_size == 16
     assert scheduler._bench_block_hasher is block_hasher
-    block_hasher_factory.assert_called_once_with(16, caching_hash_fn)
+    expected_kwargs = (
+        {"num_hash_lookahead_tokens": hash_lookahead} if hash_lookahead else {}
+    )
+    block_hasher_factory.assert_called_once_with(16, caching_hash_fn, **expected_kwargs)
 
 
 def test_agg_resolves_piecewise_prefill_and_full_decode_capture_views(tmp_path):
@@ -2997,6 +3006,7 @@ def _prefill_grid_stub(
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    stub.num_spec_tokens = 0
     _install_test_capacity_preflight(
         stub,
         _benchmark_capacity(
@@ -6450,11 +6460,7 @@ def test_kvwarm_native_capacity_counts_resident_blocks_not_evicted_placeholders(
 
 
 @pytest.mark.core
-@pytest.mark.parametrize(
-    "cap_attribute",
-    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
-)
-def test_kvwarm_native_capacity_uses_sliding_window_admission_caps(cap_attribute):
+def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.max_model_len = 1024
     stub.num_lookahead_tokens = 0
@@ -6462,7 +6468,7 @@ def test_kvwarm_native_capacity_uses_sliding_window_admission_caps(cap_attribute
         coordinator=SimpleNamespace(
             single_type_managers=[
                 SimpleNamespace(block_size=16),
-                SimpleNamespace(block_size=4, **{cap_attribute: 4}),
+                SimpleNamespace(block_size=4, max_admission_blocks_per_request=4),
             ]
         )
     )
@@ -7602,7 +7608,7 @@ def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
     sliding-window group keeps absolute positions (null placeholders included),
     so the shadow at ctx=152 forks table index 9, never the last ``cap`` entries."""
     stub, mgr, pool, chain = _shadow_stub(cow=True)
-    mgr._max_admission_blocks_per_request = 4
+    mgr.max_admission_blocks_per_request = 4
     mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=True)
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
         stub, "shadow", "chain", 152, 3
@@ -7613,18 +7619,14 @@ def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
     assert mgr.num_cached_block["shadow"] == 9
 
 
-@pytest.mark.parametrize(
-    "cap_attribute",
-    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
-)
-def test_kvwarm_shadow_registration_forks_circular_tail_table(cap_attribute):
+def test_kvwarm_shadow_registration_forks_circular_tail_table():
     """GLM5-Next's k-pool tail: one circularly reused block per request
     (admission cap 1, excluded from prefix caching). The chain holds a single
     block whatever its depth; the shadow shares nothing and forks that block."""
     stub, mgr, pool, chain = _shadow_stub(cow=True)
     mgr.req_to_blocks["chain"] = chain[:1]
     mgr.block_size = 4
-    setattr(mgr, cap_attribute, 1)
+    mgr.max_admission_blocks_per_request = 1
     mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
     assert stub._bench_blocks_per_req(152, apply_admission_cap=True) == 1
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
@@ -7687,7 +7689,7 @@ def test_kvwarm_live_state_keeps_circular_kpool_geometry():
     chain = [_FakeBlock(0)]
     mgr = KpoolTailManager(chain, cow=True)
     mgr.block_size = 4
-    mgr._max_admission_blocks_per_request = 1
+    mgr.max_admission_blocks_per_request = 1
     mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
     pool = _FakePool()
     stub.kv_cache_manager = SimpleNamespace(
@@ -8984,8 +8986,6 @@ def _provenance_vllm_config(
         enable_prefix_caching=True,
         num_gpu_blocks=1234,
     )
-    if with_layout:
-        cache_config.kv_cache_layout = "LBNHC"
     spec = MLAAttentionSpec(
         dtype=_ProvenanceDtype(),
         head_size=576,
@@ -8995,9 +8995,8 @@ def _provenance_vllm_config(
     )
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
+        kv_cache_layout="LBNHC" if with_layout else None,
     )
-    if with_layout:
-        kv_cache_config.kv_cache_layout = "LBNHC"
     model_config = SimpleNamespace(
         dtype=_ProvenanceDtype(),
         max_model_len=163840,
@@ -9072,8 +9071,11 @@ def test_json_safe_coerces_enums_dtypes_and_dataclasses():
     assert coerce(_ProvenanceNumpyScalar(42)) == 42
 
 
-def test_bench_capture_engine_records_requested_engine_facts():
+@pytest.mark.parametrize("hash_lookahead", [None, 0, 3])
+def test_bench_capture_engine_records_requested_engine_facts(hash_lookahead):
     vllm_config, kv_cache_config = _provenance_vllm_config()
+    if hash_lookahead is not None:
+        vllm_config.num_hash_lookahead_tokens = hash_lookahead
 
     engine = instrumented_scheduler_module._bench_capture_engine(
         vllm_config,
@@ -9108,6 +9110,7 @@ def test_bench_capture_engine_records_requested_engine_facts():
         "cache_dtype": "fp8_ds_mla",
         "block_size": 64,
         "enable_prefix_caching": True,
+        "num_hash_lookahead_tokens": hash_lookahead or 0,
         "kv_cache_layout": "LBNHC",
         "groups": [
             {
@@ -9186,7 +9189,7 @@ def test_bench_capture_engine_preserves_observed_decode_context_parallel_size(si
 
 
 def test_bench_capture_engine_omits_absent_optional_blocks():
-    """vLLM 0.28.0 has no kv_cache_layout, and a model without a sparse
+    """An unresolved kv_cache_layout is omitted, and a model without a sparse
     indexer has no indexer topology."""
     vllm_config, kv_cache_config = _provenance_vllm_config(
         with_indexer=False, with_layout=False
@@ -9732,7 +9735,16 @@ def realseed_prefix_cache(monkeypatch):
 
     monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-root"), raising=False)
 
-    def build(point, *, drop=0, seq=0, block_size=32):
+    def build(point, *, drop=0, seq=0, block_size=32, hash_lookahead=0):
+        if (
+            hash_lookahead
+            and "num_hash_lookahead_tokens"
+            not in inspect.signature(kv_cache_utils.get_request_block_hasher).parameters
+        ):
+            pytest.skip("lookahead block hashing requires vLLM 0.33+")
+        hash_kwargs = (
+            {"num_hash_lookahead_tokens": hash_lookahead} if hash_lookahead else {}
+        )
         stub, _ = _realseed_prefill_stub(point, monkeypatch, seq=seq, drop=drop)
         del stub._bench_inject_prefill
         del stub._bench_synthetic_token_ids
@@ -9741,8 +9753,9 @@ def realseed_prefix_cache(monkeypatch):
         stub._bench_vocab_size = 4096
         stub._bench_content_seed = "0"
         stub._fpm_dp_rank = 0
+        stub.num_hash_lookahead_tokens = hash_lookahead
         stub._bench_block_hasher = kv_cache_utils.get_request_block_hasher(
-            block_size, sha256
+            block_size, sha256, **hash_kwargs
         )
         stub.kv_cache_manager = KVCacheManager(
             KVCacheConfig(
@@ -9765,6 +9778,7 @@ def realseed_prefix_cache(monkeypatch):
             hash_block_size=block_size,
             enable_caching=True,
             use_eagle=bool(drop),
+            **hash_kwargs,
         )
         stub.add_request = lambda req: stub.requests.__setitem__(req.request_id, req)
         stub._bench_results = []
@@ -9819,27 +9833,70 @@ def _complete_realseed_cache_shot(stub):
     return requests, hits
 
 
-@pytest.mark.parametrize(("new_tokens", "kv_read_tokens"), [(1, 16), (16, 64)])
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 3])
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[1, 16]],
+        [[1, 16], [2, 0]],
+        [[1, 0]],
+        [[2, 16]],
+    ],
+)
+def test_prefill_grid_excludes_cached_single_token_speculative_admissions(
+    num_spec_tokens, rows
+):
+    grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
+    grid.num_spec_tokens = num_spec_tokens
+    grid.num_hash_lookahead_tokens = 0
+    grid.kv_cache_manager.use_eagle = False
+    padded = num_spec_tokens > 0 and any(new == 1 and kv > 0 for new, kv in rows)
+
+    assert grid._bench_prefill_point_feasible(
+        sum(new for new, _ in rows),
+        len(rows),
+        sum(kv for _, kv in rows),
+        rows=rows,
+    ) == (not padded)
+    assert grid._bench_seed_prompt_len(16) == 16
+    assert grid._bench_seed_prompt_len(0) == 0
+
+
+@pytest.mark.parametrize(
+    ("drop", "hash_lookahead", "new_tokens", "kv_read_tokens"),
+    [(16, 0, 1, 16), (16, 0, 16, 64), (0, 1, 1, 16), (0, 3, 3, 64)],
+)
 def test_prefill_grid_rejects_eagle_points_without_a_measurable_tail(
-    new_tokens, kv_read_tokens
+    drop, hash_lookahead, new_tokens, kv_read_tokens
 ):
     grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
     grid.max_model_len = 4096
-    grid.kv_cache_manager.use_eagle = True
+    grid.kv_cache_manager.use_eagle = bool(drop)
+    grid.num_hash_lookahead_tokens = hash_lookahead
     _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
     assert not grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
 
 
 @pytest.mark.parametrize(
-    ("drop", "new_tokens", "kv_read_tokens"),
-    [(0, 1, 16), (0, 16, 64), (16, 17, 16), (16, 32, 1024)],
+    ("drop", "hash_lookahead", "new_tokens", "kv_read_tokens"),
+    [
+        (0, 0, 1, 16),
+        (0, 0, 16, 64),
+        (16, 0, 17, 16),
+        (16, 0, 32, 1024),
+        (0, 1, 2, 16),
+        (0, 1, 16, 64),
+        (0, 3, 4, 64),
+        (0, 3, 32, 1024),
+    ],
 )
 def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
-    realseed_prefix_cache, kv_read_tokens, drop, new_tokens
+    realseed_prefix_cache, kv_read_tokens, drop, hash_lookahead, new_tokens
 ):
     grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
     grid.max_model_len = 4096
     grid.kv_cache_manager.use_eagle = bool(drop)
+    grid.num_hash_lookahead_tokens = hash_lookahead
     _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
     assert grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
 
@@ -9849,18 +9906,54 @@ def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
         total_kv_read_tokens=kv_read_tokens,
         batch_size=1,
     )
-    scheduler = realseed_prefix_cache(point, drop=drop, block_size=16)
+    scheduler = realseed_prefix_cache(
+        point, drop=drop, block_size=16, hash_lookahead=hash_lookahead
+    )
     del scheduler._bench_eagle_cache_drop_tokens
     scheduler._bench_realseed_stage_point(point, [kv_read_tokens], [new_tokens])
     seeded, _ = _complete_realseed_cache_shot(scheduler)
-    assert [request.num_tokens for request in seeded] == [kv_read_tokens + drop]
+    seed_len = kv_read_tokens + drop + hash_lookahead
+    assert [request.num_tokens for request in seeded] == [seed_len]
 
+    shots = []
     for _ in ("warm", "measure"):
         assert scheduler._bench_realseed_pending_step()
         requests, hits = _complete_realseed_cache_shot(scheduler)
         assert hits == [kv_read_tokens]
         assert requests[0].num_tokens - hits[0] == new_tokens
+        assert requests[0].prompt_token_ids[:seed_len] == seeded[0].prompt_token_ids
+        shots.append(requests[0].prompt_token_ids)
 
+    if hash_lookahead:
+        assert shots[0][seed_len:] != shots[1][seed_len:]
+
+    assert scheduler._bench_skipped_points == []
+    assert len(scheduler._bench_results) == 1
+
+
+@pytest.mark.parametrize("hash_lookahead", [0, 1, 3])
+def test_fake_prefix_lookahead_preserves_mixed_zero_and_cached_rows(
+    monkeypatch, realseed_prefix_cache, hash_lookahead
+):
+    point = BenchmarkPoint(
+        "prefill",
+        batch_size=2,
+        total_prefill_tokens=48,
+        total_kv_read_tokens=32,
+        rows=[[16, 0], [32, 32]],
+    )
+    scheduler = realseed_prefix_cache(
+        point, block_size=16, hash_lookahead=hash_lookahead
+    )
+    del scheduler._bench_cache_fake_prefixes
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", "off")
+    scheduler._bench_step_prefill()
+    requests, hits = _complete_realseed_cache_shot(scheduler)
+    assert hits == [0, 32]
+    assert [request.num_tokens - hit for request, hit in zip(requests, hits)] == [
+        16,
+        32,
+    ]
     assert scheduler._bench_skipped_points == []
     assert len(scheduler._bench_results) == 1
 
@@ -9910,9 +10003,9 @@ def test_real_seed_aligned_zero_kv_repeats_keep_content_and_miss_cache(
 
 
 @pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
-@pytest.mark.parametrize("drop", [0, 32])
+@pytest.mark.parametrize(("drop", "hash_lookahead"), [(0, 0), (32, 0), (0, 1), (0, 3)])
 def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
-    monkeypatch, realseed_prefix_cache, content, drop
+    monkeypatch, realseed_prefix_cache, content, drop, hash_lookahead
 ):
     monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", content)
     new_tokens = [128, 32 + drop]
@@ -9923,7 +10016,7 @@ def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
         batch_size=2,
         rows=[[new_tokens[0], 0], [new_tokens[1], 64]],
     )
-    stub = realseed_prefix_cache(point, drop=drop)
+    stub = realseed_prefix_cache(point, drop=drop, hash_lookahead=hash_lookahead)
     if content == "zeros":
         stub._bench_vocab_size = 1
     elif content == "sharegpt":
@@ -10130,7 +10223,7 @@ def test_prompt_evidence_does_not_claim_observed_decode_continuations():
     assert [len(row.prompt_token_ids) for row in output.scheduled_new_reqs] == [17, 18]
 
 
-@pytest.mark.parametrize("different", ["seed", "content", "pool_tag"])
+@pytest.mark.parametrize("different", ["seed", "content", "pool_tag", "hash_lookahead"])
 def test_grid_invariants_include_measurement_content_policy(different, monkeypatch):
     first = _digest_stub(max_num_running_reqs=8)
     first._bench_vocab_size = 4096
@@ -10139,6 +10232,8 @@ def test_grid_invariants_include_measurement_content_policy(different, monkeypat
         first._bench_content_seed = "second-content-draw"
     elif different == "content":
         monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
+    elif different == "hash_lookahead":
+        first.num_hash_lookahead_tokens = 3
     else:
         monkeypatch.setenv("DYN_BENCH_POOL_TAG", "different-pool")
     assert first._bench_grid_invariants_digest() != original

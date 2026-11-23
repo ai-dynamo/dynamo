@@ -29,8 +29,10 @@ class KvTransferHintSource:
     worker_type: str
 
 
-def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
-    """Return mapping-shaped secondary-tier configs from KVTransferConfig."""
+def _secondary_tiers(
+    engine_args: AsyncEngineArgs,
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    """Return each mapping-shaped secondary-tier config with its connector's extra config."""
     kv_config = getattr(engine_args, "kv_transfer_config", None)
     extra_config = getattr(kv_config, "kv_connector_extra_config", None)
     if not isinstance(extra_config, Mapping):
@@ -43,15 +45,38 @@ def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
             for child in extra_config.get("connectors") or []
         ]
 
-    tiers: list[Mapping[str, Any]] = []
+    tiers: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     for config in extra_configs:
         secondary_tiers = config.get("secondary_tiers")
         if not isinstance(secondary_tiers, list):
             continue
         for tier in secondary_tiers:
             if isinstance(tier, Mapping):
-                tiers.append(tier)
+                tiers.append((config, tier))
     return tiers
+
+
+def kvcr_host_capacity_blocks(
+    engine_args: AsyncEngineArgs, engine_block_size: int, router_block_size: int
+) -> int | None:
+    """Return each rank's KVCR host capacity in router KV blocks, if the tier config gives it.
+
+    One ``secondary_g2_slots`` slot holds one offload chunk: the connector's
+    ``block_size`` tokens, or ``blocks_per_chunk`` engine blocks (default 1). vLLM
+    ignores the slot count when ``kvcr_service_socket_path`` is set, so that setup
+    reports nothing.
+    """
+    kvcr = [(c, t) for c, t in _secondary_tiers(engine_args) if t.get("type") == "kvcr"]
+    if len(kvcr) != 1 or kvcr[0][1].get("kvcr_service_socket_path") is not None:
+        return None
+    config, tier = kvcr[0]
+    slots = tier.get("secondary_g2_slots")
+    if type(slots) is not int or slots <= 0:
+        return None
+    chunk_tokens = config.get("block_size")
+    if chunk_tokens is None:
+        chunk_tokens = int(config.get("blocks_per_chunk") or 1) * engine_block_size
+    return slots * int(chunk_tokens) // router_block_size
 
 
 def _supports_transfer_hint(tier: Mapping[str, Any]) -> bool:
@@ -65,7 +90,7 @@ def _supports_transfer_hint(tier: Mapping[str, Any]) -> bool:
 def _transfer_hint_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
     """Return secondary tiers that opt in to TRANSFER hint support."""
     transfer_hint_tiers: list[Mapping[str, Any]] = []
-    for tier in _secondary_tiers(engine_args):
+    for _, tier in _secondary_tiers(engine_args):
         if _supports_transfer_hint(tier):
             transfer_hint_tiers.append(tier)
     return transfer_hint_tiers

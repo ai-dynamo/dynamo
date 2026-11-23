@@ -22,10 +22,16 @@ pub use crate::plugins::worker_selection::{
 
 // Request-classifier contracts and the request they classify.
 pub use crate::plugins::request_classifier::{
-    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
     RequestClassifierProvider, RequestClassifierProviderError, RequestClassifierRegistryError,
-    RequestProgress, WorkerView,
+    RequestProgress, WorkerCacheView, WorkerLoadView, WorkerView,
+};
+
+// Experimental dispatch-gate contract: how a classifier holds a queued request. Its shape may
+// change in a minor release.
+pub use crate::plugins::request_classifier::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
 
 // Experimental hint-policy contracts, their registration, and the KV copies they send.
@@ -50,18 +56,16 @@ pub use dynamo_kv_hints::{
     KvHintTransferWorkerMetadata, KvSourceLocationsPayload, KvTransferEnforcement,
     WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
-pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+pub use dynamo_kv_indexer::{KvTransferCandidateSource, KvTransferCandidates};
 pub use dynamo_router_protocol::WorkerType;
 pub use dynamo_router_protocol::identity::{RoutingPartitionId, RoutingPartitionRef};
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 pub use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
-pub use dynamo_scheduler::overlap::OverlapSignals;
-pub use dynamo_scheduler::protocols::{
-    RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
-};
+pub use dynamo_scheduler::OverlapSignals;
 pub use dynamo_scheduler::{
     AccountingAttribution, KvSchedulerError, ScheduleMode, SchedulingRequest, WorkerIdSet,
 };
+pub use dynamo_scheduler::{RoutingConstraints, WorkerConfigLike, WorkerSelectionResult};
 pub use dynamo_session_affinity::{
     MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, WorkerAffinityTarget,
 };

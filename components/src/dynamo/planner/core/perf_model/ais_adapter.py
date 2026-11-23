@@ -20,17 +20,21 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
-from aisimulate_core.datasets import prepare_execution_profile
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.datasets import prepare_execution_profile
+from aisim_core.sdk import ForwardPassPerfModelConfig
 
+from dynamo.common.ais_perf_model import engine_perf_config
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
     ForwardPassMetrics,
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
-from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
+from dynamo.planner.config.planner_config import (
+    AISPerfModelSpec,
+    PlannerConfig,
+    ais_perf_model_role_config,
+)
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
     EngineCapacityRequest,
@@ -47,6 +51,22 @@ _ENGINE_MODEL_INIT_EXCEPTIONS = (ImportError, RuntimeError)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 DEFAULT_MAX_NUM_SEQS = 512
 DEFAULT_MAX_KV_TOKENS = 2_000_000
+
+# Upper bound on the applied KV hit rate discount. A full 1.0 reading would
+# zero out queued/avg prefill tokens and could mask a genuine backlog; cap
+# at 0.95 so the planner always sees *some* work ahead.
+_MAX_KV_HIT_RATE_DISCOUNT = 0.95
+
+
+def _clamp_kv_hit_rate(kv_hit_rate: Optional[float]) -> float:
+    """Clamp a raw hit rate into the usable discount range.
+
+    Returns 0.0 for ``None`` / NaN (no discount), otherwise clamps into
+    ``[0.0, _MAX_KV_HIT_RATE_DISCOUNT]``.
+    """
+    if kv_hit_rate is None or math.isnan(kv_hit_rate):
+        return 0.0
+    return max(0.0, min(_MAX_KV_HIT_RATE_DISCOUNT, float(kv_hit_rate)))
 
 
 @dataclass(frozen=True)
@@ -109,6 +129,10 @@ class PlannerEnginePerfModel:
         self._profile_directory: Optional[TemporaryDirectory] = None
         self._profile_source: Optional[tuple[str, str]] = None
         self._profile_config: Optional[dict[str, Any]] = None
+        # The config or list of configs the resolved entry was read from: the
+        # files it names are read once, and again only when the value changes.
+        self._written_perf_model: Any = None
+        self._resolved_perf_model: Optional[dict[str, Any]] = None
         # Retained history is canonical; pending marks that the active engine
         # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
@@ -248,6 +272,18 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             raise ValueError("AIS role configuration is absent")
+        if not isinstance(spec, AISPerfModelSpec):
+            if self._written_perf_model != spec:
+                # What a source named with `from` gives is checked here for
+                # the first time; a config without `from` was checked when
+                # the Planner config was loaded.
+                self._resolved_perf_model = ais_perf_model_role_config(
+                    self._worker_type, engine_perf_config(spec, self._worker_type)
+                )
+                self._written_perf_model = deepcopy(spec)
+            if self._resolved_perf_model is None:
+                raise RuntimeError("AIS perf model entry was not resolved")
+            return self._resolved_perf_model
         source = spec.dataset_profiles.get(self._worker_type)
         if source is None:
             return spec.roles[self._worker_type]
@@ -260,9 +296,7 @@ class PlannerEnginePerfModel:
                     source.manifest,
                     Path(directory.name) / "prepared",
                 )
-                normalized = AISPerfModelSpec(
-                    roles={self._worker_type: prepared}
-                ).roles[self._worker_type]
+                normalized = ais_perf_model_role_config(self._worker_type, prepared)
             except BaseException:
                 directory.cleanup()
                 raise

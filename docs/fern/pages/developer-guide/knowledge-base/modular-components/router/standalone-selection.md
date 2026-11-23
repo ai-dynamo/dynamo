@@ -149,6 +149,8 @@ Omitting the field in a patch leaves its value unchanged; pass `false` to disabl
 
 Custom discovery sources must include the setting in their worker records. The Kubernetes EPP adapter does not detect the SGLang build and currently leaves this setting unset, which uses `false`.
 
+For raw SGLang sources, also set the boolean `idempotent_stores` to `true`. SGLang sends one remove per block however many times it stored the block, so the indexer must not count [repeated block stores](standalone-indexer.md#repeated-block-stores). The default, `false`, counts them, as vLLM sources need. The setting applies to all of the worker's DP ranks, and a patch handles it as it does `engine_owned_mm_identity`. The Kubernetes EPP adapter sets it to `true` when `DYN_EPP_TOKENIZER_PROTOCOL` is `sglang-renderer`.
+
 `worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
 is an upsert and returns `201`: reusing an existing ID replaces its catalog
 record. If the model or routing group changes, the worker is removed from the
@@ -190,10 +192,10 @@ sequence watermark or invalidate old cache ownership.
 With KV events enabled, `POST /workers` or `PATCH /workers/{worker_id}` for an
 existing schedulable worker reconciles its indexer registration rank by rank: a rank
 whose event endpoint, replay endpoint, and effective `engine_owned_mm_identity`
-value are unchanged keeps its listener, its
+and `idempotent_stores` values are unchanged keeps its listener, its
 sequence watermark, and its indexed blocks, so capacity or topology updates do not
-drain the cache view. An omitted identity setting and explicit `false` are equivalent.
-A changed endpoint or effective identity setting clears that rank's indexed blocks
+drain the cache view. For either setting, omitting it and explicit `false` are equivalent.
+A changed endpoint or effective setting clears that rank's indexed blocks
 and creates a listener with a fresh watermark. Because an unchanged update keeps
 the old watermark, it does not recover a
 publisher that restarted at the same address: for that, call

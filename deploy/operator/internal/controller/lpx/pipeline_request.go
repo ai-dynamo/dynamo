@@ -218,6 +218,26 @@ func (r *graphReconciler) reconcilePipelineRequests(
 	return nil
 }
 
+// validatePipelineRequests dry-run creates the missing requests under the observed, non-nil PCS.
+// Only an Invalid response refuses a request. Any other failure of the dry run, such as
+// a full object-count quota, says nothing about the request and does not stop the pass.
+func (r *graphReconciler) validatePipelineRequests(ctx context.Context, pcs *grovev1alpha1.PodCliqueSet, missing []*lpxv1alpha1.LPUPipelineRequest) error {
+	for _, request := range missing {
+		// A generated name keeps the dry run clear of a live request that has the same name.
+		probe := request.DeepCopy()
+		probe.Name, probe.GenerateName = "", request.Name+"-"
+
+		if err := controllerutil.SetControllerReference(pcs, probe, r.Scheme()); err != nil {
+			return fmt.Errorf("validate LPX request %q: %w", request.Name, err)
+		}
+
+		if err := r.Create(ctx, probe, client.DryRunAll); apierrors.IsInvalid(err) {
+			return fmt.Errorf("validate LPX request %q: %w", request.Name, err)
+		}
+	}
+	return nil
+}
+
 // pipelineRequestsPendingDeletion selects removed requests and current terminating
 // names that must disappear before publication. All requests belong to the observed PCS.
 func pipelineRequestsPendingDeletion(

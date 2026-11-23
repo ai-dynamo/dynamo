@@ -101,6 +101,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
+#[cfg(feature = "http")]
+pub mod http;
+
+/// Environment variable that sets the HTTP status of an overload rejection. Defined here, outside the `http` feature, so that `http::overload_status_code` and the `dynamo-runtime` environment registry name the same string.
+pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ErrorClass {
     /// The request contains invalid input (e.g., prompt exceeds context length).
@@ -572,9 +578,16 @@ pub enum PublicDetails {
         limit: u64,
         actual: Option<u64>,
     },
+    /// Structured token bounds for a context-length rejection.
     ContextLength {
         limit: u64,
+        /// The token count that exceeded `limit`; for a combined input/output
+        /// budget this includes the requested output.
         actual: Option<u64>,
+        /// Prompt tokens alone, when the producer knows them. Renderers use this
+        /// to distinguish a prompt-only overflow from a combined budget.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<u64>,
     },
     RateLimit {
         limit: Option<u64>,
@@ -676,6 +689,23 @@ impl<'de> Deserialize<'de> for Diagnostic {
     }
 }
 
+/// Optional recovery context; consumers still own retry safety and budgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryHint {
+    /// The selected worker rejected admission before executing the request.
+    Draining,
+}
+
+fn deserialize_retry_hint<'de, D>(deserializer: D) -> Result<Option<RetryHint>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+        .filter(|hint| hint.as_str() == Some("draining"))
+        .map(|_| RetryHint::Draining))
+}
+
 // ============================================================================
 // DynamoError - The Standardized Error Type
 // ============================================================================
@@ -705,6 +735,7 @@ pub struct DynamoError {
     pub diagnostic: Option<Diagnostic>,
     /// Optional explicitly client-safe data. The producer remains responsible for ensuring every contained value is safe to expose.
     pub public: Option<PublicDetails>,
+    retry_hint: Option<RetryHint>,
 }
 
 impl Serialize for DynamoError {
@@ -715,6 +746,7 @@ impl Serialize for DynamoError {
         use serde::ser::SerializeStruct;
 
         let public = self.public_details();
+        let retry_hint = self.retry_hint();
         let dp_rank = match self.error_type() {
             ErrorClass::WorkerRankOverloaded(rank) => Some(rank),
             _ => None,
@@ -729,7 +761,8 @@ impl Serialize for DynamoError {
             4 + usize::from(self.diagnostic.is_some())
                 + usize::from(public.is_some())
                 + usize::from(dp_rank.is_some())
-                + usize::from(caused_by.is_some()),
+                + usize::from(caused_by.is_some())
+                + usize::from(retry_hint.is_some()),
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
         state.serialize_field("class", &self.class())?;
@@ -740,6 +773,9 @@ impl Serialize for DynamoError {
         }
         if let Some(public) = public {
             state.serialize_field("public", public)?;
+        }
+        if let Some(retry_hint) = retry_hint {
+            state.serialize_field("retry_hint", &retry_hint)?;
         }
         if let Some(dp_rank) = dp_rank {
             state.serialize_field("dp_rank", &dp_rank)?;
@@ -772,6 +808,8 @@ impl<'de> Deserialize<'de> for DynamoError {
             public: Option<PublicDetails>,
             #[serde(default, deserialize_with = "deserialize_dp_rank")]
             dp_rank: Option<u32>,
+            #[serde(default, deserialize_with = "deserialize_retry_hint")]
+            retry_hint: Option<RetryHint>,
             #[serde(default)]
             caused_by: Option<Box<DynamoError>>,
         }
@@ -836,6 +874,7 @@ impl<'de> Deserialize<'de> for DynamoError {
             reason,
             diagnostic,
             public,
+            retry_hint: representation.retry_hint,
         })
     }
 }
@@ -914,6 +953,18 @@ impl DynamoError {
         }
     }
 
+    /// Returns a recognized hint only for a compatible worker-unavailable identity.
+    /// This does not authorize replay or extend a consumer's retry budget by itself.
+    pub fn retry_hint(&self) -> Option<RetryHint> {
+        if self.error_type() == ErrorClass::WorkerUnavailable
+            && self.reason().as_str() == "backend.worker_unavailable"
+        {
+            self.retry_hint
+        } else {
+            None
+        }
+    }
+
     /// Returns the stable reason key.
     pub fn reason(&self) -> &ErrorReason {
         if self.has_valid_identity() {
@@ -980,6 +1031,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 reason: ErrorReason::from_static("runtime.unclassified"),
                 diagnostic: Some(diagnostic),
                 public: None,
+                retry_hint: None,
             };
         };
 
@@ -991,6 +1043,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 reason: source.reason().clone(),
                 diagnostic: Some(diagnostic),
                 public: source.public_details().cloned(),
+                retry_hint: source.retry_hint(),
             };
         }
 
@@ -999,6 +1052,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
             reason: ErrorReason::from_static("runtime.unclassified"),
             diagnostic: Some(diagnostic),
             public: None,
+            retry_hint: None,
         }
     }
 }
@@ -1033,6 +1087,7 @@ pub struct DynamoErrorBuilder {
     reason: Option<ErrorReason>,
     diagnostic: Option<Diagnostic>,
     public: Option<PublicDetails>,
+    retry_hint: Option<RetryHint>,
 }
 
 impl DynamoErrorBuilder {
@@ -1053,6 +1108,12 @@ impl DynamoErrorBuilder {
         self
     }
 
+    /// Attach optional recovery context; consumers validate it against the error identity.
+    pub fn retry_hint(mut self, retry_hint: RetryHint) -> Self {
+        self.retry_hint = Some(retry_hint);
+        self
+    }
+
     /// Set the private bounded diagnostic.
     pub fn diagnostic(mut self, diagnostic: impl Into<String>) -> Self {
         self.diagnostic = Some(Diagnostic::new(diagnostic));
@@ -1065,6 +1126,11 @@ impl DynamoErrorBuilder {
     }
 
     /// Set a bounded client-safe rejection message.
+    ///
+    /// This and [`Self::public_details`] assign the same `public` field, so the
+    /// last call wins. Do not call this after `public_details` with a structured
+    /// variant such as [`PublicDetails::ContextLength`]: only this message would
+    /// survive and the structured fields would disappear.
     pub fn public_message(mut self, message: impl Into<String>) -> Self {
         let message = bounded_message(message.into());
         self.public = Some(PublicDetails::Message { message });
@@ -1072,6 +1138,11 @@ impl DynamoErrorBuilder {
     }
 
     /// Set structured client-safe details.
+    ///
+    /// This and [`Self::public_message`] assign the same `public` field, so the
+    /// last call wins. Protocol renderers derive a readable message from
+    /// [`PublicDetails::ContextLength`]; call this last and do not add a public
+    /// message afterwards.
     pub fn public_details(mut self, public: PublicDetails) -> Self {
         self.public = Some(public);
         self
@@ -1104,6 +1175,7 @@ impl DynamoErrorBuilder {
                 reason,
                 diagnostic: self.diagnostic,
                 public: self.public,
+                retry_hint: self.retry_hint,
             }
         } else {
             DynamoError {
@@ -1111,6 +1183,7 @@ impl DynamoErrorBuilder {
                 reason: ErrorReason::from_static("runtime.invalid_error"),
                 diagnostic: self.diagnostic,
                 public: None,
+                retry_hint: None,
             }
         }
     }
@@ -1203,6 +1276,70 @@ mod tests {
             roundtrip.source().unwrap().to_string(),
             "Internal: io error"
         );
+    }
+
+    #[test]
+    fn draining_hint_preserves_worker_identity_and_wrapping() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .retry_hint(RetryHint::Draining)
+            .build();
+        let encoded = serde_json::to_value(&error).unwrap();
+        assert_eq!(encoded["error_type"], "WorkerUnavailable");
+        assert_eq!(encoded["class"], "Unavailable");
+        assert_eq!(encoded["reason"], "backend.worker_unavailable");
+        assert_eq!(encoded["retry_hint"], "draining");
+        let decoded: DynamoError = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.error_type(), ErrorClass::WorkerUnavailable);
+        assert_eq!(decoded.retry_hint(), Some(RetryHint::Draining));
+        let wrapped = anyhow::Error::new(decoded).context("dispatch failed");
+        let recovered = DynamoError::from(wrapped.as_ref());
+        assert_eq!(recovered.retry_hint(), Some(RetryHint::Draining));
+        let roundtrip: DynamoError =
+            serde_json::from_value(serde_json::to_value(recovered).unwrap()).unwrap();
+        assert_eq!(roundtrip.retry_hint(), Some(RetryHint::Draining));
+    }
+
+    #[test]
+    fn absent_and_unknown_retry_hints_keep_ordinary_worker_unavailability() {
+        let ordinary = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .build();
+        let mut encoded = serde_json::to_value(ordinary).unwrap();
+        assert!(encoded.get("retry_hint").is_none());
+        let absent: DynamoError = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(absent.retry_hint(), None);
+        for hint in [
+            serde_json::json!("future"),
+            serde_json::json!({"draining": true}),
+        ] {
+            encoded["retry_hint"] = hint;
+            let decoded: DynamoError = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded.error_type(), ErrorClass::WorkerUnavailable);
+            assert_eq!(decoded.reason().as_str(), "backend.worker_unavailable");
+            assert_eq!(decoded.retry_hint(), None);
+        }
+    }
+
+    #[test]
+    fn draining_hint_cannot_change_another_error_identity() {
+        for (class, reason) in [
+            (ErrorClass::Unavailable, "backend.worker_unavailable"),
+            (ErrorClass::WorkerUnavailable, "backend.engine_shutdown"),
+        ] {
+            let error = DynamoError::builder()
+                .class(class)
+                .reason(ErrorReason::new(reason).unwrap())
+                .retry_hint(RetryHint::Draining)
+                .build();
+            assert_eq!(error.retry_hint(), None);
+            let mut encoded = serde_json::to_value(error).unwrap();
+            assert!(encoded.get("retry_hint").is_none());
+            encoded["retry_hint"] = serde_json::json!("draining");
+            let decoded: DynamoError = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.error_type(), class);
+            assert_eq!(decoded.retry_hint(), None);
+        }
     }
 
     #[test]
@@ -1309,6 +1446,33 @@ mod tests {
     }
 
     #[test]
+    fn context_length_details_accept_payloads_without_prompt_tokens() {
+        let details: PublicDetails = serde_json::from_value(serde_json::json!({
+            "type": "context_length",
+            "limit": 8192,
+            "actual": 9000
+        }))
+        .expect("older context-length details remain readable");
+
+        assert_eq!(
+            details,
+            PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(details).unwrap(),
+            serde_json::json!({
+                "type": "context_length",
+                "limit": 8192,
+                "actual": 9000
+            })
+        );
+    }
+
+    #[test]
     fn semantic_schema_includes_legacy_compatibility_fields() {
         let err = DynamoError::builder()
             .class(ErrorClass::RateLimited)
@@ -1378,6 +1542,7 @@ mod tests {
                 limit: Some(10),
                 remaining: Some(0),
             }),
+            retry_hint: None,
         };
 
         assert_eq!(err.class(), ErrorClass::Internal);
@@ -1497,6 +1662,7 @@ mod tests {
             reason: ErrorReason::new("request.rate_limited").unwrap(),
             diagnostic: None,
             public: None,
+            retry_hint: None,
         };
         assert_eq!(mismatched.error_type(), ErrorClass::Internal);
         assert!(!match_error_chain(

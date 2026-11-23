@@ -151,20 +151,19 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > [!TIP]
 > All `helm install` commands can be customized with your own values file: `helm install ... -f your-values.yaml`
 
-> [!WARNING]
-> **Experimental. Development clusters only.** The unfinished DGDR v1beta2 schemas are disabled by
-> default. The `1.2.1` chart shown above does not support this feature gate. To test the API before
-> a supporting release is available, use a development chart built from the current `main` branch
-> and add
-> `--set "dynamo-operator.dgdrV1Beta2.enabled=true"` to the Helm command.
-> The flag adds the v1beta2 `DynamoGraphDeploymentRequest` schema and installs the
-> `DynamoGraphDeploymentRun` and `DynamoGraphDeploymentCandidate` Custom Resource Definitions
-> (CRDs). It does not enable v1beta2 reconciliation, so the operator does not process resources
-> created with these schemas.
+> [!NOTE]
+> Starting with platform chart v1.8.0, the operator installs and serves the DGDR v1beta2 Request,
+> Run, and Candidate APIs and reconciles Requests into Runs without a feature gate. These APIs
+> are available but not feature complete. Older chart versions, including the `1.2.1` example
+> above, do not provide this default availability.
 >
-> Kubernetes persists Run and Candidate objects in etcd. Because the schemas are not finalized,
-> later schema changes can make stored objects unreadable or prevent a CRD upgrade. Do not enable
-> this API on production or shared clusters.
+> Custom operator and CRD-installer commands must remove `--dgdr-v1beta2-enabled`.
+> The legacy `dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability;
+> it remains solely for the existing Planner live-retune RBAC condition. Retune remains disabled
+> by default with its existing opt-ins.
+>
+> Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
+> installations, require an administrator to install the matching CRDs before upgrading the operator.
 
 > [!TIP]
 > **Shared/Multi-Tenant Clusters**: If a cluster-wide Dynamo operator is already running, do **not** install another one. Check with:
@@ -224,7 +223,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer

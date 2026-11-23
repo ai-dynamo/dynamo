@@ -40,6 +40,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SECONDS = 0.5
+# How long stopped children get to exit before SIGKILL; below Kubernetes'
+# default 30 s termination grace period.
+_STOP_GRACE_SECONDS = 10.0
 
 
 def _v1_gpus() -> list[Gpu]:
@@ -50,9 +53,35 @@ def _v1_gpus() -> list[Gpu]:
 
 
 def _terminate_all(processes: list[subprocess.Popen]) -> None:
+    """SIGTERM the processes, SIGKILL any still running after the grace period,
+    and reap them all."""
     for process in processes:
         if process.poll() is None:
             process.terminate()
+    deadline = time.monotonic() + _STOP_GRACE_SECONDS
+    for process in processes:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "GMS process pid=%d did not stop within %ss; killing it",
+                process.pid,
+                _STOP_GRACE_SECONDS,
+            )
+            process.kill()
+            process.wait()
+
+
+def _ignore_stop_signals() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _exit_on_signal(*_args) -> None:
+    # Leave stopping to the caller's finally: this may interrupt Popen.poll()
+    # holding its non-reentrant waitpid lock. Ignore repeats to protect that stop.
+    _ignore_stop_signals()
+    raise SystemExit(0)
 
 
 def _supervise(
@@ -102,17 +131,14 @@ def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
         return argv
 
     processes: list[subprocess.Popen] = []
-
-    def terminate(*_args) -> None:
-        _terminate_all(processes)
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGTERM, terminate)
-    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGINT, _exit_on_signal)
     try:
         processes.extend(ranks.start_ranks(_v1_gpus(), command, confine=confine))
         return _supervise(processes)
     finally:
+        # A signal must not cut the stop short, even when an exception got us here.
+        _ignore_stop_signals()
         _terminate_all(processes)
 
 
@@ -200,13 +226,8 @@ def main(argv: list[str] | None = None) -> None:
 
     servers: list[subprocess.Popen] = []
     loaders: list[subprocess.Popen] = []
-
-    def terminate(*_args) -> None:
-        _terminate_all([*servers, *loaders])
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGTERM, terminate)
-    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGINT, _exit_on_signal)
 
     try:
         for device in devices:
@@ -229,6 +250,7 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(_supervise(servers, loaders))
     finally:
+        _ignore_stop_signals()
         _terminate_all([*servers, *loaders])
 
 

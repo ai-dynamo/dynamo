@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-use dynamo_slot_tracker::busy::BusyThresholds;
+use dynamo_slot_tracker::BusyThresholds;
 
 /// The one class of a profile built from the flat router config alone.
 pub const SYNTHETIC_POLICY_CLASS: &str = "default";

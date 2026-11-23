@@ -156,6 +156,11 @@ fn disconnected(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
 }
 
 fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
+    let message = format!("{rpc}: {message} ({code:?})");
+    if code == tonic::Code::Unimplemented {
+        return typed(ErrorType::NotImplemented, message);
+    }
+
     let kind = match code {
         tonic::Code::InvalidArgument
         | tonic::Code::NotFound
@@ -167,7 +172,7 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
     };
-    backend(kind, format!("{rpc}: {message} ({code:?})"))
+    backend(kind, message)
 }
 
 #[cfg(test)]
@@ -188,7 +193,6 @@ mod tests {
             ),
             (tonic::Code::AlreadyExists, BackendError::InvalidArgument),
             (tonic::Code::Unknown, BackendError::Unknown),
-            (tonic::Code::Unimplemented, BackendError::Unknown),
             (tonic::Code::ResourceExhausted, BackendError::Unknown),
             (tonic::Code::PermissionDenied, BackendError::Unknown),
             (tonic::Code::Unauthenticated, BackendError::Unknown),
@@ -222,6 +226,26 @@ mod tests {
                 assert_eq!(v14.error_type(), error.error_type());
                 assert_eq!(v14.to_string(), error.to_string());
             }
+        }
+    }
+
+    #[test]
+    fn maps_unimplemented_to_not_implemented() {
+        let error = status_to_dynamo(
+            "Test",
+            tonic::Status::new(tonic::Code::Unimplemented, "failure"),
+        );
+        assert_eq!(error.error_type(), ErrorType::NotImplemented);
+        assert!(error.to_string().contains("Test: failure (Unimplemented)"));
+
+        #[cfg(feature = "tonic-v14")]
+        {
+            let error = crate::error::status_to_dynamo_v14(
+                "Test",
+                tonic_v14::Status::new(tonic_v14::Code::Unimplemented, "failure"),
+            );
+            assert_eq!(error.error_type(), ErrorType::NotImplemented);
+            assert!(error.to_string().contains("Test: failure (Unimplemented)"));
         }
     }
 
