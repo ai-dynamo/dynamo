@@ -2266,27 +2266,12 @@ impl KvRouter {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
-                let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
                     if first_item {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
                             inject_worker_id_from_tracker(data, tracker);
-                        }
-                    }
-
-                    if !first_token_gauges_observed {
-                        let has_tokens = response
-                            .data
-                            .as_ref()
-                            .map(|d| !d.token_ids.is_empty())
-                            .unwrap_or(false);
-                        if has_tokens {
-                            if let Some(ref tracker) = tracker {
-                                tracker.observe_first_token_gauges();
-                            }
-                            first_token_gauges_observed = true;
                         }
                     }
 
@@ -2313,10 +2298,6 @@ impl KvRouter {
                     if is_error {
                         break;
                     }
-                }
-
-                if let Some(ref tracker) = tracker {
-                    tracker.observe_finish_gauges();
                 }
             });
 
