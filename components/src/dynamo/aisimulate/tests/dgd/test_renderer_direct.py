@@ -52,7 +52,7 @@ REAL_CANDIDATE_TEP_TRTLLM = {
 _IMAGE = "my-registry/tensorrtllm-runtime:1.3.0rc10"
 
 # Built directly from the confirmed field-naming rules in
-# aisimulate.sweeper.sample.py's unroll_sample/_unroll_parallel: disagg mode
+# aisim.sweeper.sample.py's unroll_sample/_unroll_parallel: disagg mode
 # has NO bare tp/strategy/replicas/agg_* keys at all -- every shape/kv-cache
 # /scheduler/replica/attention-dp field is uniformly "{role}_"-prefixed
 # ("prefill_"/"decode_"), unlike agg's bare-vs-"agg_"-prefixed mix.

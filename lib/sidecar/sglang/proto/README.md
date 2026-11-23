@@ -5,25 +5,24 @@ SPDX-License-Identifier: Apache-2.0
 
 # Temporary SGLang gRPC contract
 
-This copy is temporary while Dynamo waits for SGLang to include
-`sglang/srt/grpc/sglang.proto` in a release wheel. Once the contract is
-available there, Dynamo should remove this directory, pin and install the
-matching `sglang` wheel as a build dependency, and compile the packaged proto
-instead.
+This copy is temporary while Dynamo waits for SGLang to publish
+`sglang-api-types` 0.1.1 on crates.io (sgl-project/sglang#50028). Once it is
+published, Dynamo should remove this directory and the build script and use
+the crate instead.
 
-The contract was copied from the SGLang v0.5.23 release branch, commit
-[`297e54fd105e974cdf401e5b4d20253a22c16f90`](https://github.com/sgl-project/sglang/blob/297e54fd105e974cdf401e5b4d20253a22c16f90/proto/sglang/runtime/v1/sglang.proto).
-The upstream file's SHA-256 is
-`3e7a78c9d2327530ea22369b2c6159886f720a9887d41a4f2983aebe7f257d2f`.
-The local file adds SPDX and temporary-copy comments and applies Dynamo's
-`clang-format` style; these changes do not alter the protobuf descriptor. The
-SGLang sidecar generates both client and server types and temporarily exposes
-them to the Mocker server.
+The files are unchanged copies of SGLang upstream `main`
+`37f3b2730bca1cc875126f8b94c4487ec1331a95`. Their SHA-256s are:
 
-SGLang 0.5.23 adds the `GenerateRequest` media fields 19 to 21 (`image_data`,
-`video_data`, and `audio_data`) and the `GetServerInfo` `grpc_features` list.
-The sidecar sends each media kind only to a server that lists it in
-`grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`). An older
-server drops unknown fields, and a model processor drops each media kind that
-it has no placeholder for. Both drops are silent, so the sidecar refuses each
-media kind that the server does not list.
+| File | SHA-256 |
+|------|---------|
+| `sglang/api/v1/common.proto` | `6c2dd838206329d897567d60e9fbdfe9e66f9baba438e8aa34d3b3e3b9be40cf` |
+| `sglang/api/v1/finish.proto` | `a8069d9b7be196224a0e7011e4d69e514e50b0833a038338dbfc82fc296fa40c` |
+| `sglang/api/v1/generate.proto` | `f18cb71127ad9760efae059796f382e5c4d015a148bb42cc1ca7fa00eeb8f4cc` |
+| `sglang/api/v1/hicache.proto` | `3224ff3d64234d23678d1a6f899c35b131ebc73eddeabf4a6b25fa983852e736` |
+| `sglang/api/v1/sampling.proto` | `64621faa7bc31835a52973db9ce8e961c14e66c7d95b21282399d5049531fa6f` |
+| `sglang/api/v1/service.proto` | `c2794fb9d4fdb8dc489a75c5f22066d2b5b455c77e3606137785c2278521ac11` |
+| `sglang/json/v1/options.proto` | `d1aa73d1a5ee39b180ccc5967dae55d061a4e6e10f9a01d4c116d3a269b111fe` |
+
+All of them are excluded from Dynamo's formatting and copyright-header checks.
+The SGLang sidecar generates both client and server types and temporarily
+exposes them to the Mocker server.

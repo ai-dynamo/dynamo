@@ -2708,7 +2708,7 @@ _Appears in:_
 
 LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
 Partition IDs are the compiler partition IDs of the build's runtime
-partitions. A selected prop-sync chain is identified by its first partition.
+partitions. A selected unit is identified by its first partition.
 
 
 
@@ -3417,6 +3417,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3454,6 +3455,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3488,6 +3490,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
@@ -3531,6 +3534,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 | `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 spec while this object is<br />represented through v1beta2. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta1 API. |  | Type: object <br />Optional: \{\} <br /> |
 
@@ -3560,6 +3564,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3599,6 +3604,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
@@ -3762,6 +3768,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
@@ -3875,6 +3882,25 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `maxCandidates` _integer_ | MaxCandidates is the maximum number of DGDCs owned by one run. Scalar<br />candidates are ordered best first.<br />This field does not limit internal trials. |  | Maximum: 100 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### RerunSpec
+
+
+
+RerunSpec records explicit intent to create another Run without changing search inputs.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec)
+- [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
+- [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)
+- [NativeSearchInput](#nativesearchinput)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `reason` _string_ | Reason records why the user requested another Run. Changing this value creates a new<br />Request generation and the value is frozen into that generation's immutable Run. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### ResourceReference
@@ -4293,6 +4319,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `schedulerName` _string_ | SchedulerName is the pod scheduler name used by the KAI integration.<br />Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend. | kai-scheduler | Optional: \{\} <br /> |
 | `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
 
 

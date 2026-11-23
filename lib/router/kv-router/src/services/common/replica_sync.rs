@@ -101,7 +101,7 @@ pub(crate) fn setup_replica_sync(
     }))
 }
 
-pub(crate) fn start_replica_publisher(
+fn start_replica_publisher(
     bind_endpoint: &str,
     cancel_token: CancellationToken,
 ) -> Result<(

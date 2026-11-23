@@ -67,7 +67,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="lpx" type="LPXConfig">
-  Experimental DGD-only compiled-model and scheduling configuration; requires the operator's `lpx.enabled` setting and may change incompatibly. Set `buildId`; placement comes from the build manifest. Runtime options belong in role pod templates. See [LPXConfig](full-api-reference.mdx#lpxconfig).
+  Experimental DGD-only compiled-model and scheduling configuration; requires the operator's `lpx.enabled` setting and may change incompatibly. Set `buildId`; placement comes from the build's `lpuUnits` (deployment contract revision 1). Builds without `lpuUnits` must be recompiled. Runtime options belong in role pod templates. See [LPXConfig](full-api-reference.mdx#lpxconfig).
 
   When the operator's `lpx.modelRegistryURL` is configured, `buildId` must be relative to that registry; absolute paths and URLs require an empty registry URL.
 </ParamField>
@@ -95,11 +95,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   <Indent>
     <ParamField path="localPartitions" type="LPXLocalPartitions">
-      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. Hybrid XT (LP20) and HX (LP30) builds support this field. LPU-only and speculative builds reject it.
+      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. LPU-only and speculative builds do not support this field.
 
-      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the Agents' partition configuration and, for XT builds, the conductor's `lpu_servers`. For HX builds, the request's allocation metadata also lists only the remaining partitions. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
+      The LPX compiler groups partitions into units (`lpuUnits` in the build). A unit runs as a whole, on LPUs or on the GPU. `ids` selects a unit by its first compiler partition ID, including every partition in that unit. Unknown IDs and other members of a unit are rejected during reconciliation. Connectors within the remaining units retain their authored order. Changing the selection changes the workload digest and rolls the workload.
 
-      `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Because a chain moves as a unit, a local selection never splits a chain. The operator keeps a prop-sync connector only when both of its partitions remain on LPUs, and renumbers it to their positions among the remaining partitions. Changing the selection changes the workload digest and rolls the workload.
+      The operator schedules Agent Pods and LPU pipeline requests only for the remaining units. When every unit is local, it renders no Agent PodClique and creates no LPU pipeline request. It sets `LPX_LOCAL_PARTITION_IDS` in the `main` container of the Cyborg and Agent Pods: a comma-separated list of the first partition ID of each local unit, or empty when none are configured.
     </ParamField>
   </Indent>
 </Indent>

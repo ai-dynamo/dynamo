@@ -165,7 +165,7 @@ class TestPriorityChain:
             patch.object(
                 pm,
                 "_try_aic_interpolation",
-                side_effect=ImportError("no module named aisimulate_core"),
+                side_effect=ImportError("no module named aisim_core"),
             ),
             patch.object(
                 pm, "_convert_profiling_data_to_fpms", return_value=file_fpms

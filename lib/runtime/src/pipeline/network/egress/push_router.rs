@@ -2616,6 +2616,20 @@ mod tests {
         assert!(is_inhibited(&err));
     }
 
+    #[test]
+    fn transport_failure_with_raw_cause_quarantines_the_worker() {
+        let error = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("NATS request failed")
+            .cause(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "connection refused",
+            ))
+            .build();
+
+        assert!(is_inhibited(&error), "{error:#}");
+    }
+
     /// A worker's admission refusal as the gate raises it, in process: for
     /// the whole worker, or for DP rank `dp_rank` alone.
     fn refusal(dp_rank: Option<u32>) -> DynamoError {
@@ -2793,18 +2807,33 @@ mod tests {
     }
 
     #[test]
-    fn pre_stream_invalid_request_does_not_quarantine_healthy_worker() {
+    fn pre_stream_failure_preserves_worker_health_classification() {
         use crate::pipeline::network::{
             StreamPrologueError, egress::addressed_router::pre_stream_failure_error,
         };
 
-        for (error_type, is_worker_fault) in [
-            (ErrorType::InvalidRequest, false),
-            (ErrorType::InvalidArgument, false),
-            (ErrorType::Backend(BackendError::InvalidArgument), false),
-            (ErrorType::Conflict, false),
-            (ErrorType::CannotConnect, true),
-            (ErrorType::Unavailable, true),
+        for (error_type, expected_type, is_worker_fault) in [
+            (ErrorType::InvalidRequest, ErrorType::InvalidRequest, false),
+            (
+                ErrorType::InvalidArgument,
+                ErrorType::InvalidArgument,
+                false,
+            ),
+            (
+                ErrorType::Backend(BackendError::InvalidArgument),
+                ErrorType::Backend(BackendError::InvalidArgument),
+                false,
+            ),
+            (ErrorType::Conflict, ErrorType::CannotConnect, false),
+            (ErrorType::NotImplemented, ErrorType::NotImplemented, false),
+            (ErrorType::Internal, ErrorType::CannotConnect, true),
+            (
+                ErrorType::Backend(BackendError::Unknown),
+                ErrorType::CannotConnect,
+                true,
+            ),
+            (ErrorType::CannotConnect, ErrorType::CannotConnect, true),
+            (ErrorType::Unavailable, ErrorType::CannotConnect, true),
         ] {
             let rejection = DynamoError::builder()
                 .error_type(error_type)
@@ -2813,6 +2842,11 @@ mod tests {
             let error =
                 pre_stream_failure_error(StreamPrologueError::new("Generate Error", rejection));
             assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
+            assert_eq!(
+                crate::pipeline::network::egress::route_span::error_type_from_chain(&error),
+                expected_type,
+                "unexpected route classification for {error_type:?}: {error}"
+            );
         }
     }
 

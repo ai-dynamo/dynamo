@@ -51,7 +51,7 @@ inputs:
     required: false
     default: 'linux/amd64'
   cuda_version:
-    description: 'CUDA version (13.0, 13.1). Optional for general flavor.'
+    description: 'CUDA version (13.0, 13.4). Optional for general flavor.'
     required: false
     default: ''
   fresh_builder:

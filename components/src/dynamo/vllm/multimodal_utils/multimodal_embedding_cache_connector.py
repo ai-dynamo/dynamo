@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
-from packaging.version import Version
-from vllm import __version__ as _vllm_version
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -21,7 +19,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.request import Request
 
-MINIMUM_VLLM_VERSION = "0.17.0"
 
 # This connector runs inside vLLM's spawned EngineCore process, where Dynamo's
 # logging bridge is unavailable. Use a vLLM child logger so
@@ -167,13 +164,6 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     """
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
-        if Version(_vllm_version) < Version(MINIMUM_VLLM_VERSION):
-            logger.warning(
-                "DynamoMultimodalEmbeddingCacheConnector requires vLLM >= %s, "
-                "but found %s. Some features may not work correctly.",
-                MINIMUM_VLLM_VERSION,
-                _vllm_version,
-            )
         super().__init__(vllm_config=vllm_config, role=role)
         self._device = _get_device(vllm_config)
 
