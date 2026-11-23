@@ -49,7 +49,7 @@ At startup, the sidecar writes each endpoint it uses back to its environment var
 
 `--grpc-endpoint` and `--http-endpoint` are the same as `--grpc` and `--http`, matching the options of the other Dynamo sidecars: each takes a required `host:port` or URL.
 Both require a value to be provided and neither support bare port values.
-When multiple `--gprc` and/or `--grpc-endpoint` options are provided, the last provided value is accepted.
+When multiple `--grpc` and/or `--grpc-endpoint` options are provided, including the same option twice, the last provided value is accepted.
 Same rule applied to the `--http` and `--http-endpoint` options.
 
 > [!WARNING]

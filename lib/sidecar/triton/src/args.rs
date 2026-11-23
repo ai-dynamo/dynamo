@@ -122,18 +122,18 @@ pub(crate) struct Args {
         num_args = 0..=1,
         default_missing_value = "localhost:8001",
         value_parser = parse_grpc_endpoint,
-        overrides_with = "compat_grpc_endpoint",
+        overrides_with_all = ["grpc_endpoint", "compat_grpc_endpoint"],
     )]
     pub grpc_endpoint: Option<GrpcEndpoint>,
 
     /// Same as `--grpc`, in the format the other Dynamo sidecars accept: `host:port` or a plaintext gRPC/HTTP URL, with no bare-port or no-value default.
     ///
-    /// When both are passed, the last one wins.
+    /// Repeating this option or `--grpc`, in any order, keeps the last value.
     #[arg(
         long = "grpc-endpoint",
         value_name = "ENDPOINT",
         value_parser = parse_compat_grpc_endpoint,
-        overrides_with = "grpc_endpoint",
+        overrides_with_all = ["grpc_endpoint", "compat_grpc_endpoint"],
     )]
     pub compat_grpc_endpoint: Option<GrpcEndpoint>,
 
@@ -147,18 +147,18 @@ pub(crate) struct Args {
         num_args = 0..=1,
         default_missing_value = "localhost:8000",
         value_parser = parse_http_endpoint,
-        overrides_with = "compat_http_endpoint",
+        overrides_with_all = ["http_endpoint", "compat_http_endpoint"],
     )]
     pub http_endpoint: Option<HttpEndpoint>,
 
     /// Same as `--http`, as `host:port` or an HTTP(S) URL, with no bare-port or no-value default.
     ///
-    /// When both are passed, the last one wins.
+    /// Repeating this option or `--http`, in any order, keeps the last value.
     #[arg(
         long = "http-endpoint",
         value_name = "ENDPOINT",
         value_parser = parse_compat_http_endpoint,
-        overrides_with = "http_endpoint",
+        overrides_with_all = ["http_endpoint", "compat_http_endpoint"],
     )]
     pub compat_http_endpoint: Option<HttpEndpoint>,
 
@@ -733,6 +733,34 @@ mod tests {
             args.grpc_endpoint.unwrap().as_str(),
             "http://localhost:8001"
         );
+
+        // A repeated endpoint flag keeps its last value, so a launcher can append an override.
+        for (flag, last) in [
+            ("--grpc", "http://triton:9001"),
+            ("--grpc-endpoint", "http://triton:9001"),
+        ] {
+            let args = validated(&[
+                "dynamo-triton-sidecar",
+                flag,
+                "triton:8001",
+                flag,
+                "triton:9001",
+            ]);
+            assert_eq!(args.grpc_endpoint.unwrap().as_str(), last, "{flag}");
+        }
+        for (flag, last) in [
+            ("--http", "http://triton:9000/"),
+            ("--http-endpoint", "http://triton:9000/"),
+        ] {
+            let args = validated(&[
+                "dynamo-triton-sidecar",
+                flag,
+                "triton:8000",
+                flag,
+                "triton:9000",
+            ]);
+            assert_eq!(args.http_endpoint.unwrap().as_str(), last, "{flag}");
+        }
 
         // The sidecar flags require a value and do not expand a bare port.
         for argv in [
