@@ -139,7 +139,7 @@ impl DirectDispatch {
         source: &str,
         custom_template: Option<&Path>,
     ) -> Result<ModelFiles, DynamoError> {
-        let kept = self.model(source);
+        let kept = self.model_slot(source);
         let files = kept
             .get_or_try_init(|| ModelFiles::read(source, custom_template))
             .await?;
@@ -164,14 +164,14 @@ impl DirectDispatch {
                 models.remove(source);
             }
         }
-        self.model(source)
+        self.model_slot(source)
             .get_or_try_init(|| ModelFiles::read(source, custom_template))
             .await
             .cloned()
     }
 
     /// Where the files of the model `source` names are kept once read.
-    fn model(&self, source: &str) -> Arc<tokio::sync::OnceCell<ModelFiles>> {
+    fn model_slot(&self, source: &str) -> Arc<tokio::sync::OnceCell<ModelFiles>> {
         let mut models = self.models.lock();
         match models.get(source) {
             Some(kept) => kept.clone(),
