@@ -597,12 +597,14 @@ mod tests {
             .worker(1, CaseWorker::new().device_overlap_blocks(8))
             .worker(2, CaseWorker::new().host_overlap_blocks(4))
             .worker(3, CaseWorker::new().disk_overlap_blocks(8))
+            // One lower tier on top of the device blocks. The router adds lower tiers in an
+            // unspecified order, so with both tiers the sum would match this one bit for bit
+            // only for weights like the defaults.
             .worker(
                 4,
                 CaseWorker::new()
                     .device_overlap_blocks(2)
-                    .host_overlap_blocks(4)
-                    .disk_overlap_blocks(8),
+                    .host_overlap_blocks(4),
             )
             .worker(5, CaseWorker::new());
         case.select(&policy).unwrap();
@@ -612,16 +614,16 @@ mod tests {
                 (1, row(8.0, 0.0, 0.0)),
                 (2, row(0.0, 4.0, 0.0)),
                 (3, row(0.0, 0.0, 8.0)),
-                (4, row(2.0, 4.0, 8.0)),
+                (4, row(2.0, 4.0, 0.0)),
                 (5, row(0.0, 0.0, 0.0)),
             ])
         );
         assert_eq!(seen.lock().unwrap()[&1].estimate, (8.0, 128));
 
         // Replacing a worker's signals replaces its tiers and its estimate.
-        case.set_worker(4, CaseWorker::new().host_overlap_blocks(4));
+        case.set_worker(4, CaseWorker::new().disk_overlap_blocks(8));
         case.select(&policy).unwrap();
-        assert_eq!(seen.lock().unwrap()[&4], row(0.0, 4.0, 0.0));
+        assert_eq!(seen.lock().unwrap()[&4], row(0.0, 0.0, 8.0));
     }
 
     /// Marks a request `batch` when every observed worker is at or past a request count.
