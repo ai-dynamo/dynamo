@@ -2753,9 +2753,12 @@ mod tests {
         .unwrap()
     }
 
+    #[rstest::rstest]
+    #[case::single(1)]
+    #[case::concurrent(4)]
     #[tokio::test]
-    async fn direct_kv_index_uses_the_configured_event_threads() {
-        let component = make_test_component("direct-kv-threads").await;
+    async fn direct_kv_index_uses_the_configured_event_threads(#[case] threads: u32) {
+        let component = make_test_component(&format!("direct-kv-threads-{threads}")).await;
         let endpoint = component.endpoint("backend");
         let client = endpoint.client().await.unwrap();
         let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
@@ -2768,7 +2771,7 @@ mod tests {
             2,
             SelectionPolicySource::Registry,
             Some(KvRouterConfig {
-                router_event_threads: 4,
+                router_event_threads: threads,
                 skip_initial_worker_wait: true,
                 ..Default::default()
             }),
@@ -2786,7 +2789,16 @@ mod tests {
         .await
         .unwrap();
         assert!(router.ingress.is_none());
-        assert!(matches!(router.indexer, Indexer::Concurrent { .. }));
+        // One thread is the single-threaded index, which the selection
+        // service's default of four would not build.
+        assert_eq!(
+            matches!(router.indexer, Indexer::Concurrent { .. }),
+            threads > 1
+        );
+        assert_eq!(
+            matches!(router.indexer, Indexer::Single { .. }),
+            threads == 1
+        );
     }
 
     #[rstest::rstest]
