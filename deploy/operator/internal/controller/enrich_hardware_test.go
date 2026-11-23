@@ -533,8 +533,7 @@ func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.
 }
 
 // TestHandlePendingPhaseRetriesProfilingJobConflict checks that a 409 on the
-// profiling Job write requeues the DGDR instead of failing it, so the next
-// reconcile can retry from a fresh observation.
+// profiling Job write requeues the DGDR instead of failing it.
 func TestHandlePendingPhaseRetriesProfilingJobConflict(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
