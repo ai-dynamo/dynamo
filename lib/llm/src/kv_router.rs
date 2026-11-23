@@ -677,12 +677,26 @@ fn map_scheduler_error(error: dynamo_scheduler::host::KvSchedulerError) -> anyho
     }
 }
 
-/// KV events from engines the frontend dials directly: the ZMQ ingress, except
-/// that an engine advertising no publishers at all stays schedulable without
-/// prefix-cache scoring, as it does behind a sidecar. The plain ZMQ ingress
-/// holds such a worker back as incomplete.
-#[derive(Debug, Default)]
-struct DirectKvIngress(dynamo_kv_router::services::selection::ZmqDirectIngress);
+/// KV events from engines the frontend dials directly: the ZMQ ingress, with two
+/// differences. Its listeners feed the frontend's own index, built as the
+/// runtime ingress builds its own, so it has the component's indexer metrics
+/// and session updates; the index the selection core would create has
+/// neither. And an engine advertising no publishers at all stays schedulable
+/// without prefix-cache scoring, as it does behind a sidecar; the plain ZMQ
+/// ingress holds such a worker back as incomplete.
+struct DirectKvIngress {
+    listeners: dynamo_kv_router::services::selection::ZmqDirectIngress,
+    indexer: Indexer,
+}
+
+impl DirectKvIngress {
+    fn new(indexer: Indexer) -> Self {
+        Self {
+            listeners: Default::default(),
+            indexer,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
@@ -691,7 +705,7 @@ impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
         index: &Arc<dynamo_scheduler::host::IndexRegistry>,
         cancel_token: CancellationToken,
     ) {
-        self.0.attach(index, cancel_token);
+        self.listeners.attach(index, cancel_token);
     }
 
     fn open(
@@ -700,7 +714,8 @@ impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
         key: &dynamo_router_protocol::identity::RoutingPartitionId,
         block_size: u32,
     ) -> Indexer {
-        self.0.open(index, key, block_size)
+        // The listeners claim the partition's index from the registry.
+        index.adopt_indexer(key.clone(), block_size, self.indexer.clone())
     }
 
     fn missing_metadata(
@@ -710,7 +725,7 @@ impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
         if record.listener_endpoints().is_empty() {
             return Vec::new();
         }
-        self.0.missing_metadata(record)
+        self.listeners.missing_metadata(record)
     }
 
     async fn reconcile(
@@ -718,11 +733,11 @@ impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
         previous: Option<&dynamo_scheduler::host::WorkerCatalogRecord>,
         record: &dynamo_scheduler::host::WorkerCatalogRecord,
     ) -> Result<(), SelectionError> {
-        self.0.reconcile(previous, record).await
+        self.listeners.reconcile(previous, record).await
     }
 
     async fn detach(&self, record: &dynamo_scheduler::host::WorkerCatalogRecord) {
-        self.0.detach(record).await;
+        self.listeners.detach(record).await;
     }
 }
 
@@ -915,7 +930,16 @@ impl KvRouter {
             Arc<dyn dynamo_scheduler::host::KvEventIngress>,
             Option<Arc<indexer::RuntimeIngress>>,
         ) = if direct_kv_events {
-            (Arc::new(DirectKvIngress::default()), None)
+            let indexer = indexer::build(
+                component,
+                &kv_router_config,
+                block_size,
+                model_name.as_deref(),
+                cancellation_token.child_token(),
+                session_prefix_index.clone(),
+            )
+            .await?;
+            (Arc::new(DirectKvIngress::new(indexer)), None)
         } else {
             let runtime_ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
                 endpoint: &endpoint,
@@ -947,8 +971,9 @@ impl KvRouter {
                 })?;
         }
 
-        // The runtime ingress's index exists already. The ZMQ ingress builds its
-        // index when the selection core opens the partition, below.
+        // The runtime ingress's index exists already. The direct ingress hands
+        // its index to the selection core when the core opens the partition,
+        // below.
         let runtime_index = match &runtime_ingress {
             Some(runtime_ingress) => {
                 let indexer = runtime_ingress.indexer().clone();
@@ -2799,6 +2824,91 @@ mod tests {
             matches!(router.indexer, Indexer::Single { .. }),
             threads == 1
         );
+    }
+
+    #[rstest::rstest]
+    #[case::single(1)]
+    #[case::concurrent(4)]
+    #[tokio::test]
+    async fn direct_kv_index_records_sessions_and_counts_events(#[case] threads: u32) {
+        use dynamo_kv_events::residency::StorageTier;
+        use dynamo_kv_indexer::host::{KvIndexerMetrics, METRIC_EVENT_STORED};
+        use indexer::KvIndexerMetricsExt as _;
+
+        let component = make_test_component(&format!("direct-kv-index-{threads}")).await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let parent_token = component.drt().child_token();
+        // The counters every frontend index in this process reports to.
+        let stored = KvIndexerMetrics::from_component(&component)
+            .kv_cache_events_applied
+            .with_label_values(&[METRIC_EVENT_STORED, dynamo_kv_indexer::METRIC_STATUS_OK]);
+        let router = KvRouter::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(7)),
+            Some(KvRouterConfig {
+                enable_session_prefix_index: true,
+                router_event_threads: threads,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            }),
+            None,
+            Some(WorkerType::Decode),
+            "decode",
+            None,
+            false,
+            None,
+            None,
+            SchedulerLoadSender::disabled(parent_token.child_token()),
+            parent_token,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(router.ingress.is_none());
+
+        // A store for a session, as a listener applies it to the index.
+        let session_index = router.session_prefix_index.as_ref().unwrap();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let hashes = compute_block_hash_for_seq(&[11, 12, 13, 14], 2, BlockHashOptions::default());
+        let stored_before = stored.get();
+        router
+            .indexer
+            .try_apply_event(
+                indexer::test_util::store_event(
+                    7,
+                    0,
+                    1,
+                    &[],
+                    &hashes.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+                    StorageTier::Device,
+                )
+                .with_session_id("seed"),
+            )
+            .await
+            .unwrap();
+
+        // The index records the session, which the selection core's own
+        // index does not.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while session_index
+                .get_session_block_lineage("seed", worker, None)
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the direct index must record the session's blocks");
+        // And it counts the store on the component's counters. Other tests in
+        // this process share them, so only a lower bound can be checked.
+        assert!(stored.get() > stored_before);
     }
 
     #[rstest::rstest]

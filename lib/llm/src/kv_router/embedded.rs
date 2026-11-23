@@ -268,8 +268,8 @@ impl EmbeddedSelection {
         )
         .worker_selection_policy_factory(args.policy_factory)
         .host_manages_request_lifecycle()
-        // Sizes the index an ingress opens from the registry (the direct ZMQ
-        // ingress); the runtime ingress brings its own, sized the same way.
+        // Sizes an index the registry creates itself. Both of this frontend's
+        // ingresses bring their own, sized the same way.
         .indexer_threads(args.kv_router_config.router_event_threads.max(1) as usize)
         .host(SelectionHost {
             load: HostLoad {
