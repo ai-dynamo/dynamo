@@ -4954,6 +4954,115 @@ async fn handler_responses_input_tokens(
     Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
 }
 
+/// The configured response store, or the 501 a lifecycle route returns without one.
+fn require_response_store(
+    state: &service_v2::State,
+) -> Result<Arc<dyn ResponseStore>, ErrorResponse> {
+    state.responses_store().cloned().ok_or_else(|| {
+        ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "stored responses require server-side storage; set DYN_HTTP_RESPONSES_STORE.",
+        )
+    })
+}
+
+/// Map a store read failure onto the client-facing error.
+fn response_store_error_response(
+    error: super::responses_store::ResponseStoreError,
+) -> ErrorResponse {
+    tracing::error!(error = %error, "response store lookup failed");
+    ErrorMessage::service_unavailable_with_body(
+        "Response store is unavailable; retry later.".to_string(),
+    )
+}
+
+/// `GET /v1/responses/{id}`: the stored response object as it was returned.
+async fn handler_get_response(
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    axum::extract::Path(response_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    let store = require_response_store(&state)?;
+    match store
+        .get(&response_id)
+        .await
+        .map_err(response_store_error_response)?
+    {
+        Some(record) => Ok(Json(record.response.clone()).into_response()),
+        None => Err(ErrorMessage::not_found(format!(
+            "Response with id '{response_id}' not found."
+        ))),
+    }
+}
+
+/// `DELETE /v1/responses/{id}`: forget a stored response. Later turns that
+/// continued from it can no longer be replayed.
+async fn handler_delete_response(
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    axum::extract::Path(response_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    let store = require_response_store(&state)?;
+    if store
+        .delete(&response_id)
+        .await
+        .map_err(response_store_error_response)?
+    {
+        Ok(Json(serde_json::json!({
+            "id": response_id,
+            "object": "response",
+            "deleted": true,
+        }))
+        .into_response())
+    } else {
+        Err(ErrorMessage::not_found(format!(
+            "Response with id '{response_id}' not found."
+        )))
+    }
+}
+
+/// `GET /v1/responses/{id}/input_items`: every input item the stored response
+/// was generated from, oldest first: the replayed chain followed by the turn's
+/// own input. The list is returned whole; `has_more` is always `false`.
+async fn handler_list_response_input_items(
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    axum::extract::Path(response_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    let store = require_response_store(&state)?;
+    let Some(record) = store
+        .get(&response_id)
+        .await
+        .map_err(response_store_error_response)?
+    else {
+        return Err(ErrorMessage::not_found(format!(
+            "Response with id '{response_id}' not found."
+        )));
+    };
+    let mut data = match record.previous_response_id.as_deref() {
+        Some(previous_id) => {
+            resolve_history(
+                store.as_ref(),
+                previous_id,
+                state.responses_max_chain_depth(),
+            )
+            .await
+            .map_err(history_error_response)?
+            .items
+        }
+        None => Vec::new(),
+    };
+    data.extend(record.input_items.iter().cloned());
+    let item_id = |item: &serde_json::Value| item.get("id").cloned().unwrap_or_default();
+    let first_id = data.first().map(item_id).unwrap_or_default();
+    let last_id = data.last().map(item_id).unwrap_or_default();
+    Ok(Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+        "first_id": first_id,
+        "last_id": last_id,
+        "has_more": false,
+    }))
+    .into_response())
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -6272,16 +6381,31 @@ pub fn responses_router(
     // The parent is registered verbatim, so trimming here changes only the
     // derived path and leaves existing configurations behaving as they do now.
     let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
+    // Lifecycle routes for stored responses. The static `input_tokens` segment
+    // takes precedence over the `{response_id}` capture in axum's matcher.
+    let response_path = format!("{}/{{response_id}}", path.trim_end_matches('/'));
+    let input_items_path = format!("{}/{{response_id}}/input_items", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let doc = doc.with_openapi_kind(super::OpenApiRouteKind::Responses);
     let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
+    let get_doc = RouteDoc::new(axum::http::Method::GET, &response_path);
+    let delete_doc = RouteDoc::new(axum::http::Method::DELETE, &response_path);
+    let input_items_doc = RouteDoc::new(axum::http::Method::GET, &input_items_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
         .route(&input_tokens_path, post(handler_responses_input_tokens))
+        .route(
+            &response_path,
+            get(handler_get_response).delete(handler_delete_response),
+        )
+        .route(&input_items_path, get(handler_list_response_input_items))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc, input_tokens_doc], router)
+    (
+        vec![doc, input_tokens_doc, get_doc, delete_doc, input_items_doc],
+        router,
+    )
 }
 
 /// Apply shared edit limits before dispatching generation requests with references.

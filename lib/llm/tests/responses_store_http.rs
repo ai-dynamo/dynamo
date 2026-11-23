@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Full-HTTP coverage for server-side Responses storage: `store` and
-//! `previous_response_id` continuation.
+//! Full-HTTP coverage for server-side Responses storage: `store`,
+//! `previous_response_id` continuation, and the `GET` / `DELETE` /
+//! `input_items` lifecycle routes.
 
 use std::sync::Arc;
 
@@ -232,6 +233,133 @@ async fn streaming_responses_are_stored_before_the_terminal_event() {
         assert_eq!(user_text(&m[0]), "ping");
         assert_eq!(assistant_text(&m[1]), "Pong.");
         assert_eq!(user_text(&m[2]), "again");
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn lifecycle_routes_return_501_without_a_store() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        for request in [
+            svc.client
+                .get(format!("{}/v1/responses/resp_x", svc.base_url)),
+            svc.client
+                .delete(format!("{}/v1/responses/resp_x", svc.base_url)),
+            svc.client
+                .get(format!("{}/v1/responses/resp_x/input_items", svc.base_url)),
+        ] {
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn lifecycle_routes_serve_stored_responses() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start_with_store(
+            [
+                load_agent_fixture("text.sse").await.unwrap(),
+                load_agent_fixture("text.sse").await.unwrap(),
+            ],
+            memory_store(),
+        )
+        .await;
+
+        let first = post_responses(
+            &svc,
+            &json!({"model": MODEL, "input": "ping", "store": true, "stream": false}),
+        )
+        .await;
+        assert_eq!(first.status(), reqwest::StatusCode::OK);
+        let first: Value = first.json().await.unwrap();
+        let id = first["id"].as_str().unwrap().to_string();
+
+        // GET returns the object exactly as it was returned to the client.
+        let fetched = svc
+            .client
+            .get(format!("{}/v1/responses/{id}", svc.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), reqwest::StatusCode::OK);
+        let fetched: Value = fetched.json().await.unwrap();
+        assert_eq!(fetched, first);
+
+        let second = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "again",
+                "store": true,
+                "stream": false,
+                "previous_response_id": id,
+            }),
+        )
+        .await;
+        assert_eq!(second.status(), reqwest::StatusCode::OK);
+        let second: Value = second.json().await.unwrap();
+        let second_id = second["id"].as_str().unwrap().to_string();
+
+        // input_items lists the replayed chain and then the turn's own input.
+        let items = svc
+            .client
+            .get(format!(
+                "{}/v1/responses/{second_id}/input_items",
+                svc.base_url
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(items.status(), reqwest::StatusCode::OK);
+        let items: Value = items.json().await.unwrap();
+        assert_eq!(items["object"], "list");
+        assert_eq!(items["has_more"], false);
+        let data = items["data"].as_array().unwrap();
+        assert_eq!(data.len(), 3, "{items}");
+        assert_eq!(data[0]["role"], "user");
+        assert_eq!(data[0]["content"], "ping");
+        assert_eq!(data[1]["type"], "message");
+        assert_eq!(data[1]["role"], "assistant");
+        assert_eq!(data[2]["content"], "again");
+
+        // Deleting the first node breaks the chain for later continuations.
+        let deleted = svc
+            .client
+            .delete(format!("{}/v1/responses/{id}", svc.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+        let deleted: Value = deleted.json().await.unwrap();
+        assert_eq!(
+            deleted,
+            json!({"id": id, "object": "response", "deleted": true})
+        );
+        for request in [
+            svc.client
+                .get(format!("{}/v1/responses/{id}", svc.base_url)),
+            svc.client
+                .delete(format!("{}/v1/responses/{id}", svc.base_url)),
+            svc.client
+                .get(format!("{}/v1/responses/{id}/input_items", svc.base_url)),
+        ] {
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        }
+        let broken = post_responses(
+            &svc,
+            &json!({"model": MODEL, "input": "x", "previous_response_id": second_id}),
+        )
+        .await;
+        assert_eq!(broken.status(), reqwest::StatusCode::NOT_FOUND);
 
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
