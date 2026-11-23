@@ -121,10 +121,11 @@ contract are unchanged.
 CRDs to be installed before upgrading the operator.
 
 **Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
-Ordinary Helm upgrades remove the flag automatically. The legacy
-`dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability; it remains solely
-for the existing Planner live-retune RBAC condition. Retune behavior and its disabled defaults are
-unchanged. Review API migration notes before future upgrades.
+Ordinary Helm upgrades remove the flag automatically. Remove `dynamo-operator.dgdrV1Beta2.enabled`
+and `dynamo-operator.dgdrV1Beta2.plannerLiveRetune` from your Helm overrides. On install or
+upgrade, every Planner ServiceAccount can create DGDR Requests, read Runs and Candidates, and
+get, create, update, or delete any Lease in its namespace, even when the old values are `false`.
+Enable experimental live retune per deployment with `retune.executor: dgdr` in the Planner config.
 
 #### Operator behavior breaking changes
 
@@ -813,8 +814,6 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
-| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | Legacy prerequisite for Planner live-retune RBAC. This does not gate DGDR v1beta2 API availability. |
-| dynamo-operator.dgdrV1Beta2.plannerLiveRetune | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs: create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates, and read, create, update and delete any Lease in the namespace. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
