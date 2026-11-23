@@ -50,7 +50,7 @@ use crate::engine::{EngineConfig, KvEventSource, LLMEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::worker::{
     WorkerConfig, fetch_model_files, local_model_builder, resolve_model_type,
-    resolve_worker_type_and_needs,
+    resolve_worker_type_and_needs, validate_llm_model_input,
 };
 
 /// Delay after the first failed probe, and before the first probe of an engine
@@ -319,6 +319,9 @@ async fn serve_engines(
             "direct mode needs at least one engine",
         ));
     }
+    // As the sidecar `Worker` checks: the engines are `LLMEngine`s, and only
+    // the token pipeline's requests have a direct dispatch to reach them.
+    validate_llm_model_input(config.model_input)?;
     let mut urls = HashSet::new();
     for spec in &specs {
         if !urls.insert(normalized_url(&spec.url)) {
@@ -1763,6 +1766,34 @@ mod tests {
         .expect("the router must score the blocks `A` published");
         assert_eq!(a.cached_tokens.load(Ordering::SeqCst), blocks * BLOCK_SIZE);
         assert_eq!(frontend.states[B].cached_tokens.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_model_input_other_than_tokens_is_rejected() {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let factory: DirectEngineFactory = Arc::new(
+            |_: &DirectEngineSpec| -> Result<Arc<dyn LLMEngine>, DynamoError> {
+                panic!("no engine is built for a model input the engines cannot take")
+            },
+        );
+        let spec = DirectEngineSpec {
+            url: A.to_string(),
+            mode: DisaggregationMode::Aggregated,
+        };
+        // A text model would be advertised as ready, and its requests would
+        // find no direct dispatch.
+        let config = WorkerConfig {
+            model_input: dynamo_llm::model_type::ModelInput::Text,
+            ..WorkerConfig::default()
+        };
+        let result = serve_direct_engines(&drt, config, vec![spec], factory).await;
+        assert!(result.is_err());
+        drt.shutdown();
     }
 
     #[tokio::test]

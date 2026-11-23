@@ -2186,24 +2186,26 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     Ok(out)
 }
 
+/// An [`LLMEngine`] takes tokens: `model_input` must be `Tokens`.
+pub(crate) fn validate_llm_model_input(model_input: ModelInput) -> Result<(), DynamoError> {
+    if model_input == ModelInput::Tokens {
+        return Ok(());
+    }
+    Err(err(
+        ErrorType::Backend(BackendError::InvalidArgument),
+        format!(
+            "LLMEngine (token pipeline) requires ModelInput::Tokens; got '{}'. \
+             Use a RawEngine for ModelInput::Text / Tensor.",
+            model_input.as_str()
+        ),
+    ))
+}
+
 /// Check `model_input` matches the engine modality: [`LLMEngine`] needs
 /// `Tokens`; [`RawEngine`] needs `Text`/`Tensor` (no tokenizer stage).
 fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<(), DynamoError> {
     match engine {
-        EngineKind::Llm(_) => {
-            if model_input == ModelInput::Tokens {
-                Ok(())
-            } else {
-                Err(err(
-                    ErrorType::Backend(BackendError::InvalidArgument),
-                    format!(
-                        "LLMEngine (token pipeline) requires ModelInput::Tokens; got '{}'. \
-                         Use a RawEngine for ModelInput::Text / Tensor.",
-                        model_input.as_str()
-                    ),
-                ))
-            }
-        }
+        EngineKind::Llm(_) => validate_llm_model_input(model_input),
         EngineKind::Raw(_) => {
             if model_input == ModelInput::Tokens {
                 Err(err(
