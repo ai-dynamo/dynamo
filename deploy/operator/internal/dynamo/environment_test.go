@@ -8,7 +8,6 @@ package dynamo
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -181,21 +181,38 @@ func TestStandaloneTopologySourceDoesNotOwnEnvironment(t *testing.T) {
 }
 
 func TestEnvironmentLateGMSBindings(t *testing.T) {
-	for _, mode := range []v1beta1.GPUMemoryServiceMode{v1beta1.GMSModeIntraPod, v1beta1.GMSModeInterPod} {
-		t.Run(string(mode), func(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode v1beta1.GPUMemoryServiceMode
+		cold bool
+	}{
+		{name: "IntraPod", mode: v1beta1.GMSModeIntraPod},
+		{name: "IntraPod-cold-failover", mode: v1beta1.GMSModeIntraPod, cold: true},
+		{name: "InterPod", mode: v1beta1.GMSModeInterPod},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mode := test.mode
 			t.Log("Reference a late GMS binding from graph defaults and try overriding an owned mode")
 			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				Experimental: &v1beta1.ExperimentalSpec{GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: mode}},
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"},
-					Env:       []corev1.EnvVar{{Name: "NATS_SERVER", Value: "custom"}, {Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "false"}},
+					Env:       []corev1.EnvVar{{Name: "NATS_SERVER", Value: "custom"}, {Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "false"}, {Name: gms.EnvSocketDir, Value: "/authored"}, {Name: "UNOWNED", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "settings", Key: "value"}}}},
 					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
 				}}}},
 			}
 			if mode == v1beta1.GMSModeIntraPod {
 				component.Experimental.GPUMemoryService.ExtraClientContainers = []string{"main"}
+				if test.cold {
+					component.Experimental.GPUMemoryService.ExtraClientContainers = nil
+					component.Experimental.Failover = &v1beta1.FailoverSpec{Mode: mode}
+				}
 			} else {
 				component.Experimental.Failover = &v1beta1.FailoverSpec{Mode: mode}
+				component.PodTemplate.Spec.Containers[0].Env = append(component.PodTemplate.Spec.Containers[0].Env,
+					corev1.EnvVar{Name: "ENGINE_ID", Value: "authored"}, corev1.EnvVar{Name: "FAILOVER_LOCK_PATH", Value: "authored"},
+					corev1.EnvVar{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "authored"}, corev1.EnvVar{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "true"},
+					corev1.EnvVar{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)-$(GMS_SOCKET_DIR)"})
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
 				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
@@ -207,39 +224,32 @@ func TestEnvironmentLateGMSBindings(t *testing.T) {
 			env := pod.Containers[0].Env
 			require.Len(t, envVarsToMap(env), len(env), "cross-layer overrides must not create duplicate names")
 			require.Equal(t, "custom", envVarsToMap(env)["NATS_SERVER"])
+			require.Equal(t, findEnvVar(component.PodTemplate.Spec.Containers[0].Env, "UNOWNED"), findEnvVar(env, "UNOWNED"))
 			require.Less(t, envIndex(t, env, gms.EnvSocketDir), envIndex(t, env, "WEIGHTS"))
 			if mode == v1beta1.GMSModeInterPod {
 				require.Equal(t, "true", envVarsToMap(env)["DYN_VLLM_GMS_SHADOW_MODE"])
-			}
-		})
-	}
-}
-
-func TestEnvironmentGraphDeploymentConfigReaders(t *testing.T) {
-	for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeWorker, v1beta1.ComponentTypeFrontend} {
-		t.Run(string(componentType), func(t *testing.T) {
-			t.Log("Keep graph-scoped deployment configuration visible without flattening env")
-			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: string(componentType), ComponentType: componentType,
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "engine:1.7.0"}}}},
-			}
-			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
-					Env: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"worker":{"ServiceArgs":{"workers":3,"resources":{"cpu":"2"}}},"frontend":{"port":1234}}`}},
-				},
-			}
-			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
-			require.NoError(t, err)
-			child := children[string(componentType)]
-			if componentType == v1beta1.ComponentTypeWorker {
-				require.EqualValues(t, 3, *child.Spec.Replicas)
-				require.Equal(t, "2", child.Spec.PodTemplate.Spec.Containers[0].Resources.Requests.Cpu().String())
+				require.Equal(t, "/run/gms/shared", envVarsToMap(env)[gms.EnvSocketDir])
+				require.Equal(t, "/run/gms/shared/failover.lock", envVarsToMap(env)["FAILOVER_LOCK_PATH"])
+				require.Equal(t, "notready", envVarsToMap(env)["DYN_SYSTEM_STARTING_HEALTH_STATUS"])
+				require.NotContains(t, envVarsToMap(env), "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
+				require.NotEqual(t, "authored", envVarsToMap(env)["ENGINE_ID"])
+				require.Less(t, envIndex(t, env, "ENGINE_ID"), envIndex(t, env, "USER_REFERENCE"))
+				require.Less(t, envIndex(t, env, gms.EnvSocketDir), envIndex(t, env, "USER_REFERENCE"))
 			} else {
-				config := findEnvVar(slices.Concat(child.Spec.Env, child.Spec.PodTemplate.Spec.Containers[0].Env), commonconsts.DynamoDeploymentConfigEnvVar)
-				require.NotNil(t, config)
-				var parsed map[string]map[string]any
-				require.NoError(t, json.Unmarshal([]byte(config.Value), &parsed))
-				require.EqualValues(t, commonconsts.DynamoServicePort, parsed["frontend"]["port"])
+				require.Equal(t, "/gms-intrapod-control", envVarsToMap(env)[gms.EnvSocketDir])
+				if test.cold {
+					require.Len(t, pod.Containers, 2)
+					for i, engine := range pod.Containers {
+						values := envVarsToMap(engine.Env)
+						require.Equal(t, "/gms-intrapod-control", values[gms.EnvSocketDir])
+						require.Equal(t, "true", values["DYN_VLLM_GMS_SHADOW_MODE"])
+						require.Equal(t, fmt.Sprint(i), values["ENGINE_ID"])
+						require.Equal(t, fmt.Sprint(5600+i), values["VLLM_NIXL_SIDE_CHANNEL_PORT"])
+						require.Equal(t, fmt.Sprint(20080+i), values["DYN_VLLM_KV_EVENT_PORT"])
+					}
+				} else {
+					require.Equal(t, "false", envVarsToMap(env)["DYN_VLLM_GMS_SHADOW_MODE"])
+				}
 			}
 		})
 	}
@@ -277,107 +287,34 @@ func TestEnvironmentDeploymentConfigDuplicateDefinitions(t *testing.T) {
 	}
 }
 
-func TestFrontendDeploymentConfigKeepsGeneralSource(t *testing.T) {
-	for _, chained := range []bool{false, true} {
-		t.Run(fmt.Sprintf("chained=%t", chained), func(t *testing.T) {
-			t.Log("An authored frontend value depends on graph-sourced deployment configuration")
-			general := []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234}}`}}
-			authored := []corev1.EnvVar{{Name: "CFG", Value: "$(DYN_DEPLOYMENT_CONFIG)"}}
-			want := []string{commonconsts.DynamoDeploymentConfigEnvVar, "CFG"}
-			if chained {
-				general = append(general, corev1.EnvVar{Name: "DERIVED", Value: "$(DYN_DEPLOYMENT_CONFIG)"})
-				authored = []corev1.EnvVar{{Name: "FRONTEND_VAR", Value: "$(DERIVED)"}}
-				want = []string{commonconsts.DynamoDeploymentConfigEnvVar, "DERIVED", "FRONTEND_VAR"}
-			}
-			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: authored}}}},
-			}
-			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-				Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: general, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
-			}
-			original := dgd.DeepCopy()
-
-			t.Log("Normalize without promoting the rewritten general binding into the authored list")
-			normalized, err := NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, RollingUpdateContext{})
-			require.NoError(t, err)
-			require.Equal(t, authored, normalized["frontend"].PodTemplate.Spec.Containers[0].Env)
-			children, err := GenerateDynamoComponentsDeploymentsFromNormalized(dgd, normalized, RollingUpdateContext{})
-			require.NoError(t, err)
-			child := children["frontend"]
-			child.OwnerReferences = []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: dgd.Name, Controller: new(true)}}
-			require.Equal(t, authored, child.Spec.PodTemplate.Spec.Containers[0].Env)
-			require.Len(t, child.Spec.Env, len(general))
-			require.JSONEq(t, `{"frontend":{"port":8000}}`, child.Spec.Env[0].Value)
-			require.Equal(t, general[1:], child.Spec.Env[1:])
-
-			t.Log("Direct Grove, normalized DS and stored DCD rendering keep the same valid dependency order")
-			config := &configv1alpha1.OperatorConfiguration{}
-			grove, err := GeneratePodSpecForComponent(&component, BackendFrameworkNoop, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, staticContainerGPUCount(0))
-			require.NoError(t, err)
-			ds, err := GenerateBasePodSpec(normalized["frontend"], BackendFrameworkNoop, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeLWS, "frontend", nil, staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env})
-			require.NoError(t, err)
-			stored, err := renderStoredEnvironment(child, config, RoleMain)
-			require.NoError(t, err)
-			for _, pod := range []*corev1.PodSpec{grove, ds, stored} {
-				var names []string
-				for _, binding := range pod.Containers[0].Env {
-					if slices.Contains(want, binding.Name) {
-						names = append(names, binding.Name)
-					}
-				}
-				require.Equal(t, want, names)
-				require.JSONEq(t, `{"frontend":{"port":8000}}`, findEnvVar(pod.Containers[0].Env, commonconsts.DynamoDeploymentConfigEnvVar).Value)
-			}
-			require.Equal(t, original, dgd)
-		})
-	}
-}
-
-func TestFrontendDeploymentConfigIgnoresShadowedGeneralSource(t *testing.T) {
-	t.Log("A valid authored config shadows an unreadable graph-level binding")
-	authored := []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234}}`}}
-	component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
-		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: authored}}}},
-	}
-	general := []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "config", Key: "value"}}}}
-	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-		Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: general, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
-	}
-	original := dgd.DeepCopy()
-
-	t.Log("Do not parse or rewrite the shadowed source when snapshotting a child")
-	children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
-	require.NoError(t, err)
-	child := children["frontend"]
-	require.Equal(t, general, child.Spec.Env)
-	require.JSONEq(t, `{"frontend":{"port":8000}}`, child.Spec.PodTemplate.Spec.Containers[0].Env[0].Value)
-	require.Equal(t, original, dgd)
-}
-
 func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		general   []corev1.EnvVar
-		authored  []corev1.EnvVar
-		wantValue string
-		wantError string
+		name                 string
+		general, authored    []corev1.EnvVar
+		wantValue, wantError string
+		generalRewritten     bool
+		wantOrder            []string
 	}{
-		{name: "container overrides general", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":4321}}`}},
-			authored: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234}}`}}, wantValue: `{"frontend":{"port":8000}}`},
+		{name: "general config retains its source", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"frontend\":{\"port\":1234}}"}},
+			authored: []corev1.EnvVar{{Name: "CFG", Value: "$(DYN_DEPLOYMENT_CONFIG)"}}, wantValue: "{\"frontend\":{\"port\":8000}}", generalRewritten: true, wantOrder: []string{commonconsts.DynamoDeploymentConfigEnvVar, "CFG"}},
+		{name: "chained general config retains its source", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"frontend\":{\"port\":1234}}"}, {Name: "DERIVED", Value: "$(DYN_DEPLOYMENT_CONFIG)"}},
+			authored: []corev1.EnvVar{{Name: "FRONTEND_VAR", Value: "$(DERIVED)"}}, wantValue: "{\"frontend\":{\"port\":8000}}", generalRewritten: true, wantOrder: []string{commonconsts.DynamoDeploymentConfigEnvVar, "DERIVED", "FRONTEND_VAR"}},
+		{name: "container overrides general", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"frontend\":{\"port\":4321}}"}},
+			authored: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"frontend\":{\"port\":1234}}"}}, wantValue: "{\"frontend\":{\"port\":8000}}"},
+		{name: "container shadows opaque general", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "config", Key: "value"}}}},
+			authored: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"frontend\":{\"port\":1234}}"}}, wantValue: "{\"frontend\":{\"port\":8000}}"},
 		{name: "general alias to container", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "$(Z_CONFIG)"}},
-			authored: []corev1.EnvVar{{Name: "Z_CONFIG", Value: `{"frontend":{"port":1234}}`}}, wantValue: `{"frontend":{"port":8000}}`},
-		{name: "container alias to general", general: []corev1.EnvVar{{Name: "Z_CONFIG", Value: `{"frontend":{"port":1234}}`}},
-			authored: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "$(Z_CONFIG)"}}, wantValue: `{"frontend":{"port":8000}}`},
-		{name: "escaped JSON is not expanded twice", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234,"description":"$$(ALIAS)"}}`}},
-			authored: []corev1.EnvVar{{Name: "ALIAS", Value: "must-not-be-used"}}, wantValue: `{"frontend":{"port":8000,"description":"$$(ALIAS)"}}`},
+			authored: []corev1.EnvVar{{Name: "Z_CONFIG", Value: "{\"frontend\":{\"port\":1234}}"}}, wantValue: "{\"frontend\":{\"port\":8000}}", generalRewritten: true},
+		{name: "container alias to general", general: []corev1.EnvVar{{Name: "Z_CONFIG", Value: "{\"frontend\":{\"port\":1234}}"}},
+			authored: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "$(Z_CONFIG)"}}, wantValue: "{\"frontend\":{\"port\":8000}}"},
+		{name: "escaped JSON is not expanded twice", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"frontend\":{\"port\":1234,\"description\":\"$$(ALIAS)\"}}"}},
+			authored: []corev1.EnvVar{{Name: "ALIAS", Value: "must-not-be-used"}}, wantValue: "{\"frontend\":{\"port\":8000,\"description\":\"$$(ALIAS)\"}}", generalRewritten: true},
 		{name: "opaque general", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "config", Key: "json"}}}}},
 		{name: "opaque container", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "invalid shadowed JSON"}},
 			authored: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "config", Key: "json"}}}}},
 		{name: "unknown alias", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "$(PROVIDER_CONFIG)"}}},
-		{name: "null selected service", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"gateway":null}`}}, wantError: `service "gateway" must be an object`},
-		{name: "null frontend fallback", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"Frontend":null}`}}, wantError: `service "Frontend" must be an object`},
+		{name: "null selected service", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"gateway\":null}"}}, wantError: "service \"gateway\" must be an object"},
+		{name: "null frontend fallback", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"Frontend\":null}"}}, wantError: "service \"Frontend\" must be an object"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Prepare the same frontend input for graph and standalone lowering")
@@ -395,21 +332,38 @@ func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
 				DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), Env: tc.general,
 			}}
 
-			t.Log("Unknown bindings stay intact; every known winning frontend config gets the shared port")
+			t.Log("Unknown bindings stay intact; known winning frontend configs get the shared port")
 			grove, groveErr := GeneratePodSpecForComponent(&component, BackendFrameworkNoop, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "gateway", nil, staticContainerGPUCount(0))
 			stored, storedErr := renderStoredEnvironment(standalone, config, RoleMain)
-			children, childErr := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			normalized, normalizeErr := NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, RollingUpdateContext{})
 			if tc.wantError != "" {
-				for _, err := range []error{groveErr, storedErr, childErr} {
+				for _, err := range []error{groveErr, storedErr, normalizeErr} {
 					require.ErrorContains(t, err, tc.wantError)
 				}
 			} else {
 				require.NoError(t, groveErr)
 				require.NoError(t, storedErr)
-				require.NoError(t, childErr)
-				childPod, err := renderStoredEnvironment(children["gateway"], config, RoleMain)
+				require.NoError(t, normalizeErr)
+				children, err := GenerateDynamoComponentsDeploymentsFromNormalized(dgd, normalized, RollingUpdateContext{})
 				require.NoError(t, err)
-				for _, pod := range []*corev1.PodSpec{grove, stored, childPod} {
+				child := children["gateway"]
+				child.OwnerReferences = []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: dgd.Name, Controller: new(true)}}
+				childPod, err := renderStoredEnvironment(child, config, RoleMain)
+				require.NoError(t, err)
+				ds, err := GenerateBasePodSpec(normalized["gateway"], BackendFrameworkNoop, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeLWS, "gateway", nil, staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env})
+				require.NoError(t, err)
+
+				t.Log("Rewriting a general winner never promotes it into the authored source")
+				if tc.generalRewritten {
+					require.Equal(t, tc.authored, normalized["gateway"].PodTemplate.Spec.Containers[0].Env)
+					require.Equal(t, tc.authored, child.Spec.PodTemplate.Spec.Containers[0].Env)
+					require.Len(t, child.Spec.Env, len(tc.general))
+					require.JSONEq(t, tc.wantValue, child.Spec.Env[0].Value)
+					require.Equal(t, tc.general[1:], child.Spec.Env[1:])
+				} else {
+					require.Equal(t, tc.general, child.Spec.Env)
+				}
+				for _, pod := range []*corev1.PodSpec{grove, stored, childPod, ds} {
 					binding := findEnvVar(pod.Containers[0].Env, commonconsts.DynamoDeploymentConfigEnvVar)
 					require.NotNil(t, binding)
 					if tc.wantValue != "" {
@@ -421,6 +375,9 @@ func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
 						}
 						require.Equal(t, want, binding)
 					}
+					for i := 1; i < len(tc.wantOrder); i++ {
+						require.Less(t, envIndex(t, pod.Containers[0].Env, tc.wantOrder[i-1]), envIndex(t, pod.Containers[0].Env, tc.wantOrder[i]))
+					}
 				}
 			}
 			require.Equal(t, original, dgd)
@@ -430,12 +387,14 @@ func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
 
 func TestGraphDeploymentConfigWithoutAuthoredMain(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		general   []corev1.EnvVar
-		wantError bool
-		wantApply bool
+		name         string
+		general      []corev1.EnvVar
+		wantError    bool
+		wantApply    bool
+		authoredMain bool
 	}{
 		{name: "literal", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"worker":{"ServiceArgs":{"workers":4,"resources":{"cpu":"2"}}}}`}}, wantApply: true},
+		{name: "literal with authored main", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"worker":{"ServiceArgs":{"workers":4,"resources":{"cpu":"2"}}}}`}}, wantApply: true, authoredMain: true},
 		{name: "known alias", general: []corev1.EnvVar{{Name: "Z_CONFIG", Value: `{"worker":{"ServiceArgs":{"workers":4,"resources":{"cpu":"2"}}}}`}, {Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "$(Z_CONFIG)"}}, wantApply: true},
 		{name: "unknown alias", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "$(PROVIDER_CONFIG)"}}},
 		{name: "malformed JSON", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "not JSON"}}, wantError: true},
@@ -445,6 +404,9 @@ func TestGraphDeploymentConfigWithoutAuthoredMain(t *testing.T) {
 			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
 				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
 				Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: tc.general, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker}}},
+			}
+			if tc.authoredMain {
+				dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "engine:1.7.0"}}}}
 			}
 			original := dgd.DeepCopy()
 			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
@@ -597,24 +559,50 @@ func TestSemanticTopologyBindingsAndMPIExports(t *testing.T) {
 	}
 }
 
-func TestEffectiveEnvironmentDoesNotValidateBeforeOwnedBindings(t *testing.T) {
-	t.Log("An apparent graph/container cycle disappears when the operator binds rank")
-	component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
-		Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-			Name: "main", Image: "engine:1.7.0", Env: []corev1.EnvVar{{Name: "USER", Value: "$(DYNAMO_RANK)"}},
-		}}}},
+func TestDeploymentConfigAliasSurvivesUnrelatedPendingBindings(t *testing.T) {
+	for _, rankInGeneral := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rank-general=%t", rankInGeneral), func(t *testing.T) {
+			t.Log("Known deployment config must survive an unrelated cycle removed by topology binding")
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: "main", Image: "engine:1.8.0", Command: []string{"python3", "-m", "dynamo.vllm"},
+					Env: []corev1.EnvVar{{Name: "Z_CONFIG", Value: `{"worker":{"ServiceArgs":{"workers":4,"resources":{"cpu":"2"}}}}`},
+						{Name: commonconsts.DynamoRankEnvVar, Value: "$(PENDING)"}},
+				}}}},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+					Env: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "$(Z_CONFIG)"}, {Name: "PENDING", Value: "$(DYNAMO_RANK)"}},
+				},
+			}
+			if rankInGeneral {
+				dgd.Spec.Env[1], component.PodTemplate.Spec.Containers[0].Env[1] =
+					component.PodTemplate.Spec.Containers[0].Env[1], dgd.Spec.Env[1]
+			}
+			original := dgd.DeepCopy()
+			t.Log("Input consumers cannot validate the partial environment before owned bindings")
+			_, err := EffectiveDGDComponentTemplates(dgd, &component)
+			require.NoError(t, err)
+			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			require.EqualValues(t, 4, *children["worker"].Spec.Replicas)
+			main := GetMainContainer(&children["worker"].Spec.DynamoComponentDeploymentSharedSpec)
+			require.Equal(t, resource.MustParse("2"), main.Resources.Requests[corev1.ResourceCPU])
+
+			t.Log("Final rendering applies owned topology bindings before validating the complete graph")
+			pod, err := GeneratePodSpecForComponent(&component, BackendFrameworkVLLM, nil, dgd, RoleLeader, 2,
+				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			resolved := semanticenv.Replay(pod.Containers[0].Env)
+			require.True(t, resolved[commonconsts.DynamoDeploymentConfigEnvVar].Known)
+			require.Equal(t, "$(GROVE_PCSG_POD_INDEX)", envVarsToMap(pod.Containers[0].Env)[commonconsts.DynamoRankEnvVar])
+			require.Less(t, envIndex(t, pod.Containers[0].Env, commonconsts.DynamoRankEnvVar), envIndex(t, pod.Containers[0].Env, "PENDING"))
+			require.JSONEq(t, component.PodTemplate.Spec.Containers[0].Env[0].Value, resolved[commonconsts.DynamoDeploymentConfigEnvVar].Value)
+			require.Equal(t, original, dgd)
+		})
 	}
-	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-		Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: []corev1.EnvVar{{Name: commonconsts.DynamoRankEnvVar, Value: "$(USER)"}}, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
-	}
-	_, err := EffectiveDGDComponentTemplates(dgd, &component)
-	require.NoError(t, err, "input consumers cannot validate a partial environment")
-	pod, err := GeneratePodSpecForComponent(&component, BackendFrameworkNoop, nil, dgd, RoleLeader, 2, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
-	require.NoError(t, err)
-	require.Equal(t, "$(GROVE_PCSG_POD_INDEX)", envVarsToMap(pod.Containers[0].Env)[commonconsts.DynamoRankEnvVar])
-	require.Less(t, envIndex(t, pod.Containers[0].Env, commonconsts.DynamoRankEnvVar), envIndex(t, pod.Containers[0].Env, "USER"))
 }
 
 func TestEnvironmentKVPolicyOwnsAbsentGraphSettings(t *testing.T) {
@@ -632,6 +620,14 @@ func TestEnvironmentKVPolicyOwnsAbsentGraphSettings(t *testing.T) {
 					component.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "runtime", Image: "runtime:1.7.0", RestartPolicy: &policy}}
 					component.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(DYN_TOPOLOGY_MOUNT_PATH)/model"}}
 				}
+				runtime := &component.PodTemplate.Spec.Containers[0]
+				if runtimeSidecar {
+					runtime = &component.PodTemplate.Spec.InitContainers[0]
+				}
+				runtime.Env = []corev1.EnvVar{{Name: commonconsts.EnvKvTransferPreferredWeight, Value: "authored"},
+					{Name: commonconsts.EnvKvTransferDomain, Value: "authored"}, {Name: commonconsts.EnvKvTransferEnforcement, Value: "authored"},
+					{Name: commonconsts.EnvTopologyEnabled, Value: "false"}, {Name: commonconsts.EnvTopologyMountPath, Value: "/authored"},
+					{Name: "UNOWNED", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "settings", Key: "value"}}}}
 				dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
 					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
 					Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
@@ -682,8 +678,12 @@ func TestEnvironmentKVPolicyOwnsAbsentGraphSettings(t *testing.T) {
 					}
 					env := envVarsToMap(runtime.Env)
 					require.NotContains(t, env, commonconsts.EnvKvTransferPreferredWeight)
+					require.Equal(t, "zone", env[commonconsts.EnvKvTransferDomain])
 					require.Equal(t, "required", env[commonconsts.EnvKvTransferEnforcement])
+					require.Equal(t, "true", env[commonconsts.EnvTopologyEnabled])
+					require.Equal(t, "/etc/dynamo/topology", env[commonconsts.EnvTopologyMountPath])
 					require.Equal(t, "retained", env["GLOBAL"])
+					require.NotNil(t, findEnvVar(runtime.Env, "UNOWNED").ValueFrom.SecretKeyRef)
 				}
 				require.Equal(t, original, dgd)
 

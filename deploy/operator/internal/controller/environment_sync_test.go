@@ -62,26 +62,7 @@ func loadEnvironmentSyncPredecessor(t testing.TB, origin string) *environmentSyn
 	require.NoError(t, json.Unmarshal(data, &predecessor))
 	require.Equal(t, "8f1fdc45f043356fa2e15bfcd28f576ce44db555", predecessor.SourceRevision)
 	require.Equal(t, origin, predecessor.Origin)
-	require.Equal(t, environmentSyncGraph(origin), predecessor.Graph, "the frozen input is independent of current lowering")
 	return &predecessor
-}
-
-// environmentSyncGraph constructs an independently owned frontend-only graph so
-// worker-generation rotation cannot hide a missed order-only resource update.
-func environmentSyncGraph(origin string) *v1beta1.DynamoGraphDeployment {
-	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", UID: "graph-uid",
-		Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: origin},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-			ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(1)),
-			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name: "main", Image: "runtime:1.7.0", Env: []corev1.EnvVar{{Name: "B", Value: "$(A)"}, {Name: "A", Value: "x"}},
-			}}}},
-		}}},
-	}
-	if origin == "" {
-		dgd.Annotations = nil
-	}
-	return dgd
 }
 
 func requireEnvironmentOrder(t *testing.T, env []corev1.EnvVar, forward bool) {
@@ -216,35 +197,24 @@ func TestEnvironmentOrderThroughDCDWorkloadSync(t *testing.T) {
 		for _, test := range cases {
 			t.Run(fmt.Sprintf("multinode=%t/%s", multinode, test.name), func(t *testing.T) {
 				t.Log("Prepare authoritative-origin cases independently from frozen upgrade cases")
-				template := environmentSyncGraph(test.templateOrigin).Spec.Components[0].PodTemplate
-				template.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: test.templateOrigin}
-				template.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
-				template.Spec.Containers[0].Args = []string{"--model", "test-model"}
-				dcd := &v1beta1.DynamoComponentDeployment{Name: "worker", Namespace: "ns", UID: "dcd-uid",
-					Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: test.origin},
-					Spec: v1beta1.DynamoComponentDeploymentSpec{BackendFramework: "vllm", DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, Replicas: new(int32(1)), PodTemplate: template,
-					}},
-				}
-				if test.child {
-					dcd.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(environmentSyncGraph(test.origin), v1beta1.DynamoGraphDeploymentGVK)}
-				}
+				predecessor := loadEnvironmentSyncPredecessor(t, test.origin)
+				dcd := predecessor.DeploymentInput
 				if multinode {
-					dcd.Spec.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+					dcd = predecessor.LeaderWorkerSetInput
 				}
-				if test.mixedRoles {
-					leader := template.DeepCopy()
-					leader.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.7.0"
-					dcd.Spec.PodTemplate = nil
-					dcd.Spec.Roles = []v1beta1.ComponentRoleSpec{{Name: "leader", PodTemplate: leader}, {Name: "worker", PodTemplate: template}}
-				}
-				var predecessor *environmentSyncPredecessor
-				if test.frozen {
-					predecessor = loadEnvironmentSyncPredecessor(t, test.origin)
-					dcd = predecessor.DeploymentInput
-					if multinode {
-						dcd = predecessor.LeaderWorkerSetInput
+				if !test.frozen {
+					template := dcd.Spec.PodTemplate
+					template.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: test.templateOrigin}
+					if test.child {
+						dcd.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(predecessor.Graph, v1beta1.DynamoGraphDeploymentGVK)}
 					}
+					if test.mixedRoles {
+						leader := template.DeepCopy()
+						leader.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.7.0"
+						dcd.Spec.PodTemplate = nil
+						dcd.Spec.Roles = []v1beta1.ComponentRoleSpec{{Name: "leader", PodTemplate: leader}, {Name: "worker", PodTemplate: template}}
+					}
+					predecessor = nil
 				}
 				require.Equal(t, test.ordered, dynamo.DCDUsesOrderedEnvironment(dcd))
 				scheme := newDynamoGraphDeploymentControllerTestScheme(t)

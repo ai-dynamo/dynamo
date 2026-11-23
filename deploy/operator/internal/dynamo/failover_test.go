@@ -848,6 +848,12 @@ func TestBuildFailoverPod_SemanticEnvironment(t *testing.T) {
 			user := []corev1.EnvVar{
 				{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: "9999"},
 				{Name: "DYN_VLLM_KV_EVENT_PORT", Value: "9998"},
+				{Name: "ENGINE_ID", Value: "authored"}, {Name: "CONTAINER_NAME", Value: "authored"},
+				{Name: "FAILOVER_LOCK_PATH", Value: "authored"}, {Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "authored"},
+				{Name: "DYN_SYSTEM_PORT", Value: "authored"}, {Name: "DYN_SYSTEM_ENABLED", Value: "authored"},
+				{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "authored"}, {Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "authored"},
+				{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "authored"}, {Name: "DYN_HEALTH_CHECK_ENABLED", Value: "authored"},
+				{Name: "UNOWNED", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "settings", Key: "value"}}},
 				{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)-$(NNODES)"},
 				{Name: "USER_OVERRIDE", Value: "value"},
 			}
@@ -866,6 +872,18 @@ func TestBuildFailoverPod_SemanticEnvironment(t *testing.T) {
 				require.Equal(t, tt.wantLast, environment[len(environment)-1].Name)
 				if tt.ordered {
 					require.Len(t, envVarsToMap(environment), len(environment))
+					values := envVarsToMap(environment)
+					require.Equal(t, strconv.Itoa(i), values["ENGINE_ID"])
+					require.Equal(t, fmt.Sprintf("engine-%d", i), values["CONTAINER_NAME"])
+					require.Equal(t, "/gms-intrapod-control/failover.lock", values["FAILOVER_LOCK_PATH"])
+					require.Equal(t, "notready", values["DYN_SYSTEM_STARTING_HEALTH_STATUS"])
+					require.Equal(t, "true", values["DYN_SYSTEM_ENABLED"])
+					require.Equal(t, "true", values["DYN_VLLM_GMS_SHADOW_MODE"])
+					require.Equal(t, strconv.Itoa(commonconsts.DynamoSystemPort+i), values["DYN_SYSTEM_PORT"])
+					require.Equal(t, strconv.Itoa(commonconsts.DynamoFPMBasePort+i), values["DYN_FORWARDPASS_METRIC_PORT"])
+					require.NotContains(t, values, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
+					require.NotContains(t, values, "DYN_HEALTH_CHECK_ENABLED")
+					require.Equal(t, findEnvVar(user, "UNOWNED"), findEnvVar(environment, "UNOWNED"))
 					require.Equal(t, strconv.Itoa(5600+i), envVarsToMap(environment)["VLLM_NIXL_SIDE_CHANNEL_PORT"])
 					require.Equal(t, strconv.Itoa(20080+i), envVarsToMap(environment)["DYN_VLLM_KV_EVENT_PORT"])
 					assert.Less(t, envIndex(t, environment, "ENGINE_ID"), envIndex(t, environment, "USER_REFERENCE"))
@@ -874,26 +892,6 @@ func TestBuildFailoverPod_SemanticEnvironment(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestAugmentEngineForGMS_SemanticEnvironment(t *testing.T) {
-	t.Log("Add inter-pod GMS variables before an existing user reference")
-	podSpec := &corev1.PodSpec{Containers: []corev1.Container{{
-		Name: "engine",
-		Env: []corev1.EnvVar{
-			{Name: "SYSTEM", Value: "value"},
-			{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)-$(GMS_SOCKET_DIR)"},
-		},
-	}}}
-	collector := newPodEnvironment(map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}, nil)
-	collector.register("engine", "container.env", podSpec.Containers[0].Env[:1], nil, podSpec.Containers[0].Env[1:])
-	augmentEngineForGMS(podSpec, 0, false, collector)
-	require.NoError(t, FinalizePodSpec(podSpec, collector.capture(podSpec), BackendFrameworkVLLM, []string{"engine"}, staticContainerGPUCount(1)))
-
-	t.Log("Verify the user reference follows the generated rank and socket variables")
-	environment := podSpec.Containers[0].Env
-	assert.Less(t, envIndex(t, environment, "ENGINE_ID"), envIndex(t, environment, "USER_REFERENCE"))
-	assert.Less(t, envIndex(t, environment, gms.EnvSocketDir), envIndex(t, environment, "USER_REFERENCE"))
 }
 
 func envIndex(t *testing.T, environment []corev1.EnvVar, name string) int {

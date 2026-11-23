@@ -19,23 +19,28 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func TestSnapshotEnvironmentRetainsFourSourceLayers(t *testing.T) {
-	t.Log("A job-specific override references the component while a graph value references the override")
+// snapshotEnvironmentFixture gives each test its own graph and checkpoint worker.
+func snapshotEnvironmentFixture() (*v1beta1.DynamoComponentDeploymentSharedSpec, *v1beta1.DynamoGraphDeployment) {
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 			Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"},
-			Env: []corev1.EnvVar{{Name: "STORAGE", Value: "nats://custom:4222"}},
 		}}}},
-		Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true,
-			Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name: "main", Env: []corev1.EnvVar{{Name: "NATS_SERVER", Value: "$(STORAGE)"}},
-			}}}}},
-		}},
+		Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
 		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-		Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: []corev1.EnvVar{{Name: "MODEL", Value: "$(NATS_SERVER)/model"}}},
 	}
+	return component, dgd
+}
+
+func TestSnapshotEnvironmentRetainsFourSourceLayers(t *testing.T) {
+	t.Log("A job-specific override references the component while a graph value references the override")
+	component, dgd := snapshotEnvironmentFixture()
+	component.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "STORAGE", Value: "nats://custom:4222"}}
+	component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "main", Env: []corev1.EnvVar{{Name: "NATS_SERVER", Value: "$(STORAGE)"}},
+	}}}}}
+	dgd.Spec.Env = []corev1.EnvVar{{Name: "MODEL", Value: "$(NATS_SERVER)/model"}}
 	reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{NATSAddress: "default"}}}
 	pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkVLLM)
 	require.NoError(t, err)
@@ -66,23 +71,18 @@ func TestSnapshotSGLangLookupUsesFinalJobEnvironment(t *testing.T) {
 					Env:   []corev1.EnvVar{{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"}, {Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"}, {Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"}},
 					Ports: []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: 19090}},
 				}
-				component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
-					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{main}}},
-					Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true, TargetContainerName: targetName,
-						Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-							Name: targetName, Env: []corev1.EnvVar{test.base},
-						}}}}},
-					}},
-				}
+				component, dgd := snapshotEnvironmentFixture()
+				component.PodTemplate.Spec.Containers[0] = main
+				component.Experimental.Checkpoint.TargetContainerName = targetName
+				component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: targetName, Env: []corev1.EnvVar{test.base},
+				}}}}}
 				if targetName != "main" {
 					writer := *main.DeepCopy()
 					writer.Name = targetName
 					component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, writer)
 				}
-				dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-					Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: []corev1.EnvVar{{Name: "BASE", Value: "30000"}}},
-				}
+				dgd.Spec.Env = []corev1.EnvVar{{Name: "BASE", Value: "30000"}}
 				original := component.DeepCopy()
 				reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
 				pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkSGLang)
@@ -110,21 +110,15 @@ func TestSnapshotCompatibilityEnvironmentUsesAuthoritativeOrigin(t *testing.T) {
 	for _, origin := range []string{"", "1.7.0", "1.8.0"} {
 		t.Run(origin, func(t *testing.T) {
 			t.Log("An alias around a restore-time binding is part of new-origin process identity")
-			component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
-				PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{
-						Name: "main", Image: "engine:1.8.0", Command: []string{"python3", "-m", "dynamo.vllm"},
-						Env: []corev1.EnvVar{{Name: "DYN_SERVED_MODEL_NAME", Value: "model-a"}, {Name: "MODEL_ID", Value: "$(DYN_SERVED_MODEL_NAME)"}},
-					}}}},
-				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}},
-			}
+			component, dgd := snapshotEnvironmentFixture()
+			component.PodTemplate.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}
+			component.PodTemplate.Spec.Containers[0].Image = "engine:1.8.0"
+			component.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_SERVED_MODEL_NAME", Value: "model-a"}, {Name: "MODEL_ID", Value: "$(DYN_SERVED_MODEL_NAME)"}}
 			if origin == "1.8.0" {
 				component.PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = "1.7.0"
 			}
-			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
-				Spec:        v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm"},
-			}
+			dgd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+			dgd.Spec.BackendFramework = "vllm"
 			reordered := component.DeepCopy()
 			reordered.PodTemplate.Spec.Containers[0].Env[0], reordered.PodTemplate.Spec.Containers[0].Env[1] =
 				reordered.PodTemplate.Spec.Containers[0].Env[1], reordered.PodTemplate.Spec.Containers[0].Env[0]
@@ -160,17 +154,11 @@ func TestSnapshotGMSBindingsAvailableDuringRendering(t *testing.T) {
 	for _, targetName := range []string{"main", "writer"} {
 		t.Run(targetName, func(t *testing.T) {
 			t.Log("A GMS-owned binding replaces a cyclic authored definition before capture rendering")
-			component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-					Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"},
-					Env:       []corev1.EnvVar{{Name: gms.EnvSocketDir, Value: "$(WEIGHTS)"}},
-					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
-				}}}},
-				Experimental: &v1beta1.ExperimentalSpec{
-					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
-					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true, TargetContainerName: targetName},
-				},
-			}
+			component, dgd := snapshotEnvironmentFixture()
+			component.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: gms.EnvSocketDir, Value: "$(WEIGHTS)"}}
+			component.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+			component.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod}
+			component.Experimental.Checkpoint.TargetContainerName = targetName
 			if targetName != "main" {
 				component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, corev1.Container{
 					Name: targetName, Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"},
@@ -178,10 +166,7 @@ func TestSnapshotGMSBindingsAvailableDuringRendering(t *testing.T) {
 					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
 				})
 			}
-			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-				Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: []corev1.EnvVar{{Name: "WEIGHTS", Value: "$(GMS_SOCKET_DIR)/weights"}}},
-			}
+			dgd.Spec.Env = []corev1.EnvVar{{Name: "WEIGHTS", Value: "$(GMS_SOCKET_DIR)/weights"}}
 			original := component.DeepCopy()
 			reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
 			pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkVLLM)
@@ -210,17 +195,12 @@ func TestSnapshotFailoverOmissionPrecedesEnvironmentComposition(t *testing.T) {
 	for _, targetName := range []string{"main", "writer"} {
 		t.Run(targetName, func(t *testing.T) {
 			t.Log("Capture omits the serving-only metric port before validating dependencies")
-			component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-					Name: "main", Image: "engine:test", Command: []string{"python3", "-m", "dynamo.vllm"},
-					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
-				}}}},
-				Experimental: &v1beta1.ExperimentalSpec{
-					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
-					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
-					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true, TargetContainerName: targetName},
-				},
-			}
+			component, dgd := snapshotEnvironmentFixture()
+			component.PodTemplate.Spec.Containers[0].Image = "engine:test"
+			component.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+			component.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod}
+			component.Experimental.Failover = &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod}
+			component.Experimental.Checkpoint.TargetContainerName = targetName
 			target := component.PodTemplate.Spec.Containers[0].DeepCopy()
 			target.Name = targetName
 			target.Env = []corev1.EnvVar{{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "$(LABEL_PORT)"}, {Name: "AFTER", Value: "retained"}}
@@ -229,10 +209,7 @@ func TestSnapshotFailoverOmissionPrecedesEnvironmentComposition(t *testing.T) {
 			} else {
 				component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, *target)
 			}
-			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-				Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: []corev1.EnvVar{{Name: "LABEL_PORT", Value: "$(DYN_FORWARDPASS_METRIC_PORT)"}}},
-			}
+			dgd.Spec.Env = []corev1.EnvVar{{Name: "LABEL_PORT", Value: "$(DYN_FORWARDPASS_METRIC_PORT)"}}
 			reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
 			pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkVLLM)
 			require.NoError(t, err)
@@ -247,22 +224,15 @@ func TestSnapshotFailoverOmissionPrecedesEnvironmentComposition(t *testing.T) {
 
 func TestSnapshotJobSidecarDoesNotInheritDiscardedComponentEnvironment(t *testing.T) {
 	t.Log("A job-only metrics sidecar replaces rather than inherits the discarded component sidecar")
-	component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
-		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
-			{Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"}},
-			{Name: "metrics", Image: "metrics:component", Env: []corev1.EnvVar{{Name: "X", Value: "$(Y)"}},
-				EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "component-metrics"}}}},
-		}}},
-		Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true,
-			Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name: "metrics", Image: "metrics:job", Env: []corev1.EnvVar{{Name: "Y", Value: "$(X)"}},
-				EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "job-metrics"}}},
-			}}}}},
-		}},
-	}
-	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
-		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-	}
+	component, dgd := snapshotEnvironmentFixture()
+	component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, corev1.Container{
+		Name: "metrics", Image: "metrics:component", Env: []corev1.EnvVar{{Name: "X", Value: "$(Y)"}},
+		EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "component-metrics"}}},
+	})
+	component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "metrics", Image: "metrics:job", Env: []corev1.EnvVar{{Name: "Y", Value: "$(X)"}},
+		EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "job-metrics"}}},
+	}}}}}
 	reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
 	pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkVLLM)
 	require.NoError(t, err)
