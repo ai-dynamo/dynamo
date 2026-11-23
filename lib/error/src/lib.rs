@@ -101,6 +101,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
+#[cfg(feature = "http")]
+pub mod http;
+
+/// Environment variable that sets the HTTP status of an overload rejection. Defined here, outside the `http` feature, so that `http::overload_status_code` and the `dynamo-runtime` environment registry name the same string.
+pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ErrorClass {
     /// The request contains invalid input (e.g., prompt exceeds context length).

@@ -310,7 +310,7 @@ pub mod llm {
     /// through 999 are accepted; an informational value from 100 through 199,
     /// an unparseable value, or an out-of-range value falls back to 529. The
     /// value is read and cached on first use.
-    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = dynamo_error::DYN_HTTP_OVERLOAD_STATUS_CODE;
 
     /// Emit an SSE comment at this interval while a streaming response has no
     /// data. Unset, `0`, invalid, or unrepresentable values keep SSE comments
