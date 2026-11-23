@@ -2653,4 +2653,132 @@ mod tests {
         presence.apply(&remove);
         assert!(!has_checkpoint());
     }
+
+    /// SGLang publishes `format=dynamo` map events: untagged attention pages with
+    /// token ids, and (sgl-project/sglang#51647) one tagged Mamba store per cached
+    /// state at the node's last page hash, plus a tagged removal on tombstone.
+    fn sglang_stream() -> Vec<dynamo_kv_events::zmq_wire::RawKvEvent> {
+        use dynamo_kv_events::zmq_wire::decode_event_batch;
+
+        let payload = serde_json::json!([0.0, [
+            {
+                "type": "BlockStored", "block_hashes": [11, 12, 13, 14],
+                "parent_block_hash": null, "token_ids": (0..64).collect::<Vec<u32>>(),
+                "block_size": 16, "lora_id": null, "medium": "GPU",
+                "cache_salt": null, "session_id": null, "lora_name": null
+            },
+            {
+                "type": "BlockStored", "block_hashes": [14], "parent_block_hash": 13,
+                "token_ids": [], "block_size": 16, "lora_id": null, "medium": "GPU",
+                "group_idx": 1, "kv_cache_spec_kind": "mamba"
+            },
+            {
+                "type": "BlockRemoved", "block_hashes": [14], "medium": "GPU",
+                "group_idx": 1, "kv_cache_spec_kind": "mamba"
+            }
+        ], 0]);
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        decode_event_batch(&wire).unwrap().events
+    }
+
+    #[test]
+    fn sglang_last_page_checkpoint_tracks_store_and_tombstone() {
+        use dynamo_kv_events::zmq_wire::ZmqEventNormalizer;
+
+        let worker = WorkerWithDpRank::new(9, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let mut events = sglang_stream().into_iter();
+        let (attention, store, tombstone) = (
+            events.next().unwrap(),
+            events.next().unwrap(),
+            events.next().unwrap(),
+        );
+
+        // Without the opt-in the tagged events are dropped and the attention
+        // pages are the only thing the router sees, as before.
+        let mut dense = ZmqEventNormalizer::new(16);
+        assert!(dense.normalize(attention.clone(), 1, worker).is_some());
+        assert!(dense.preprocess(store.clone(), worker).is_none());
+
+        let mut normalizer = ZmqEventNormalizer::new(16)
+            .with_recurrent_groups(Some(vec![1]))
+            .with_recurrent_alignment_blocks(1);
+        let attention = normalizer
+            .normalize(attention, 1, worker)
+            .unwrap()
+            .into_router_event()
+            .unwrap();
+        assert!(attention.targets_primary().unwrap());
+        let KvCacheEventData::Stored(pages) = &attention.event.data else {
+            panic!("attention store");
+        };
+        assert_eq!(pages.blocks.len(), 4);
+        assert_eq!(pages.blocks[3].block_hash, ExternalSequenceBlockHash(14));
+
+        let presence = KvCacheGroupResidency::new();
+        presence.declare_layout(owner, &[1], 1);
+        let store = normalizer
+            .normalize(store, 2, worker)
+            .unwrap()
+            .into_router_event()
+            .unwrap();
+        assert!(!store.targets_primary().unwrap());
+        assert_eq!(store.residency_owner().unwrap(), owner);
+        presence.apply(&store);
+        let checkpoint_at = |hash: u64| {
+            let mut view = presence.read_view();
+            view.track_owner(owner);
+            view.owners_at(ExternalSequenceBlockHash(hash), StorageTier::Device)
+                .any(|known| known == owner)
+        };
+        assert!(presence.is_hybrid(worker));
+        assert!(checkpoint_at(14), "the state sits at the node's last page");
+        assert!(
+            !checkpoint_at(13),
+            "earlier pages of the node hold no state"
+        );
+
+        let tombstone = normalizer
+            .normalize(tombstone, 3, worker)
+            .unwrap()
+            .into_router_event()
+            .unwrap();
+        presence.apply(&tombstone);
+        assert!(presence.is_hybrid(worker));
+        assert!(!checkpoint_at(14), "a tombstone withdraws the checkpoint");
+    }
+
+    #[test]
+    fn sglang_page_smaller_than_the_mamba_chunk_gets_no_credit() {
+        use dynamo_kv_events::zmq_wire::ZmqEventNormalizer;
+
+        // page_size 16 under a 64-token Mamba chunk would need alignment 4. The
+        // table supports alignment 1 only, so the worker stays hybrid with no
+        // usable checkpoint; the publisher refuses this geometry at startup.
+        let worker = WorkerWithDpRank::new(9, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let mut events = sglang_stream().into_iter();
+        let _attention = events.next().unwrap();
+        let store = events.next().unwrap();
+        let mut normalizer = ZmqEventNormalizer::new(16)
+            .with_recurrent_groups(Some(vec![1]))
+            .with_recurrent_alignment_blocks(4);
+        let presence = KvCacheGroupResidency::new();
+        presence.declare_layout(owner, &[1], 4);
+        let store = normalizer
+            .normalize(store, 1, worker)
+            .unwrap()
+            .into_router_event()
+            .unwrap();
+        presence.apply(&store);
+        let mut view = presence.read_view();
+        view.track_owner(owner);
+        assert!(presence.is_hybrid(worker));
+        assert!(
+            !view
+                .owners_at(ExternalSequenceBlockHash(14), StorageTier::Device)
+                .any(|known| known == owner),
+            "unsupported alignment keeps the owner known but uncredited"
+        );
+    }
 }

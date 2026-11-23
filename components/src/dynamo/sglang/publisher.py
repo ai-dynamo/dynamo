@@ -50,6 +50,10 @@ from dynamo.sglang.gateway import (
     owns_engine_metrics,
 )
 from dynamo.sglang.nixl_telemetry import scheduler_metrics_ipc_name
+from dynamo.sglang.recurrent_kv import (
+    recurrent_kv_events_enabled,
+    sglang_recurrent_kv_layout,
+)
 from dynamo.sglang.state_agent import inventory_sources
 
 
@@ -398,10 +402,23 @@ class DynamoSglangPublisher:
             List of KvEventPublisher instances if KV event publishing is enabled,
             empty list otherwise.
         """
+        recurrent_layout = sglang_recurrent_kv_layout(
+            self.server_args,
+            enabled=recurrent_kv_events_enabled() and self.dynamo_args.use_kv_events,
+        )
         if inventory_sources(self.engine):
             # The versioned state agent consumes the mixed framework/KVCR
             # stream. The legacy normalizer rejects independently owned events.
+            if recurrent_layout is not None:
+                raise ValueError(
+                    "DYN_SGLANG_RECURRENT_KV_EVENTS is not supported with the "
+                    "state-agent KV event source"
+                )
             return []
+        if recurrent_layout is not None and not self.dynamo_args.enable_local_indexer:
+            raise ValueError(
+                "DYN_SGLANG_RECURRENT_KV_EVENTS requires the local indexer"
+            )
         if self.dynamo_args.use_kv_events and not publishes_kv_events(self.server_args):
             logging.info(
                 "Non-leader node (node_rank=%s) shares the leader's single KV "
@@ -459,6 +476,16 @@ class DynamoSglangPublisher:
                     kv_state_endpoint=self.dynamo_args.kv_state_endpoint,
                     engine_owned_mm_identity=engine_owned_mm_identity,
                     idempotent_stores=True,
+                    recurrent_groups=(
+                        recurrent_layout.recurrent_groups
+                        if recurrent_layout is not None
+                        else None
+                    ),
+                    recurrent_alignment_blocks=(
+                        recurrent_layout.alignment_blocks
+                        if recurrent_layout is not None
+                        else 1
+                    ),
                 )
                 self.kv_publishers.append(publisher)
 

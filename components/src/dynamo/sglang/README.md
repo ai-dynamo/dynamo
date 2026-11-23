@@ -5,6 +5,27 @@
 
 See [docs/backends/sglang/](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md) for documentation.
 
+## Recurrent checkpoint events
+
+For hybrid models (attention plus Mamba, Gated DeltaNet, KDA or short-conv layers),
+`DYN_SGLANG_RECURRENT_KV_EVENTS=1` makes the worker ask SGLang to publish one
+tagged `BlockStored` per cached recurrent state and a tagged `BlockRemoved` when
+the state is evicted (`KVEventsConfig.publish_recurrent_checkpoints`,
+sgl-project/sglang#51647). The router then credits the worker only up to its
+deepest checkpoint instead of every cached attention page. The default remains
+attention-only publication; enable the option only after every router and event
+consumer understands `kv_cache_group` events.
+
+The option needs `--kv-events-config` with a ZMQ publisher, the radix cache, the
+local indexer, a model SGLang serves with its Mamba radix-cache component, and a
+page size such that `page_size * dcp_size` is a multiple of the Mamba chunk size
+(64 tokens for Gated DeltaNet). SGLang keeps states on that grid, and the router
+scores checkpoints only at whole indexer blocks, so other page sizes fail at
+startup. Dense models, SGLang builds without the field, and the state-agent event
+source fail at startup as well. The runtime metadata publishes the layout under
+the `sglang_mamba_last_page_v1` contract. Host-tier (HiCache) checkpoints are not
+published yet.
+
 ## KVCR-owned inventory
 
 > [!IMPORTANT]
