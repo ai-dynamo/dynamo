@@ -31,6 +31,26 @@ SPDX-License-Identifier: Apache-2.0
 - Extract only the rendering needed by the change. Moving a complete lowering's
   reconciliation and lifecycle into its subpackage is a separate refactor.
 
+# Consuming DGD workload configuration
+
+- Controllers consuming a DGD must not reconstruct its spec's lowering semantics.
+  Template inheritance, overrides, operator defaults and injections, backend/provider
+  transformations, and origin-dependent behavior belong to the owning lowerer.
+- Read evaluated target workload configuration from DGD status, with current
+  `status.observedGeneration` and the required component role publication. Missing or
+  stale target facts are unavailable, not permission to fall back to the authored spec.
+- Published roles must be fully expanded, including implicit `main`, `leader`, and
+  `worker` roles where applicable. Consumers must not expand roles or derive missing
+  role templates themselves. Preserve the PodSpec's `containers`/`initContainers`
+  distinction in the projection.
+- If a consumer needs a fact that status does not expose, extend status publication
+  at the lowering producer. Do not add another local interpretation of DGD lowering
+  or invoke rendering helpers to reconstruct its result.
+- Interpreting the final workload's semantics, including environment values, command
+  arguments, flags, and runtime defaults, is allowed. This is distinct from reproducing
+  how the operator builds that workload. Target status is not proof of the effective
+  configuration of running Pods.
+
 # Tests
 
 - Use one `t.Log` heading before each block that implements a test step so the test output tells the scenario's story.
