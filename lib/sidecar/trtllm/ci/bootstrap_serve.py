@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # Reuse repository pins only for packages absent from the immutable stock image.
@@ -32,6 +33,21 @@ REQUIRED = {
     "pyyaml",
     "requests",
 }
+
+
+@dataclass
+class RuntimeIdentity:
+    source_commit: str
+    native_commit: str | None
+    native_version: str | None
+    native_python: str
+    python_version: str
+    stock_packages: dict[str, str]
+    bootstrap_state: str = "starting"
+    image: str | None = None
+    expected_native_commit: str | None = None
+    test_python: str | None = None
+    overlay_native_packages: dict[str, str] | None = None
 
 
 def normalized(name):
@@ -55,33 +71,31 @@ def main():
     repo = Path(__file__).resolve().parents[4]
     args.results.mkdir(parents=True, exist_ok=True)
     stock = installed()
-    identity = {
-        "source_commit": subprocess.check_output(
+    identity = RuntimeIdentity(
+        source_commit=subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=repo, text=True
         ).strip(),
-        "native_commit": os.environ.get("TRT_LLM_GIT_COMMIT"),
-        "native_version": stock.get("tensorrt-llm"),
-        "native_python": sys.executable,
-        "python_version": sys.version,
-        "stock_packages": stock,
-        "bootstrap_state": "starting",
-    }
+        native_commit=os.environ.get("TRT_LLM_GIT_COMMIT"),
+        native_version=stock.get("tensorrt-llm"),
+        native_python=sys.executable,
+        python_version=sys.version,
+        stock_packages=stock,
+    )
     manifest = args.results / "runtime.json"
-    manifest.write_text(json.dumps(identity, indent=2) + "\n")
+    manifest.write_text(json.dumps(asdict(identity), indent=2) + "\n")
     config = json.loads((args.artifact / "nightly.json").read_text())
     build = json.loads((args.artifact / "build.json").read_text())
-    identity.update(
-        image=config["image"], expected_native_commit=config["upstream_commit"]
-    )
-    manifest.write_text(json.dumps(identity, indent=2) + "\n")
-    if identity["native_commit"] != config["upstream_commit"]:
+    identity.image = config["image"]
+    identity.expected_native_commit = config["upstream_commit"]
+    manifest.write_text(json.dumps(asdict(identity), indent=2) + "\n")
+    if identity.native_commit != config["upstream_commit"]:
         raise RuntimeError("Installed TRT-LLM source differs from the resolved nightly")
     if (
         build["native_image"] != config["image"]
         or build["native_commit"] != config["upstream_commit"]
     ):
         raise RuntimeError("Test artifacts were built against a different native image")
-    if build["source_commit"] != identity["source_commit"]:
+    if build["source_commit"] != identity.source_commit:
         raise RuntimeError("Dynamo test artifact does not match the checked-out source")
     for relative, expected in build["files"].items():
         if (
@@ -143,12 +157,10 @@ def main():
             text=True,
         )
     )
-    identity.update(
-        bootstrap_state="validating",
-        test_python=str(python),
-        overlay_native_packages=native_packages,
-    )
-    manifest.write_text(json.dumps(identity, indent=2) + "\n")
+    identity.bootstrap_state = "validating"
+    identity.test_python = str(python)
+    identity.overlay_native_packages = native_packages
+    manifest.write_text(json.dumps(asdict(identity), indent=2) + "\n")
     if any(stock.get(name) != version for name, version in native_packages.items()):
         raise RuntimeError(
             "The test virtual environment shadows the stock native stack"
@@ -166,8 +178,8 @@ def main():
         raise RuntimeError(
             "Bootstrap changed the stock interpreter's installed packages"
         )
-    identity.update(bootstrap_state="ready")
-    manifest.write_text(json.dumps(identity, indent=2) + "\n")
+    identity.bootstrap_state = "ready"
+    manifest.write_text(json.dumps(asdict(identity), indent=2) + "\n")
     if args.github_env:
         with args.github_env.open("a") as output:
             output.write(

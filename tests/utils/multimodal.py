@@ -107,7 +107,8 @@ def make_sidecar_media_payload(media: str) -> MediaAccuracyPayload:
         expected_response=[],
         temperature=0,
         extra_body={
-            "nvext": {"extra_fields": ["prompt_token_ids", "worker_id", "timing"]}
+            "seed": 0,
+            "nvext": {"extra_fields": ["prompt_token_ids", "worker_id", "timing"]},
         },
     )
     if kind == "image" and not routing:
@@ -123,6 +124,8 @@ def make_sidecar_media_payload(media: str) -> MediaAccuracyPayload:
         media_source=lambda _iteration: _sidecar_media_source(kind),
         repeat_count=4 if routing else 1,
         timeout=120,
+        # GPU content variability: https://github.com/ai-dynamo/dynamo/pull/19288.
+        max_attempts=3,
     )
 
 

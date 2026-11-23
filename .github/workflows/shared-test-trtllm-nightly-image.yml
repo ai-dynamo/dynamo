@@ -144,11 +144,13 @@ jobs:
           fi
       - name: Bootstrap isolated frontend and standard pytest dependencies
         shell: bash
+        env:
+          CONFIG: ${{ matrix.config }}
         run: |
           set -euo pipefail
           python3 lib/sidecar/trtllm/ci/bootstrap_serve.py \
             --artifact trtllm-serve-runtime \
-            --results "test-results/${{ matrix.config }}" \
+            --results "test-results/$CONFIG" \
             --venv "$GITHUB_WORKSPACE/.serve-venv" \
             --github-env "$GITHUB_ENV"
       - name: Run standard serve test
