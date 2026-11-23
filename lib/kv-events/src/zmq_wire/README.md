@@ -81,3 +81,12 @@ parsed by name, with `lora_name` on `BlockStored`. Other SGLang shapes are
 legacy and parsed only for compatibility: the default format, and the
 positional `BlockStored` of releases before 0.5.20, which ends at `lora_id` and
 parses because the tuple terminates early.
+
+SGLang builds with routing-label support add the optional named field
+`mm_routing_spans` to `BlockStored` in the `dynamo` format. It is a list aligned
+with `block_hashes`; each block contains `[start, length, label]` spans with
+block-relative token offsets and lengths. The label echoes Dynamo's hexadecimal
+`u64` media hash. For example, `[[], [[0, 4, "0123456789abcdef"]]]` labels the
+first four tokens of the second block. The field adds no positional slot.
+For sources flagged with `engine_owned_mm_identity`, events without usable
+labels retain multimodal exclusion.

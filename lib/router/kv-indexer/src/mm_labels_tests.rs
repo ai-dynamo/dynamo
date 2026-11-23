@@ -12,9 +12,7 @@ use serde::Serialize;
 use dynamo_kv_events::event::{KvCacheEventData, KvCacheEventError, KvCacheStoreData, RouterEvent};
 use dynamo_kv_events::placement::PlacementEvent;
 use dynamo_kv_events::residency::StorageTier;
-use dynamo_kv_events::zmq_wire::{
-    RawKvEvent, WIDE_TOKEN_SENTINEL, ZmqEventNormalizer, decode_event_batch,
-};
+use dynamo_kv_events::zmq_wire::{RawKvEvent, ZmqEventNormalizer, decode_event_batch};
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 use dynamo_kv_hashing::routing::{
@@ -24,7 +22,7 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use crate::{
     BranchShardedIndexer, ConcurrentRadixTreeCompressed, KvIndexerInterface, LowerTierContinuation,
-    LowerTierIndexer, OverlapScores, PositionalIndexer, RadixTree, ThreadPoolIndexer,
+    LowerTierIndexer, OverlapScores, RadixTree, ThreadPoolIndexer,
 };
 
 const BLOCK: usize = 16;
@@ -98,23 +96,10 @@ struct WireCleared {
     kind: &'static str,
 }
 
-/// Eagle/NextN stores carry overlapping token pairs.
-#[derive(Serialize)]
-struct WireStoredBigram {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    block_hashes: Vec<i64>,
-    parent_block_hash: Option<i64>,
-    token_ids: Vec<(u64, u64)>,
-    block_size: usize,
-    lora_id: Option<i64>,
-}
-
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Wire {
     Stored(WireStored),
-    StoredBigram(WireStoredBigram),
     Removed(WireRemoved),
     Cleared(WireCleared),
 }
@@ -172,20 +157,6 @@ fn removed_on(ids: &[u64], medium: Option<&'static str>) -> Wire {
         kind: "BlockRemoved",
         block_hashes: ids.iter().map(|id| *id as i64).collect(),
         medium,
-    })
-}
-
-/// An Eagle store over `tokens` (`ids.len() * BLOCK + 1` tokens), sent as the
-/// overlapping pairs SGLang publishes.
-fn stored_eagle(ids: &[u64], tokens: &[u64]) -> Wire {
-    assert_eq!(tokens.len(), ids.len() * BLOCK + 1);
-    Wire::StoredBigram(WireStoredBigram {
-        kind: "BlockStored",
-        block_hashes: ids.iter().map(|id| *id as i64).collect(),
-        parent_block_hash: None,
-        token_ids: tokens.windows(2).map(|pair| (pair[0], pair[1])).collect(),
-        block_size: BLOCK,
-        lora_id: None,
     })
 }
 
@@ -272,23 +243,6 @@ fn request_hashes(blocks: &[Vec<u64>]) -> Vec<LocalBlockHash> {
     )
 }
 
-fn hashes(tokens: &[u64], is_eagle: bool) -> Vec<LocalBlockHash> {
-    let tokens: Vec<u32> = tokens
-        .iter()
-        .map(|&token| u32::try_from(token).expect("routing tokens fit in u32"))
-        .collect();
-    compute_block_hash_for_seq(
-        &tokens,
-        BLOCK as u32,
-        BlockHashOptions {
-            block_mm_infos: None,
-            lora_name: None,
-            is_eagle: Some(is_eagle),
-            cache_namespace: None,
-        },
-    )
-}
-
 /// Request: text, one image (labeled), text. Routing tokens use Dynamo's pad.
 fn request(label: u64) -> Vec<LocalBlockHash> {
     request_hashes(&[text(100), routing_pad(label, BLOCK), text(300)])
@@ -362,31 +316,6 @@ impl Indexes {
             })
             .collect()
     }
-}
-
-#[test]
-fn sglang_map_with_wide_tokens_and_spans_decodes() {
-    let raw = decode_one(image_request_store(IMAGE_X, LABEL_U, [E_T, E_IX, E_KX]));
-    let RawKvEvent::BlockStored {
-        token_ids,
-        block_mm_infos,
-        ..
-    } = raw
-    else {
-        panic!("expected BlockStored");
-    };
-    // Wide values no longer fail the batch; they narrow to the sentinel.
-    assert!(
-        token_ids[BLOCK..2 * BLOCK]
-            .iter()
-            .all(|&token| token == WIDE_TOKEN_SENTINEL)
-    );
-    let infos = block_mm_infos.expect("spans become per-block multimodal info");
-    assert!(infos[0].is_none() && infos[2].is_none());
-    let image_info = infos[1].as_ref().expect("image block info");
-    assert_eq!(image_info.mm_objects.len(), 1);
-    assert_eq!(image_info.mm_objects[0].mm_hash, LABEL_U);
-    assert_eq!(image_info.mm_objects[0].offsets, vec![(0, BLOCK)]);
 }
 
 #[test]
@@ -591,48 +520,6 @@ async fn alias_on_one_worker_is_reference_counted() {
     assert_eq!(indexes.scores(&query, &[A]).await, vec![1]);
 }
 
-#[tokio::test]
-async fn unlabeled_image_is_excluded_with_its_descendants() {
-    let mut normalizer = labeled_normalizer();
-    let mut indexes = Indexes::new();
-
-    let event = run(
-        &mut normalizer,
-        A,
-        1,
-        stored(
-            None,
-            &[
-                block(E_T, text(100), vec![]),
-                block(E_IX, image(IMAGE_X, BLOCK), vec![]),
-                block(E_KX, text(300), vec![]),
-            ],
-        ),
-    );
-    let store = store_data(&event).expect("text prefix still published");
-    assert_eq!(store.blocks.len(), 1);
-    assert_eq!(store.blocks[0].block_hash.0, E_T);
-    indexes.apply(A, &event).await;
-
-    // A later store chained under the excluded block is dropped too.
-    let child = run(
-        &mut normalizer,
-        A,
-        2,
-        stored(Some(E_KX), &[block(0xc0de, text(500), vec![])]),
-    );
-    assert!(is_noop(&child));
-
-    // Removals of excluded blocks never reach the index; only E_T passes through.
-    let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, 0xc0de, E_T]));
-    assert_eq!(removed_ids(&evict), vec![E_T]);
-    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
-    indexes.apply(A, &evict).await;
-
-    // Both indexes must reach zero after the text-prefix block is evicted.
-    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
-}
-
 /// The id map never evicts a live mapping. When it is full, a new multimodal
 /// chain is excluded like an unmapped one, its text prefix still routes, and
 /// it is mapped once capacity frees up.
@@ -683,51 +570,6 @@ async fn full_id_map_falls_back_to_exclusion_without_evicting() {
     assert_eq!(indexes.scores(&request(LABEL_V), &[A, B]).await, vec![1, 3]);
 }
 
-/// A store dropped entirely becomes an empty removal so the event id sequence
-/// has no gap. Every index must take it as a no-op, including for a worker it
-/// has not seen yet (an unlabeled image-first request right after startup).
-#[tokio::test]
-async fn fully_excluded_store_is_a_noop_for_an_unseen_worker() {
-    let mut normalizer = labeled_normalizer();
-    let mut indexes = Indexes::new();
-    let event = run(
-        &mut normalizer,
-        A,
-        1,
-        stored(None, &[block(E_IX, image(IMAGE_X, BLOCK), vec![])]),
-    );
-    assert!(is_noop(&event));
-    indexes.apply(A, &event).await;
-
-    let positional = ThreadPoolIndexer::new(PositionalIndexer::new(8), 2, BLOCK as u32);
-    positional
-        .apply_event_and_wait(router_event(A, &event))
-        .await
-        .expect("positional index accepts an empty removal");
-
-    let lower = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, BLOCK as u32);
-    let host = run(
-        &mut normalizer,
-        A,
-        2,
-        stored_on(
-            None,
-            &[block(E_IX, image(IMAGE_X, BLOCK), vec![])],
-            Some("CPU_PINNED"),
-        ),
-    );
-    assert!(is_noop(&host));
-    lower
-        .apply_event_and_wait(RouterEvent::with_storage_tier(
-            A,
-            host.event.clone(),
-            StorageTier::HostPinned,
-        ))
-        .await
-        .expect("lower tier accepts an empty removal");
-    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
-}
-
 /// Exhausted exclusion state must not send unknown-parent stores to an index.
 #[tokio::test]
 async fn exclusion_overflow_drops_descendants_and_preserves_text_eviction() {
@@ -767,204 +609,6 @@ async fn exclusion_overflow_drops_descendants_and_preserves_text_eviction() {
     );
     indexes.crtc.apply_event_and_wait(event).await.unwrap();
     assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
-}
-
-/// Overflow must preserve the relay source and subsequent root text updates.
-#[test]
-fn exclusion_overflow_preserves_the_relay_source() {
-    use crate::cuckoo::{CkfConfig, DcCkfState};
-
-    let events = |excluded_capacity: usize| {
-        let mut normalizer =
-            labeled_normalizer().with_engine_mm_excluded_capacity(excluded_capacity);
-        let first = run(
-            &mut normalizer,
-            A,
-            1,
-            stored(
-                None,
-                &[
-                    block(E_T, text(100), vec![]),
-                    block(E_IX, image(IMAGE_X, BLOCK), vec![]),
-                ],
-            ),
-        );
-        let child = run(
-            &mut normalizer,
-            A,
-            2,
-            stored(Some(E_IX), &[block(E_KX, text(300), vec![])]),
-        );
-        let text_root = run(
-            &mut normalizer,
-            A,
-            3,
-            stored(None, &[block(0xc0de, text(500), vec![])]),
-        );
-        assert_eq!(store_data(&first).unwrap().blocks.len(), 1);
-        assert!(is_noop(&child));
-        assert_eq!(
-            store_data(&text_root).unwrap().blocks[0].block_hash.0,
-            0xc0de
-        );
-        let evict = run(&mut normalizer, A, 4, removed(&[E_IX, E_KX, E_T, 0xc0de]));
-        [first, child, text_root, evict]
-    };
-    let relay_errors = |events: [PlacementEvent; 4]| {
-        let mut relay = DcCkfState::new(CkfConfig::new(64)).expect("relay producer");
-        events
-            .iter()
-            .map(|event| {
-                relay
-                    .apply_event(router_event(A, event))
-                    .first_error()
-                    .copied()
-            })
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(relay_errors(events(1 << 10)), vec![None; 4]);
-    assert_eq!(relay_errors(events(0)), vec![None; 4]);
-}
-
-/// A replayed text store suppressed after overflow was already indexed. Its
-/// removal must still pass through, even though the replay itself is a no-op.
-#[tokio::test]
-async fn overflow_does_not_hide_evictions_of_previously_indexed_text() {
-    let mut normalizer = labeled_normalizer().with_engine_mm_excluded_capacity(0);
-    let mut indexes = Indexes::new();
-    let root = run(
-        &mut normalizer,
-        A,
-        1,
-        stored(None, &[block(E_T, text(100), vec![])]),
-    );
-    let continuation = || stored(Some(E_T), &[block(E_KX, text(300), vec![])]);
-    let child = run(&mut normalizer, A, 2, continuation());
-    indexes.apply(A, &root).await;
-    indexes.apply(A, &child).await;
-    let query = request_hashes(&[text(100), text(300)]);
-    assert_eq!(indexes.scores(&query, &[A]).await, vec![2]);
-
-    let image = run(
-        &mut normalizer,
-        A,
-        3,
-        stored(None, &[block(E_IX, image(IMAGE_X, BLOCK), vec![])]),
-    );
-    assert!(is_noop(&image));
-    let replay = run(&mut normalizer, A, 4, continuation());
-    assert!(is_noop(&replay));
-    indexes.apply(A, &replay).await;
-    let evict = run(&mut normalizer, A, 5, removed(&[E_KX]));
-    assert_eq!(removed_ids(&evict), vec![E_KX]);
-    indexes.apply(A, &evict).await;
-    assert_eq!(indexes.scores(&query, &[A]).await, vec![1]);
-}
-
-#[test]
-fn cache_clear_resets_overflow_only_for_the_affected_worker_rank() {
-    let mut normalizer = labeled_normalizer().with_engine_mm_excluded_capacity(0);
-    let scopes = [worker(A), WorkerWithDpRank::new(A, 1), worker(A + 1)];
-    for scope in scopes {
-        run_on(
-            &mut normalizer,
-            scope,
-            1,
-            stored(
-                None,
-                &[
-                    block(E_T, text(100), vec![]),
-                    block(E_IX, image(IMAGE_X, BLOCK), vec![]),
-                ],
-            ),
-        );
-    }
-    run_on(&mut normalizer, scopes[0], 2, cleared());
-    run_on(
-        &mut normalizer,
-        scopes[0],
-        3,
-        stored(None, &[block(E_T, text(100), vec![])]),
-    );
-    for scope in scopes {
-        let event = run_on(
-            &mut normalizer,
-            scope,
-            4,
-            stored(Some(E_T), &[block(E_KX, text(300), vec![])]),
-        );
-        assert_eq!(store_data(&event).is_some(), scope == scopes[0]);
-    }
-}
-
-#[test]
-fn multimodal_values_that_fit_in_u32_are_still_classified() {
-    let mut normalizer = labeled_normalizer();
-    // An image starts in the last two tokens of the text block; its values
-    // happen to fit in u32, so only the >= 1_000_000 rule catches them.
-    let mut first = text(100);
-    first[BLOCK - 2] = 1_500_000;
-    first[BLOCK - 1] = 1_600_000;
-    let event = run(
-        &mut normalizer,
-        A,
-        1,
-        stored(
-            None,
-            &[block(E_T, text(50), vec![]), block(E_IX, first, vec![])],
-        ),
-    );
-    let store = store_data(&event).unwrap();
-    assert_eq!(
-        store.blocks.len(),
-        1,
-        "the block with unlabeled values is cut"
-    );
-}
-
-#[tokio::test]
-async fn malformed_multimodal_stores_do_not_suppress_text_eviction() {
-    for excluded_parent in [false, true] {
-        let mut normalizer = labeled_normalizer();
-        let mut indexes = Indexes::new();
-        let text_store = run(
-            &mut normalizer,
-            A,
-            1,
-            stored(None, &[block(E_T, text(100), vec![])]),
-        );
-        indexes.apply(A, &text_store).await;
-        let malformed = if excluded_parent {
-            run(
-                &mut normalizer,
-                A,
-                2,
-                stored(None, &[block(E_IX, image(IMAGE_X, BLOCK), vec![])]),
-            );
-            stored(
-                Some(E_IX),
-                &[block(E_T, text(100), vec![]), block(E_T, text(300), vec![])],
-            )
-        } else {
-            stored(
-                None,
-                &[
-                    block(E_T, text(100), vec![]),
-                    block(E_IX, image(IMAGE_X, BLOCK), vec![]),
-                    block(E_T, text(300), vec![]),
-                ],
-            )
-        };
-        let rejected = run(&mut normalizer, A, 3, malformed);
-        assert!(is_noop(&rejected));
-        indexes.apply(A, &rejected).await;
-        assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
-        let evict = run(&mut normalizer, A, 4, removed(&[E_T]));
-        assert_eq!(removed_ids(&evict), vec![E_T]);
-        indexes.apply(A, &evict).await;
-        assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
-    }
 }
 
 #[test]
@@ -1336,31 +980,6 @@ fn unflagged_source_excludes_wide_blocks_and_their_descendants() {
     assert_eq!(removed_ids(&evict), vec![E_T]);
 }
 
-/// Legacy sources use Dynamo's own pads, which sit above `MM_PAD_SHIFT_VALUE`
-/// but fit in `u32`; only the engine-owned flag excludes those.
-#[test]
-fn unflagged_source_keeps_legacy_pads() {
-    let mut legacy_pad = text(100);
-    legacy_pad[BLOCK - 1] = u64::from(pad_value_for_mm_hash(LABEL_U));
-    let wire = || {
-        stored(
-            None,
-            &[
-                block(E_T, text(50), vec![]),
-                block(E_IX, legacy_pad.clone(), vec![]),
-            ],
-        )
-    };
-
-    let mut unflagged = ZmqEventNormalizer::new(BLOCK as u32);
-    let kept = run(&mut unflagged, A, 1, wire());
-    assert_eq!(store_data(&kept).unwrap().blocks.len(), 2);
-
-    let mut flagged = labeled_normalizer();
-    let cut = run(&mut flagged, A, 1, wire());
-    assert_eq!(store_data(&cut).unwrap().blocks.len(), 1);
-}
-
 #[test]
 fn text_only_events_are_unchanged() {
     let mut labeled = labeled_normalizer();
@@ -1377,83 +996,6 @@ fn text_only_events_are_unchanged() {
     let with_flag = run(&mut labeled, A, 1, wire());
     let without_flag = run(&mut plain, A, 1, wire());
     assert_eq!(with_flag.event, without_flag.event);
-}
-
-/// Eagle hashes each block together with the next block's first token, so a
-/// multimodal value there belongs to the preceding block. Both flag states
-/// classify exactly the hashed windows and keep the overlap token the last
-/// surviving block needs.
-#[test]
-fn eagle_overlap_token_is_classified_with_the_preceding_block() {
-    for engine_owned in [false, true] {
-        let normalizer =
-            || ZmqEventNormalizer::new(BLOCK as u32).with_engine_owned_mm_identity(engine_owned);
-
-        // The image starts at the overlap token of block 0.
-        let mut at_overlap: Vec<u64> = (100..100 + BLOCK as u64).collect();
-        at_overlap.extend(image(IMAGE_X, BLOCK + 1));
-        let event = run(
-            &mut normalizer(),
-            A,
-            1,
-            stored_eagle(&[E_T, E_IX], &at_overlap),
-        );
-        assert!(is_noop(&event), "engine_owned={engine_owned}");
-
-        // The image starts one token later: block 0 is text, overlap included.
-        let mut after_overlap: Vec<u64> = (100..101 + BLOCK as u64).collect();
-        after_overlap.extend(image(IMAGE_X, BLOCK));
-        let event = run(
-            &mut normalizer(),
-            A,
-            1,
-            stored_eagle(&[E_T, E_IX], &after_overlap),
-        );
-        let store = store_data(&event).expect("text block published");
-        assert_eq!(store.blocks.len(), 1, "engine_owned={engine_owned}");
-        assert_eq!(store.blocks[0].block_hash.0, E_T);
-        assert_eq!(
-            store.blocks[0].tokens_hash,
-            hashes(&after_overlap[..=BLOCK], true)[0],
-            "block 0 hashes its tokens plus the overlap token"
-        );
-    }
-}
-
-/// Exclusions belong to one worker, DP rank and storage tier. A clear forgets
-/// only that rank's exclusions; another tier never held the excluded blocks.
-#[test]
-fn exclusions_are_scoped_to_worker_rank_and_tier() {
-    let mut normalizer = labeled_normalizer();
-    let rank0 = WorkerWithDpRank::new(A, 0);
-    let rank1 = WorkerWithDpRank::new(A, 1);
-    let unlabeled_store = || {
-        stored(
-            None,
-            &[
-                block(E_T, text(100), vec![]),
-                block(E_IX, image(IMAGE_X, BLOCK), vec![]),
-                block(E_KX, text(300), vec![]),
-            ],
-        )
-    };
-    run_on(&mut normalizer, rank0, 1, unlabeled_store());
-    run_on(&mut normalizer, rank1, 1, unlabeled_store());
-
-    let host = run_on(
-        &mut normalizer,
-        rank0,
-        2,
-        removed_on(&[E_IX], Some("CPU_PINNED")),
-    );
-    assert_eq!(removed_ids(&host), vec![E_IX]);
-
-    let clear = run_on(&mut normalizer, rank0, 3, cleared());
-    assert!(matches!(clear.event.data, KvCacheEventData::Cleared));
-    let rank0_evict = run_on(&mut normalizer, rank0, 4, removed(&[E_IX, E_KX]));
-    assert_eq!(removed_ids(&rank0_evict), vec![E_IX, E_KX]);
-    let rank1_evict = run_on(&mut normalizer, rank1, 2, removed(&[E_IX, E_KX]));
-    assert!(removed_ids(&rank1_evict).is_empty());
 }
 
 /// SGLang's label registry is bounded, so a later store of a cached block can

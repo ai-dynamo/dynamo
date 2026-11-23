@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -100,6 +101,7 @@ class TestDynamoJsonToolCallFallback:
         stream_response,
         parallel_tool_calls=None,
         tool_parameters=None,
+        tool_catalog_names=None,
     ):
         request = json.loads(json.dumps(TOOL_REQUEST))
         request["tool_choice"] = tool_choice
@@ -122,7 +124,49 @@ class TestDynamoJsonToolCallFallback:
             chat_template_kwargs={},
             stream_response=stream_response,
             uses_dynamo_json_tool_call_fallback=True,
+            tool_catalog_names=tool_catalog_names,
         )
+
+    @pytest.mark.parametrize("stream_response", [False, True])
+    @pytest.mark.parametrize("name", ["get_weather", "other_tool"])
+    def test_fallback_keeps_declared_calls_for_http_allowlist(
+        self, tokenizer, stream_response, name
+    ):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice="required",
+            stream_response=stream_response,
+            tool_catalog_names=frozenset({"get_weather", "other_tool"}),
+        )
+        text = json.dumps([{"name": name, "parameters": {}}])
+        if stream_response:
+            assert (
+                post.process_output(
+                    SimpleNamespace(
+                        index=0,
+                        text=text[:12],
+                        token_ids=[],
+                        finish_reason=None,
+                        logprobs=None,
+                    )
+                )
+                is None
+            )
+            text = text[12:]
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert "content" not in choice["delta"]
+        assert choice["delta"]["tool_calls"][0]["function"]["name"] == name
 
     def test_streaming_required_choice_converts_json_to_tool_calls(self, tokenizer):
         post = self._post_processor(
@@ -2242,26 +2286,28 @@ async def _capture_rendered_reasoning_processors(
     backend_defers_grammar,
 ):
     """Use real preprocessing and capture the worker controls and response parser."""
+    original_request = deepcopy(request)
     monkeypatch.setattr(
         module.InputProcessor,
         "assign_request_id",
         lambda request: None,
+    )
+    render_messages = AsyncMock(
+        return_value=(
+            None,
+            {
+                "prompt_token_ids": tokenizer.encode(
+                    prompt_text, add_special_tokens=False
+                )
+            },
+        )
     )
     processor = module.VllmProcessor(
         tokenizer=tokenizer,
         input_processor=SimpleNamespace(
             generation_config_fields={},
             renderer=SimpleNamespace(
-                render_messages_async=AsyncMock(
-                    return_value=(
-                        None,
-                        {
-                            "prompt_token_ids": tokenizer.encode(
-                                prompt_text, add_special_tokens=False
-                            )
-                        },
-                    )
-                ),
+                render_messages_async=render_messages,
                 process_for_engine_async=AsyncMock(return_value={}),
             ),
             process_inputs=lambda request_id, inputs, sampling_params, tasks: (
@@ -2289,6 +2335,19 @@ async def _capture_rendered_reasoning_processors(
     monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
     async for _ in processor._generator_inner(request):
         pass
+
+    render_messages.assert_awaited_once()
+    messages, chat_params = render_messages.await_args.args
+    assert messages == original_request["messages"]
+    template_kwargs = chat_params.chat_template_kwargs
+    expected_tools = [
+        ChatCompletionToolsParam.model_validate(tool).model_dump()
+        for tool in (original_request.get("tools") or [])
+    ]
+    assert template_kwargs["tools"] == (expected_tools or None)
+    for key, value in original_request.get("chat_template_kwargs", {}).items():
+        assert template_kwargs[key] == value
+
     return captured["dynamo_preproc"], captured["post"]
 
 
@@ -2563,6 +2622,150 @@ async def test_guided_json_follows_worker_grammar_scheduling(
             "arguments": answer if guidance == "named" else '{"city":"Paris"}',
         }
         assert choice["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+@pytest.mark.core
+@pytest.mark.parametrize("tool_choice_kind", ["named", "required"])
+@pytest.mark.parametrize(
+    ("prompt_text", "backend_defers_grammar", "worker_output", "terminal_reasons"),
+    [
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            False,
+            ("{answer}",),
+            ("stop", "tool_calls"),
+            id="json-before-finish",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            False,
+            ("{answer_start}", "{answer_end}"),
+            ("stop", "tool_calls"),
+            id="split-json-before-finish",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            False,
+            ("{answer_start}", "{answer_end}"),
+            ("stop", "tool_calls"),
+            id="closed-prompt-split-json",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            True,
+            ("{hidden_reasoning}", "</think>", "{answer}"),
+            ("stop", "tool_calls"),
+            id="tool-shaped-hidden-reasoning",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            True,
+            ("{hidden_reasoning}", "</think>{answer_start}", "{answer_end}"),
+            ("stop", "tool_calls"),
+            id="split-json-starts-with-reasoning-close",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            True,
+            ("{hidden_reasoning}",),
+            ("length", "length"),
+            id="length-limit-before-reasoning-close",
+        ),
+    ],
+)
+@pytest.mark.filterwarnings(
+    "ignore:max_tokens is deprecated in favor of the max_completion_tokens field:DeprecationWarning"
+)
+async def test_glm_hidden_reasoning_replays_scripted_worker_chunks(
+    vllm_processor_module,
+    monkeypatch,
+    tokenizer,
+    tool_choice_kind,
+    prompt_text,
+    backend_defers_grammar,
+    worker_output,
+    terminal_reasons,
+):
+    """Replay forced tool streams with JSON on either side of the reasoning boundary."""
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "tools": TOOL_REQUEST["tools"],
+        "tool_choice": (
+            "required"
+            if tool_choice_kind == "required"
+            else {"type": "function", "function": {"name": "get_weather"}}
+        ),
+        "chat_template_kwargs": {"enable_thinking": False},
+        "include_reasoning": False,
+        "stream": True,
+    }
+    metadata, post = await _capture_rendered_reasoning_processors(
+        vllm_processor_module,
+        monkeypatch,
+        tokenizer,
+        request,
+        prompt_text,
+        "glm45",
+        backend_defers_grammar,
+    )
+    assert metadata["sampling_options"]["guided_decoding"]["json"]
+    assert metadata["reasoning_ended"] is (not backend_defers_grammar)
+
+    arguments = '{"city":"Paris"}'
+    answer = (
+        '[{"name":"get_weather","parameters":{"city":"Paris"}}]'
+        if tool_choice_kind == "required"
+        else arguments
+    )
+    boundary = answer.index("Paris") + len("Pa")
+    chunks = [
+        piece.format(
+            answer=answer,
+            answer_start=answer[:boundary],
+            answer_end=answer[boundary:],
+            hidden_reasoning=answer.replace("Paris", "Rome"),
+        )
+        for piece in worker_output
+    ]
+    chunks.append("")
+
+    worker_finish_reason, expected_finish_reason = terminal_reasons
+    deltas = []
+    for index, text in enumerate(chunks):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                finish_reason=worker_finish_reason
+                if index == len(chunks) - 1
+                else None,
+                logprobs=None,
+            )
+        )
+        if choice is not None:
+            if index < len(chunks) - 1:
+                assert choice["finish_reason"] is None
+            deltas.append(choice["delta"])
+
+    assert not any(
+        delta.get("content") or delta.get("reasoning_content") for delta in deltas
+    )
+    calls = [
+        (call["function"]["name"], json.loads(call["function"]["arguments"]))
+        for delta in deltas
+        for call in delta.get("tool_calls", [])
+    ]
+    expected_calls = (
+        [("get_weather", {"city": "Paris"})]
+        if expected_finish_reason == "tool_calls"
+        else []
+    )
+    assert calls == expected_calls
+    assert choice is not None
+    assert choice["finish_reason"] == expected_finish_reason
 
 
 def _make_processor(module, routed_engine):

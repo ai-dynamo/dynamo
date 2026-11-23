@@ -408,6 +408,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::WorkerSequenceEventPublisher>()?;
+    #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SessionBindingStream>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionCacheConfig>()?;
@@ -1545,6 +1547,13 @@ impl DistributedRuntime {
 
     fn shutdown(&self) {
         self.inner.shutdown();
+    }
+
+    /// The response transport this runtime uses ("tcp", "quic" or "velo"),
+    /// after the default and the TLS fallback are applied.
+    #[getter]
+    fn response_plane(&self) -> &'static str {
+        self.inner.response_plane().name()
     }
 
     fn event_loop(&self) -> PyObject {

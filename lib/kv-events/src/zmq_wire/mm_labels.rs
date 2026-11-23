@@ -27,6 +27,10 @@
 //! and excludes every other value at or above `MM_PAD_SHIFT_VALUE`. Legacy
 //! sources keep those values, because their pads are Dynamo's own routing
 //! values.
+//!
+//! Raw extra keys take the same exclusion path. Decoding marks the first block
+//! carrying a msgpack `bin`, such as vLLM's prompt-embeds digest, with the sentinel
+//! so it and its descendants stay out of the index.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -420,7 +424,8 @@ impl EngineMmState {
                 worker_id = key.0.worker_id,
                 dp_rank = key.0.dp_rank,
                 capacity = self.excluded_capacity,
-                "Multimodal exclusion state is full; accepting only root stores until cache clear"
+                "Multimodal exclusion state is full (blocks with raw extra keys, such as \
+                 prompt embeds, count too); accepting only root stores until cache clear"
             );
         }
     }

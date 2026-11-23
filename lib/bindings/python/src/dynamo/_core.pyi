@@ -117,6 +117,14 @@ class DistributedRuntime:
         """
         ...
 
+    @property
+    def response_plane(self) -> str:
+        """
+        The response transport this runtime uses ("tcp", "quic" or "velo"),
+        after the default and the TLS fallback are applied.
+        """
+        ...
+
     def set_health_status(self, ready: bool) -> None:
         """
         Explicitly set the system-level health status (Ready / NotReady).
@@ -918,6 +926,55 @@ class SelectionService:
 
     async def potential_loads(self, request: JsonLike) -> JsonLike:
         """Per-worker potential loads for a prompt, without booking."""
+        ...
+
+    async def register_worker_publisher(self, endpoint: str) -> bool:
+        """Subscribe to a worker's prefill and request completion events.
+
+        Events update local and replicated reservations without being republished.
+        Requires replica sync. Returns True if the subscription was added, or
+        False if the endpoint was already registered.
+        """
+        ...
+
+    async def deregister_worker_publisher(self, endpoint: str) -> bool:
+        """Unsubscribe from a worker publisher.
+
+        Returns True if the subscription was removed, or False if the endpoint
+        was not registered.
+        """
+        ...
+
+    def list_worker_publishers(self) -> list[str]:
+        """Endpoints of the subscribed worker publishers, sorted."""
+        ...
+
+class WorkerSequenceEventPublisher:
+    """Nonblocking ZMQ publisher for worker-origin active-sequence events."""
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        routing_group: str,
+        worker_id: int,
+        dp_rank: int = 0,
+        bind_endpoint: str = "tcp://*:*",
+    ) -> None:
+        ...
+
+    @property
+    def endpoint(self) -> str:
+        """Bound endpoint, including the port selected by ZMQ."""
+        ...
+
+    def mark_prefill_completed(self, request_id: str) -> None:
+        ...
+
+    def free(self, request_id: str) -> None:
+        ...
+
+    def close(self) -> None:
         ...
 
 class ModelDeploymentCard:

@@ -17,7 +17,7 @@ async fn native_abort_preserves_retry_status_and_cancels_pending_peer() {
         .await
         .expect("native abort must not wait for stream closure or its pending peer");
         let expected = if status == 429 {
-            super::super::super::error::overload_status_code()
+            dynamo_error::http::overload_status_code()
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
