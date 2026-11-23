@@ -808,13 +808,8 @@ func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoCo
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt generateResourceOption) (bool, error) {
-	desired, toDelete, err := r.generateService(ctx, opt)
-	if err != nil {
-		return false, err
-	}
-
-	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(context.Context) (*corev1.Service, bool, error) {
-		return desired, toDelete, nil
+	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateService(ctx, opt)
 	})
 	return modified, err
 }
