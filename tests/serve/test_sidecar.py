@@ -202,7 +202,7 @@ class SidecarConfig(EngineConfig):
 
 
 # vLLM's FlashAttention-2 has only sm_80 code; newer GPUs JIT-compile it on first
-# use, stalling ~70 s (DYN-5754). Warm up with the first routed request's shape.
+# use, stalling ~70 s. Warm up with the first routed request's shape.
 SPLIT_KV_WARMUP_PROMPT = "Pale lanterns drift over harbor water at dusk. " * 32
 SPLIT_KV_WARMUP_TOKENS = 128
 
