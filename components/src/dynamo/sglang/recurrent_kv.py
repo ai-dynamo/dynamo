@@ -152,6 +152,11 @@ def _mamba_cache_chunk_size(server_args: Any, tree_page: int) -> int:
                 "Recurrent KV events need the Mamba chunk size and the page size "
                 f"to divide one another: {exc}"
             ) from exc
+        except AttributeError:
+            # SGLang 0.5.23 memoizes the result on server_args once resolution
+            # has finished, but Dynamo holds a read-only ResolvedView there.
+            # The value is max(model chunk, page), computed below.
+            pass
     hf_config = getattr(_model_config(server_args), "hf_config", None)
     chunk = int(getattr(hf_config, "mamba_chunk_size", DEFAULT_MAMBA_CHUNK_SIZE))
     return max(chunk, tree_page)
