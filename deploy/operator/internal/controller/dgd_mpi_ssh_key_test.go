@@ -66,10 +66,14 @@ func newMPISSHTestReconciler(t *testing.T, objects ...client.Object) *DynamoGrap
 	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	require.NoError(t, rbacv1.AddToScheme(scheme))
 	plannerRole := &rbacv1.ClusterRole{Name: "planner"}
+
+	// Emulate Grove scale reads while keeping the fake client's normal DGD status writes.
+	scaleReads := groveScaleInterceptor(interceptor.Funcs{}, nil)
+	scaleReads.SubResourceUpdate = nil
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithRESTMapper(groveScaleRESTMapper()).
-		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
+		WithInterceptorFuncs(scaleReads).
 		WithObjects(append(objects, plannerRole)...).
 		WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
