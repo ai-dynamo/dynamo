@@ -700,7 +700,16 @@ where
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
         match request.instance().filter(|instance| is_direct(instance)) {
             Some(instance) => self.direct(instance.id())?.generate(request).await,
-            None => StreamingDispatch::<T, U>::generate(self.request_plane.as_ref(), request).await,
+            // Call what the request plane's own `StreamingDispatch` impl
+            // forwards to, here and in `generate_bidirectional`: going through
+            // that impl would box one more future per request.
+            None => {
+                AsyncEngine::<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error>::generate(
+                    self.request_plane.as_ref(),
+                    request,
+                )
+                .await
+            }
         }
     }
 
@@ -715,13 +724,9 @@ where
                 .generate_bidirectional(instance, address, input)
                 .await
         } else {
-            StreamingDispatch::<T, U>::generate_bidirectional(
-                self.request_plane.as_ref(),
-                instance,
-                address,
-                input,
-            )
-            .await
+            self.request_plane
+                .dispatch_bidirectional(instance, address, input)
+                .await
         }
     }
 
