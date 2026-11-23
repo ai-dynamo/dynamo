@@ -16,15 +16,23 @@ const fn default_track_prefill_tokens() -> bool {
     true
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActiveSequenceEventOrigin {
+    #[default]
+    Router,
+    Worker,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ActiveSequenceEvent {
     pub request_id: String,
     pub worker: WorkerWithDpRank,
     pub data: ActiveSequenceEventData,
-    /// Source DRT identity, used to suppress a publisher's own echo. Router events use the router
-    /// ID; worker-origin completion marks use the worker ID.
+    /// Router identity for echo suppression; unused for worker events.
     pub router_id: u64,
     pub lora_name: Option<String>,
+    #[serde(default)]
+    pub origin: ActiveSequenceEventOrigin,
 }
 
 /// Active-sequence lifecycle events carried in publisher-queue arrival order.
