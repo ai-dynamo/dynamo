@@ -58,10 +58,14 @@ impl<'a> RequestInfo<'a> {
         self.session_context
     }
 
-    /// The exact worker/rank imposed on the request, if any: the pin the caller requires
-    /// and, at worker selection, also an eligible exclusive-affinity target. This is
-    /// read-only routing metadata, not permission to change eligibility; a classifier's soft
-    /// selection target and a dispatch gate's `Go` target cannot override it.
+    /// The exact worker/rank the request's host requires, if any, the same value at every
+    /// stage, such as an explicit target on the request, a session binding the host resolved
+    /// to one rank before selection, or the worker a route preview chose. At worker selection
+    /// the policy is offered only this worker. This is read-only routing metadata, not
+    /// permission to change eligibility; a classifier's soft selection target and a dispatch
+    /// gate's `Go` target cannot override it. A session-affinity target the host passes
+    /// without pinning is not a pin, even when the selector treats it as exclusive: a policy
+    /// reads it through [`WorkerSelectionRequest::affinity_target`].
     #[inline]
     pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
         self.pinned_worker

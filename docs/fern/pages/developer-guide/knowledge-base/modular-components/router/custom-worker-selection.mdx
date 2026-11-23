@@ -428,7 +428,7 @@ Filters, scorers, and pickers receive each request as a `WorkerSelectionRequest`
 | `request_id()` | Optional request ID; `None` for a selection that tracks no request |
 | `isl_tokens()` | Input sequence length in tokens; zero when the request has no token IDs, such as embeddings-only input |
 | `session_context()` | Optional session metadata described below |
-| `pinned_worker()` | Exact worker and rank imposed on the request, if any: the caller's pin or an eligible exclusive-affinity target. Read-only: Dynamo offers the policy only this worker |
+| `pinned_worker()` | Exact worker and rank the request must run on, if any, such as an explicit request target, a hard session binding to one rank, or the worker Dynamo chose when it previewed the route. Read-only: Dynamo offers the policy only this worker. A session binding that Dynamo passes only as `affinity_target()` is not a pin |
 
 What exists only at worker selection is on the `WorkerSelectionRequest` itself:
 

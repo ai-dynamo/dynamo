@@ -120,9 +120,9 @@ pub trait WorkerSelectionPolicyHostExt: sealed::Sealed + Sized {
 
 /// The facts about a request that every stage reads. It takes every value, so a place that
 /// builds a [`RequestInfo`] fails to compile until it supplies a fact added later.
-/// `pinned_worker` is the exact worker and rank imposed on the request: the caller's pin, or
-/// at worker selection what eligibility imposes, which includes an eligible
-/// exclusive-affinity target.
+/// `pinned_worker` is the exact worker and rank the request's host requires, the same value
+/// at every stage. An affinity target is not a pin, even when the selector treats it as
+/// exclusive.
 #[inline]
 pub fn request_info<'a>(
     request_id: Option<&'a str>,

@@ -345,8 +345,9 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         Ok(source)
     }
 
-    /// The policy's view of the request, pinned to what eligibility imposes. It borrows this
-    /// source for the resident block counts the host lent, so it lives no longer than the source.
+    /// The policy's view of the request, with eligibility's pinned worker. An exclusive
+    /// affinity target narrows the rows and is not a pin. It borrows this source for the
+    /// resident block counts the host lent, so it lives no longer than the source.
     pub(super) fn selection_request(&self) -> WorkerSelectionRequest<'_> {
         worker_selection_request(
             self.request,
@@ -583,7 +584,7 @@ impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
 }
 
 /// The fields of `request` a policy may read, as [`WorkerSelectionRequest`] exposes them,
-/// pinned to the worker eligibility imposes.
+/// with `pinned_worker` as its pin.
 fn worker_selection_request(
     request: &SchedulingRequest,
     block_size: u32,
