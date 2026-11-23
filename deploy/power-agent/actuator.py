@@ -1058,15 +1058,41 @@ class DcgmActuator:
         # NVML side: enumerate this process's NVML indices -> UUIDs.
         # No DCGM dependency here — bare pynvml.
         nvml_index_by_uuid: dict[str, int] = {}
+        unreadable_nvml_indices: list[int] = []
         nvml_count = pynvml.nvmlDeviceGetCount()
         for nvml_idx in range(nvml_count):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
-            raw_uuid = pynvml.nvmlDeviceGetUUID(handle)
+            # A GPU that has fallen off the bus fails these calls with
+            # NVML_ERROR_GPU_IS_LOST. Leave it out of the map so the other
+            # GPUs keep a usable identity; its own PID reads then fail
+            # per GPU in list_running_pids.
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
+                raw_uuid = pynvml.nvmlDeviceGetUUID(handle)
+            except pynvml.NVMLError as err:
+                logger.warning(
+                    "DcgmActuator: NVML index %d cannot be queried (%s); "
+                    "leaving it out of the identity map.",
+                    nvml_idx,
+                    err,
+                )
+                unreadable_nvml_indices.append(nvml_idx)
+                continue
             uuid = self._normalize_uuid(raw_uuid, source=f"NVML index={nvml_idx}")
             nvml_index_by_uuid[uuid] = nvml_idx
 
         missing = [u for u in dcgm_uuids if u not in nvml_index_by_uuid]
-        if missing:
+        if missing and len(missing) <= len(unreadable_nvml_indices):
+            # Every DCGM UUID that NVML did not name can be one of the GPUs
+            # NVML could not query, so this is not a disagreement about the
+            # GPU set. Those GPUs fail on their own; the rest are mapped.
+            logger.warning(
+                "DcgmActuator: %d GPU UUID(s) visible to DCGM are unresolved "
+                "because NVML could not query index(es) %r: %r.",
+                len(missing),
+                unreadable_nvml_indices,
+                missing,
+            )
+        elif missing:
             raise RuntimeError(
                 f"DcgmActuator: {len(missing)} GPU UUID(s) visible to "
                 f"DCGM are not visible to NVML in this process: "
