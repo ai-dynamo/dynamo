@@ -72,6 +72,16 @@
           "parallel_tool_calls_false_single_call",
           "plain_no_tools",
           "plain_usage_counts_consistent",
+          "regression_allowed_tools_auto_catalog_chat_completions",
+          "regression_allowed_tools_auto_catalog_responses",
+          "regression_allowed_tools_auto_text_chat_completions",
+          "regression_allowed_tools_auto_text_responses",
+          "regression_allowed_tools_required_catalog_chat_completions",
+          "regression_allowed_tools_required_catalog_responses",
+          "regression_allowed_tools_unknown_chat_completions",
+          "regression_allowed_tools_unknown_responses",
+          "regression_auto_regex_fallback",
+          "regression_nonstrict_regex_control",
           "reject_empty_tools_array",
           "reject_named_tool_choice_not_in_tools",
           "required_max_completion_tokens_alias_truncates",
@@ -85,6 +95,42 @@
           "kimi_k2": [
             "customer_kimi_consume_prior_tool_result",
             "customer_kimi_parallel_weather_final_answer"
+          ],
+          "qwen3_coder": [
+            "regression_qwen_auto_nonstrict_empty_arguments",
+            "regression_qwen_escaped_ref_requires_arguments"
+          ],
+          "kimi_k3": [
+            "regression_tool_images_in_order",
+            "regression_tool_images_multiple_per_result",
+            "regression_tool_images_reverse_order"
+          ],
+          "glm5": [
+            "regression_guided_choice_answer_in_content",
+            "regression_guided_grammar_answer_in_content",
+            "regression_guided_json_answer_in_content",
+            "regression_guided_regex_answer_in_content",
+            "regression_response_format_answer_in_content",
+            "regression_tool_images_in_order",
+            "regression_tool_images_multiple_per_result",
+            "regression_tool_images_reverse_order"
+          ],
+          "glm47": [
+            "regression_guided_choice_answer_in_content",
+            "regression_guided_grammar_answer_in_content",
+            "regression_guided_json_answer_in_content",
+            "regression_guided_regex_answer_in_content",
+            "regression_response_format_answer_in_content",
+            "regression_tool_images_in_order",
+            "regression_tool_images_multiple_per_result",
+            "regression_tool_images_reverse_order"
+          ],
+          "minimax_m2": [
+            "regression_guided_choice_answer_in_content",
+            "regression_guided_grammar_answer_in_content",
+            "regression_guided_json_answer_in_content",
+            "regression_guided_regex_answer_in_content",
+            "regression_response_format_answer_in_content"
           ]
         },
         "complete_case_profiles": [

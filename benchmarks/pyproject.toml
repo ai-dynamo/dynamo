@@ -41,6 +41,8 @@ classifiers = [
 dependencies = [
     "aisimulate==0.13.0.dev202610290000000087 ; python_version >= '3.11' and python_version < '3.14'",
     "aiperf==0.13.0",
+    "jsonschema>=4.23,<5",
+    "referencing>=0.35,<1",
     "matplotlib",
     "networkx",
     "numpy",

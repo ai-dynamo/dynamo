@@ -13,13 +13,14 @@ import tool_calling_probe as probe  # noqa: E402
 import tool_calling_static_report as static_report  # noqa: E402
 
 
-def test_muse_profile_contains_61_cases_and_122_two_mode_records() -> None:
+def test_muse_profile_contains_74_cases_and_148_two_mode_records() -> None:
     cases = probe.build_cases("muse_glimmer")
 
-    assert len(cases) == 61
-    assert len(cases) * 2 == 122
+    assert len(cases) == 74
+    assert len(cases) * 2 == 148
     assert len({case.case_id for case in cases}) == len(cases)
-    assert all(case.case_id.startswith("muse_") for case in cases)
+    assert sum(case.case_id.startswith("muse_") for case in cases) == 61
+    assert sum(case.case_id.startswith("regression_") for case in cases) == 13
 
 
 def test_muse_profile_never_sends_a_thinking_control() -> None:

@@ -42,15 +42,15 @@ def test_qualification_profile_has_bounded_stratified_coverage() -> None:
     custom_selection, selection_hash = _custom_selection(
         profile["custom"], "google/gemma-4-31B-it"
     )
-    assert len(custom_selection["case_ids"]) == 61
-    assert len(custom_selection["case_groups"]["generic"]) == 61
+    assert len(custom_selection["case_ids"]) == 71
+    assert len(custom_selection["case_groups"]["generic"]) == 71
     assert custom_selection["case_groups"]["model_specific"] == []
     assert (
         sum(case_id.startswith("customer_") for case_id in custom_selection["case_ids"])
         == 8
     )
     assert "customer_truncated_tool_markup_hidden" in custom_selection["case_ids"]
-    assert custom_selection["record_count"] == 122
+    assert custom_selection["record_count"] == 142
     assert "exclude_cases" not in profile["custom"]
     assert profile["custom"]["modes"] == ["nonstream", "stream"]
     assert profile["custom"]["concurrency"] == 8
@@ -69,7 +69,7 @@ def test_all_public_profiles_resolve_to_the_same_qualification_budget() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("generic_cases", ["only-one"], "exactly 61 generic case IDs"),
+        ("generic_cases", ["only-one"], "exactly 71 generic case IDs"),
         ("modes", ["nonstream"], "modes must be nonstream,stream"),
         ("iterations", 2, "exactly 1 iteration"),
     ],
@@ -92,15 +92,38 @@ def test_custom_selection_appends_matching_model_specific_cases() -> None:
     )
 
     assert selection["resolved_case_profile"] == "kimi_k2"
-    assert len(selection["case_groups"]["generic"]) == 61
+    assert len(selection["case_groups"]["generic"]) == 71
     assert selection["case_groups"]["model_specific"] == [
         "customer_kimi_consume_prior_tool_result",
         "customer_kimi_parallel_weather_final_answer",
     ]
-    assert selection["generic_record_count"] == 122
+    assert selection["generic_record_count"] == 142
     assert selection["model_specific_record_count"] == 4
-    assert selection["record_count"] == 126
+    assert selection["record_count"] == 146
     assert len(selection_hash) == 64
+
+
+@pytest.mark.parametrize(
+    ("model", "case_profile", "case_count", "record_count"),
+    [
+        ("moonshotai/Kimi-K3", "kimi_k3", 74, 148),
+        ("z-ai/GLM-5.3-Flash", "glm5", 79, 158),
+        ("z-ai/GLM-4.7", "glm47", 79, 158),
+        ("MiniMaxAI/MiniMax-M2.7", "minimax_m2", 76, 152),
+        ("Qwen/Qwen3.6-35B-A3B", "qwen3_coder", 73, 146),
+    ],
+)
+def test_family_regressions_have_bounded_qualification_matrices(
+    model: str, case_profile: str, case_count: int, record_count: int
+) -> None:
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+    selection, _ = _custom_selection(profile["custom"], model)
+
+    assert selection["resolved_case_profile"] == case_profile
+    assert selection["generic_case_count"] == 71
+    assert len(selection["case_ids"]) == case_count
+    assert selection["record_count"] == record_count
+    assert selection["model_specific_case_count"] == case_count - 71
 
 
 def test_muse_uses_complete_profile_without_generic_thinking_controls() -> None:
@@ -113,15 +136,15 @@ def test_muse_uses_complete_profile_without_generic_thinking_controls() -> None:
     assert selection["resolved_case_profile"] == "muse_glimmer"
     assert selection["case_groups"]["generic"] == []
     assert selection["case_groups"]["model_specific"] == []
-    assert len(selection["case_groups"]["complete_profile"]) == 61
-    assert len(selection["case_ids"]) == 61
+    assert len(selection["case_groups"]["complete_profile"]) == 74
+    assert len(selection["case_ids"]) == 74
     assert selection["generic_case_count"] == 0
     assert selection["model_specific_case_count"] == 0
-    assert selection["complete_profile_case_count"] == 61
+    assert selection["complete_profile_case_count"] == 74
     assert selection["generic_record_count"] == 0
     assert selection["model_specific_record_count"] == 0
-    assert selection["complete_profile_record_count"] == 122
-    assert selection["record_count"] == 122
+    assert selection["complete_profile_record_count"] == 148
+    assert selection["record_count"] == 148
     assert selection["temperature"] == 1.0
     assert len(selection_hash) == 64
 
@@ -134,11 +157,11 @@ def test_qwen36_27b_uses_complete_qwen_xml_profile() -> None:
     assert selection["resolved_case_profile"] == "qwen3_coder_xml"
     assert selection["case_groups"]["generic"] == []
     assert selection["case_groups"]["model_specific"] == []
-    assert len(selection["case_groups"]["complete_profile"]) == 63
-    assert len(selection["case_ids"]) == 63
-    assert selection["complete_profile_case_count"] == 63
-    assert selection["complete_profile_record_count"] == 126
-    assert selection["record_count"] == 126
+    assert len(selection["case_groups"]["complete_profile"]) == 75
+    assert len(selection["case_ids"]) == 75
+    assert selection["complete_profile_case_count"] == 75
+    assert selection["complete_profile_record_count"] == 150
+    assert selection["record_count"] == 150
     assert selection["temperature"] == 0.0
     assert len(selection_hash) == 64
 
@@ -151,10 +174,10 @@ def test_minimax_m3_resolves_to_its_own_profile_with_generic_cases() -> None:
     )
 
     assert selection["resolved_case_profile"] == "minimax_m3"
-    assert len(selection["case_groups"]["generic"]) == 61
+    assert len(selection["case_groups"]["generic"]) == 71
     assert selection["case_groups"]["model_specific"] == []
     assert selection["case_groups"]["complete_profile"] == []
-    assert selection["record_count"] == 122
+    assert selection["record_count"] == 142
     assert len(selection_hash) == 64
 
 
@@ -440,16 +463,16 @@ def test_custom_dry_run_uses_realistic_qualification_matrix(tmp_path: Path) -> N
     assert command[1].endswith("benchmarks/tool_calling/custom_runner.py")
     assert "--case-profile" in command
     case_ids = command[command.index("--cases") + 1].split(",")
-    assert len(case_ids) == 61
+    assert len(case_ids) == 71
     assert "--exclude-cases" not in command
     assert command[command.index("--modes") + 1] == "nonstream,stream"
     selection = json.loads((output_dir / "custom-case-ids.json").read_text())
     assert selection["case_ids"] == case_ids
     assert selection["resolved_case_profile"] == "gemma4"
     assert selection["case_groups"]["model_specific"] == []
-    assert selection["record_count"] == 122
-    assert result["coverage"]["resolved_case_count"] == 61
-    assert result["coverage"]["generic_case_count"] == 61
+    assert selection["record_count"] == 142
+    assert result["coverage"]["resolved_case_count"] == 71
+    assert result["coverage"]["generic_case_count"] == 71
     assert result["coverage"]["model_specific_case_count"] == 0
     assert result["provenance"]["selection_hash"] == selection["selection_hash"]
 
@@ -482,11 +505,11 @@ def test_custom_dry_run_appends_model_specific_matrix(tmp_path: Path) -> None:
     case_ids = command[command.index("--cases") + 1].split(",")
     assert selection["resolved_case_profile"] == "kimi_k2"
     assert selection["case_ids"] == case_ids
-    assert len(selection["case_groups"]["generic"]) == 61
+    assert len(selection["case_groups"]["generic"]) == 71
     assert len(selection["case_groups"]["model_specific"]) == 2
-    assert selection["record_count"] == 126
-    assert result["coverage"]["resolved_case_count"] == 63
-    assert result["coverage"]["generic_case_count"] == 61
+    assert selection["record_count"] == 146
+    assert result["coverage"]["resolved_case_count"] == 73
+    assert result["coverage"]["generic_case_count"] == 71
     assert result["coverage"]["model_specific_case_count"] == 2
 
 
@@ -518,11 +541,11 @@ def test_muse_custom_dry_run_uses_complete_sampled_matrix(tmp_path: Path) -> Non
     case_ids = command[command.index("--cases") + 1].split(",")
     assert selection["resolved_case_profile"] == "muse_glimmer"
     assert selection["case_ids"] == case_ids
-    assert len(case_ids) == 61
-    assert selection["record_count"] == 122
+    assert len(case_ids) == 74
+    assert selection["record_count"] == 148
     assert command[command.index("--temperature") + 1] == "1.0"
     assert result["coverage"]["generic_case_count"] == 0
-    assert result["coverage"]["complete_profile_case_count"] == 61
+    assert result["coverage"]["complete_profile_case_count"] == 74
     assert result["coverage"]["resolved_temperature"] == 1.0
 
 
@@ -550,9 +573,9 @@ def test_custom_normalizes_the_complete_detailed_report(
                         "iterations": 1,
                     },
                     "summary": {
-                        "passed": 121,
+                        "passed": 141,
                         "failed": 1,
-                        "total": 122,
+                        "total": 142,
                         "failure_categories": {
                             "dynamo_api": 1,
                             "infrastructure": 0,
@@ -584,11 +607,11 @@ def test_custom_normalizes_the_complete_detailed_report(
     assert result["execution_status"] == "complete"
     assert result["verdict"] == "fail"
     assert result["summary"] == {
-        "passed": 121,
+        "passed": 141,
         "failed": 1,
-        "total": 122,
-        "completed": 122,
-        "score": 121 / 122,
+        "total": 142,
+        "completed": 142,
+        "score": 141 / 142,
         "failure_categories": {
             "dynamo_api": 1,
             "infrastructure": 0,
@@ -604,7 +627,7 @@ def test_custom_normalizes_the_complete_detailed_report(
         "serving_errors": 1,
     }
     assert result["coverage"]["resolved_case_profile"] == "gemma4"
-    assert result["coverage"]["resolved_case_count"] == 61
+    assert result["coverage"]["resolved_case_count"] == 71
     assert len(result["provenance"]["selection_hash"]) == 64
 
 
@@ -692,7 +715,7 @@ def test_custom_rejects_a_report_with_case_selection_drift(
                         "modes": ["nonstream", "stream"],
                         "iterations": 1,
                     },
-                    "summary": {"passed": 122, "failed": 0, "total": 122},
+                    "summary": {"passed": 142, "failed": 0, "total": 142},
                 }
             ),
             encoding="utf-8",

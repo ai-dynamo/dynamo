@@ -33,7 +33,7 @@ benchmark scores.
 
 | Suite | Fixed coverage | Target |
 |---|---:|---:|
-| Custom | 61 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 10–12 min |
+| Custom | 71 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 10–12 min |
 | BFCL | 50 BFCL v3 cases across 8 categories | 3–5 min |
 | tau2 | 9 tasks: 3 each from airline, retail, and telecom | 10–12 min |
 
@@ -45,7 +45,113 @@ The exact selections, budgets, concurrency, and evaluator image digests live in
 Custom tests exercise OpenAI Chat Completions request and response contracts,
 including tool choice, schemas, parallel calls, streaming finish reasons,
 reasoning separation, parser-marker leakage, truncation, history, and
-multi-turn tool execution.
+multi-turn tool execution. Targeted allowed-tools regressions also exercise
+the Responses API, including its native unary and SSE completion/error states.
+
+Install the lightweight Custom client dependencies in the evaluator's Python
+environment before invoking a new test bundle:
+
+```bash
+python3 -m pip install -r benchmarks/tool_calling/requirements.txt
+```
+
+These dependencies are also declared in the benchmark and CPU-test dependencies.
+
+The shared regression definitions in `custom/regression_cases.py` add ten
+generic cases and eight distinct family cases. Complete profiles append these
+definitions too; they do not silently replace them with their original JSON
+selection.
+
+| Regression group | Cases | Source |
+|---|---|---|
+| Allowed tool catalog and selection | `auto`/`required` catalog visibility, text-only `auto`, unknown selection; Chat and Responses | dynamo #18429, #18496 |
+| Argument schemas and framing | Automatic regex fallback and non-strict control; Qwen empty calls and escaped references; Muse decoded string lengths and delimiter data | dynamo #17513; frontend-crates #570, #644 |
+| Tool-result image identity | Seeded call history with ordered/reversed results and multiple images in one result | frontend-crates #283 |
+
+Qualification selects 71 generic cases, 73 for Kimi K2, 74 for Kimi K3,
+79 for GLM, 76 for MiniMax M2, 73 for the inline Qwen Coder profile, 74 for
+complete Muse, and 75 for complete Qwen XML. Each case runs in both modes.
+A model is not required to generate
+multiple calls just because parallel calls are permitted; image-order cases
+start with fixed historical call IDs.
+
+Tool-choice checks use the actual request after overrides. Returning a call
+outside an explicit allowed subset or returning multiple calls with
+`parallel_tool_calls:false` fails Dynamo compatibility. A text-only answer is
+valid under `allowed_tools.mode:auto`.
+
+Decoded arguments are checked with the declared JSON Schema dialect (2020-12
+when omitted), including local references, composition, string constraints,
+and extra properties. Schema retrieval over the network is disabled. A schema
+the verifier cannot safely evaluate produces an inconclusive result. Explicit
+strict constraints, global strict mode, and case-declared effective constraints
+are compatibility checks. Other declared-schema violations remain model-quality
+checks; `strict:false` and patterns deliberately relaxed by automatic guidance
+are not silently promoted to strict requirements. Global schema mode `off`
+disables enforcement attribution, while retaining argument-quality checks.
+
+Vision cases require an explicit `vision` deployment capability. Pass deployment
+metadata through the existing request contract, for example:
+
+```json
+{
+  "enabled": {"enable_thinking": true},
+  "disabled": {"enable_thinking": false},
+  "capabilities": ["vision"],
+  "schema_mode": "auto",
+  "provenance": {
+    "parser_version": "2",
+    "grammar_backend": "xgrammar",
+    "dynamo_sha": "<deployed SHA>",
+    "parser_crate_version": "<deployed version>"
+  }
+}
+```
+
+These fields record the deployment contract supplied by the caller; the verifier
+does not independently inspect the running image. Missing required capabilities
+produce an explicit inconclusive record without dispatch, never a passing case.
+Catalog-token retrieval, exact argument copying and image understanding remain
+semantic checks. Keep deterministic Rust renderer/parser regressions alongside
+these live diagnostics when attributing a semantic failure to Dynamo.
+
+Some cases target fixes that may not be present in the deployed crate versions,
+including frontend-crates #283 and #644. Their records retain source PR links;
+known failures remain visible rather than being counted as passes. The Muse
+delimiter round-trip case additionally requires
+`capabilities:["muse_delimiter_string_roundtrip"]`: only enable it when the
+deployed parser promises that representation. Until that policy is settled,
+rejecting delimiter-admitting schemas can be a safe implementation choice.
+
+Five additional cases in `custom/guided_output_cases.py` cover
+[dynamo #18527](https://github.com/ai-dynamo/dynamo/issues/18527), tracked by
+[DGH-2516](https://linear.app/nvidia/issue/DGH-2516/bug-top-level-guided-json-output-lands-in-reasoning-content-with-force),
+and the proposed fix in [#18718](https://github.com/ai-dynamo/dynamo/pull/18718).
+They exercise top-level `guided_json`, `guided_choice`, `guided_regex`,
+`guided_grammar`, and one equivalent `response_format` control. Together with
+the eighteen cases above, the regression additions contain 23 distinct cases.
+Only GLM and MiniMax M2 qualification profiles add these five cases, each in
+streaming and nonstreaming mode.
+
+The guided cases preserve the customer's request defaults: no tools, no tool
+choice, no thinking-control kwargs, no explicit temperature, and a 256-token
+budget. They require the final answer in `content` and check reported
+reasoning-token accounting without estimating token counts from text length.
+Reasoning counts must be present and within the completion-token bounds.
+An all-reasoning count alongside visible answer content is a warning, since
+the frontend estimator can count a mixed reasoning/content chunk as reasoning.
+
+Run them only with capability `guided_reasoning_three_parsers` and a matching
+top-level `parser_configuration` in the request contract:
+
+| Model profile | `chat_processor` | `dynamo_reasoning_parser` | `dynamo_tool_call_parser` | `native_reasoning_parser` |
+|---|---|---|---|---|
+| `glm5`, `glm47` | `dynamo` | `glm45` | `glm47` | `glm45` |
+| `minimax_m2` | `dynamo` | `minimax_m2` | `minimax_m2` | `minimax-append-think` |
+
+Missing or mismatched configuration produces an explicit inconclusive record
+without dispatch. CPU checks validate the cases and verifier behavior;
+confirming the production fix requires targeted runs after redeployment.
 
 Response readers accept both `reasoning` and `reasoning_content` in messages,
 streaming deltas, and provider fields. Matching aliases are read once;
@@ -101,7 +207,7 @@ first one in the table order raised by an error of that category.
 ```mermaid
 flowchart LR
     M[Served model ID] --> P[Resolve model profile]
-    G[61 generic cases] --> S[Exact selection]
+    G[71 generic cases] --> S[Exact selection]
     P --> X[Matching model-specific cases]
     X --> S
     P --> F[Optional complete model profile]

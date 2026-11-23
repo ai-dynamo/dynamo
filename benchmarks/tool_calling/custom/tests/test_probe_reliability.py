@@ -47,11 +47,11 @@ def error_kinds(errors: list[dict]) -> set[str]:
     return {str(item.get("kind")) for item in errors}
 
 
-def test_qualification_uses_the_same_61_generic_cases_for_inline_profiles() -> None:
+def test_qualification_uses_the_same_71_generic_cases_for_inline_profiles() -> None:
     expected_ids = qualification_generic_case_ids()
 
-    assert len(expected_ids) == 61
-    assert len(set(expected_ids)) == 61
+    assert len(expected_ids) == 71
+    assert len(set(expected_ids)) == 71
     generic_cases = probe.build_cases("generic")
     assert {case.case_id for case in generic_cases} == set(expected_ids)
     assert all(case.profiles == ("generic",) for case in generic_cases)
@@ -99,11 +99,11 @@ def test_kimi_models_resolve_by_generation() -> None:
     assert probe.model_case_profile("moonshotai/Kimi-K2.6") == "kimi_k2"
     assert probe.model_case_profile("nvidia/Kimi-K2.6-NVFP4") == "kimi_k2"
     assert probe.model_case_profile("moonshotai/Kimi-K3") == "kimi_k3"
-    # K3 has no model-specific cases yet, so its profile selects exactly the
-    # generic qualification set; the K2 customer regressions stay on kimi_k2.
+    # K3 adds image-identity checks; K2's customer regressions stay on kimi_k2.
     assert {case.case_id for case in probe.build_cases("kimi_k3")} == set(
-        qualification_generic_case_ids()
+        qualification_case_ids("kimi_k3")
     )
+    assert len(qualification_case_ids("kimi_k3")) == 74
 
 
 def test_minimax_models_resolve_by_generation() -> None:
@@ -122,11 +122,34 @@ def test_minimax_models_resolve_by_generation() -> None:
     )
 
 
+def test_guided_answers_are_selected_only_for_customer_parser_families() -> None:
+    guided_ids = {
+        "regression_guided_json_answer_in_content",
+        "regression_guided_choice_answer_in_content",
+        "regression_guided_regex_answer_in_content",
+        "regression_guided_grammar_answer_in_content",
+        "regression_response_format_answer_in_content",
+    }
+    config = qualification_custom_config()
+    assert config["modes"] == ["nonstream", "stream"]
+    assert guided_ids.isdisjoint(config["generic_cases"])
+
+    for profile in probe.INLINE_CASE_PROFILES:
+        selected_ids = qualification_case_ids(profile)
+        selected = probe.select_cases(
+            probe.build_cases(profile), ",".join(selected_ids)
+        )
+        actual = {case.case_id for case in selected} & guided_ids
+        assert actual == (
+            guided_ids if profile in ("glm5", "glm47", "minimax_m2") else set()
+        ), profile
+
+
 def test_qwen36_27b_resolves_to_the_complete_qwen_xml_profile() -> None:
     assert probe.model_case_profile("Qwen/Qwen3.6-27B") == "qwen3_coder_xml"
     cases = probe.build_cases("qwen3_coder_xml")
-    assert len(cases) == 63
-    assert all(case.request_overrides == {} for case in cases)
+    assert len(cases) == 75
+    assert all(not case.request_overrides for case in cases)
 
 
 def test_qwen_xml_profile_covers_explicit_strict_policy() -> None:
@@ -557,6 +580,7 @@ def test_every_known_error_kind_has_exactly_one_owner_and_subcategory() -> None:
         set(probe.DYNAMO_API_ERROR_KINDS)
         | set(probe.MODEL_QUALITY_ERROR_KINDS)
         | set(probe.INFRASTRUCTURE_ERROR_KINDS)
+        | set(probe.UNCLASSIFIED_ERROR_KINDS)
     )
     assert not (probe.DYNAMO_API_ERROR_KINDS & probe.MODEL_QUALITY_ERROR_KINDS)
     for kind in owned:
@@ -568,7 +592,7 @@ def test_every_known_error_kind_has_exactly_one_owner_and_subcategory() -> None:
             category = "model_quality"
         elif kind in probe.INFRASTRUCTURE_ERROR_KINDS:
             category = "infrastructure"
-        elif kind == "probe_exception":
+        elif kind in probe.UNCLASSIFIED_ERROR_KINDS:
             category = "unclassified"
         elif "marker_leaked" in kind:
             category = "dynamo_api"

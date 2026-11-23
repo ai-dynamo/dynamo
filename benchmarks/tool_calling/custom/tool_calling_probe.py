@@ -44,7 +44,15 @@ from pathlib import Path
 from typing import Any
 
 from case_profile_loader import available_case_profiles, load_case_profile
+from guided_output_cases import build_guided_output_cases
 from model_profiles import INLINE_CASE_PROFILES, model_case_profile
+from regression_cases import build_regression_cases
+from request_policy import effective_tool_policy
+from responses_adapter import build_responses_payload
+from responses_adapter import parse_nonstream as parse_responses_nonstream
+from responses_adapter import parse_stream as parse_responses_stream
+from schema_validation import SchemaValidationUnavailable
+from schema_validation import validate_json_schema as validate_full_schema
 
 DEFAULT_BASE_URL = "https://inference-api.nvidia.com/v1"
 DEFAULT_OUTPUT_ROOT = str(Path(__file__).resolve().parent / "data")
@@ -223,10 +231,41 @@ ERROR_KIND_SUBCATEGORIES = {
     # infrastructure / unclassified
     "request_error": "transport",
     "probe_exception": "probe",
+    "schema_unverifiable": "probe",
+    "capability_unavailable": "probe",
+    "stream_error": "server_error",
+    "responses_error": "server_error",
+    "stream_incomplete": "response_shape",
+    "malformed_stream_chunk": "response_shape",
+    "tool_policy_violation": "tool_choice_enforcement",
+    "enforced_schema_violation": "argument_encoding",
+    "responses_status": "response_shape",
+    "responses_shape": "response_shape",
+    "responses_stream_incomplete": "response_shape",
+    "responses_event_mismatch": "response_shape",
+    "responses_item_mismatch": "tool_call_identity",
+    "responses_arguments_mismatch": "argument_encoding",
+    "responses_duplicate_event": "response_shape",
 }
-INFRASTRUCTURE_ERROR_KINDS = frozenset({"request_error"})
+UNCLASSIFIED_ERROR_KINDS = frozenset(
+    {"probe_exception", "schema_unverifiable", "capability_unavailable"}
+)
+INFRASTRUCTURE_ERROR_KINDS = frozenset(
+    {"request_error", "stream_error", "responses_error"}
+)
 DYNAMO_API_ERROR_KINDS = frozenset(
     {
+        "tool_policy_violation",
+        "enforced_schema_violation",
+        "stream_incomplete",
+        "malformed_stream_chunk",
+        "responses_status",
+        "responses_shape",
+        "responses_stream_incomplete",
+        "responses_event_mismatch",
+        "responses_item_mismatch",
+        "responses_arguments_mismatch",
+        "responses_duplicate_event",
         "arguments_not_object",
         "duplicate_tool_ids",
         "empty_arguments",
@@ -1022,12 +1061,27 @@ class Case:
     # stream_options.include_usage through request_overrides).
     expect_usage: bool = False
     profiles: tuple[str, ...] = ("generic",)
+    api: str = "chat_completions"
+    regression_refs: tuple[str, ...] = ()
+    required_capabilities: tuple[str, ...] = ()
+    available_capabilities: tuple[str, ...] = ()
+    expected_response_statuses: tuple[str, ...] = ("completed",)
+    schema_mode: str = "auto"
+    enforced_schemas: dict[str, Any] | None = None
+    runtime_provenance: dict[str, Any] | None = None
+    preserve_request_defaults: bool = False
+    expect_reasoning_usage: bool = False
+    required_parser_configuration: dict[str, str] | None = None
 
 
 def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     declarative_cases = load_case_profile(profile, Case)
     if declarative_cases is not None:
-        return declarative_cases
+        return (
+            *declarative_cases,
+            *build_regression_cases(Case, profile),
+            *build_guided_output_cases(Case, profile),
+        )
 
     book_flight = TOOLS["book_flight"]
     weather = TOOLS["get_weather"]
@@ -1122,6 +1176,8 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
         return merged
 
     def with_default_thinking(case: Case) -> Case:
+        if case.preserve_request_defaults:
+            return case
         return dataclasses.replace(
             case,
             request_overrides=merge_request_overrides(
@@ -3394,7 +3450,14 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
         ),
     )
 
-    all_cases = tuple(with_default_thinking(case) for case in all_cases)
+    all_cases = tuple(
+        with_default_thinking(case)
+        for case in (
+            *all_cases,
+            *build_regression_cases(Case, profile),
+            *build_guided_output_cases(Case, profile),
+        )
+    )
 
     if profile == "all":
         return all_cases
@@ -3407,57 +3470,31 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     )
 
 
-def schema_by_name(tools: tuple[dict[str, Any], ...]) -> dict[str, dict[str, Any]]:
-    schemas: dict[str, dict[str, Any]] = {}
+def tool_definitions(
+    tools: tuple[dict[str, Any], ...],
+    namespace: str | None = None,
+) -> dict[tuple[str | None, str], dict[str, Any]]:
+    definitions = {}
     for tool in tools:
-        fn = tool.get("function") or {}
+        if tool.get("type") == "namespace":
+            definitions.update(
+                tool_definitions(tuple(tool.get("tools") or ()), tool.get("name"))
+            )
+            continue
+        fn = tool.get("function") or tool
         name = fn.get("name")
         if isinstance(name, str):
-            schemas[name] = fn.get("parameters") or {}
-    return schemas
+            identity = (namespace or tool.get("namespace") or fn.get("namespace"), name)
+            definitions[identity] = fn
+    return definitions
 
 
 def validate_json_schema(
     value: Any,
-    schema: dict[str, Any],
+    schema: Any,
     path: str = "$",
 ) -> list[str]:
-    problems: list[str] = []
-    schema_type = schema.get("type")
-
-    if "enum" in schema and value not in schema["enum"]:
-        problems.append(f"{path}: {value!r} is not one of {schema['enum']!r}")
-
-    if isinstance(schema_type, list):
-        if not any(type_matches(value, item) for item in schema_type):
-            problems.append(f"{path}: expected one of {schema_type!r}")
-            return problems
-    elif isinstance(schema_type, str) and not type_matches(value, schema_type):
-        problems.append(f"{path}: expected {schema_type}, got {type(value).__name__}")
-        return problems
-
-    if schema_type == "object":
-        assert isinstance(value, dict)
-        for required in schema.get("required", []):
-            if required not in value:
-                problems.append(f"{path}: missing required field {required!r}")
-        properties = schema.get("properties") or {}
-        for key, subschema in properties.items():
-            if key in value and isinstance(subschema, dict):
-                problems.extend(
-                    validate_json_schema(value[key], subschema, f"{path}.{key}")
-                )
-
-    if schema_type == "array":
-        assert isinstance(value, list)
-        item_schema = schema.get("items")
-        if isinstance(item_schema, dict):
-            for idx, item in enumerate(value):
-                problems.extend(
-                    validate_json_schema(item, item_schema, f"{path}[{idx}]")
-                )
-
-    return problems
+    return validate_full_schema(value, schema, path)
 
 
 def find_stringified_scalars(
@@ -3620,10 +3657,26 @@ class ChatResult:
     raw_response: Any = None
     parse_errors: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     warnings: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    api: str = "chat_completions"
+    response_status: str | None = None
+    request_payload: dict[str, Any] | None = None
 
 
-def _tool_choice_requires_call(case: Case) -> bool:
-    return case.tool_choice == "required" or isinstance(case.tool_choice, dict)
+def case_request_payload(
+    case: Case, result: ChatResult | None = None
+) -> dict[str, Any]:
+    if result is not None and result.request_payload is not None:
+        return result.request_payload
+    return {
+        "tools": list(case.tools),
+        "tool_choice": case.tool_choice,
+        "parallel_tool_calls": case.parallel_tool_calls,
+        **(case.request_overrides or {}),
+    }
+
+
+def _tool_choice_requires_call(case: Case, result: ChatResult | None = None) -> bool:
+    return effective_tool_policy(case_request_payload(case, result)).requires_call
 
 
 def _error_failure_category(
@@ -3639,7 +3692,7 @@ def _error_failure_category(
         if not isinstance(status, int) or status in {408, 429} or status >= 500:
             return "infrastructure"
         return "dynamo_api"
-    if kind == "probe_exception":
+    if kind in UNCLASSIFIED_ERROR_KINDS:
         return "unclassified"
 
     if kind in DYNAMO_API_ERROR_KINDS or "marker_leaked" in kind:
@@ -3647,7 +3700,7 @@ def _error_failure_category(
     if kind == "unexpected_finish_reason":
         if result.finish_reason is None:
             return "dynamo_api"
-        if _tool_choice_requires_call(case) and not result.tool_calls:
+        if _tool_choice_requires_call(case, result) and not result.tool_calls:
             return "dynamo_api"
         if result.finish_reason == "tool_calls":
             # The frontend synthesizes tool_calls; when the case forbids it
@@ -3655,7 +3708,8 @@ def _error_failure_category(
             return "dynamo_api"
         return "model_quality"
     if kind == "unexpected_tool_calls":
-        return "dynamo_api" if case.tool_choice == "none" else "model_quality"
+        mode = effective_tool_policy(case_request_payload(case, result)).mode
+        return "dynamo_api" if mode == "none" else "model_quality"
     if kind in MODEL_QUALITY_ERROR_KINDS or kind.startswith(
         ("missing_expected_", "too_few_")
     ):
@@ -3680,9 +3734,12 @@ def _error_failure_subcategory(
     if kind == "unexpected_finish_reason":
         if result.finish_reason is None:
             return "response_shape"
-        if _tool_choice_requires_call(case) and not result.tool_calls:
+        if _tool_choice_requires_call(case, result) and not result.tool_calls:
             return "tool_choice_enforcement"
-        if case.tool_choice == "none" and result.tool_calls:
+        if (
+            effective_tool_policy(case_request_payload(case, result)).mode == "none"
+            and result.tool_calls
+        ):
             return "tool_choice_enforcement"
         return "finish_reason" if category == "dynamo_api" else "tool_selection"
     if kind == "unexpected_tool_calls" and category == "dynamo_api":
@@ -3787,10 +3844,16 @@ def build_payload(
     # max_completion_tokens is the only budget the request carries.
     if "max_tokens" in payload and payload["max_tokens"] is None:
         del payload["max_tokens"]
+    if "temperature" in payload and payload["temperature"] is None:
+        del payload["temperature"]
     # stream_options is only valid on a streaming request; the same case runs
     # in both modes, so drop it from the nonstream payload.
     if not stream:
         payload.pop("stream_options", None)
+    if case.api == "responses":
+        return build_responses_payload(payload)
+    if case.api != "chat_completions":
+        raise ValueError(f"unknown API: {case.api!r}")
     return payload
 
 
@@ -3917,6 +3980,7 @@ def request_stream(
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
     raw_chunks: list[Any] = []
     result = ChatResult(raw_response=raw_chunks)
+    saw_done = False
 
     with post_json(
         url,
@@ -3937,6 +4001,7 @@ def request_stream(
 
             data = line[len("data:") :].strip()
             if data == "[DONE]":
+                saw_done = True
                 break
 
             if result.chunk_count == 0:
@@ -3952,6 +4017,20 @@ def request_stream(
                 continue
 
             raw_chunks.append(chunk)
+            if not isinstance(chunk, dict):
+                result.parse_errors.append(
+                    error("malformed_stream_chunk", "SSE data is not an object")
+                )
+                continue
+            if chunk.get("error") is not None:
+                result.parse_errors.append(
+                    error(
+                        "stream_error",
+                        "endpoint emitted an SSE error",
+                        error=chunk["error"],
+                    )
+                )
+                continue
             if isinstance(chunk.get("usage"), dict):
                 result.usage = chunk["usage"]
             result.response_id = result.response_id or str(chunk.get("id") or "")
@@ -4043,6 +4122,10 @@ def request_stream(
                         if fn_delta.get("arguments"):
                             entry["function"]["arguments"] += str(fn_delta["arguments"])
 
+    if not saw_done:
+        result.parse_errors.append(
+            error("stream_incomplete", "Chat stream ended without [DONE]")
+        )
     result.content = "".join(content_parts)
     result.reasoning_content = "".join(reasoning_parts)
     result.tool_calls = [
@@ -4349,6 +4432,35 @@ def validate_result(
     errors = list(result.parse_errors)
     warnings = list(result.warnings)
     allowed_finish = set(case.expected_finish_reasons)
+    request_payload = case_request_payload(case, result)
+    policy = effective_tool_policy(request_payload)
+
+    if (
+        result.api == "responses"
+        and result.response_status not in case.expected_response_statuses
+    ):
+        errors.append(
+            error(
+                "responses_status",
+                f"Responses status {result.response_status!r} is not one of {case.expected_response_statuses!r}",
+            )
+        )
+    if policy.max_calls is not None and len(result.tool_calls) > policy.max_calls:
+        errors.append(
+            error(
+                "tool_policy_violation",
+                "parallel_tool_calls=false returned more than one tool call",
+                call_count=len(result.tool_calls),
+            )
+        )
+    if (
+        policy.requires_call
+        and not result.tool_calls
+        and result.finish_reason not in (None, "length")
+    ):
+        errors.append(
+            error("tool_policy_violation", "required tool choice returned no tool call")
+        )
 
     if result.finish_reason not in allowed_finish:
         errors.append(
@@ -4404,7 +4516,12 @@ def validate_result(
 
     names = []
     decoded_calls: list[tuple[str, dict[str, Any]]] = []
-    schemas = schema_by_name(case.tools)
+    effective_tools = tuple(request_payload.get("tools") or ())
+    declared_tools = tool_definitions(effective_tools)
+    schemas = {
+        identity: {} if fn.get("parameters") is None else fn["parameters"]
+        for identity, fn in declared_tools.items()
+    }
     ids = []
 
     for idx, tc in enumerate(result.tool_calls):
@@ -4426,13 +4543,25 @@ def validate_result(
             )
             continue
         names.append(name)
+        namespace = tc.get("namespace") or fn.get("namespace")
+        identity = (namespace, name)
+        if not policy.allows(name, namespace):
+            errors.append(
+                error(
+                    "tool_policy_violation",
+                    f"tool {name!r} is not allowed by tool_choice",
+                    allowed_names=sorted(policy.allowed_names),
+                )
+            )
 
-        if schemas and name not in schemas:
+        if schemas and identity not in schemas:
             errors.append(
                 error(
                     "unknown_tool_name",
                     f"tool call {idx} used unknown function {name!r}",
-                    known=sorted(schemas),
+                    known=sorted(
+                        f"{ns}.{leaf}" if ns else leaf for ns, leaf in schemas
+                    ),
                 )
             )
 
@@ -4441,8 +4570,13 @@ def validate_result(
             continue
         decoded_calls.append((name, args))
 
-        if case.validate_schema and name in schemas:
-            stringified = find_stringified_scalars(args, schemas[name])
+        if case.validate_schema and identity in schemas:
+            schema = schemas[identity]
+            stringified = (
+                find_stringified_scalars(args, schema)
+                if isinstance(schema, dict)
+                else []
+            )
             stringified_paths = {path for path, _, _ in stringified}
             for path, expected_type, raw in stringified:
                 errors.append(
@@ -4453,10 +4587,34 @@ def validate_result(
                         expected_type=expected_type,
                     )
                 )
-            schema_errors = validate_json_schema(args, schemas[name])
+            try:
+                schema_errors = validate_json_schema(args, schema)
+                enforced_schema = None
+                if case.schema_mode == "off":
+                    pass
+                elif case.schema_mode == "strict":
+                    enforced_schema = schema
+                elif (
+                    case.enforced_schemas is not None and name in case.enforced_schemas
+                ):
+                    enforced_schema = case.enforced_schemas[name]
+                elif declared_tools[identity].get("strict") is True:
+                    enforced_schema = schema
+                enforced_errors = (
+                    validate_json_schema(args, enforced_schema)
+                    if enforced_schema is not None
+                    else []
+                )
+            except SchemaValidationUnavailable as exc:
+                errors.append(error("schema_unverifiable", str(exc), tool_name=name))
+                continue
+            for schema_error in enforced_errors:
+                errors.append(
+                    error("enforced_schema_violation", schema_error, tool_name=name)
+                )
             for schema_error in schema_errors:
                 problem_path = schema_error.split(":", 1)[0]
-                if problem_path in stringified_paths:
+                if problem_path in stringified_paths or schema_error in enforced_errors:
                     continue
                 errors.append(error("schema_validation", schema_error, tool_name=name))
 
@@ -4475,7 +4633,9 @@ def validate_result(
             )
         )
 
-    leaked_names = find_tool_call_json_leaks(result.content or "", sorted(schemas))
+    leaked_names = find_tool_call_json_leaks(
+        result.content or "", sorted({name for _, name in schemas})
+    )
     if leaked_names:
         errors.append(
             error(
@@ -4685,7 +4845,7 @@ def validate_result(
     # (dynamo #17521 / #17578).
     if (
         case.expect_reasoning is False
-        and _tool_choice_requires_call(case)
+        and _tool_choice_requires_call(case, result)
         and result.tool_calls
         and looks_like_reasoning(result.content or "")
     ):
@@ -4817,6 +4977,39 @@ def validate_result(
 
     if case.expect_usage:
         errors.extend(validate_usage(result.usage))
+    if case.expect_reasoning_usage:
+        usage = result.usage if isinstance(result.usage, dict) else {}
+        completion_tokens = usage.get("completion_tokens")
+        if reasoning_tokens is None:
+            errors.append(
+                error(
+                    "usage_inconsistent",
+                    "usage.completion_tokens_details.reasoning_tokens is missing or is not a non-negative integer",
+                )
+            )
+        elif (
+            isinstance(completion_tokens, int)
+            and not isinstance(completion_tokens, bool)
+            and reasoning_tokens > completion_tokens
+        ):
+            errors.append(
+                error(
+                    "usage_inconsistent", "reasoning_tokens exceeds completion_tokens"
+                )
+            )
+        elif (
+            (result.content or "").strip()
+            and reasoning_tokens == completion_tokens
+            and reasoning_tokens > 0
+        ):
+            # The frontend can count a mixed reasoning/content chunk wholly as
+            # reasoning. Public usage alone cannot establish an exact split.
+            warnings.append(
+                error(
+                    "reasoning_usage_estimate",
+                    "all completion tokens are reported as reasoning despite visible answer content",
+                )
+            )
 
     for marker in RAW_REASONING_MARKERS:
         if marker in (result.content or ""):
@@ -4890,14 +5083,52 @@ def request_chat(
 ) -> tuple[ChatResult, dict[str, Any]]:
     stream = mode == "stream"
     payload = build_payload(
-        case,
+        dataclasses.replace(case, messages=tuple(messages)),
         model=model,
         stream=stream,
         temperature=temperature,
         default_max_tokens=max_tokens,
     )
-    payload["messages"] = list(messages)
-    if stream:
+    result = request_completion(
+        case.api,
+        url,
+        payload,
+        api_key=api_key,
+        timeout=timeout,
+        extra_headers=extra_headers,
+    )
+    return result, payload
+
+
+def request_completion(
+    api: str,
+    url: str,
+    payload: dict[str, Any],
+    *,
+    api_key: str | None,
+    timeout: float,
+    extra_headers: dict[str, str],
+) -> ChatResult:
+    if api == "responses":
+        responses_url = url.removesuffix("/chat/completions")
+        if not responses_url.endswith("/responses"):
+            responses_url += "/responses"
+        started = time.monotonic()
+        with post_json(
+            responses_url,
+            payload,
+            api_key=api_key,
+            timeout=timeout,
+            extra_headers=extra_headers,
+        ) as resp:
+            fields = (
+                parse_responses_stream(resp)
+                if payload.get("stream")
+                else parse_responses_nonstream(json.loads(resp.read().decode("utf-8")))
+            )
+        result = ChatResult(**fields)
+        result.latency_ms = (time.monotonic() - started) * 1000.0
+    elif payload.get("stream"):
         result = request_stream(
             url,
             payload,
@@ -4913,7 +5144,8 @@ def request_chat(
             timeout=timeout,
             extra_headers=extra_headers,
         )
-    return result, payload
+    result.request_payload = payload
+    return result
 
 
 def _step_findings(findings: list[dict[str, Any]], step: int) -> list[dict[str, Any]]:
@@ -4987,7 +5219,9 @@ def run_scripted_followup_case(
                     {
                         "role": "tool",
                         "tool_call_id": tool_call.get("id") or "",
-                        "content": str(tool_result),
+                        "content": tool_result
+                        if isinstance(tool_result, (str, list))
+                        else json.dumps(tool_result, ensure_ascii=False),
                     }
                 )
 
@@ -5371,6 +5605,44 @@ def run_case(
     raw_chars: int,
     record_success_raw: bool,
 ) -> dict[str, Any]:
+    missing_capabilities = sorted(
+        set(case.required_capabilities) - set(case.available_capabilities)
+    )
+    parser_configuration = (case.runtime_provenance or {}).get(
+        "parser_configuration"
+    ) or {}
+    if not isinstance(parser_configuration, dict):
+        parser_configuration = {}
+    parser_mismatches = {
+        name: {"expected": expected, "actual": parser_configuration.get(name)}
+        for name, expected in (case.required_parser_configuration or {}).items()
+        if parser_configuration.get(name) != expected
+    }
+    if missing_capabilities or parser_mismatches:
+        finding = error(
+            "capability_unavailable",
+            "required deployment capabilities or parser configuration were not declared",
+            missing=missing_capabilities,
+            parser_configuration_mismatches=parser_mismatches,
+        )
+        return {
+            "timestamp": utc_now(),
+            "iteration": iteration,
+            "case_id": case.case_id,
+            "description": case.description,
+            "mode": mode,
+            "api": case.api,
+            "pass": False,
+            "failure_category": "unclassified",
+            "failure_subcategory": "probe",
+            "failure_kinds": [finding["kind"]],
+            "errors": [finding],
+            "warnings": [],
+            "regression_refs": list(case.regression_refs),
+            "required_capabilities": list(case.required_capabilities),
+            "runtime_provenance": case.runtime_provenance or {},
+            "response": {},
+        }
     if case.scripted_followup:
         return run_scripted_followup_case(
             case,
@@ -5413,22 +5685,14 @@ def run_case(
     started = utc_now()
 
     try:
-        if stream:
-            result = request_stream(
-                url,
-                payload,
-                api_key=api_key,
-                timeout=timeout,
-                extra_headers=extra_headers,
-            )
-        else:
-            result = request_nonstream(
-                url,
-                payload,
-                api_key=api_key,
-                timeout=timeout,
-                extra_headers=extra_headers,
-            )
+        result = request_completion(
+            case.api,
+            url,
+            payload,
+            api_key=api_key,
+            timeout=timeout,
+            extra_headers=extra_headers,
+        )
         if case.expected_http_status is not None:
             # The request was supposed to be rejected. Response-level checks
             # are meaningless, so report only the contract violation.
@@ -5498,6 +5762,10 @@ def run_case(
         "case_id": case.case_id,
         "description": case.description,
         "mode": mode,
+        "api": case.api,
+        "regression_refs": list(case.regression_refs),
+        "required_capabilities": list(case.required_capabilities),
+        "runtime_provenance": case.runtime_provenance or {},
         "pass": passed,
         "failure_category": failure_category,
         "failure_subcategory": failure_subcategory,
@@ -5506,6 +5774,8 @@ def run_case(
         "warnings": warnings,
         "response": {
             "id": result.response_id,
+            "api": result.api,
+            "status": result.response_status,
             "model": result.model,
             "created": result.created,
             "finish_reason": result.finish_reason,
@@ -5517,6 +5787,9 @@ def run_case(
             "tool_calls": [
                 {
                     "id": tc.get("id"),
+                    "item_id": tc.get("item_id"),
+                    "namespace": tc.get("namespace")
+                    or (tc.get("function") or {}).get("namespace"),
                     "name": (tc.get("function") or {}).get("name"),
                     "arguments": (tc.get("function") or {}).get("arguments"),
                 }

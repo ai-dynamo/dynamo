@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..custom.model_profiles import model_case_profile
+from ..custom.regression_cases import (
+    common_regression_case_ids,
+    profile_regression_case_ids,
+)
 from . import CONTRACT_VERSION
 from .bfcl_capture import FAILURES_FILE, TRACE_FILE
 
@@ -26,7 +30,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILES = ROOT / "profiles.json"
 SUITES = ("custom", "bfcl", "tau2")
 CUSTOM_SELECTION_FILE = "custom-case-ids.json"
-CUSTOM_GENERIC_CASE_COUNT = 61
+CUSTOM_GENERIC_CASE_COUNT = 71
 CUSTOM_MODES = ("nonstream", "stream")
 CUSTOM_ITERATIONS = 1
 DECLARATIVE_PROFILE_ROOT = ROOT.parent / "custom" / "configs" / "case_profiles"
@@ -205,7 +209,14 @@ def _complete_profile_case_ids(profile: str) -> tuple[str, ...]:
             f"case profile {profile} declares {expected} cases but contains "
             f"{len(case_ids)}"
         )
-    return case_ids
+    combined = (
+        *case_ids,
+        *common_regression_case_ids(),
+        *profile_regression_case_ids(profile),
+    )
+    if len(combined) != len(set(combined)):
+        raise ValueError(f"duplicate complete custom regression IDs in {profile}")
+    return tuple(sorted(combined))
 
 
 def _custom_selection(

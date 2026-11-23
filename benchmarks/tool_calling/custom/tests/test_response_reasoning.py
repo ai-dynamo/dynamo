@@ -49,7 +49,9 @@ def test_streaming_aliases_are_not_duplicated_and_can_alternate(monkeypatch):
         },
     ]
     raw = [{"choices": [{"delta": delta}]} for delta in deltas]
-    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in raw)
+    body = (
+        "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in raw) + "data: [DONE]\n\n"
+    )
     monkeypatch.setattr(probe, "post_json", lambda *a, **k: io.BytesIO(body.encode()))
     result = probe.request_stream(
         "unused", {}, api_key=None, timeout=1, extra_headers={}

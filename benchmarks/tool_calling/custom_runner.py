@@ -24,7 +24,33 @@ def apply_request_contract(
     disabled = contract.get("disabled", {})
     if not isinstance(enabled, dict) or not isinstance(disabled, dict):
         raise ValueError("request contract enabled/disabled values must be objects")
-    if not enabled and not disabled:
+    capabilities = contract.get("capabilities", [])
+    provenance = contract.get("provenance", {})
+    parser_configuration = contract.get("parser_configuration", {})
+    schema_mode = contract.get("schema_mode")
+    if not isinstance(capabilities, list) or not all(
+        isinstance(value, str) for value in capabilities
+    ):
+        raise ValueError("request contract capabilities must be a string list")
+    if not isinstance(provenance, dict):
+        raise ValueError("request contract provenance must be an object")
+    if not isinstance(parser_configuration, dict) or not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in parser_configuration.items()
+    ):
+        raise ValueError(
+            "request contract parser_configuration must be a string mapping"
+        )
+    if schema_mode is not None and schema_mode not in ("auto", "strict", "off"):
+        raise ValueError("request contract schema_mode must be auto, strict or off")
+    if (
+        not enabled
+        and not disabled
+        and not capabilities
+        and not provenance
+        and not parser_configuration
+        and schema_mode is None
+    ):
         return tuple(cases)
     result: list[Any] = []
     for case in cases:
@@ -33,10 +59,25 @@ def apply_request_contract(
         current = dict(current) if isinstance(current, dict) else {}
         is_disabled = any(value is False for value in current.values())
         expected = disabled if is_disabled else enabled
-        if expected:
+        if expected and not case.preserve_request_defaults:
             current.update(expected)
             overrides["chat_template_kwargs"] = current
-        result.append(dataclasses.replace(case, request_overrides=overrides))
+        result.append(
+            dataclasses.replace(
+                case,
+                request_overrides=overrides,
+                available_capabilities=tuple(capabilities),
+                runtime_provenance={
+                    **provenance,
+                    **(
+                        {"parser_configuration": dict(parser_configuration)}
+                        if parser_configuration
+                        else {}
+                    ),
+                },
+                schema_mode=case.schema_mode if schema_mode is None else schema_mode,
+            )
+        )
     return tuple(result)
 
 
