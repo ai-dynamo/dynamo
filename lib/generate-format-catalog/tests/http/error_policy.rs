@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use dynamo_runtime::error::{ErrorReason, ErrorType as Backend};
+use dynamo_runtime::error::{BackendError, ErrorReason, ErrorType as Backend};
 
 struct ErrorEngine(Vec<Backend>, bool);
 
@@ -144,6 +144,16 @@ async fn native_error_phase_and_nested_chain_compatibility() {
                 (500, Internal, "internal server error"),
             ],
         ),
+        // A backend-raised worker overload normalizes to `CapacityExhausted`,
+        // so it takes the shared overload status, as on the OpenAI path.
+        (
+            vec![Backend::Backend(BackendError::WorkerOverloaded)],
+            [
+                (overload, Unavailable, "Service temporarily overloaded"),
+                (500, Internal, "Internal server error"),
+                (500, Internal, "internal server error"),
+            ],
+        ),
         (
             vec![Backend::CapacityExhausted, Backend::Cancelled],
             [
@@ -244,6 +254,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
                                         Backend::WorkerOverloaded
                                             | Backend::RateLimited
                                             | Backend::CapacityExhausted
+                                            | Backend::Backend(BackendError::WorkerOverloaded)
                                     )
                                 )
                         ),
