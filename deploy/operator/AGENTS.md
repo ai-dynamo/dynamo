@@ -29,6 +29,9 @@ SPDX-License-Identifier: Apache-2.0
 - Before approving a CRD API change, the operator reviewer must verify that
   affected curated pages remain aligned with the Go types, runtime behavior,
   and regenerated reference, even when no curated page changed in the PR.
+- `deploy/operator/docs/footer.md` is hand-written prose, and both generated
+  pages publish it. A change to this file does not request a Docs review, so
+  the operator reviewer also reviews this prose as user-facing documentation.
 - When introducing CRD/admission or platform chart breaking changes, or dependency
   compatibility changes that require migration, update the platform README's
   `Upgrading` section in the same PR. Edit
