@@ -1050,10 +1050,16 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
         let text = scrape(port).await;
         let declared = declared_families(&text);
         let scraped: Names = declared.iter().cloned().collect();
-        assert_eq!(
-            declared.len(),
-            scraped.len(),
-            "/metrics declares a family more than once:\n{text}"
+        // Report family names, not the raw body: the names are all a failure
+        // needs, and the body would be echoed verbatim into the test log.
+        let duplicated: Names = scraped
+            .iter()
+            .filter(|name| declared.iter().filter(|d| d == name).count() > 1)
+            .cloned()
+            .collect();
+        assert!(
+            duplicated.is_empty(),
+            "/metrics declares these families more than once: {duplicated:?}"
         );
         let exported = otlp_export_families(&drt_metrics);
 
@@ -1107,18 +1113,20 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
         let (token, task) = spawn_service(service, listener);
         wait_for_metrics_ready(port).await;
         let text = scrape(port).await;
+        let served: Names = declared_families(&text).into_iter().collect();
         assert!(
             !text.contains("dynamo_frontend_requests_total"),
-            "the first service's series are still served:\n{text}"
+            "the first service's series are still served; families on /metrics: {served:?}"
         );
-        assert!(
-            text.contains("dynamo_frontend_metrics_start_time_seconds"),
-            "{text}"
-        );
-        assert!(
-            text.contains("dynamo_component_otlp_parity_probe_total"),
-            "{text}"
-        );
+        for name in [
+            "dynamo_frontend_metrics_start_time_seconds",
+            "dynamo_component_otlp_parity_probe_total",
+        ] {
+            assert!(
+                text.contains(name),
+                "{name} not on /metrics; families on /metrics: {served:?}"
+            );
+        }
         let exported = otlp_export_families(&drt_metrics);
         assert!(exported.contains("dynamo_frontend_metrics_start_time_seconds"));
         assert!(!exported.contains("dynamo_frontend_requests_total"));
