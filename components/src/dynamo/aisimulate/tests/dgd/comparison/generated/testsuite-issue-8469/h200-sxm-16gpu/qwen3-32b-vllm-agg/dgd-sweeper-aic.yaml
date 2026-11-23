@@ -43,8 +43,6 @@ spec:
           - '1'
           - --data-parallel-size
           - '1'
-          - --block-size
-          - '64'
           - --gpu-memory-utilization
           - '0.9'
           - --max-num-seqs

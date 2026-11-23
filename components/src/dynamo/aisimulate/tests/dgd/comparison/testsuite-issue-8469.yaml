@@ -141,6 +141,11 @@ tests:
   - case: nemotron-3-super-fp8-sglang-agg
     hardware: h200-sxm-4gpu
     exceptions:
+      recommend:
+        aic:
+          status: broken
+          reason: AISim's SGLang H200 performance data lacks the model's FP8 MoE measurements.
+          match: '(?s)MoE data missing for MoeKey.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -152,6 +157,11 @@ tests:
   - case: nemotron-3-super-fp8-sglang-disagg
     hardware: h200-sxm-4gpu
     exceptions:
+      recommend:
+        aic:
+          status: broken
+          reason: AISim's SGLang H200 performance data lacks the model's FP8 MoE measurements.
+          match: '(?s)MoE data missing for MoeKey.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -171,6 +181,11 @@ tests:
   - case: nemotron-3-super-fp8-vllm-agg
     hardware: h200-sxm-4gpu
     exceptions:
+      recommend:
+        aic:
+          status: broken
+          reason: The DGD output adapter refuses implicit remote-code trust for a mutable model ref.
+          match: "Refusing to auto-inject --trust-remote-code for mutable remote model ref 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8'"
       render:
         profiler-v1beta1:
           status: broken
@@ -216,6 +231,11 @@ tests:
   - case: qwen3-32b-fp8-vllm-disagg
     hardware: a100-sxm-8gpu
     exceptions:
+      recommend:
+        aic:
+          status: broken
+          reason: A100 does not support the model's required FP8 tensor-core compute mode.
+          match: "(?s)GPU a100_sxm .* does not support FP8 tensor-core compute.*no feasible candidate found"
       render:
         sweeper:
           status: broken

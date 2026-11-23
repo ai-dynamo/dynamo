@@ -43,8 +43,6 @@ spec:
           - '1'
           - --data-parallel-size
           - '1'
-          - --block-size
-          - '64'
           - --gpu-memory-utilization
           - '0.9'
           - --max-num-seqs
@@ -564,7 +562,6 @@ spec:
           - '510'
           - '511'
           - '512'
-          - --no-enable-prefix-caching
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
@@ -604,8 +601,6 @@ spec:
           - '1'
           - --data-parallel-size
           - '1'
-          - --block-size
-          - '64'
           - --gpu-memory-utilization
           - '0.9'
           - --max-num-seqs

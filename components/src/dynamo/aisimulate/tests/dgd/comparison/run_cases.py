@@ -397,9 +397,7 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
                 "type": "constant_rate",
                 "requests_per_second": workload["request_rate"],
             },
-            "stop": {
-                "requests_per_load_unit": workload["num_request_ratio"],
-            },
+            "stop": {"requests": 1},
         },
         "engine": engine,
         "optimization": {

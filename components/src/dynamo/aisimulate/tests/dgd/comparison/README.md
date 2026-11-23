@@ -26,13 +26,14 @@ Every suite row runs as a parametrized Planner CPU integration test in
 [`test_model_corpus.py`](../test_model_corpus.py) and
 [`test_model_corpus_part2.py`](../test_model_corpus_part2.py). The split lets the two Planner CPU
 workers share the full table instead of serializing it as one pytest module. Each test composes the
-case and hardware inputs, executes one seeded public-CLI recommendation suggestion, and requires
+case and hardware inputs, executes one seeded public-CLI recommendation suggestion with a single
+simulated request, and requires
 either a successful default-AIC DGD with a checked-in parsed-YAML golden or a deliberate negative
-expectation with an exact diagnostic. One suggestion is sufficient for model/backend/hardware and
-output-adapter smoke coverage, avoids architecture-sensitive winner selection between candidates,
-and keeps the full table inside the pre-merge CPU budget. Tests generate into pytest's temporary
-directory. A golden mismatch writes an adjacent `.new.yaml` proposal and prints the unified diff and
-acceptance command in the failing test output. The smaller
+expectation with an exact diagnostic. One suggestion and request are sufficient for
+model/backend/hardware and output-adapter smoke coverage, avoid architecture-sensitive winner
+selection between candidates, and keep the full table inside the pre-merge CPU budget. Tests
+generate into pytest's temporary directory. A golden mismatch writes an adjacent `.new.yaml`
+proposal and prints the unified diff and acceptance command in the failing test output. The smaller
 [DGD CLI E2E table](../e2e/test_dgd_cli.py) uses the same command and assertions with tiny fixed
 searches. Neither path deploys generated manifests or recipes.
 

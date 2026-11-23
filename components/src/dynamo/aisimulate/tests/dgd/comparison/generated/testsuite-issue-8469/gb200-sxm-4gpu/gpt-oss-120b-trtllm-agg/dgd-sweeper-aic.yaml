@@ -25,7 +25,7 @@ spec:
               name: hf-token-secret
   - name: TRTLLMWorker
     type: worker
-    replicas: 2
+    replicas: 1
     podTemplate:
       spec:
         containers:
@@ -43,6 +43,7 @@ spec:
           - '1'
           - --expert-parallel-size
           - '2'
+          - --enable-attention-dp
           - --max-batch-size
           - '512'
           - --max-num-tokens
@@ -55,8 +56,6 @@ spec:
           - AUTO
           - --trtllm.kv_cache_config.dtype
           - auto
-          - --trtllm.kv_cache_config.tokens_per_block
-          - '64'
           - --trtllm.kv_cache_config.enable_block_reuse
           - 'true'
           - --trtllm.cuda_graph_config.enable_padding
@@ -71,12 +70,14 @@ spec:
           - openai/gpt-oss-120b
           - --trtllm.enable_chunked_prefill
           - 'true'
+          - --max-seq-len
+          - '131072'
           resources:
             limits:
-              nvidia.com/gpu: '2'
+              nvidia.com/gpu: '4'
             requests:
               ephemeral-storage: 2Gi
-              nvidia.com/gpu: '2'
+              nvidia.com/gpu: '4'
           envFrom:
           - secretRef:
               name: hf-token-secret

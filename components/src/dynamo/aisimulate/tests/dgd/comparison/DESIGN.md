@@ -292,11 +292,12 @@ sampler, and renderers. Each pytest case composes the case and hardware input, e
 - an explicit `exceptions.recommend.aic` negative expectation with a precise diagnostic regex.
 
 The table is split across two pytest modules so both Planner CPU workers run it concurrently. Each
-row evaluates one seeded suggestion: enough to exercise the model/backend/hardware and AIC output
-path without architecture-sensitive winner selection between candidates. Each case writes to
-`tmp_path`, compares parsed YAML against the owning suite's checked-in AIC golden, and leaves that
-golden unchanged. A missing or changed golden produces an adjacent `.new.yaml` proposal plus a
-unified diff and acceptance command in the failure output.
+row evaluates one seeded suggestion against a single simulated request: enough to exercise the
+model/backend/hardware and AIC output path without architecture-sensitive winner selection between
+candidates or a full performance run. Each case writes to `tmp_path`, compares parsed YAML against
+the owning suite's checked-in AIC golden, and leaves that golden unchanged. A missing or changed
+golden produces an adjacent `.new.yaml` proposal plus a unified diff and acceptance command in the
+failure output.
 
 The full comparison runner remains available for manual profiler/AIC/direct generation and
 cross-generator investigation. Its unit tests cover composition and failure isolation. Direct

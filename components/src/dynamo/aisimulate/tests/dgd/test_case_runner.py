@@ -176,7 +176,7 @@ def test_recommendation_config_preserves_comparison_intent(
                 "output_tokens": 128,
             },
             "load": {"type": "constant_rate", "requests_per_second": 10},
-            "stop": {"requests_per_load_unit": 10},
+            "stop": {"requests": 1},
         },
         "engine": {
             "mode": "disaggregated",
