@@ -139,6 +139,12 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
         let setup = adapter.generate(Context::rejoin(request, context));
         let stream = match establish_timeout {
             Some(timeout) => tokio::time::timeout(timeout, setup).await.map_err(|_| {
+                tracing::warn!(
+                    request_id = engine_context.id(),
+                    instance_id,
+                    timeout_secs = timeout.as_secs_f64(),
+                    "engine did not establish its response stream before the timeout"
+                );
                 error(
                     ErrorType::ResponseTimeout,
                     format!(
