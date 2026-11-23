@@ -148,6 +148,11 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// The worker loads `/inference/v1/generate` `content_parts` sent as
+/// `multi_modal_data`. Older workers drop that input and answer without the
+/// media, so absence means unsupported.
+pub const VLLM_GENERATE_CONTENT_PARTS_CAPABILITY: &str = "vllm_generate_content_parts";
+
 /// An opted-in worker can consume opaque JSON through `multi_modal_data`.
 /// Absence means unsupported, including workers predating this transport.
 pub const JSON_MULTIMODAL_CAPABILITY: &str = "custom_json_v1";

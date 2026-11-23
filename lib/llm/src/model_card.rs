@@ -1398,6 +1398,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0custom_json_v1\0true");
                 }
 
+                // Nor can Generate content_parts, which older workers drop.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_GENERATE_CONTENT_PARTS_CAPABILITY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_generate_content_parts\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -3681,6 +3688,14 @@ mod ownership_tests {
             .insert(capability.into(), true.into());
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+
+        // Older workers drop Generate content_parts, so they never share a set either.
+        let mut content_parts = ModelDeploymentCard::with_name_only("model");
+        content_parts.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::VLLM_GENERATE_CONTENT_PARTS_CAPABILITY.into(),
+            true.into(),
+        );
+        assert_ne!(missing.mdcsum(), content_parts.mdcsum());
     }
 
     #[test]

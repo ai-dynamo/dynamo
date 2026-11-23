@@ -13,6 +13,7 @@ fn routing_metadata(
         kv_cache_block_size,
         tower_connector_lora_enabled,
         lora_name,
+        supports_content_parts: true,
     }
 }
 
@@ -665,4 +666,12 @@ fn content_parts_become_the_workers_multimodal_input() {
             ],
         )]))
     );
+
+    // Older workers would drop the media and answer without it.
+    let old_worker = Worker {
+        supports_content_parts: false,
+        ..routing_metadata(16, false, None)
+    };
+    let request = serde_json::from_value(raw).unwrap();
+    assert!(preprocessed_from_generate(request, "test-model", None, "id", &old_worker).is_err());
 }

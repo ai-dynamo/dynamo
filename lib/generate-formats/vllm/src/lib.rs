@@ -436,7 +436,11 @@ fn preprocessed_from_generate(
     let skip_reading_prefix_cache = sampling.skip_reading_prefix_cache();
     // Keep the token buffer only in the routed request; workers reconstruct it.
     let token_ids = std::mem::take(&mut request.token_ids);
-    let media = ContentMedia::new(request.content_parts.take().unwrap_or_default())?;
+    let content_parts = request.content_parts.take().unwrap_or_default();
+    if !content_parts.is_empty() && !worker.supports_content_parts {
+        anyhow::bail!("this model's workers do not support content_parts; upgrade them");
+    }
+    let media = ContentMedia::new(content_parts)?;
     request.request_id = Some(request_id.to_string());
     if request.model.is_some() {
         request.model = Some(model.to_string());
