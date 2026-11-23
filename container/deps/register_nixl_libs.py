@@ -67,9 +67,27 @@ def link_dir(link: Path, lib_dir: Path) -> None:
     link.symlink_to(lib_dir)
 
 
-def dlopens(env_updates: dict[str, str | None]) -> bool:
-    """Run the dlopen check in a child process, since the loader reads
-    LD_LIBRARY_PATH only at startup."""
+class _LinkMap(ctypes.Structure):
+    _fields_ = [("l_addr", ctypes.c_void_p), ("l_name", ctypes.c_char_p)]
+
+
+def loaded_path(lib: ctypes.CDLL) -> Path:
+    """Return the canonical path of the file the loader opened for lib."""
+    try:
+        dlinfo = ctypes.CDLL(None).dlinfo
+    except AttributeError:
+        dlinfo = ctypes.CDLL("libdl.so.2").dlinfo
+    link_map = ctypes.POINTER(_LinkMap)()
+    if dlinfo(ctypes.c_void_p(lib._handle), 2, ctypes.byref(link_map)) != 0:
+        raise OSError("dlinfo(RTLD_DI_LINKMAP) failed")
+    return Path(os.fsdecode(link_map.contents.l_name)).resolve()
+
+
+def check_dlopen(env_updates: dict[str, str | None], expected: Path) -> str | None:
+    """Return why a bare dlopen does not open expected, or None if it does.
+
+    Runs in a child process, since the loader reads LD_LIBRARY_PATH only at
+    startup."""
     env = dict(os.environ)
     env.pop("LD_PRELOAD", None)
     for key, value in env_updates.items():
@@ -80,9 +98,15 @@ def dlopens(env_updates: dict[str, str | None]) -> bool:
     result = subprocess.run(
         [sys.executable, __file__, "--check-dlopen"],
         env=env,
-        stderr=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        return result.stderr.strip() or f"probe exited {result.returncode}"
+    loaded = Path(result.stdout.strip())
+    if loaded != expected:
+        return f"loader opened {loaded}, not {expected}"
+    return None
 
 
 def main() -> None:
@@ -98,7 +122,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.check_dlopen:
-        ctypes.CDLL(CAPI)
+        try:
+            print(loaded_path(ctypes.CDLL(CAPI)))
+        except OSError as e:
+            raise SystemExit(f"dlopen({CAPI}) failed: {e}") from e
         return
 
     lib_dir = (args.lib_dir or wheel_lib_dir(args.cuda_major)).resolve()
@@ -110,10 +137,12 @@ def main() -> None:
     if not (lib_dir / "plugins").is_dir():
         die(f"missing {lib_dir / 'plugins'}; NIXL layout changed")
 
+    capi = (lib_dir / CAPI).resolve()
     if args.link:
         link_dir(args.link, lib_dir)
-        if not dlopens({"LD_LIBRARY_PATH": str(args.link)}):
-            die(f"{CAPI} could not be dlopened via {args.link}")
+        error = check_dlopen({"LD_LIBRARY_PATH": str(args.link)}, capi)
+        if error:
+            die(f"{CAPI} via {args.link}: {error}")
 
     LD_CONF.write_text(f"{lib_dir}\n")
     subprocess.run(["ldconfig"], check=True)
@@ -123,17 +152,18 @@ def main() -> None:
     # (st_dev, st_ino, st_size, st_ctime), which overlayfs recycles across
     # layers, and drops a directory whose (st_dev, st_ino) it already queued.
     # Retry once without the aux-cache, then fail.
-    if not dlopens({"LD_LIBRARY_PATH": None}):
+    if check_dlopen({"LD_LIBRARY_PATH": None}, capi):
         AUX_CACHE.unlink(missing_ok=True)
         subprocess.run(["ldconfig"], check=True)
-        if not dlopens({"LD_LIBRARY_PATH": None}):
+        error = check_dlopen({"LD_LIBRARY_PATH": None}, capi)
+        if error:
             verbose = subprocess.run(
                 ["ldconfig", "-v"], capture_output=True, text=True
             ).stderr
             for line in verbose.splitlines():
                 if "given more than once" in line:
                     print(line, file=sys.stderr)
-            die(f"ldconfig will not cache {CAPI} from {lib_dir}")
+            die(f"{CAPI} from {lib_dir} via ld.so.cache: {error}")
 
     via = f" via {args.link}" if args.link else ""
     print(f"register_nixl_libs: registered {lib_dir}{via}")
