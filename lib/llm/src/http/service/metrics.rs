@@ -697,26 +697,32 @@ mod tests {
     }
 
     #[test]
-    fn migration_limit_gauge_reports_frontend_limit() {
-        // The assertion reads the exported name, so do not take a prefix from the environment.
+    fn mdc_gauges_report_card_sizes_and_frontend_migration_limit() {
+        // The assertions read the exported names, so do not take a prefix from the environment.
         let metrics = Metrics::new_with_prefix(None);
         let registry = Registry::new();
         metrics.register(&registry).unwrap();
         let mut card = ModelDeploymentCard::default();
         card.display_name = "test-model".to_string();
+        // Three different values: each gauge must get its own.
+        card.runtime_config.context_length = Some(8192);
+        card.kv_cache_block_size = 32;
         // Workers publish 0 here; the frontend's own limit must win.
         card.migration_limit = 0;
 
         update_metrics_from_mdc(&metrics, &card, 3).unwrap();
 
-        assert_eq!(
-            model_ready_value_with_name(
-                &registry,
-                "dynamo_frontend_model_migration_limit",
-                "test-model",
-            ),
-            Some(3.0)
-        );
+        for (name, expected) in [
+            ("dynamo_frontend_model_context_length", 8192.0),
+            ("dynamo_frontend_model_kv_cache_block_size", 32.0),
+            ("dynamo_frontend_model_migration_limit", 3.0),
+        ] {
+            assert_eq!(
+                model_ready_value_with_name(&registry, name, "test-model"),
+                Some(expected),
+                "{name}"
+            );
+        }
     }
 
     #[test]
