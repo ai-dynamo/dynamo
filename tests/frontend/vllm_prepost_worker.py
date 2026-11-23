@@ -47,6 +47,8 @@ class VllmPrepostTestHandler:
             "output_options": request.get("output_options"),
             "eos_token_ids": request.get("eos_token_ids"),
             "agent_context": request.get("agent_context"),
+            "image_cache_scope": request.get("image_cache_scope"),
+            "routing": request.get("routing"),
             "decoded_prompt": self.tokenizer.decode(
                 token_ids,
                 skip_special_tokens=False,

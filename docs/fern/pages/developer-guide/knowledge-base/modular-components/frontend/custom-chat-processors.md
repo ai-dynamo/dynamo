@@ -64,6 +64,31 @@ The factory receives:
 - `routed_engine`, which sends a preprocessed request to a worker through Dynamo's router:
   `await routed_engine.generate(request, context=context)`.
 
+### What Dynamo fills in
+
+A processor sets what depends on its own rendering: `model`, `token_ids`, and any stop tokens,
+guided decoding, logprobs or multimodal fields it uses. When it passes the request's `context`,
+`routed_engine.generate` completes the preprocessed request from the client's original request
+before routing it. A field the processor sets is kept. A field it leaves out, or sets to `None`,
+is filled.
+
+| Filled when unset | From |
+|---|---|
+| `agent_context`, `image_cache_scope` | The request's session headers |
+| `routing` (worker targets, priority, expected output tokens, routing constraints, LoRA name, cache salt), `router`, `request_timestamp_ms`, `mdc_sum` | `nvext` and the model card |
+| `stop_conditions`: `max_tokens`, `min_tokens`, `ignore_eos`, `max_thinking_tokens` | The request |
+| `sampling_options`: `n`, `best_of`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `logit_bias`, and the presence, frequency and repetition penalties | The request |
+| `extra_args.nvext`: `extra_fields`, `metadata_upload`, `cache_salt` | `nvext` |
+| `extra_args.sampling_options`: `allowed_token_ids`, `bad_words_token_ids`, `logprob_token_ids`, `vllm_xargs`, `detokenize` | The request |
+
+Dynamo never fills the fields that only the processor can decide: `token_ids`, stop strings and
+stop token IDs, `sampling_options.guided_decoding`, `output_options`, `eos_token_ids`,
+`annotations`, `require_reasoning` and the multimodal fields.
+
+`routed_engine.generate` also checks the engine's token budget against the length of `token_ids`
+and the client's `max_tokens`. A request that does not fit raises `RoutedEngineError`, which the
+Frontend returns as a context-length error.
+
 ## Register and run it
 
 For an installable package, register the provider under the `dynamo.frontend.chat_processors`

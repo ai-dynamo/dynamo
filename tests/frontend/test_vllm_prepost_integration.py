@@ -235,6 +235,8 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
         "tool_choice": "auto",
         "stream": True,
         "max_tokens": 128,
+        "seed": 7,
+        "nvext": {"agent_hints": {"osl": 64}},
     }
 
     response = requests.post(
@@ -249,7 +251,12 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
 
     assert captured["model"] == TEST_MODEL
     assert isinstance(captured["token_ids"], list) and captured["token_ids"]
+    # The processor sets none of these: Dynamo fills them from the client's
+    # request and its session header.
     assert captured["agent_context"]["session_id"] == "session-123"
+    assert captured["image_cache_scope"] == "session-123"
+    assert captured["routing"]["expected_output_tokens"] == 64
+    assert captured["sampling_options"]["seed"] == 7
 
     guided_decoding = captured["sampling_options"].get("guided_decoding")
     assert isinstance(guided_decoding, dict)

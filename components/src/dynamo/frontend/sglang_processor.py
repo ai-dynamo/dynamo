@@ -8,14 +8,13 @@
 import asyncio
 import json
 import logging
-import math
 import os
 import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from sglang.srt.parser.conversation import chat_template_exists
 
@@ -26,7 +25,6 @@ except ImportError:  # Optional: only `--tokenizer fastokens` needs it.
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
-from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
@@ -132,64 +130,6 @@ def _normalize_eos_token_ids(value: Any) -> list[int]:
                     seen.add(token_id)
         return token_ids
     return []
-
-
-_I32_MIN = -(2**31)
-_I32_MAX = 2**31 - 1
-_U32_MAX = 2**32 - 1
-
-
-def _is_i32(value: Any) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and _I32_MIN <= value <= _I32_MAX
-    )
-
-
-def _is_u32(value: Any) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 <= value <= _U32_MAX
-    )
-
-
-def _finite_float(value: Any) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    try:
-        result = float(value)
-    except OverflowError:
-        return None
-    return result if math.isfinite(result) else None
-
-
-def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
-    agent_hints = nvext.get("agent_hints")
-    if not isinstance(agent_hints, dict):
-        return None
-
-    routing: dict[str, Any] = {}
-    priority = agent_hints.get("priority")
-    if _is_i32(priority):
-        priority_value = cast(int, priority)
-        routing["priority"] = priority_value
-        routing["priority_jump"] = float(max(priority_value, 0))
-    else:
-        latency_sensitivity = _finite_float(agent_hints.get("latency_sensitivity"))
-        if latency_sensitivity is not None:
-            routing["priority_jump"] = latency_sensitivity
-
-    strict_priority = agent_hints.get("strict_priority")
-    if _is_u32(strict_priority):
-        routing["strict_priority"] = strict_priority
-
-    expected_output_tokens = agent_hints.get("osl")
-    if _is_u32(expected_output_tokens):
-        routing["expected_output_tokens"] = expected_output_tokens
-
-    return routing or None
 
 
 def _request_stop_strings(request: dict[str, Any]) -> set[str]:
@@ -330,59 +270,6 @@ def _runtime_config_parser_name(
         return None
     value = runtime_config.get(key)
     return value if isinstance(value, str) and value else None
-
-
-def _runtime_token_budget(mdc: ModelDeploymentCard) -> TokenBudget | None:
-    runtime_config = mdc.runtime_config()
-    if not isinstance(runtime_config, dict):
-        return None
-    runtime_data = runtime_config.get("runtime_data")
-    if not isinstance(runtime_data, dict):
-        return None
-    value = runtime_data.get(TOKEN_BUDGET_RUNTIME_KEY)
-    if value is None:
-        return None
-
-    if isinstance(value, dict):
-        combined_limit = value.get("combined_limit")
-        reject_prompt = value.get("reject_prompt_overflow", False)
-        reject_total = value.get("reject_total_overflow", False)
-        if (
-            type(combined_limit) is int
-            and 0 <= combined_limit <= _U32_MAX
-            and isinstance(reject_prompt, bool)
-            and isinstance(reject_total, bool)
-        ):
-            return TokenBudget(combined_limit, reject_prompt, reject_total)
-
-    logger.warning("Ignoring invalid %s runtime metadata", TOKEN_BUDGET_RUNTIME_KEY)
-    return None
-
-
-def _validate_requested_token_budget(
-    prompt_len: int, max_tokens: int | None, token_budget: TokenBudget
-) -> None:
-    limit = token_budget.combined_limit
-    if prompt_len >= limit:
-        if token_budget.reject_prompt_overflow:
-            raise InvalidArgument(
-                f"The prompt has {prompt_len} input tokens, leaving no room for "
-                f"generation within the {limit}-token context window. "
-                "Please reduce the input length."
-            )
-        # Backend truncation can change the prompt length.
-        return
-
-    if (
-        token_budget.reject_total_overflow
-        and max_tokens is not None
-        and prompt_len + max_tokens > limit
-    ):
-        raise InvalidArgument(
-            f"This model accepts at most {limit} combined input and output tokens. "
-            f"The request has {prompt_len} input tokens and asks for {max_tokens} "
-            "output tokens. Please reduce the input length or requested output length."
-        )
 
 
 def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
@@ -601,7 +488,11 @@ def _build_dynamo_preproc(
     require_reasoning: bool = False,
     force_reasoning: bool = False,
 ) -> dict[str, Any]:
-    """Build the Dynamo preprocessed request dict from request fields."""
+    """Build the Dynamo preprocessed request dict from request fields.
+
+    RoutedEngine.generate fills what is left out here from the client's
+    request: routing hints, the cache salt and nvext passthrough arguments.
+    """
     thinking_token_budget = resolve_thinking_token_budget(request)
     require_reasoning = require_reasoning or (
         thinking_token_budget is not None and force_reasoning
@@ -618,33 +509,6 @@ def _build_dynamo_preproc(
         stop = []
     elif stop is None:
         stop = []
-
-    nvext = request.get("nvext") or {}
-    routing = request.get("routing")
-    nvext_routing = (
-        _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
-    )
-    if isinstance(nvext, dict):
-        # Preserve explicit targets for the router to resolve in the current phase.
-        # Rank zero is a valid target; only absent/null values are omitted.
-        worker_routing = {
-            key: nvext[key]
-            for key in (
-                "backend_instance_id",
-                "decode_worker_id",
-                "prefill_worker_id",
-                "dp_rank",
-                "prefill_dp_rank",
-            )
-            if nvext.get(key) is not None
-        }
-        if worker_routing:
-            nvext_routing = {**(nvext_routing or {}), **worker_routing}
-    if isinstance(routing, dict):
-        if nvext_routing:
-            routing = {**nvext_routing, **routing}
-    else:
-        routing = nvext_routing
 
     # PreprocessedRequest.logit_bias is HashMap<u32, f32>, so JSON's str keys must
     # become int; the HTTP layer has already validated the keys and values.
@@ -697,7 +561,6 @@ def _build_dynamo_preproc(
         },
         "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
         "annotations": [],
-        "routing": routing,
     }
 
     try:
@@ -708,12 +571,6 @@ def _build_dynamo_preproc(
         raise PreprocessError(str(exc)) from exc
     if mm_data:
         preproc["multi_modal_data"] = mm_data
-
-    nvext_passthrough = {
-        key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
-    }
-    if nvext_passthrough:
-        preproc["extra_args"] = {"nvext": nvext_passthrough}
 
     return preproc
 
@@ -735,7 +592,6 @@ class SglangProcessor:
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
         prompt_renderer: PromptRenderer | None = None,
-        token_budget: TokenBudget | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -764,7 +620,6 @@ class SglangProcessor:
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
         self.prompt_renderer = prompt_renderer
-        self.token_budget = token_budget
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -1003,13 +858,6 @@ class SglangProcessor:
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
-        # Media expansion is backend-owned on this path, so only text-only
-        # requests have an exact frontend-visible prompt length.
-        if self.token_budget is not None and not dynamo_preproc.get("multi_modal_data"):
-            stop_conditions = dynamo_preproc.get("stop_conditions") or {}
-            _validate_requested_token_budget(
-                len(tokens), stop_conditions.get("max_tokens"), self.token_budget
-            )
         token_count = 0
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
@@ -1513,7 +1361,6 @@ class SglangEngineFactory:
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
             prompt_renderer=prompt_renderer,
-            token_budget=_runtime_token_budget(mdc),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

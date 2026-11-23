@@ -1414,11 +1414,6 @@ def cache_salt_processor(vllm_processor_module, monkeypatch):
     "fields,expected",
     [
         pytest.param({}, None, id="absent"),
-        pytest.param(
-            {"routing": {"backend_instance_id": 7, "cache_salt": "internal"}},
-            None,
-            id="internal-hint-is-not-public-salt",
-        ),
         pytest.param({"cache_salt": ""}, None, id="empty-legacy"),
         pytest.param({"nvext": {"cache_salt": ""}}, None, id="empty-canonical"),
         pytest.param({"cache_salt": "legacy"}, "legacy", id="legacy"),
@@ -1438,16 +1433,6 @@ def cache_salt_processor(vllm_processor_module, monkeypatch):
             id="canonical-precedence",
         ),
         pytest.param(
-            {"nvext": {"cache_salt": "tenant-a"}, "allowed_token_ids": [123]},
-            "tenant-a",
-            id="salt-with-sampling-options",
-        ),
-        pytest.param(
-            {"nvext": {"cache_salt": "canonical"}, "routing": None},
-            "canonical",
-            id="no-routing-hints",
-        ),
-        pytest.param(
             {"nvext": {"cache_salt": "dynamo-cache-salt:租户"}},
             "dynamo-cache-salt:租户",
             id="public-value-preserved",
@@ -1455,13 +1440,15 @@ def cache_salt_processor(vllm_processor_module, monkeypatch):
     ],
 )
 async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expected):
-    """Preserve public salt precedence across local, router, and worker inputs."""
+    """Salt the local prompt with the public salt.
+
+    RoutedEngine.generate gives the router and the worker theirs.
+    """
     processor, routed_engine = cache_salt_processor()
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Hello"}],
         "max_completion_tokens": 1,
-        "routing": {"backend_instance_id": 7, "priority": 2},
         **fields,
     }
     original = deepcopy(request)
@@ -1472,21 +1459,11 @@ async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expe
     preprocessed = routed_engine.requests[0]
     renderer = processor.input_processor.renderer.process_for_engine_async
     local_prompt = renderer.await_args.args[0]
+    assert "routing" not in preprocessed
+    assert "extra_args" not in preprocessed
     if expected is None:
-        assert preprocessed["routing"] == original["routing"]
-        assert "extra_args" not in preprocessed
         assert "cache_salt" not in local_prompt
     else:
-        assert preprocessed["routing"] == {
-            **(original["routing"] or {}),
-            "cache_salt": expected,
-        }
-        expected_extra_args = {"nvext": {"cache_salt": expected}}
-        if "allowed_token_ids" in fields:
-            expected_extra_args["sampling_options"] = {
-                "allowed_token_ids": fields["allowed_token_ids"]
-            }
-        assert preprocessed["extra_args"] == expected_extra_args
         assert local_prompt["cache_salt"] == expected
 
 
@@ -1495,7 +1472,7 @@ async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expe
 async def test_generator_cache_salt_survives_multimodal_metadata(
     cache_salt_processor, vllm_processor_module, monkeypatch
 ):
-    """Keep salt and multimodal metadata together without mutating the request."""
+    """Send multimodal metadata without the salt and without mutating the request."""
     feature = SimpleNamespace(
         modality="image",
         mm_hash="a" * 64,
@@ -1514,19 +1491,14 @@ async def test_generator_cache_salt_survives_multimodal_metadata(
         "messages": [{"role": "user", "content": "Hello"}],
         "max_completion_tokens": 1,
         "nvext": {"cache_salt": "canonical"},
-        "routing": {"backend_instance_id": 7, "cache_salt": "stale"},
     }
     original = deepcopy(request)
     assert [chunk async for chunk in processor._generator_inner(request)] == []
 
     assert request == original
     preprocessed = routed_engine.requests[0]
-    assert preprocessed["routing"] == {
-        "backend_instance_id": 7,
-        "cache_salt": "canonical",
-    }
+    assert "routing" not in preprocessed
     assert preprocessed["extra_args"] == {
-        "nvext": {"cache_salt": "canonical"},
         "mm_hashes": [feature.mm_hash],
         "mm_hashes_by_modality": {"image": [feature.mm_hash]},
         "mm_placeholders": [(0, 3)],
@@ -1929,12 +1901,6 @@ async def test_generator_forwards_chat_logprobs_count(
     assert (
         captured["dynamo_preproc"]["output_options"]["prompt_logprobs"]
         == expected_prompt_logprobs
-    )
-    sampling_passthrough = (
-        captured["dynamo_preproc"].get("extra_args", {}).get("sampling_options", {})
-    )
-    assert sampling_passthrough.get("logprob_token_ids") == request_options.get(
-        "logprob_token_ids"
     )
 
 
