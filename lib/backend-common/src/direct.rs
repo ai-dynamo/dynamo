@@ -602,7 +602,7 @@ impl DirectEngineHost {
                 format!("build local model: {build_error}"),
             )
         })?;
-        let mut card = local_model.card().clone();
+        let mut card = local_model.into_card();
         card.model_type = model_type;
         card.model_input = config.model_input;
         card.worker_type = Some(worker_type);
