@@ -100,6 +100,8 @@ navigation:
           path: pages/kubernetes/installation/gateway-api-routing.mdx
         - page: Operator TLS
           path: pages/kubernetes/installation/tls.md
+        - page: etcd Authentication
+          path: pages/kubernetes/installation/etcd-authentication.md
         - section: RDMA Setup
           contents:
             - page: Overview
@@ -276,6 +278,8 @@ navigation:
         contents:
           - page: Install Dynamo
             path: pages/cli/installation/install-dynamo.mdx
+          - page: etcd Authentication
+            path: pages/cli/installation/etcd-authentication.md
           - page: Minikube Setup
             path: pages/cli/installation/minikube-setup.mdx
           - page: Observability
@@ -333,8 +337,6 @@ navigation:
         contents:
           - page: Secure Deployment Guidelines
             path: pages/developer-guide/security/secure-deployment-guidelines.md
-          - page: etcd Authentication
-            path: pages/developer-guide/security/etcd-authentication.md
 
       # ==================== Knowledge Base ====================
       - section: Knowledge Base

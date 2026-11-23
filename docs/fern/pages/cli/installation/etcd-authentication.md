@@ -11,10 +11,7 @@ read and write only Dynamo's own keys.
 
 It applies when Dynamo uses etcd for discovery (`--discovery-backend etcd` or
 `DYN_DISCOVERY_BACKEND=etcd`). That is the default for Dynamo processes you
-start yourself, so it covers local, bare-metal, and other non-Kubernetes
-deployments. On Kubernetes, the Dynamo Operator uses Kubernetes-native
-discovery by default and needs no etcd; see
-[Secure Deployment Guidelines](secure-deployment-guidelines.md#discovery-plane).
+start yourself on a local or bare-metal host.
 
 ## How Dynamo reads etcd credentials
 
@@ -33,7 +30,7 @@ environment variables:
 The client applies these rules:
 
 - The three TLS variables hold **PEM contents, not file paths**. Set them with
-  `"$(cat file.pem)"` or from a Kubernetes Secret.
+  `"$(cat file.pem)"`.
 - Dynamo uses TLS only when **all three** TLS variables are set. A CA alone is
   ignored.
 - When `ETCD_AUTH_USERNAME` and `ETCD_AUTH_PASSWORD` are both set, Dynamo uses
@@ -46,7 +43,7 @@ TLS). etcd maps the certificate's common name (CN) to an etcd user and checks
 that user's role on every request. Use password authentication for Dynamo only
 on loopback or a network that no one else can reach.
 
-## Local or bare-metal setup
+## Set up etcd and Dynamo
 
 The steps below run one etcd member on `127.0.0.1` with TLS and client
 certificate authentication, create a `dynamo` user whose role is limited to the
@@ -179,75 +176,3 @@ etcdctl --endpoints=https://127.0.0.1:2379 --cacert=ca.pem \
 
 A Dynamo component started without the `ETCD_AUTH_*` variables keeps logging
 `etcd not reachable yet; retrying startup connection` and does not start.
-
-## Kubernetes setup
-
-On Kubernetes, prefer the default Kubernetes-native discovery. If you run etcd
-discovery instead, give every Dynamo component the same client certificate
-variables through a Secret.
-
-### 1. Store the client credentials in a Secret
-
-Create the Secret in the namespace of your DynamoGraphDeployment (DGD), from
-the `dynamo` client certificate and the CA that signed the etcd server
-certificate. Each Secret key is the name of the environment variable it fills.
-
-```bash
-kubectl create secret generic dynamo-etcd-client -n <namespace> \
-  --from-file=ETCD_AUTH_CA=ca.pem \
-  --from-file=ETCD_AUTH_CLIENT_CERT=dynamo.pem \
-  --from-file=ETCD_AUTH_CLIENT_KEY=dynamo-key.pem
-```
-
-### 2. Inject the Secret into each component
-
-Add an `envFrom` reference to the `main` container of every component in the
-DGD: the frontend, every worker, and the planner if you run one.
-
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-graph
-spec:
-  backendFramework: vllm
-  components:
-    - name: frontend
-      type: frontend
-      replicas: 1
-      podTemplate:
-        spec:
-          containers:
-            - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:<version>
-              envFrom:
-                - secretRef:
-                    name: dynamo-etcd-client
-    - name: worker
-      type: worker
-      replicas: 1
-      podTemplate:
-        spec:
-          containers:
-            - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>
-              envFrom:
-                - secretRef:
-                    name: dynamo-etcd-client
-```
-
-The operator sets `ETCD_ENDPOINTS` in each component from its etcd address.
-Set that address to an `https://` URL whose host name is in the etcd server
-certificate, and select etcd discovery, when you install the platform chart:
-
-```yaml
-dynamo-operator:
-  discoveryBackend: etcd
-  etcdAddr: "https://my-etcd.etcd.svc.cluster.local:2379"
-```
-
-To run the etcd that the platform chart bundles with TLS and authentication,
-see
-[Enable authentication and TLS on the bundled etcd](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#enable-authentication-and-tls-on-the-bundled-etcd)
-in the chart README. Create the `dynamo` user and role there as in
-[step 3](#3-create-the-users-and-turn-on-authentication).

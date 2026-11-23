@@ -824,7 +824,7 @@ dynamo-operator:
   etcdAddr: "https://my-external-etcd:2379"
 ```
 
-Dynamo components connect to an `https://` etcd address only when they also have a client certificate. See [etcd Authentication](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/security/etcd-authentication.md) for how components get their etcd credentials.
+Dynamo components connect to an `https://` etcd address only when they also have a client certificate. See [etcd Authentication](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/etcd-authentication.md) for how components get their etcd credentials.
 
 #### Enable authentication and TLS on the bundled etcd
 
@@ -871,9 +871,16 @@ etcd:
       certFilename: tls.crt
       certKeyFilename: tls.key
       caFilename: ca.crt
+    peer:
+      secureTransport: true
+      enableAuthentication: true
+      existingSecret: dynamo-etcd-server-tls
+      certFilename: tls.crt
+      certKeyFilename: tls.key
+      caFilename: ca.crt
 ```
 
-`auth.client.enableAuthentication` makes etcd reject clients without a certificate signed by `ca.crt`, and `auth.rbac.create` creates the `root` user and turns on authentication. When `etcd.replicaCount` is greater than 1, also encrypt traffic between etcd members with the matching `etcd.auth.peer.*` values.
+`auth.client.enableAuthentication` makes etcd reject clients without a certificate signed by `ca.crt`, and `auth.rbac.create` creates the `root` user and turns on authentication. The `auth.peer` values apply the same certificate and checks to the peer port `2380`, which etcd members use to talk to each other. Keep them even with one replica: the peer port still listens, and client certificates and RBAC on port `2379` do not cover it. The server certificate already lists the headless service names the peer URLs use.
 
 Create a `dynamo` user that can use only the `v1/` keys Dynamo stores. etcd maps the common name of a client certificate to the user, so give Dynamo components a client certificate with `CN=dynamo`, signed by the same CA:
 
@@ -895,7 +902,7 @@ kubectl exec -n dynamo-system dynamo-platform-etcd-0 -- bash -c '
 '
 ```
 
-Finally, give each Dynamo component the CA and its client certificate through a Secret, as shown in the [Kubernetes setup](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/security/etcd-authentication.md#kubernetes-setup) of the etcd Authentication guide.
+Finally, give each Dynamo component the CA and its client certificate through a Secret, as shown in [Store the client credentials in a Secret](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/etcd-authentication.md#4-store-the-client-credentials-in-a-secret) and the steps after it in the etcd Authentication guide.
 
 For detailed etcd configuration options, please refer to the official Bitnami etcd Helm chart documentation:
 **[etcd Helm Chart Documentation](https://github.com/bitnami/charts/tree/main/bitnami/etcd)**
