@@ -351,7 +351,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 		}
 	}
-	return r.generateComponentPodTemplateSpec(
+	template, err := r.generateComponentPodTemplateSpec(
 		ctx,
 		componentForRendering,
 		podLabels,
@@ -367,6 +367,18 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		checkpointInfo,
 		containerGPUs,
 	)
+	if err != nil || dcd.GetParentGraphDeploymentName() != "" {
+		return template, err
+	}
+
+	// No DGD owns an MPI SSH Secret for a standalone DCD, so its Pods keep mounting the shared one.
+	for i := range template.Spec.Volumes {
+		volume := &template.Spec.Volumes[i]
+		if source := volume.Secret; volume.Name == r.config.MPI.SSHSecretName && source != nil && source.SecretName == dynamo.MPISSHSecretName(dcd.Name) {
+			source.SecretName, source.DefaultMode = r.config.MPI.SSHSecretName, new(int32(0o644))
+		}
+	}
+	return template, nil
 }
 
 func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(

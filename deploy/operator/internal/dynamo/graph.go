@@ -1395,8 +1395,9 @@ func BackendFactory(
 		}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
-			MpiRunSecretName:    operatorConfig.MPI.SSHSecretName,
-			roleLaunchOwnership: roleLaunchOwnership,
+			MpiRunSecretName:          operatorConfig.MPI.SSHSecretName,
+			ParentGraphDeploymentName: parentGraphDeploymentName,
+			roleLaunchOwnership:       roleLaunchOwnership,
 		}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}

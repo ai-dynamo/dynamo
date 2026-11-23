@@ -302,6 +302,25 @@ key and certificate. Node-side software should accept the certificate only for t
 hardware the DGD currently holds, so a leaked key stops working when the DGD ends,
 whatever the certificate's validity period.
 
+## TensorRT-LLM Multinode MPI SSH Key
+
+For every multinode DGD created by operator 1.7.0 or newer, the operator creates Secret
+`<DGD name>-mpi-ssh` in the DGD's namespace. The DGD owns it, it is immutable, and it
+holds the DGD's own `private.key` and `private.key.pub`. The DGD's TensorRT-LLM leader
+and worker Pods mount it read-only at `/ssh-pk` with mode `0400`, so one DGD's key
+does not open another DGD's Pods.
+
+- Kubelet makes the files readable by a non-root user only through the pod `fsGroup`.
+  When you set no pod `securityContext`, the operator's default `fsGroup` covers this.
+  When you set your own pod `securityContext` and the container runs as non-root, set
+  `fsGroup` in it, or let your platform assign one (OpenShift assigns one under SCCs
+  such as `restricted-v2`, but not under `anyuid`).
+  The operator does not add one, as for any user-set `securityContext`.
+- The key is not rotated during the DGD's life. To rotate it, delete and recreate the
+  DGD.
+- DGDs created by an earlier operator keep the shared MPI SSH Secret until they are
+  recreated, so an operator upgrade does not restart their Pods.
+
 ## Reporting a Vulnerability
 
 To report a potential security vulnerability in Dynamo, follow the process in

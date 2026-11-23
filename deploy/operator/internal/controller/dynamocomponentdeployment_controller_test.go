@@ -3654,6 +3654,74 @@ func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
 	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, worker.Resources.Claims)
 }
 
+func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		owners     []metav1.OwnerReference
+		secretName string
+		mode       int32
+	}{
+		{name: "standalone DCD keeps the shared Secret", secretName: "mpi-run-ssh-secret", mode: 0o644},
+		{
+			name:       "DGD child mounts the DGD's own Secret owner-read-only",
+			owners:     []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "graph", UID: "uid-graph", Controller: new(true)}},
+			secretName: "graph-mpi-ssh",
+			mode:       0o400,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Create a two-node TRT-LLM DCD created by operator 1.7.0")
+			dcd := &v1beta1.DynamoComponentDeployment{
+				Name: "graph-worker", Namespace: "default", OwnerReferences: tc.owners,
+				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkTRTLLM),
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						ComponentName: "worker",
+						ComponentType: v1beta1.ComponentTypeWorker,
+						Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+						PodTemplate: &corev1.PodTemplateSpec{
+							Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{
+								Name:    commonconsts.MainContainerName,
+								Image:   "trtllm-test",
+								Command: []string{"python3", "-m", "dynamo.trtllm"},
+							}}},
+						},
+					},
+				},
+			}
+			reconciler := &DynamoComponentDeploymentReconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{
+					MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "mpi-run-ssh-secret", SSHSecretNamespace: "dynamo-system"},
+				},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+				},
+			}
+
+			t.Log("Render both LWS roles")
+			leader, worker, err := reconciler.workloadRenderer().renderMultinodePodTemplateSpecs(t.Context(), dcd)
+			require.NoError(t, err)
+
+			t.Log("Both roles mount the expected MPI SSH Secret with the expected mode")
+			for _, template := range []*corev1.PodTemplateSpec{leader, worker} {
+				var volume *corev1.Volume
+				for i := range template.Spec.Volumes {
+					if template.Spec.Volumes[i].Name == "mpi-run-ssh-secret" {
+						volume = &template.Spec.Volumes[i]
+					}
+				}
+				require.NotNil(t, volume)
+				require.Equal(t, tc.secretName, volume.Secret.SecretName)
+				require.Equal(t, tc.mode, *volume.Secret.DefaultMode)
+			}
+		})
+	}
+}
+
 func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing.T) {
 	t.Log("Create an LWS component with distinct complete leader and worker templates")
 	dcd := &v1beta1.DynamoComponentDeployment{

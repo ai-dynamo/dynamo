@@ -458,8 +458,12 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 		role                Role
 		multinodeDeployer   MultinodeDeployer
 		initialVolumes      []corev1.Volume
+		parentGraphName     string
+		originVersion       string
 		expectedVolumeCount int
 		shouldHaveSSHVolume bool
+		expectedSecretName  string
+		expectedDefaultMode int32
 	}{
 		{
 			name:                "Single node - no SSH volume added",
@@ -478,6 +482,8 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			initialVolumes:      []corev1.Volume{},
 			expectedVolumeCount: 1,
 			shouldHaveSSHVolume: true,
+			expectedSecretName:  mpiRunSecretName,
+			expectedDefaultMode: 0644,
 		},
 		{
 			name:                "Multinode worker - SSH volume added",
@@ -487,6 +493,8 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			initialVolumes:      []corev1.Volume{},
 			expectedVolumeCount: 1,
 			shouldHaveSSHVolume: true,
+			expectedSecretName:  mpiRunSecretName,
+			expectedDefaultMode: 0644,
 		},
 		{
 			name:              "Multinode with existing volumes",
@@ -498,13 +506,42 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectedVolumeCount: 2,
 			shouldHaveSSHVolume: true,
+			expectedSecretName:  mpiRunSecretName,
+			expectedDefaultMode: 0644,
+		},
+		{
+			name:                "Multinode DGD created before 1.7.0 keeps the shared Secret",
+			numberOfNodes:       2,
+			role:                RoleWorker,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialVolumes:      []corev1.Volume{},
+			parentGraphName:     "graph",
+			originVersion:       "1.6.0",
+			expectedVolumeCount: 1,
+			shouldHaveSSHVolume: true,
+			expectedSecretName:  mpiRunSecretName,
+			expectedDefaultMode: 0644,
+		},
+		{
+			name:                "Multinode DGD created by operator 1.7.0 mounts its own Secret owner-read-only",
+			numberOfNodes:       2,
+			role:                RoleLeader,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialVolumes:      []corev1.Volume{},
+			parentGraphName:     "graph",
+			originVersion:       "1.7.0",
+			expectedVolumeCount: 1,
+			shouldHaveSSHVolume: true,
+			expectedSecretName:  "graph-mpi-ssh",
+			expectedDefaultMode: 0400,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &TRTLLMBackend{
-				MpiRunSecretName: mpiRunSecretName,
+				MpiRunSecretName:          mpiRunSecretName,
+				ParentGraphDeploymentName: tt.parentGraphName,
 			}
 			podSpec := &corev1.PodSpec{
 				Volumes: tt.initialVolumes,
@@ -516,6 +553,9 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			}
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+			if tt.originVersion != "" {
+				component.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.originVersion}
+			}
 
 			// Call UpdatePodSpec
 			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
@@ -534,11 +574,11 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 					if volume.VolumeSource.Secret == nil {
 						t.Errorf("UpdatePodSpec() SSH volume should use Secret volume source")
 					} else {
-						if volume.VolumeSource.Secret.SecretName != mpiRunSecretName {
-							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want %s", volume.VolumeSource.Secret.SecretName, mpiRunSecretName)
+						if volume.VolumeSource.Secret.SecretName != tt.expectedSecretName {
+							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want %s", volume.VolumeSource.Secret.SecretName, tt.expectedSecretName)
 						}
-						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != 0644 {
-							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode 0644")
+						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != tt.expectedDefaultMode {
+							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode %#o", tt.expectedDefaultMode)
 						}
 					}
 					break
@@ -552,7 +592,6 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			if !tt.shouldHaveSSHVolume && hasSSHVolume {
 				t.Errorf("UpdatePodSpec() should not add SSH volume for single node deployment")
 			}
-
 		})
 	}
 }

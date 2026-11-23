@@ -65,6 +65,13 @@ var (
 		MinOriginVersion: *semver.MustParse("1.7.0"),
 	}
 
+	// TRTLLMPerDGDMPISSHKey mounts a DGD's own MPI SSH key pair in its TRT-LLM multinode Pods. Enabled
+	// for DGDs created by operator >= 1.7.0 so an upgrade does not roll existing workloads.
+	TRTLLMPerDGDMPISSHKey = Gate{
+		Name:             "TRTLLMPerDGDMPISSHKey",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
+
 	// FrontendSidecarProbeReplacement makes an authored frontend-sidecar probe
 	// replace the operator default as a complete value, matching main and the
 	// runtime sidecar. The published 1.6 operator field-merged these probes with

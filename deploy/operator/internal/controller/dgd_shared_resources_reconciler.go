@@ -63,7 +63,7 @@ func newDGDSharedResourcesReconciler(
 		checkpoints:   newDGDCheckpointsReconciler(syncer, config, runtimeConfig, dockerSecretRetriever),
 		epp:           newDGDEPPReconciler(syncer, config, runtimeConfig, restConfig),
 		waitForLeader: newDGDWaitForLeaderReconciler(syncer),
-		sshKeys:       newDGDSSHKeysReconciler(sshKeyManager),
+		sshKeys:       newDGDSSHKeysReconciler(kubeClient, sshKeyManager),
 	}
 }
 
