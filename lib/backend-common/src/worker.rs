@@ -3810,9 +3810,10 @@ mod handoff_and_lifecycle_tests {
                 .await
                 .expect("Encode worker must register");
                 let router =
-                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_options(
                         client,
                         RouterMode::RoundRobin,
+                        dynamo_llm::kv_router::plugins::push_router_options(),
                     )
                     .await
                     .unwrap();
@@ -3830,7 +3831,7 @@ mod handoff_and_lifecycle_tests {
                         .err()
                         .expect("ordinary inference cannot bypass admission"),
                 };
-                assert_eq!(error.error_type(), ErrorType::WorkerOverloaded);
+                assert_eq!(calls.load(Ordering::SeqCst), 1, "inference was admitted: {error}");
                 let mut release = request();
                 release.encoder_result = Some(serde_json::json!({"ref": "producer-owned"}));
                 release.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
@@ -3851,7 +3852,7 @@ mod handoff_and_lifecycle_tests {
                         .err()
                         .expect("held inference still fills the gate"),
                 };
-                assert_eq!(error.error_type(), ErrorType::WorkerOverloaded);
+                assert_eq!(calls.load(Ordering::SeqCst), 2, "inference was admitted: {error}");
                 drop(stream);
                 drop(held);
                 shutdown.cancel();
