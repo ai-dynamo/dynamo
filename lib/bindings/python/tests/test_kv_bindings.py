@@ -450,7 +450,7 @@ async def test_selection_service_malformed_payload_raises_value_error(
         with pytest.raises(ValueError, match="boolean"):
             await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})
 
-        for field in ("is_eagle", "engine_owned_mm_identity"):
+        for field in ("is_eagle", "engine_owned_mm_identity", "idempotent_stores"):
             with pytest.raises(ValueError, match="boolean"):
                 await service.upsert_worker({"worker_id": 1, field: "false"})
             with pytest.raises(ValueError, match="boolean"):

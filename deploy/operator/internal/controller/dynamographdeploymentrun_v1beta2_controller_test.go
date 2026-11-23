@@ -660,6 +660,48 @@ func TestV1beta2RunControllerLowersHardwareOptOutFromInputOverrides(t *testing.T
 	}
 }
 
+func TestV1beta2RunControllerWaitsForPublisherImageBeforeFreezingExecution(t *testing.T) {
+	t.Log("A missing publisher image blocks only a new execution and remains retryable")
+	run := dgdrRunForTest(t, map[string]any{})
+	f := newDGDRRunFixture(t, run)
+	f.reconciler.OperatorImage = ""
+	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err == nil || !strings.Contains(err.Error(), "operator image is required for the DGDR Run publisher") {
+		t.Fatalf("reconcile error = %v, want missing publisher image", err)
+	}
+	if errors.Is(err, reconcile.TerminalError(nil)) || meta.IsStatusConditionTrue(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
+		t.Fatalf("missing operator configuration must not complete the Run: %v", err)
+	}
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want no Job without a publisher image", len(jobs))
+	}
+	configMap := &corev1.ConfigMap{}
+	key := client.ObjectKey{Namespace: run.Namespace, Name: dgdrRunResourceName(run.Name)}
+	if err := f.client.Get(t.Context(), key, configMap); !apierrors.IsNotFound(err) {
+		t.Fatalf("execution ConfigMap error = %v, want no frozen execution", err)
+	}
+
+	t.Log("Configuring the image allows the same Run to execute")
+	const publisherImage = "example.com/dynamo-operator:1.2.3"
+	f.reconciler.OperatorImage = publisherImage
+	f.reconcile()
+	job := f.job()
+	if got := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunPublisherContainer).Image; got != publisherImage {
+		t.Fatalf("publisher image = %q, want %q", got, publisherImage)
+	}
+
+	t.Log("Observation and Job recreation use the frozen image even if the current setting is empty")
+	f.reconciler.OperatorImage = ""
+	f.reconcile()
+	if err := f.client.Delete(t.Context(), job); err != nil {
+		t.Fatalf("delete Job: %v", err)
+	}
+	f.reconcile()
+	if got := containerNamed(t, f.job().Spec.Template.Spec.Containers, dgdrRunPublisherContainer).Image; got != publisherImage {
+		t.Fatalf("recreated publisher image = %q, want frozen %q", got, publisherImage)
+	}
+}
+
 func TestV1beta2RunControllerFreezesExecutionBeforeCreatingTheJob(t *testing.T) {
 	run := dgdrRunForTest(t, map[string]any{})
 	f := newDGDRRunFixture(t, run)

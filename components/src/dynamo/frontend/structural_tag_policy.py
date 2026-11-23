@@ -38,6 +38,18 @@ TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
 )
 
 
+def runtime_backend_defers_grammar(runtime_config: Any) -> bool:
+    """Read whether the worker delays guided decoding until reasoning ends."""
+    if not isinstance(runtime_config, dict):
+        return False
+    runtime_data = runtime_config.get("runtime_data")
+    return (
+        isinstance(runtime_data, dict)
+        and runtime_data.get(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
+        is True
+    )
+
+
 def runtime_structural_tag_excludes_reasoning(runtime_config: Any) -> bool:
     """Whether tool-call structural tags must leave reasoning to the backend.
 
@@ -49,12 +61,7 @@ def runtime_structural_tag_excludes_reasoning(runtime_config: Any) -> bool:
     """
     if not isinstance(runtime_config, dict):
         return False
-    runtime_data = runtime_config.get("runtime_data")
-    backend_excludes = (
-        isinstance(runtime_data, dict)
-        and runtime_data.get(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
-        is True
-    )
+    backend_excludes = runtime_backend_defers_grammar(runtime_config)
     config = runtime_config.get("structural_tag")
     boundary = (
         config.get("reasoning_boundary", "auto") if isinstance(config, dict) else "auto"

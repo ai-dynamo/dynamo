@@ -106,6 +106,26 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### Unreleased
 
+#### API Availability
+
+##### DGDR v1beta2 Available by Default
+
+**Change:** The operator installs and serves the DGDR v1beta2 Request, Run, and Candidate APIs
+and starts their controllers without a feature gate. The API is available but not feature complete.
+Existing v1beta1 Requests retain their API and behavior; the Request storage version and conversion
+contract are unchanged.
+
+**Affected:** All operator installations, including those that previously left
+`dynamo-operator.dgdrV1Beta2.enabled` unset or set it to `false`. Installations with
+`dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, require the matching
+CRDs to be installed before upgrading the operator.
+
+**Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
+Ordinary Helm upgrades remove the flag automatically. The legacy
+`dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability; it remains solely
+for the existing Planner live-retune RBAC condition. Retune behavior and its disabled defaults are
+unchanged. Review API migration notes before future upgrades.
+
 #### CRD and admission breaking changes
 
 ##### Checkpoint restore launch checked when a DGD is applied
@@ -803,6 +823,7 @@ Kubernetes: `>=1.30.0-0`
 | global.nats.install | bool | `false` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. NATS is optional because the default request and event planes use TCP and ZMQ, respectively. |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
+| global.kai-scheduler.schedulerName | string | `"kai-scheduler"` | Scheduler name the operator sets on Grove pods when KAI integration is enabled. A custom name requires install=false and a Grove version that maps the name to its KAI backend; this setting does not reconfigure Grove or KAI. |
 | global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
@@ -825,7 +846,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
-| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
+| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | Legacy prerequisite for Planner live-retune RBAC. This does not gate DGDR v1beta2 API availability. |
 | dynamo-operator.dgdrV1Beta2.plannerLiveRetune | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs: create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates, and read, create, update and delete any Lease in the namespace. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
@@ -987,6 +1008,48 @@ global:
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```
+
+To use a KAI-compatible scheduler under a different name (for example, Run:ai),
+install it separately and set its name:
+
+```yaml
+global:
+  kai-scheduler:
+    install: false        # A custom name requires an externally managed scheduler
+    enabled: true
+    schedulerName: runai-scheduler
+  grove:
+    enabled: true
+```
+
+> [!WARNING]
+> This setting changes only the scheduler name in Dynamo's pod templates. It does not
+> rename or reconfigure KAI or Grove. Before using a custom name, confirm that your Grove
+> version maps that name to its KAI backend and that the scheduler reads Grove's PodGroups
+> and queue metadata. The bundled Grove `v0.2.0-beta1` KAI profile is named `kai-scheduler`
+> and does not support a custom name. Changing this value alone does not enable Run:ai.
+> Custom KAI scheduler identity support is tracked in
+> [Grove PR #962](https://github.com/ai-dynamo/grove/pull/962); verify release availability
+> before choosing an external Grove version.
+
+The default is `kai-scheduler`. An empty value also uses that default. For a directly
+managed `OperatorConfiguration`, set `orchestrators.kaiScheduler.schedulerName` instead.
+Names must be DNS subdomains, like `PodSpec.schedulerName`: lowercase letters, digits,
+`-` and `.`, at most 253 characters, with each dot-separated part starting and ending
+in a letter or digit. An invalid name such as `Runai_Scheduler` stops the operator at
+startup with an error on `orchestrators.kaiScheduler.schedulerName`.
+
+The operator sets `schedulerName` and the `kai.scheduler/queue` label when a component
+omits `schedulerName` or sets it to the configured name. A component that sets a
+different scheduler name is left unchanged, without injecting a KAI queue label.
+The queue comes from the DGD's `nvidia.com/kai-scheduler-queue` annotation (default
+`dynamo`), and the operator checks that the KAI Queue exists.
+
+> [!NOTE]
+> Changing the configured scheduler name can change the pod templates and roll Grove
+> workloads using the KAI integration. Explicit component overrides selecting another
+> scheduler stay unchanged. Coordinate the change with your scheduler and Grove
+> configuration. Leaving the value unset keeps current templates.
 
 Volcano:
 

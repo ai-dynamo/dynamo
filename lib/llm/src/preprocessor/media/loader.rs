@@ -19,6 +19,7 @@ use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
 use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
 use super::require_image_url;
+use super::{IMAGE_FETCH_FORBIDDEN_MESSAGE, IMAGE_FETCH_NOT_FOUND_MESSAGE};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
@@ -174,6 +175,19 @@ fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Erro
         .public_message(public)
         .build()
         .into()
+}
+
+fn image_fetch_error(error: anyhow::Error) -> anyhow::Error {
+    let status = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .find_map(reqwest::Error::status);
+    let public = match status {
+        Some(reqwest::StatusCode::FORBIDDEN) => IMAGE_FETCH_FORBIDDEN_MESSAGE,
+        Some(reqwest::StatusCode::NOT_FOUND) => IMAGE_FETCH_NOT_FOUND_MESSAGE,
+        _ => IMAGE_FETCH_FAILED,
+    };
+    media_input_error(public, error)
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -689,7 +703,7 @@ impl MediaLoader {
                 let data = EncodedMediaData::from_url(url, &self.http_client)
                     .await
                     .map_err(MediaFetcher::map_fetch_error)
-                    .map_err(|e| media_input_error(IMAGE_FETCH_FAILED, e))?;
+                    .map_err(image_fetch_error)?;
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =
@@ -1257,10 +1271,40 @@ mod tests_non_nixl {
             .build()
             .into();
         let passed = media_input_error(IMAGE_DECODE_FAILED, host_fault);
+        let passed = image_fetch_error(passed);
         let dynamo_error = passed
             .downcast_ref::<DynamoError>()
             .expect("classified error passes through");
         assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
+    }
+
+    #[tokio::test]
+    async fn image_fetch_errors_are_bad_requests_with_safe_recovery_message() {
+        let mut server = mockito::Server::new_async().await;
+        let client = reqwest::Client::new();
+        for status in [403, 404] {
+            let origin = server
+                .mock("GET", "/image?token=SECRET")
+                .with_status(status)
+                .with_body("private origin response")
+                .create_async()
+                .await;
+            let url = format!("{}/image?token=SECRET", server.url())
+                .parse()
+                .unwrap();
+            let error = EncodedMediaData::from_url(&url, &client)
+                .await
+                .expect_err("origin refused the image");
+            let error = image_fetch_error(error);
+            let error = error.downcast_ref::<DynamoError>().unwrap();
+            assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+            let public = error.public_message().unwrap();
+            assert!(public.starts_with(&format!("Image download returned HTTP {status}.")));
+            assert!(public.contains("resend the image data before retrying"));
+            assert!(!public.contains("SECRET"));
+            assert!(!public.contains("private origin response"));
+            origin.assert_async().await;
+        }
     }
 
     #[rstest::rstest]
