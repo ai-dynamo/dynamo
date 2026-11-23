@@ -5668,8 +5668,8 @@ class InstrumentedScheduler(AsyncScheduler):
         "ShareGPT_Vicuna_unfiltered/resolve/main/"
         "ShareGPT_V3_unfiltered_cleaned_split.json"
     )
-    # Pinned digest of the default dataset. A custom DYN_BENCH_KV_WARMUP_DATASET
-    # supplies its own expectation via DYN_BENCH_KV_WARMUP_SHA256.
+    # Pinned digest of the default dataset. Any other dataset URL must supply
+    # its own expectation via DYN_BENCH_KV_WARMUP_SHA256 (checked before download).
     _KVWARM_DEFAULT_DATASET_SHA256 = (
         "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
     )
@@ -6002,10 +6002,36 @@ class InstrumentedScheduler(AsyncScheduler):
         spec = os.environ.get(
             "DYN_BENCH_KV_WARMUP_DATASET", self._KVWARM_DEFAULT_DATASET_URL
         )
-        if not spec.startswith(("http://", "https://")):
+        if "://" not in spec:
             if not os.path.exists(spec):
                 raise RuntimeError(f"KVWARM dataset path does not exist: {spec}")
             return spec
+        import urllib.parse
+
+        scheme = urllib.parse.urlsplit(spec).scheme.lower()
+        if scheme == "http":
+            allow_http = os.environ.get("DYN_BENCH_KV_WARMUP_ALLOW_HTTP", "")
+            if allow_http.strip().lower() not in ("1", "true", "on", "yes"):
+                raise ValueError(
+                    f"KVWARM dataset URL must use https: {spec} "
+                    "(set DYN_BENCH_KV_WARMUP_ALLOW_HTTP=1 to allow plain http)"
+                )
+        elif scheme != "https":
+            raise ValueError(
+                f"KVWARM dataset must be a local path or an https URL: {spec}"
+            )
+        # A non-default URL needs a pinned digest before the cache or the
+        # network is touched, so no unverified bytes are ever used.
+        expected_sha = os.environ.get("DYN_BENCH_KV_WARMUP_SHA256") or (
+            self._KVWARM_DEFAULT_DATASET_SHA256
+            if spec == self._KVWARM_DEFAULT_DATASET_URL
+            else None
+        )
+        if not expected_sha:
+            raise ValueError(
+                "DYN_BENCH_KV_WARMUP_SHA256 is required for a non-default "
+                f"DYN_BENCH_KV_WARMUP_DATASET URL: {spec}"
+            )
         cache_root = os.environ.get("DYN_BENCH_KV_WARMUP_CACHE_DIR") or (
             os.path.join(os.environ["HF_HOME"], os.pardir, "fpm_datasets")
             if os.environ.get("HF_HOME")
@@ -6015,17 +6041,15 @@ class InstrumentedScheduler(AsyncScheduler):
         os.makedirs(cache_root, exist_ok=True)
         name = os.path.basename(spec.split("?")[0]) or "kvwarm_dataset.json"
         cached = os.path.join(cache_root, name)
-        expected_sha = os.environ.get("DYN_BENCH_KV_WARMUP_SHA256") or (
-            self._KVWARM_DEFAULT_DATASET_SHA256
-            if spec == self._KVWARM_DEFAULT_DATASET_URL
-            else None
-        )
         if os.path.exists(cached):
             digest = self._kvwarm_sha256(cached)
-            if expected_sha and digest != expected_sha:
+            if digest != expected_sha:
                 raise RuntimeError(
                     f"KVWARM dataset cache sha mismatch: {digest} != {expected_sha}"
                 )
+            logger.info(
+                "KVWARM: dataset source=%s path=%s sha256=%s", spec, cached, digest
+            )
             return cached
         import urllib.request
 
@@ -6038,13 +6062,13 @@ class InstrumentedScheduler(AsyncScheduler):
         ) as resp, open(tmp, "wb") as out:
             shutil.copyfileobj(resp, out)
         digest = self._kvwarm_sha256(tmp)
-        if expected_sha and digest != expected_sha:
+        if digest != expected_sha:
             os.unlink(tmp)
             raise RuntimeError(
                 f"KVWARM dataset download sha mismatch: {digest} != {expected_sha}"
             )
         os.replace(tmp, cached)
-        logger.info("KVWARM: dataset cached (sha256=%s)", digest)
+        logger.info("KVWARM: dataset source=%s path=%s sha256=%s", spec, cached, digest)
         return cached
 
     @staticmethod
@@ -6077,9 +6101,11 @@ class InstrumentedScheduler(AsyncScheduler):
             if digest[0] % 2 == 0:  # even pool = collection; odd pool = eval
                 texts.append(body)
         meta = self._kvwarm_meta_init()
+        path_sha256 = self._kvwarm_sha256(path)
+        logger.info("KVWARM: dataset path=%s sha256=%s", path, path_sha256)
         meta["dataset"] = {
             "path": path,
-            "sha256": self._kvwarm_sha256(path),
+            "sha256": path_sha256,
             "collection_pool": "conversation_sha256_even",
             "conversations": len(texts),
         }
