@@ -295,10 +295,20 @@ func requireEnvironmentWorkloads(t *testing.T, before, after []unstructured.Unst
 		require.Equal(t, old.GetUID(), current.GetUID())
 		if edited && len(environmentVariables(t, old)) > 0 {
 			require.Greater(t, current.GetGeneration(), old.GetGeneration())
-			if old.GetKind() == upgradePodCliqueSetKind {
+			t.Log("Only the main-container env order may change; all other workload fields must remain identical")
+			expectedSpec, _, err := unstructured.NestedMap(old.Object, "spec")
+			require.NoError(t, err)
+			var containerPaths [][]string
+			switch old.GetKind() {
+			case "Deployment":
+				containerPaths = [][]string{{"template", "spec", "containers"}}
+			case "LeaderWorkerSet":
+				containerPaths = [][]string{
+					{"leaderWorkerTemplate", "leaderTemplate", "spec", "containers"},
+					{"leaderWorkerTemplate", "workerTemplate", "spec", "containers"},
+				}
+			case upgradePodCliqueSetKind:
 				t.Log("Only the frontend env order may change; all worker cliques and other PCS fields must remain identical")
-				expectedSpec, _, err := unstructured.NestedMap(old.Object, "spec")
-				require.NoError(t, err)
 				cliques, _, err := unstructured.NestedSlice(expectedSpec, "template", "cliques")
 				require.NoError(t, err)
 				for _, value := range cliques {
@@ -312,10 +322,16 @@ func requireEnvironmentWorkloads(t *testing.T, before, after []unstructured.Unst
 					require.NoError(t, unstructured.SetNestedSlice(clique, containers, "spec", "podSpec", "containers"))
 				}
 				require.NoError(t, unstructured.SetNestedSlice(expectedSpec, cliques, "template", "cliques"))
-				actualSpec, _, err := unstructured.NestedMap(current.Object, "spec")
-				require.NoError(t, err)
-				require.Equal(t, expectedSpec, actualSpec, "frontend-only env reorder must not change any worker or other PCS setting")
 			}
+			for _, path := range containerPaths {
+				containers, _, err := unstructured.NestedSlice(expectedSpec, path...)
+				require.NoError(t, err)
+				swapEnvironmentEntries(t, containers)
+				require.NoError(t, unstructured.SetNestedSlice(expectedSpec, containers, path...))
+			}
+			actualSpec, _, err := unstructured.NestedMap(current.Object, "spec")
+			require.NoError(t, err)
+			require.Equal(t, expectedSpec, actualSpec, "env reorder must not change any other workload setting")
 		} else {
 			require.NoError(t, upgradeComponentWorkloadSafetyError(old, current))
 		}
