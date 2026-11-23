@@ -342,6 +342,11 @@ impl TrtllmSidecarEngine {
                 .ok_or_else(|| {
                     client::invalid_argument("encoder routing requires OpenEngine server identity")
                 })?;
+            if server.instance_id.trim().is_empty() {
+                return Err(client::invalid_argument(
+                    "encoder routing requires a nonempty OpenEngine instance_id",
+                ));
+            }
             if server.schema_release != include_str!("../proto/REVISION").trim() {
                 return Err(client::invalid_argument(
                     "encoder routing requires the pinned OpenEngine schema release",

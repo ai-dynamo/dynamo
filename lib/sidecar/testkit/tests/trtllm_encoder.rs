@@ -84,6 +84,7 @@ async fn fixture(mode: DisaggregationMode) -> (Fixture, Controller<Adapter>) {
 
 fn server_info(encoder: bool) -> pb::ServerInfo {
     pb::ServerInfo {
+        instance_id: "encoder-engine".into(),
         engine_role: if encoder {
             pb::EngineRole::Encoder
         } else {
@@ -250,6 +251,33 @@ async fn encoder_registration_rejects_identity_changed_after_bootstrap() {
             .await
             .expect_err("changed engine must not register");
         assert!(error.to_string().contains("identity changed"), "{error}");
+        encoder.cleanup().await.unwrap();
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn encoder_routing_rejects_missing_native_instance_identity() {
+    for mode in [DisaggregationMode::Encode, DisaggregationMode::Aggregated] {
+        let (mut fixture, _) = fixture(mode).await;
+        let mut info = server_info(mode.is_encode());
+        info.instance_id.clear();
+        *fixture.discovery.server_info.lock().unwrap() = Some(info);
+        let encoder = if mode.is_encode() {
+            fixture.engine().await
+        } else {
+            fixture.engine_with_args(&["--route-to-encoder"])
+        };
+        let error = encoder
+            .start(0)
+            .await
+            .expect_err("missing identity must not register");
+        assert!(
+            error
+                .to_string()
+                .contains("nonempty OpenEngine instance_id"),
+            "{error}"
+        );
         encoder.cleanup().await.unwrap();
         fixture.shutdown().await;
     }
