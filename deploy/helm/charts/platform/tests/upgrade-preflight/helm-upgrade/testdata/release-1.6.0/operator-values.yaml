@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Parsed values frozen from release/1.6.0 at 240b7d359f20dbc08469baaf9dc12973261c7df7.
+upgradeCRD: true
+lpx:
+  enabled: false
+  modelRegistryURL: ''
+env: []
+namespaceRestriction:
+  enabled: false
+  targetNamespace: ''
+  lease:
+    duration: 30s
+    renewInterval: 10s
+gpuDiscovery:
+  enabled: true
+controllerManager:
+  tolerations: []
+  affinity: {}
+  podLabels: {}
+  podAnnotations: {}
+  leaderElection:
+    id: ''
+    namespace: ''
+  manager:
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+    image:
+      repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
+      tag: ''
+    dgdrDefaultImage: ''
+    resources:
+      limits:
+        cpu: 1024m
+        memory: 2Gi
+      requests:
+        cpu: 512m
+        memory: 1Gi
+    volumeMounts: []
+    volumes: []
+  replicas: 1
+  serviceAccount:
+    annotations: {}
+planner:
+  powerAwareness:
+    enabled: false
+dynamo:
+  components:
+    serviceAccount:
+      annotations: {}
+  groveTerminationDelay: 15m
+  dockerRegistry:
+    server: ''
+    useKubernetesSecret: false
+    username: $oauthtoken
+    password: ''
+    existingSecretName: ''
+    secure: true
+  metrics:
+    prometheusEndpoint: ''
+    podMonitors:
+      enabled: null
+      frontendPath: /metrics
+      labels: {}
+      nixlTelemetry: false
+  mpiRun:
+    secretName: mpi-run-ssh-secret
+kubernetesClusterDomain: cluster.local
+metricsService:
+  enabled: null
+  labels:
+    release: prometheus
+  ports:
+  - name: metrics
+    port: 8080
+    protocol: TCP
+    targetPort: metrics
+  type: ClusterIP
+natsAddr: ''
+etcdAddr: ''
+modelExpressURL: ''
+natsTLSCAPath: ''
+natsTLSClientCertPath: ''
+natsTLSClientKeyPath: ''
+tcpTLSCertPath: ''
+tcpTLSKeyPath: ''
+tcpTLSCAPath: ''
+tcpTLSClientCertPath: ''
+tcpTLSClientKeyPath: ''
+tcpTLSClientCAPath: ''
+tcpTLSServerName: ''
+checkpoint:
+  enabled: false
+  seccomp:
+    disabled: false
+    profile: profiles/block-iouring.json
+webhook:
+  certificateSecret:
+    name: webhook-server-cert
+    external: false
+  caBundle: ''
+  failurePolicy: Fail
+  podCheckpointRestoreFailurePolicy: Ignore
+  timeoutSeconds: 10
+  namespaceSelector: {}
+  certManager:
+    enabled: false
+    certificate:
+      duration: 8760h
+      renewBefore: 360h
+      rootCA:
+        duration: 87600h
+        renewBefore: 720h

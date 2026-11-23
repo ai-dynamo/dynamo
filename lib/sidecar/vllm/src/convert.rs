@@ -826,6 +826,11 @@ fn build_media(
 
         for (index, item) in items.into_iter().enumerate() {
             let source = match item {
+                MultimodalData::Json(_) => {
+                    return Err(client::invalid_argument(
+                        "Custom JSON content requires a dynamo.vllm worker; the sidecar media transport does not support it",
+                    ));
+                }
                 MultimodalData::Url(url) => media_source(&key, url.into())?,
                 MultimodalData::RawUrl(source) => media_source(&key, source)?,
                 MultimodalData::Decoded(_) => {
@@ -1697,34 +1702,23 @@ fn map_output_logprobs(
         .copied()
         .map(normalize_logprob)
         .collect();
+    // vLLM sends the true top N, including the sampled token when it ranks there.
     let top_logprobs = include_top_logprobs.then(|| {
         output
-            .token_ids
+            .candidate_tokens
             .iter()
-            .enumerate()
-            .map(|(index, token_id)| {
-                let mut entries =
-                    Vec::with_capacity(output.candidate_tokens[index].tokens.len() + 1);
-                entries.push(TopLogprob {
-                    rank: output.ranks[index],
-                    token_id: *token_id,
-                    token: None,
-                    logprob: normalize_logprob(output.logprobs[index]),
-                    bytes: None,
-                });
-                entries.extend(
-                    output.candidate_tokens[index]
-                        .tokens
-                        .iter()
-                        .map(|candidate| TopLogprob {
-                            rank: candidate.rank,
-                            token_id: candidate.id,
-                            token: None,
-                            logprob: normalize_logprob(candidate.logprob),
-                            bytes: None,
-                        }),
-                );
-                entries
+            .map(|candidates| {
+                candidates
+                    .tokens
+                    .iter()
+                    .map(|candidate| TopLogprob {
+                        rank: candidate.rank,
+                        token_id: candidate.id,
+                        token: None,
+                        logprob: normalize_logprob(candidate.logprob),
+                        bytes: None,
+                    })
+                    .collect()
             })
             .collect()
     });

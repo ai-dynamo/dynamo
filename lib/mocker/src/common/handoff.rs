@@ -4,7 +4,7 @@
 //! Dynamo compatibility types for the shared Replay handoff coordinator.
 //!
 //! Dynamo retains its UUID transport DTOs at this boundary. Ordering and
-//! cleanup are owned by `aisimulate_core::replay`; this module only converts between
+//! cleanup are owned by `aisim_core::replay`; this module only converts between
 //! the public Dynamo surface and Replay's runtime-neutral value types.
 
 use anyhow::Result;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::protocols::{EngineType, KvTransferTimingMode};
 
-pub use aisimulate_core::replay::{
+pub use aisim_core::replay::{
     HandoffActionId, HandoffActionOutcome, HandoffCompletion, HandoffOrder, NormalizedHandoffEvent,
     NormalizedStoredTiming, expected_normalized_handoff, validate_transfer_delay_ms,
 };
@@ -47,7 +47,7 @@ impl From<HandoffId> for Uuid {
     }
 }
 
-impl From<HandoffId> for aisimulate_core::replay::HandoffId {
+impl From<HandoffId> for aisim_core::replay::HandoffId {
     fn from(value: HandoffId) -> Self {
         Self::from(value.0)
     }
@@ -149,11 +149,11 @@ pub struct NormalizedHandoffConformance {
 impl NormalizedHandoffConformance {
     #[doc(hidden)]
     pub fn validate(&self) -> Result<()> {
-        aisimulate_core::replay::NormalizedHandoffConformance {
+        aisim_core::replay::NormalizedHandoffConformance {
             engine_type: match self.engine_type {
-                EngineType::Vllm => aisimulate_core::engine::Backend::Vllm,
-                EngineType::Sglang => aisimulate_core::engine::Backend::Sglang,
-                EngineType::Trtllm => aisimulate_core::engine::Backend::Trtllm,
+                EngineType::Vllm => aisim_core::engine::Backend::Vllm,
+                EngineType::Sglang => aisim_core::engine::Backend::Sglang,
+                EngineType::Trtllm => aisim_core::engine::Backend::Trtllm,
             },
             order: self.order,
             lifecycle: self.lifecycle.clone(),
@@ -169,13 +169,13 @@ impl NormalizedHandoffConformance {
     }
 }
 
-impl From<aisimulate_core::replay::NormalizedHandoffConformance> for NormalizedHandoffConformance {
-    fn from(value: aisimulate_core::replay::NormalizedHandoffConformance) -> Self {
+impl From<aisim_core::replay::NormalizedHandoffConformance> for NormalizedHandoffConformance {
+    fn from(value: aisim_core::replay::NormalizedHandoffConformance) -> Self {
         Self {
             engine_type: match value.engine_type {
-                aisimulate_core::engine::Backend::Vllm => EngineType::Vllm,
-                aisimulate_core::engine::Backend::Sglang => EngineType::Sglang,
-                aisimulate_core::engine::Backend::Trtllm => EngineType::Trtllm,
+                aisim_core::engine::Backend::Vllm => EngineType::Vllm,
+                aisim_core::engine::Backend::Sglang => EngineType::Sglang,
+                aisim_core::engine::Backend::Trtllm => EngineType::Trtllm,
             },
             order: value.order,
             lifecycle: value.lifecycle,
@@ -192,13 +192,13 @@ impl From<aisimulate_core::replay::NormalizedHandoffConformance> for NormalizedH
 
 /// Thin UUID-compatibility wrapper around Replay's single handoff state machine.
 pub struct HandoffCoordinatorCore {
-    inner: aisimulate_core::replay::HandoffCoordinatorCore,
+    inner: aisim_core::replay::HandoffCoordinatorCore,
 }
 
 impl HandoffCoordinatorCore {
     pub fn new(handoff_id: HandoffId, order: HandoffOrder) -> Self {
         Self {
-            inner: aisimulate_core::replay::HandoffCoordinatorCore::new(handoff_id.into(), order),
+            inner: aisim_core::replay::HandoffCoordinatorCore::new(handoff_id.into(), order),
         }
     }
 
@@ -243,17 +243,15 @@ impl HandoffCoordinatorCore {
 }
 
 pub fn validate_transfer_timing(transfer_timing: HandoffTransferTiming) -> Result<()> {
-    aisimulate_core::replay::validate_transfer_timing(replay_timing(transfer_timing))
+    aisim_core::replay::validate_transfer_timing(replay_timing(transfer_timing))
 }
 
-fn replay_timing(timing: HandoffTransferTiming) -> aisimulate_core::replay::HandoffTransferTiming {
-    aisimulate_core::replay::HandoffTransferTiming {
+fn replay_timing(timing: HandoffTransferTiming) -> aisim_core::replay::HandoffTransferTiming {
+    aisim_core::replay::HandoffTransferTiming {
         mode: match timing.mode {
-            KvTransferTimingMode::FullPrompt => {
-                aisimulate_core::engine::TransferTimingMode::FullPrompt
-            }
+            KvTransferTimingMode::FullPrompt => aisim_core::engine::TransferTimingMode::FullPrompt,
             KvTransferTimingMode::DestinationMissing => {
-                aisimulate_core::engine::TransferTimingMode::DestinationMissing
+                aisim_core::engine::TransferTimingMode::DestinationMissing
             }
         },
         full_prompt_tokens: timing.full_prompt_tokens,
@@ -264,84 +262,82 @@ fn replay_timing(timing: HandoffTransferTiming) -> aisimulate_core::replay::Hand
     }
 }
 
-fn convert_fact(fact: HandoffFact) -> aisimulate_core::replay::HandoffFact {
+fn convert_fact(fact: HandoffFact) -> aisim_core::replay::HandoffFact {
     match fact {
         HandoffFact::SourceHeld {
             handoff_id,
             transfer_timing,
-        } => aisimulate_core::replay::HandoffFact::SourceHeld {
+        } => aisim_core::replay::HandoffFact::SourceHeld {
             handoff_id: handoff_id.into(),
             transfer_timing: replay_timing(transfer_timing),
         },
         HandoffFact::DestinationReserved {
             handoff_id,
             transferable_prompt_tokens,
-        } => aisimulate_core::replay::HandoffFact::DestinationReserved {
+        } => aisim_core::replay::HandoffFact::DestinationReserved {
             handoff_id: handoff_id.into(),
             transferable_prompt_tokens,
         },
         HandoffFact::TransferCompleted { handoff_id } => {
-            aisimulate_core::replay::HandoffFact::TransferCompleted {
+            aisim_core::replay::HandoffFact::TransferCompleted {
                 handoff_id: handoff_id.into(),
             }
         }
-        HandoffFact::Failed { handoff_id } => aisimulate_core::replay::HandoffFact::Failed {
+        HandoffFact::Failed { handoff_id } => aisim_core::replay::HandoffFact::Failed {
             handoff_id: handoff_id.into(),
         },
-        HandoffFact::TimedOut { handoff_id } => aisimulate_core::replay::HandoffFact::TimedOut {
+        HandoffFact::TimedOut { handoff_id } => aisim_core::replay::HandoffFact::TimedOut {
             handoff_id: handoff_id.into(),
         },
-        HandoffFact::Canceled { handoff_id } => aisimulate_core::replay::HandoffFact::Canceled {
+        HandoffFact::Canceled { handoff_id } => aisim_core::replay::HandoffFact::Canceled {
             handoff_id: handoff_id.into(),
         },
     }
 }
 
-fn convert_action(action: aisimulate_core::replay::IssuedHandoffAction) -> IssuedHandoffAction {
-    let aisimulate_core::replay::IssuedHandoffAction { id, action } = action;
+fn convert_action(action: aisim_core::replay::IssuedHandoffAction) -> IssuedHandoffAction {
+    let aisim_core::replay::IssuedHandoffAction { id, action } = action;
     let action = match action {
-        aisimulate_core::replay::HandoffAction::SubmitPrefill { handoff_id } => {
+        aisim_core::replay::HandoffAction::SubmitPrefill { handoff_id } => {
             HandoffAction::SubmitPrefill {
                 handoff_id: HandoffId::from(handoff_id.get()),
             }
         }
-        aisimulate_core::replay::HandoffAction::ReserveDestination { handoff_id } => {
+        aisim_core::replay::HandoffAction::ReserveDestination { handoff_id } => {
             HandoffAction::ReserveDestination {
                 handoff_id: HandoffId::from(handoff_id.get()),
             }
         }
-        aisimulate_core::replay::HandoffAction::StartTransfer {
+        aisim_core::replay::HandoffAction::StartTransfer {
             handoff_id,
             delay_ms,
         } => HandoffAction::StartTransfer {
             handoff_id: HandoffId::from(handoff_id.get()),
             delay_ms,
         },
-        aisimulate_core::replay::HandoffAction::ActivateDestination { handoff_id } => {
+        aisim_core::replay::HandoffAction::ActivateDestination { handoff_id } => {
             HandoffAction::ActivateDestination {
                 handoff_id: HandoffId::from(handoff_id.get()),
             }
         }
-        aisimulate_core::replay::HandoffAction::ReleaseSource { handoff_id } => {
+        aisim_core::replay::HandoffAction::ReleaseSource { handoff_id } => {
             HandoffAction::ReleaseSource {
                 handoff_id: HandoffId::from(handoff_id.get()),
             }
         }
-        aisimulate_core::replay::HandoffAction::CancelSource { handoff_id } => {
+        aisim_core::replay::HandoffAction::CancelSource { handoff_id } => {
             HandoffAction::CancelSource {
                 handoff_id: HandoffId::from(handoff_id.get()),
             }
         }
-        aisimulate_core::replay::HandoffAction::CancelDestination { handoff_id } => {
+        aisim_core::replay::HandoffAction::CancelDestination { handoff_id } => {
             HandoffAction::CancelDestination {
                 handoff_id: HandoffId::from(handoff_id.get()),
             }
         }
-        aisimulate_core::replay::HandoffAction::Complete { handoff_id } => {
-            HandoffAction::Complete {
-                handoff_id: HandoffId::from(handoff_id.get()),
-            }
-        }
+        aisim_core::replay::HandoffAction::Complete { handoff_id } => HandoffAction::Complete {
+            handoff_id: HandoffId::from(handoff_id.get()),
+        },
     };
     IssuedHandoffAction { id, action }
 }

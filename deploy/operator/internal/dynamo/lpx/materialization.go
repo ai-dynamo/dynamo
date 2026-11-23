@@ -46,7 +46,7 @@ type ExpectedAgent struct {
 type MaterializationPlan struct {
 	// ScalingGroupTemplate is unique within the shared PCS.
 	ScalingGroupTemplate string
-	// ResourcePrefix scopes runtime ConfigMaps and discovery Services to this workload.
+	// ResourcePrefix scopes discovery Services to this workload.
 	ResourcePrefix string
 	// PodCliqueSetName is the actual PCS used for every generated child address.
 	PodCliqueSetName string
@@ -165,7 +165,7 @@ func materializedCliqueNameForReplica(pcsName, templateName string, replica int3
 func (p *MaterializationPlan) validatePodHostname(role, templateName string, podIndex int) error {
 	// Validate the longest replica name without copying the full materialization plan.
 	cliqueName := materializedCliqueNameForReplica(p.LPXScalingGroup, templateName, max(0, p.Replicas-1))
-	hostname := materializedPodHostname(cliqueName, podIndex)
+	hostname := fmt.Sprintf("%s-%d", cliqueName, podIndex)
 	if problems := validation.IsDNS1123Label(hostname); len(problems) != 0 {
 		return fmt.Errorf(
 			"materialized %s Pod hostname %q is invalid: %s",
@@ -175,10 +175,6 @@ func (p *MaterializationPlan) validatePodHostname(role, templateName string, pod
 		)
 	}
 	return nil
-}
-
-func materializedPodHostname(cliqueName string, podIndex int) string {
-	return fmt.Sprintf("%s-%d", cliqueName, podIndex)
 }
 
 // WithGroup scopes a workload's resource names within a multi-workload PCS.
@@ -198,7 +194,7 @@ func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan,
 		return nil, fmt.Errorf("naming group %q in PCS %q: %w", groupName, p.PodCliqueSetName, err)
 	}
 
-	// ConfigMaps and Services retain more of the group name than Grove allows.
+	// Services retain more of the group name than Grove allows.
 	const maxResourcePrefixLength = validation.DNS1123LabelMaxLength - len("-serve")
 	resourceName, err := boundedGroupName(groupName, maxResourcePrefixLength-len(p.PodCliqueSetName)-1)
 	if err != nil {

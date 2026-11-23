@@ -8,7 +8,7 @@ use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
-use dynamo_scheduler::tracking_hash::{TrackingHashAlgorithm, TrackingHashScope};
+use dynamo_scheduler::{TrackingHashAlgorithm, TrackingHashScope};
 use tempfile::NamedTempFile;
 
 const BENCHMARK_KEY: [u8; 32] = [0x5a; 32];

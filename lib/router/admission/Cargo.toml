@@ -17,6 +17,8 @@ readme = "README.md"
 default = []
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
 testing = ["dynamo-router-protocol/testing"]
+# Test inputs for dependent crates' benchmarks.
+bench = []
 
 [dependencies]
 dynamo-router-protocol = { workspace = true }

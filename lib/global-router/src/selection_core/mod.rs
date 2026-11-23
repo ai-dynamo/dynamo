@@ -17,10 +17,9 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::services::selection::{SelectionService, SelectionServiceBuilder};
 use dynamo_kv_router::{WorkerId, WorkerType};
-use dynamo_scheduler::protocols::RoutingConstraints;
-use dynamo_scheduler::selection::input::PromptRequest;
-use dynamo_scheduler::selection::membership::CatalogReconciler;
-use dynamo_scheduler::selection::types::{SelectRequest, SelectResponse};
+use dynamo_scheduler::host::{
+    CatalogReconciler, PromptRequest, RoutingConstraints, SelectRequest, SelectResponse,
+};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 

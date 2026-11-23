@@ -14,10 +14,11 @@ use tokio_util::sync::CancellationToken;
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
 };
-use dynamo_scheduler::replication::{
-    AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityBindingEvent, REPLICA_EVENT_CHANNEL_CAPACITY,
-    ReplicaEventSender, ReplicaSyncConfig, ScopedReplicaEvent,
+use dynamo_scheduler::{
+    AFFINITY_EVENT_CHANNEL_CAPACITY, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
+    ReplicaSyncConfig, ScopedReplicaEvent,
 };
+use dynamo_session_affinity::AffinityBindingEvent;
 
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;
 
@@ -100,7 +101,7 @@ pub(crate) fn setup_replica_sync(
     }))
 }
 
-pub(crate) fn start_replica_publisher(
+fn start_replica_publisher(
     bind_endpoint: &str,
     cancel_token: CancellationToken,
 ) -> Result<(
@@ -431,7 +432,7 @@ mod tests {
     #[cfg(feature = "http")]
     use dynamo_router_protocol::identity::RoutingPartitionId;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     #[cfg(feature = "http")]
     use crate::services::slot_tracker::registry::SlotTrackerRegistry;

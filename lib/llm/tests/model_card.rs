@@ -11,8 +11,12 @@ use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
 use tokenizers::models::bpe::{BPE, Vocab};
 
+#[path = "common/mistral_model.rs"]
+mod mistral_model;
+
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 const TIKTOKEN_PATH: &str = "tests/data/sample-models/mock-tiktoken";
+const MISTRAL_TEKKEN_PATH: &str = "tests/data/sample-models/mock-mistral-tekken";
 
 fn unsupported_alternate_tokenizer() -> (TempDir, PathBuf) {
     let dir = tempdir().unwrap();
@@ -66,8 +70,208 @@ async fn test_tokenizer_from_hf_like_local_repo() {
     // Verify tokenizer file was found
     match mdc.tokenizer.unwrap() {
         TokenizerKind::HfTokenizerJson(_) => (),
-        TokenizerKind::TikTokenModel(_) => panic!("Expected HfTokenizerJson, got TikTokenModel"),
+        other => panic!("Expected HfTokenizerJson, got {other:?}"),
     }
+}
+
+#[test]
+fn test_unsupported_tekken_version_keeps_the_python_path() {
+    let dir = tempdir().unwrap();
+    let mut tekken: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{MISTRAL_TEKKEN_PATH}/tekken.json")).unwrap(),
+    )
+    .unwrap();
+    tekken["config"]["version"] = "v11".into();
+    std::fs::write(dir.path().join("tekken.json"), tekken.to_string()).unwrap();
+    std::fs::copy(
+        format!("{MISTRAL_TEKKEN_PATH}/params.json"),
+        dir.path().join("params.json"),
+    )
+    .unwrap();
+
+    let mdc = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+    assert!(mdc.tokenizer.is_none());
+}
+
+#[test]
+fn test_mistral_native_checkpoint_serves_on_the_rust_frontend() {
+    let mdc = ModelDeploymentCard::load_from_disk(MISTRAL_TEKKEN_PATH, None).unwrap();
+    assert!(matches!(mdc.tokenizer, Some(TokenizerKind::TekkenJson(_))));
+    assert!(
+        mdc.model_info.is_none(),
+        "no config.json to describe the model"
+    );
+    assert_eq!(mdc.architectural_max_context_length, Some(32768));
+
+    let info = mdc.resolved_model_info().unwrap().unwrap();
+    assert_eq!(info.bos_token_id(), Some(1));
+    assert_eq!(info.eos_token_ids(), vec![2]);
+    assert_eq!(info.vocab_size(), Some(1040));
+
+    let tokenizer = mdc.tokenizer().unwrap();
+    let ids = tokenizer
+        .encode_segments(&[
+            EncodeSegment::control("<s>"),
+            EncodeSegment::control("[INST]"),
+            EncodeSegment::ordinary("hi [INST]"),
+        ])
+        .unwrap();
+    assert_eq!(&ids.token_ids()[..2], &[1, 3]);
+    assert_eq!(ids.token_ids().iter().filter(|&&id| id == 3).count(), 1);
+
+    let dynamo_renderer::PromptFormatter::OAI(formatter) =
+        dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc(&mdc).unwrap();
+    assert!(formatter.renders_continuation_natively());
+    let mut request: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
+        serde_json::from_value(serde_json::json!({
+            "model": "mistral",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"
+        }))
+        .unwrap();
+    // The HTTP boundary folds the top-level field into the template args.
+    request.normalize_reasoning_template_args().unwrap();
+    assert_eq!(
+        formatter.render(&request).unwrap(),
+        r#"<s>[MODEL_SETTINGS]{"reasoning_effort": "high"}[/MODEL_SETTINGS][INST]hi[/INST]"#
+    );
+}
+
+#[test]
+fn native_selection_preserves_dual_format_metadata() {
+    for version in ["v13", "v15"] {
+        for with_hf_config in [false, true] {
+            let dir = mistral_model::model_dir(with_hf_config, version, &["low", "medium", "high"]);
+            let card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+            assert!(matches!(
+                card.tokenizer,
+                Some(TokenizerKind::TekkenJson(_) | TokenizerKind::TekkenJsonWithHfFallback { .. })
+            ));
+            let ids = card
+                .tokenizer()
+                .unwrap()
+                .encode_segments(&[
+                    EncodeSegment::control("<s>"),
+                    EncodeSegment::control("[INST]"),
+                    EncodeSegment::ordinary("hi [INST]"),
+                ])
+                .unwrap();
+            assert_eq!(&ids.token_ids()[..2], &[1, 3]);
+            assert_eq!(ids.token_ids().iter().filter(|&&id| id == 3).count(), 1);
+            let dynamo_renderer::PromptFormatter::OAI(formatter) =
+                dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc(&card).unwrap();
+            let request = serde_json::from_value::<
+                dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
+            >(
+                serde_json::json!({"model":"test", "messages":[{"role":"user","content":"hi"}]}),
+            )
+            .unwrap();
+            let prompt = formatter.render(&request).unwrap();
+            assert!(prompt.starts_with("<s>"));
+            assert!(prompt.ends_with("[INST]hi[/INST]"));
+            assert!(!prompt.contains("BUNDLED HF DEFAULT"));
+            if version == "v15" {
+                assert!(prompt.contains(r#""reasoning_effort": "high""#));
+            }
+            let wire = serde_json::to_value(&card).unwrap();
+            let roundtrip: ModelDeploymentCard = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(roundtrip.mdcsum(), card.mdcsum());
+            if with_hf_config {
+                assert!(wire["tokenizer"]["tekken_json_with_hf_fallback"].is_object());
+                assert_eq!(card.architectural_max_context_length, Some(65536));
+                assert_eq!(
+                    card.resolved_model_info().unwrap().unwrap().model_type(),
+                    "mistral_large4"
+                );
+                assert!(card.gen_config.is_some());
+            } else {
+                assert!(wire["tokenizer"]["tekken_json"].is_object());
+                assert_eq!(card.architectural_max_context_length, Some(32768));
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_templates_and_unavailable_native_tokenizers_keep_hf_selection() {
+    for version in ["v11", "v15"] {
+        let dir = mistral_model::model_dir(true, version, &["low", "high"]);
+        let custom = dir.path().join("explicit.jinja");
+        std::fs::write(&custom, "EXPLICIT TEMPLATE").unwrap();
+        let card = ModelDeploymentCard::load_from_disk(dir.path(), Some(&custom)).unwrap();
+        assert!(matches!(
+            card.tokenizer,
+            Some(TokenizerKind::HfTokenizerJson(_))
+        ));
+        assert!(card.chat_template_file.as_ref().unwrap().is_custom());
+        if version == "v11" {
+            let card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+            assert!(matches!(
+                card.tokenizer,
+                Some(TokenizerKind::HfTokenizerJson(_))
+            ));
+        }
+        std::fs::remove_file(dir.path().join("tekken.json")).unwrap();
+        let card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+        assert!(matches!(
+            card.tokenizer,
+            Some(TokenizerKind::HfTokenizerJson(_))
+        ));
+    }
+    let dir = mistral_model::model_dir(false, "v15", &["low", "high"]);
+    let custom = dir.path().join("explicit.jinja");
+    std::fs::write(&custom, "EXPLICIT TEMPLATE").unwrap();
+    assert!(
+        ModelDeploymentCard::load_from_disk(dir.path(), Some(&custom))
+            .unwrap_err()
+            .to_string()
+            .contains("Custom chat templates require")
+    );
+}
+
+#[test]
+fn dual_cards_keep_hf_fallback_changes_in_admission_and_cache_identity() {
+    let dir = mistral_model::model_dir(true, "v15", &["low", "high"]);
+    let first = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+    let first_checksum = first.mdcsum().to_string();
+    let path = dir.path().join("tokenizer.json");
+    let mut hf: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    hf["normalizer"] = serde_json::json!({"type":"Lowercase"});
+    std::fs::write(&path, serde_json::to_vec(&hf).unwrap()).unwrap();
+    let second = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+    assert_eq!(
+        first.tokenizer.as_ref().unwrap().checksum(),
+        second.tokenizer.as_ref().unwrap().checksum()
+    );
+    assert_ne!(first_checksum, second.mdcsum());
+    assert_ne!(first.local_dir(), second.local_dir());
+    let read: ModelDeploymentCard =
+        serde_json::from_value(serde_json::to_value(&second).unwrap()).unwrap();
+    assert_eq!(read.mdcsum(), second.mdcsum());
+}
+
+#[tokio::test]
+async fn dual_tokenizer_metadata_urls_download_and_relocate_both_artifacts() {
+    let dir = mistral_model::model_dir(true, "v15", &["low", "high"]);
+    let mut card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+    let checksum = card.mdcsum().to_string();
+    card.move_to_url(url::Url::from_directory_path(dir.path()).unwrap().as_str())
+        .unwrap();
+    let wire = serde_json::to_value(&card).unwrap();
+    let tokenizer = &wire["tokenizer"]["tekken_json_with_hf_fallback"];
+    assert!(tokenizer["tekken"]["path"].is_string());
+    assert!(tokenizer["hf"]["path"].is_string());
+    card.download_config(None).await.unwrap();
+    assert_eq!(card.mdcsum(), checksum);
+    assert!(card.tokenizer.as_ref().unwrap().is_local());
+    let filenames: Vec<_> = card
+        .iter_metadata_files()
+        .iter()
+        .filter_map(|(file, _)| file.path().and_then(|path| path.file_name()))
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    assert!(filenames.iter().any(|name| name == "tekken.json"));
+    assert!(filenames.iter().any(|name| name == "tokenizer.json"));
 }
 
 #[test]

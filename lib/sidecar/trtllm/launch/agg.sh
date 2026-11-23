@@ -4,7 +4,7 @@
 #
 # Aggregated serving through TensorRT-LLM's OpenEngine gRPC server (1 GPU).
 #
-# Run with `TRTLLM_PYTHON` from `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`.
+# Run with `TRTLLM_PYTHON` from `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009`.
 # The bindings it needs are installed by the helper below.
 
 set -e
