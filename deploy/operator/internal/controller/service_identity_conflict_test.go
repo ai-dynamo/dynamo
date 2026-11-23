@@ -252,9 +252,9 @@ func TestGroveServiceIdentityWaitPublishesScalingDeferral(t *testing.T) {
 				}}},
 			}
 			child := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default", Generation: 1},
-				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 2},
-				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 2, ReadyReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: new(int64(1))},
+				Name: "graph-0-frontend", Namespace: "default", Generation: 1,
+				Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 2},
+				Status: grovev1alpha1.PodCliqueStatus{Replicas: 2, ReadyReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: new(int64(1))},
 			}
 			base := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 				WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).
