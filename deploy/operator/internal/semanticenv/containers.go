@@ -75,17 +75,6 @@ func (c ContainerLayers) Prepend(container *corev1.Container, source string, val
 	container.Env = result
 }
 
-// BindPod applies the same binding to every regular and init container.
-// pod must not be nil. Existing sources are captured before bindings are added.
-func (c ContainerLayers) BindPod(pod *corev1.PodSpec, source string, values []corev1.EnvVar) {
-	c.Capture(pod)
-	for _, group := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
-		for i := range group {
-			c.Bind(&group[i], source, values)
-		}
-	}
-}
-
 // PrependPod replaces matching names and prepends values in every container.
 // pod must not be nil. A nil collector retains the legacy physical mutation.
 func (c ContainerLayers) PrependPod(pod *corev1.PodSpec, source string, values []corev1.EnvVar) {

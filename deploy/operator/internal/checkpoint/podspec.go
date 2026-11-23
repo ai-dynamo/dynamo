@@ -187,28 +187,26 @@ func EnsureIntraPodGPUMemoryService(
 	targetContainers []*corev1.Container,
 	extraClientContainerNames []string,
 	useV1 bool,
-) map[string][]corev1.EnvVar {
+) {
 	if len(targetContainers) == 0 {
-		return nil
+		return
 	}
 	gms.EnsureServerSidecar(podSpec, targetContainers[0], useV1)
-	bindings := make(map[string][]corev1.EnvVar)
 	for _, container := range targetContainers {
-		bindings[container.Name] = gms.EnsureClient(podSpec, container)
+		gms.EnsureClient(podSpec, container)
 		if useV1 {
-			bindings[container.Name] = append(bindings[container.Name], gms.EnableV1(container)...)
+			gms.EnableV1(container)
 		}
 	}
 	for _, name := range extraClientContainerNames {
 		for i := range podSpec.Containers {
 			if podSpec.Containers[i].Name == name {
-				bindings[name] = gms.EnsureClient(podSpec, &podSpec.Containers[i])
+				gms.EnsureClient(podSpec, &podSpec.Containers[i])
 				if useV1 {
-					bindings[name] = append(bindings[name], gms.EnableV1(&podSpec.Containers[i])...)
+					gms.EnableV1(&podSpec.Containers[i])
 				}
 				break
 			}
 		}
 	}
-	return bindings
 }

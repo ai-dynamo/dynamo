@@ -91,7 +91,6 @@ func TestContainerLayerPodBindings(t *testing.T) {
 	}
 	layers := make(ContainerLayers)
 	layers.PrependPod(pod, "operator.storage", []corev1.EnvVar{{Name: "ROOT", Value: "/models"}})
-	layers.BindPod(pod, "operator.cluster", []corev1.EnvVar{{Name: "CLUSTER", Value: "serving"}})
 
 	t.Log("Finalization preserves both authored lists and their precise Pod field paths")
 	require.NoError(t, layers.Apply(pod))
@@ -99,7 +98,6 @@ func TestContainerLayerPodBindings(t *testing.T) {
 		for _, container := range group {
 			require.Equal(t, "ROOT", container.Env[0].Name)
 			require.Equal(t, "PATH", container.Env[1].Name)
-			require.Equal(t, "CLUSTER", container.Env[2].Name)
 		}
 	}
 	require.Equal(t, "podTemplate.spec.initContainers[name=prepare].env", layers["prepare"][0].Source)

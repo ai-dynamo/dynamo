@@ -247,49 +247,33 @@ func canonicalSnapshotContainer(container corev1.Container, keepName, orderedEnv
 }
 
 func snapshotCompatibilityEnvironment(container corev1.Container, ordered bool) []corev1.EnvVar {
-	// Track the definition each entry actually reads, including repeated names and self-references.
-	needed := make([]bool, len(container.Env))
-	dependencies := make([][]int, len(container.Env))
-	definitions := make(map[string]int, len(container.Env))
-	for i, variable := range container.Env {
-		_, restored := snapshotRestoreEnvironmentNames[variable.Name]
-		needed[i] = !restored
-		if ordered && variable.ValueFrom == nil {
-			for _, name := range semanticenv.References(variable.Value) {
-				if previous, exists := definitions[name]; exists {
-					dependencies[i] = append(dependencies[i], previous)
-				}
-			}
-		}
-		definitions[variable.Name] = i
-	}
-
 	// Kubernetes expands declared argv against the final environment before capture.
+	needed := make(map[string]bool)
 	if ordered {
 		for _, parts := range [][]string{container.Command, container.Args} {
 			for _, value := range parts {
 				for _, name := range semanticenv.References(value) {
-					if definition, exists := definitions[name]; exists {
-						needed[definition] = true
-					}
-				}
-			}
-		}
-		for i, selected := range slices.Backward(needed) {
-			if selected {
-				for _, dependency := range dependencies[i] {
-					needed[dependency] = true
+					needed[name] = true
 				}
 			}
 		}
 	}
 
-	// Keep only process inputs and their dependencies in the original expansion order.
+	// Resolve dependencies backwards so duplicates and self-references select the preceding binding.
 	env := make([]corev1.EnvVar, 0, len(container.Env))
-	for i, variable := range container.Env {
-		if needed[i] {
+	for _, variable := range slices.Backward(container.Env) {
+		_, restored := snapshotRestoreEnvironmentNames[variable.Name]
+		keep := !restored || needed[variable.Name]
+		delete(needed, variable.Name)
+		if keep {
 			env = append(env, variable)
+			if ordered && variable.ValueFrom == nil {
+				for _, name := range semanticenv.References(variable.Value) {
+					needed[name] = true
+				}
+			}
 		}
 	}
+	slices.Reverse(env)
 	return env
 }

@@ -64,17 +64,16 @@ func v1Environment() corev1.EnvVar {
 // Snapshot-coupled GMS uses the V1 protocol: sidecar, extra GMS clients,
 // and the engine container all receive DYN_GMS_USE_V1=true. Intra-pod
 // GMS without snapshot keeps the V0 sidecar and does not set that env.
-func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) []corev1.EnvVar {
+func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
 	if podSpec == nil || mainContainer == nil {
-		return nil
+		return
 	}
 
-	bindings := EnsureClient(podSpec, mainContainer)
+	EnsureClient(podSpec, mainContainer)
 	if useV1 {
-		bindings = append(bindings, EnableV1(mainContainer)...)
+		EnableV1(mainContainer)
 	}
 	ensureServerSidecar(podSpec, mainContainer, useV1)
-	return bindings
 }
 
 // EnsureServerSidecarResources attaches the server and client resources without
@@ -100,26 +99,25 @@ func ensureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 }
 
 // EnableV1 sets DYN_GMS_USE_V1=true on a GMS process container. Idempotent.
-func EnableV1(container *corev1.Container) []corev1.EnvVar {
+func EnableV1(container *corev1.Container) {
 	if container == nil {
-		return nil
+		return
 	}
 	binding := v1Environment()
 	for i := range container.Env {
 		if container.Env[i].Name == EnvUseV1 {
 			container.Env[i] = binding
-			return []corev1.EnvVar{binding}
+			return
 		}
 	}
 	container.Env = append(container.Env, binding)
-	return []corev1.EnvVar{binding}
 }
 
 // EnsureClient adds the GMS UDS socket volume, mount, GMS_SOCKET_DIR env var,
 // and DRA claim to a GMS client container. Idempotent.
-func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1.EnvVar {
+func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
 	if podSpec == nil || container == nil {
-		return nil
+		return
 	}
 	EnsureClientResources(podSpec, container)
 
@@ -128,11 +126,10 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1
 	for i := range container.Env {
 		if container.Env[i].Name == EnvSocketDir {
 			container.Env[i] = sharedEnv
-			return []corev1.EnvVar{sharedEnv}
+			return
 		}
 	}
 	container.Env = append(container.Env, sharedEnv)
-	return []corev1.EnvVar{sharedEnv}
 }
 
 // EnsureClientResources attaches the socket volume, mount and DRA claim without
