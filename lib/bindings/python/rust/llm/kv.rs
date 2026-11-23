@@ -80,7 +80,7 @@ mod demand_driven;
 #[cfg(feature = "select-service")]
 #[pyclass(frozen)]
 pub(crate) struct WorkerSequenceEventPublisher {
-    // The GIL protects the borrow state while the socket is used without it.
+    // Publishing holds the GIL, so borrows never overlap.
     inner: GILProtected<RefCell<Option<selection::WorkerSequenceEventPublisher>>>,
     endpoint: String,
 }
@@ -116,38 +116,24 @@ impl WorkerSequenceEventPublisher {
     }
 
     fn mark_prefill_completed(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
-        let mut inner = self
-            .inner
-            .get(py)
-            .try_borrow_mut()
-            .map_err(|_| PyRuntimeError::new_err("publisher is already in use"))?;
-        if let Some(publisher) = inner.as_mut() {
-            py.allow_threads(|| publisher.mark_prefill_completed(request_id))
+        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+            publisher
+                .mark_prefill_completed(request_id)
                 .map_err(to_pyerr)?;
         }
         Ok(())
     }
 
     fn free(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
-        let mut inner = self
-            .inner
-            .get(py)
-            .try_borrow_mut()
-            .map_err(|_| PyRuntimeError::new_err("publisher is already in use"))?;
-        if let Some(publisher) = inner.as_mut() {
-            py.allow_threads(|| publisher.free(request_id))
-                .map_err(to_pyerr)?;
+        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+            publisher.free(request_id).map_err(to_pyerr)?;
         }
         Ok(())
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        let publisher = self
-            .inner
-            .get(py)
-            .try_borrow_mut()
-            .map_err(|_| PyRuntimeError::new_err("publisher is already in use"))?
-            .take();
+        let publisher = self.inner.get(py).borrow_mut().take();
+        // Dropping the publisher terminates its ZMQ context, which can block.
         py.allow_threads(move || drop(publisher));
         Ok(())
     }
