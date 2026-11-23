@@ -1036,8 +1036,8 @@ func TestRepointMPISSHSecret(t *testing.T) {
 			pod := &corev1.PodSpec{Volumes: []corev1.Volume{
 				{Name: "plain", Secret: &corev1.SecretVolumeSource{SecretName: "shared", DefaultMode: new(int32(0644)), Items: []corev1.KeyToPath{{Key: "private.key", Path: "key", Mode: new(int32(0600))}}}},
 				{Name: "projected", Projected: &corev1.ProjectedVolumeSource{DefaultMode: new(int32(0440)), Sources: []corev1.VolumeProjection{
-					{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "shared"}, Items: []corev1.KeyToPath{{Key: "private.key.pub", Path: "public"}}}},
-					{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "custom"}}},
+					{Secret: &corev1.SecretProjection{Name: "shared", Items: []corev1.KeyToPath{{Key: "private.key.pub", Path: "public"}}}},
+					{Secret: &corev1.SecretProjection{Name: "custom"}},
 				}}},
 				{Name: "custom", Secret: &corev1.SecretVolumeSource{SecretName: "custom"}},
 			}}

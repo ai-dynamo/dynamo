@@ -253,7 +253,7 @@ func TestDGDMPISSHSecretForAuthoredVolume(t *testing.T) {
 			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", mpiSSHTestOriginVersion)
 			component := &dgd.Spec.Components[0]
 			component.Multinode = nil
-			component.PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "ssh", Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: tc.secretName}}}}}}}
+			component.PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "ssh", Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{Name: tc.secretName}}}}}}
 			reconciler := newMPISSHTestReconciler(t, dgd)
 
 			t.Log("Create a graph key only for the shared reference, without changing the authored template")
