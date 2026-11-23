@@ -40,6 +40,7 @@
 # trigger must also check the command's SHA when approval is required.
 
 # Maintainers can retry failed jobs from existing PR runs with `/rerun ci`.
+# glamr-agent can also request retries on its own fork PRs under case 4 above.
 # Copied-branch retries require approval for the current PR head.
 
 name: Trigger CI Approval Flow
@@ -359,4 +360,7 @@ jobs:
         with:
           script: |
             const rerun = require('./.github/scripts/rerun-ci.js');
-            await rerun({ github, context, core });
+            await rerun({
+              github, context, core,
+              glamrCiRequestsDisabled: ${{ vars.GLAMR_CI_REQUESTS_DISABLED == 'true' }},
+            });
