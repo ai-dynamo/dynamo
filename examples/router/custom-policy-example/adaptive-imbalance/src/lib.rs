@@ -245,6 +245,11 @@ fn provider(
     params
         .validate()
         .map_err(WorkerSelectionPolicyProviderError::new)?;
+    if params.slot_capacity.is_none() {
+        tracing::warn!(
+            "adaptive-imbalance: slot_capacity is not set; the loop engages only on imbalance above enter_threshold, not on a full worker"
+        );
+    }
 
     Ok(Arc::new(
         move |config: &SelectionConfig, worker_type, _partition| {

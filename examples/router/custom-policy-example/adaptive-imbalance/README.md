@@ -50,6 +50,8 @@ With the defaults, the weights stay at baseline while the pool is even, so picks
 
 The imbalance measures how even the load is, not whether workers have free slots. When the loop spreads a burst evenly over workers that are all full, the imbalance falls below `exit_threshold`, and returning to the affinity weights sends the next wave to a worker without a free slot. A wave that lands while the loop is off goes with the affinity weights to the cached workers, which fill up before the imbalance reaches `enter_threshold`. With `slot_capacity` set, a worker with at least `saturation_hold × slot_capacity` requests in flight engages the loop, an engaged loop does not disengage while any worker is that full, and the split stays at or above the split at `enter_threshold` meanwhile. Engaging on a full worker still waits for `dwell_cycles`. The engaged and disengaged log lines carry `saturated`, which says whether a worker was full in that tick's sample.
 
+Set `slot_capacity` to the concurrency limit the workers run with. Without it the loop engages only on imbalance above `enter_threshold`, and a burst that fills the cached workers stays below that threshold, so the picks match the default policy's and the log shows no `adaptive-imbalance: engaged` line. The policy logs a warning at startup when `slot_capacity` is absent. The example `worker-selection.yaml` sets 32, which matches workers started with `--max-num-seqs 32`.
+
 ## Known gaps
 
 The cost omits these default-policy terms, so picks can differ from the default policy's when they are active:

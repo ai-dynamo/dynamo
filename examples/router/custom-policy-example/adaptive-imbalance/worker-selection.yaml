@@ -20,3 +20,7 @@ worker_selection:
       stale_after_ms: 5000
       enter_threshold: 0.6
       exit_threshold: 0.4
+      # Sequence slots per worker: set this to the engine's concurrency limit (vLLM `--max-num-seqs`).
+      # The router does not expose that limit, and without it the loop does not engage on a full worker,
+      # only on imbalance above enter_threshold.
+      slot_capacity: 32
