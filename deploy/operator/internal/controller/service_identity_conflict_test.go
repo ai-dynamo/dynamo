@@ -133,7 +133,7 @@ func TestGroveServiceIdentityApplyOutcome(t *testing.T) {
 			ctx := t.Context()
 			t.Log("Converge a Grove frontend before repairing missing Service metadata")
 			dgd := &v1beta1.DynamoGraphDeployment{
-				Name: "graph", Namespace: "default", UID: "graph-uid", Generation: 1,
+				Name: "graph", Namespace: "default", UID: "graph-uid", Generation: 2,
 				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 					ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime:old"}}}},
@@ -159,6 +159,12 @@ func TestGroveServiceIdentityApplyOutcome(t *testing.T) {
 			require.NoError(t, base.Get(ctx, serviceKey, service))
 			delete(service.Labels, consts.KubeLabelDynamoComponentType)
 			require.NoError(t, base.Update(ctx, service))
+			component := dgd.Status.Components["frontend"]
+			component.GPUsPerEngine, component.GPUsPerReplica = new(int64(4)), new(int64(8))
+			component.ServedModelName, component.RuntimeComponentName = "observed-model", "observed-runtime"
+			component.GPUPowerLimitWatts = new(int64(300))
+			dgd.Status.Components["frontend"] = component
+			dgd.Status.ObservedGeneration = 1
 			previous := dgd.DeepCopy().Status.Components
 
 			t.Log("Refuse the identity Apply, optionally alongside a genuine Grove scaling API failure")
@@ -197,8 +203,9 @@ func TestGroveServiceIdentityApplyOutcome(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
 				require.Equal(t, "ServiceIdentityPending", ready.Reason)
-				require.Contains(t, result.Status.Components, "frontend")
-				require.Equal(t, previous["frontend"].Replicas, result.Status.Components["frontend"].Replicas)
+				require.Equal(t, previous, result.Status.Components, "a metadata cache wait preserves all observed workload facts")
+				require.EqualValues(t, 1, result.Status.ObservedGeneration, "unfinished program work must not acknowledge the new generation")
+				require.Equal(t, dgd.Generation, ready.ObservedGeneration)
 			} else {
 				require.True(t, apierrors.IsForbidden(err), "%v", err)
 				require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
@@ -219,6 +226,77 @@ func TestGroveServiceIdentityApplyOutcome(t *testing.T) {
 			require.NoError(t, base.Get(ctx, serviceKey, service))
 			require.Equal(t, string(v1beta1.ComponentTypeFrontend), service.Labels[consts.KubeLabelDynamoComponentType])
 			require.NotEqual(t, "ServiceIdentityPending", meta.FindStatusCondition(result.Status.Conditions, "Ready").Reason)
+			require.Equal(t, dgd.Generation, result.Status.ObservedGeneration)
+		})
+	}
+}
+
+func TestGroveServiceIdentityWaitPublishesScalingDeferral(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		observedReplicas int32
+		previous, next   metav1.ConditionStatus
+	}{
+		{name: "capacity change becomes deferred", observedReplicas: 1, previous: metav1.ConditionFalse, next: metav1.ConditionTrue},
+		{name: "observed capacity clears deferral", observedReplicas: 2, previous: metav1.ConditionTrue, next: metav1.ConditionFalse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			t.Log("Converge a frontend while its Coherent PCS waits for Grove acknowledgement")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Name: "graph", Namespace: "default", UID: "graph-uid", Generation: 2,
+				Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: string(grovev1alpha1.CoherentStrategy)},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+					ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime:old"}}}},
+				}}},
+			}
+			child := &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default", Generation: 1},
+				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 2},
+				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 2, ReadyReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: new(int64(1))},
+			}
+			base := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+				WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).
+				WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, child).WithStatusSubresource(dgd).Build()
+			r := &DynamoGraphDeploymentReconciler{
+				Client: base, Recorder: events.NewFakeRecorder(100),
+				Config:                &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}},
+				RuntimeConfig:         &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}},
+				DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+			}
+			result, err := r.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			dgd.Status = result.Status
+			meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: "ScalingDeferred", Status: tc.previous, ObservedGeneration: 1, Reason: "PreviouslyObserved"})
+			service := &corev1.Service{}
+			require.NoError(t, base.Get(ctx, client.ObjectKey{Namespace: "default", Name: "graph-frontend"}, service))
+			delete(service.Labels, consts.KubeLabelDynamoComponentType)
+			require.NoError(t, base.Update(ctx, service))
+			require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(child), child))
+			child.Spec.Replicas = tc.observedReplicas
+			require.NoError(t, base.Update(ctx, child))
+
+			t.Log("Observe current capacity before a later guarded Service metadata write conflicts")
+			applyAttempts, scaleWrites := 0, 0
+			r.Client = interceptor.NewClient(base, groveScaleInterceptor(interceptor.Funcs{
+				Apply: func(ctx context.Context, delegated client.WithWatch, configuration runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+					if _, ok := configuration.(*corev1apply.ServiceApplyConfiguration); ok {
+						applyAttempts++
+						return apierrors.NewConflict(schema.GroupResource{Resource: "services"}, "graph-frontend", errors.New("stale resourceVersion"))
+					}
+					return delegated.Apply(ctx, configuration, opts...)
+				},
+			}, func() { scaleWrites++ }))
+			result, err = r.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			require.Positive(t, applyAttempts)
+			require.Zero(t, scaleWrites, "Grove must acknowledge Coherent intent before replica writes")
+			require.Equal(t, "ServiceIdentityPending", meta.FindStatusCondition(result.Status.Conditions, "Ready").Reason)
+			deferred := meta.FindStatusCondition(result.Status.Conditions, "ScalingDeferred")
+			require.NotNil(t, deferred)
+			require.Equal(t, tc.next, deferred.Status, "publish the capacity observation even when the subsequent metadata write waits")
+			require.Equal(t, dgd.Generation, deferred.ObservedGeneration)
 		})
 	}
 }

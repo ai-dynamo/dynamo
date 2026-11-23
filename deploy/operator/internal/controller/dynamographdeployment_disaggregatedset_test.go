@@ -716,27 +716,38 @@ func TestDCDAndDirectDisaggregatedSetRoleTemplateRenderingParity(t *testing.T) {
 	require.Equal(t, "leader:1.0.0", dsLeader.Spec.Containers[0].Image)
 	require.Equal(t, "worker:1.0.0", dsWorker.Spec.Containers[0].Image)
 
-	t.Log("Service metadata follows the selected leader's legacy identity without changing its spec")
+	t.Log("Service metadata follows the selected leader's final identity without changing its spec")
 	renderer.config.Discovery.Backend = configv1alpha1.DiscoveryBackendKubernetes
 	nativeService, toDelete, err := renderer.generateServiceForDGDComponent(t.Context(), dgd, component, "prefill", dcd.Name)
 	require.NoError(t, err)
 	require.False(t, toDelete)
-	for _, role := range component.Roles {
-		role.PodTemplate.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeWorker
+	for _, leaderType := range []string{consts.ComponentTypeWorker, consts.ComponentTypeDecode} {
+		t.Run(leaderType, func(t *testing.T) {
+			t.Log("Give only the leader a different authored component type")
+			roleComponent := component.DeepCopy()
+			for _, role := range roleComponent.Roles {
+				if role.Name == nvidiacomv1beta1.ComponentRoleLeader {
+					role.PodTemplate.Labels[consts.KubeLabelDynamoComponentType] = leaderType
+				}
+			}
+			beforeServiceRender := roleComponent.DeepCopy()
+			leader, worker, err := renderer.renderMultinodePodTemplateSpecsForDGDComponent(
+				t.Context(), dgd, roleComponent, "prefill", dcd.Name, dynamo.GetDynamoNamespace(dgd, roleComponent), backend, nil,
+			)
+			require.NoError(t, err)
+
+			t.Log("Render the leader Service while preserving its original selector and the input component")
+			service, toDelete, err := renderer.generateServiceForDGDComponent(t.Context(), dgd, roleComponent, "prefill", dcd.Name)
+			require.NoError(t, err)
+			require.False(t, toDelete)
+			require.Equal(t, leaderType, leader.Labels[consts.KubeLabelDynamoComponentType])
+			require.Equal(t, consts.ComponentTypePrefill, worker.Labels[consts.KubeLabelDynamoComponentType])
+			require.NotEqual(t, worker.Labels[consts.KubeLabelDynamoComponentType], leader.Labels[consts.KubeLabelDynamoComponentType])
+			require.Equal(t, leader.Labels[consts.KubeLabelDynamoComponentType], service.Labels[consts.KubeLabelDynamoComponentType])
+			require.Equal(t, nativeService.Spec, service.Spec)
+			require.Equal(t, beforeServiceRender, roleComponent)
+		})
 	}
-	beforeServiceRender := component.DeepCopy()
-	legacyLeader, legacyWorker, err := renderer.renderMultinodePodTemplateSpecsForDGDComponent(
-		t.Context(), dgd, component, "prefill", dcd.Name, dynamo.GetDynamoNamespace(dgd, component), backend, nil,
-	)
-	require.NoError(t, err)
-	legacyService, toDelete, err := renderer.generateServiceForDGDComponent(t.Context(), dgd, component, "prefill", dcd.Name)
-	require.NoError(t, err)
-	require.False(t, toDelete)
-	require.Equal(t, consts.ComponentTypeWorker, legacyLeader.Labels[consts.KubeLabelDynamoComponentType])
-	require.Equal(t, consts.ComponentTypeWorker, legacyWorker.Labels[consts.KubeLabelDynamoComponentType])
-	require.Equal(t, legacyLeader.Labels[consts.KubeLabelDynamoComponentType], legacyService.Labels[consts.KubeLabelDynamoComponentType])
-	require.Equal(t, nativeService.Spec, legacyService.Spec)
-	require.Equal(t, beforeServiceRender, component)
 }
 
 func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {

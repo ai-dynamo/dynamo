@@ -492,6 +492,10 @@ metadata:
     nvidia.com/last-applied-hash: 0d4cf4ee920ca7aa6c37ccb761926704d01e23c6f34733fdb615c175dc0a860d
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-component-type: frontend
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-compatibility-frontend-sidecar-probes-workers
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
   name: workers-frontend
@@ -535,6 +539,10 @@ metadata:
     nvidia.com/last-applied-hash: b50c8e103d0ed3a4b617524803c8a95086f0711d68ac59084bf0eb25ebe1c1df
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: worker
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-compatibility-frontend-sidecar-probes-workers
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-worker-hash: 2840f95b

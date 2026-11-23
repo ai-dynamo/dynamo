@@ -10,6 +10,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +55,8 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 
 	t.Log("Reject initial-list and unrelated events while initializing through the real cached reconciler")
 	serviceKey := client.ObjectKey{Namespace: dcd.Namespace, Name: dcd.Name}
+	serviceWatchReady := make(chan struct{})
+	var serviceWatchOnce sync.Once
 	var cachedClient client.Client
 	var testReconciler *DynamoComponentDeploymentReconciler
 	env.StartManager(func(mgr ctrl.Manager) error {
@@ -69,7 +72,12 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 
 		// Only deliberate Service changes or its later deletion may enqueue.
 		return controller.WithEventFilter(predicate.Funcs{
-			CreateFunc:  func(event.CreateEvent) bool { return false },
+			CreateFunc: func(e event.CreateEvent) bool {
+				if _, service := e.Object.(*corev1.Service); service && client.ObjectKeyFromObject(e.Object) == serviceKey {
+					serviceWatchOnce.Do(func() { close(serviceWatchReady) })
+				}
+				return false
+			},
 			GenericFunc: func(event.GenericEvent) bool { return false },
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				service, ok := e.ObjectNew.(*corev1.Service)
@@ -97,6 +105,13 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 		}
 		return observed.Labels[consts.KubeLabelDynamoComponent] == "frontend", "waiting for initial reconciliation"
 	}, 10*time.Second, 100*time.Millisecond, "initial direct reconciliation did not finish")
+
+	t.Log("Observe the Service through its watch before injecting metadata drift")
+	select {
+	case <-serviceWatchReady:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Service watch did not observe the initial Service")
+	}
 
 	original := waitForDCDOwnedService(t, ctx, env.Client(), serviceKey, dcd.UID, "")
 

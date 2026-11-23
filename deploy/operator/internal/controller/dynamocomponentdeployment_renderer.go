@@ -680,7 +680,9 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 			if err != nil {
 				return nil, false, err
 			}
-			if effectiveType != "" {
+
+			// Match the authored-label overlay on the final role Pod template.
+			if _, authored := podLabels[commonconsts.KubeLabelDynamoComponentType]; !authored && effectiveType != "" {
 				podLabels[commonconsts.KubeLabelDynamoComponentType] = effectiveType
 			}
 			if value, found := podLabels[commonconsts.KubeLabelDynamoComponentType]; found {

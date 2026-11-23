@@ -41,7 +41,9 @@ func TestServicesPreserveUnresolvedComponentType(t *testing.T) {
 				value, present := service.Labels[consts.KubeLabelDynamoComponentType]
 				require.Equal(t, tc.wantPresent, present)
 				require.Equal(t, tc.want, value)
-				require.Equal(t, tc.resolvedType, service.Spec.Selector[consts.KubeLabelDynamoComponentType], "preserve existing Service selector semantics")
+				selectorType, present := service.Spec.Selector[consts.KubeLabelDynamoComponentType]
+				require.True(t, present, "an empty selector requirement must not become an absent requirement")
+				require.Equal(t, tc.resolvedType, selectorType, "preserve existing Service selector semantics")
 			}
 		})
 	}

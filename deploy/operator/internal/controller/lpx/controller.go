@@ -322,7 +322,11 @@ func (r *graphReconciler) reconcileWorkloads(
 	// Synchronize configuration before any scale-up, scale-down, or request retirement.
 	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
 		if errors.Is(err, serviceidentity.ErrCacheObservationPending) {
-			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the runtime resource cache observation")
+			// Keep a current scheduler failure observed above while identity catches up.
+			ready := meta.FindStatusCondition(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
+			if pcs == nil || ready == nil || ready.ObservedGeneration != deployment.Generation || ready.Reason != v1alpha1.LPXReadyReasonFailed {
+				setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the runtime resource cache observation")
+			}
 			return ctrl.Result{}, nil
 		}
 

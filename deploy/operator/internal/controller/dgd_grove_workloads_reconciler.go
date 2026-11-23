@@ -155,7 +155,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		if scaleErr != nil && errors.Is(err, serviceidentity.ErrCacheObservationPending) {
 			return groveWorkloadResult{}, scaleErr
 		}
-		return groveWorkloadResult{}, errors.Join(scaleErr, err)
+		return groveWorkloadResult{ScalingDeferred: scalingDeferred}, errors.Join(scaleErr, err)
 	}
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,

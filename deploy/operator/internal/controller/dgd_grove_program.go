@@ -131,6 +131,7 @@ func (p *groveProgram) Reconcile(
 		IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
 	}
 	programResult = newWorkloadProgramResult(req.DGD)
+	previousComponents := maps.Clone(programResult.Status.Components)
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
 
@@ -196,36 +197,44 @@ func (p *groveProgram) Reconcile(
 	)
 
 	result := groveResult.ReconcileResult
+	identityPending := errors.Is(err, serviceidentity.ErrCacheObservationPending)
+
+	// Publish scaling only after it was observed, including a later metadata cache wait.
+	condition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: req.DGD.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
+	if err == nil || identityPending {
+		if groveResult.ScalingDeferred {
+			condition.Status = metav1.ConditionTrue
+			condition.Reason = "GroveUpdatePending"
+			condition.Message = "Replica changes are deferred until Grove observes the desired PodCliqueSet and any coherent update completes"
+			result.State = nvidiacomv1beta1.DGDStatePending
+			result.Reason = "scaling_deferred"
+			result.Message = Message(condition.Message)
+		}
+		if groveResult.ScalingDeferred || meta.FindStatusCondition(programResult.Status.Conditions, "ScalingDeferred") != nil {
+			meta.SetStatusCondition(&programResult.Status.Conditions, condition)
+		}
+	}
 
 	if err != nil {
+		// A metadata cache wait does not invalidate previously observed workload facts.
+		if identityPending {
+			programResult.Status.Components = previousComponents
+		}
+
 		// Preserve newly observed component status while leaving the generation unobserved.
 		if programResult.Status.Components == nil {
 			programResult.Status.Components = result.ComponentStatus
 		} else {
 			maps.Copy(programResult.Status.Components, result.ComponentStatus)
 		}
-		if errors.Is(err, serviceidentity.ErrCacheObservationPending) {
-			programResult.applyReconcileResult(req.DGD.Generation, ReconcileResult{
+		if identityPending {
+			programResult.Status.State = nvidiacomv1beta1.DGDStatePending
+			meta.SetStatusCondition(&programResult.Status.Conditions, readyCondition(req.DGD.Generation, programResult.Status, ReconcileResult{
 				State: nvidiacomv1beta1.DGDStatePending, Reason: "ServiceIdentityPending", Message: "Waiting for the Service cache observation",
-				ComponentStatus: programResult.Status.Components,
-			})
+			}))
 			return programResult, nil
 		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
-	}
-
-	// Publish scaling deferral without discarding observed component status or readiness.
-	condition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: req.DGD.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
-	if groveResult.ScalingDeferred {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = "GroveUpdatePending"
-		condition.Message = "Replica changes are deferred until Grove observes the desired PodCliqueSet and any coherent update completes"
-		result.State = nvidiacomv1beta1.DGDStatePending
-		result.Reason = "scaling_deferred"
-		result.Message = Message(condition.Message)
-	}
-	if groveResult.ScalingDeferred || meta.FindStatusCondition(programResult.Status.Conditions, "ScalingDeferred") != nil {
-		meta.SetStatusCondition(&programResult.Status.Conditions, condition)
 	}
 
 	if req.DGD.HasLPXComponent() && restartChanged {
