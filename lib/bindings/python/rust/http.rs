@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use crate::{CancellationToken, DistributedRuntime, engine::*, to_pyerr};
 
 pub use dynamo_llm::endpoint_type::EndpointType;
-pub use dynamo_llm::http::service::{error as http_error, service_v2};
+pub use dynamo_llm::http::service::service_v2;
 pub use dynamo_runtime::{
     pipeline::{AsyncEngine, Data, ManyOut, SingleIn, async_trait},
     protocols::annotated::Annotated,
@@ -222,7 +222,7 @@ where
                         if let Ok(HttpError { code, message }) = py_err.value(py).extract() {
                             // SSE panics if there are carriage returns or newlines
                             let message = message.replace(['\r', '\n'], "");
-                            return Err(http_error::HttpError { code, message })?;
+                            return Err(dynamo_error::http::HttpError { code, message })?;
                         }
                         Err(error!("Python Error: {}", py_err))
                     })
