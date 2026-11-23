@@ -121,6 +121,37 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+<ParamField path="DYN_HTTP_RESPONSES_STORE" type="string" default="none">
+  Server-side storage for Responses API objects. `none` keeps `/v1/responses` stateless:
+  `store: true` is answered with `store: false` and `previous_response_id` returns 501.
+  `memory` keeps stored responses in the
+  frontend process, bounded by the variables below; each frontend replica holds its own records,
+  so continuation requests must reach the replica that stored the previous response. A stored
+  response keeps only its own turn's input and output items plus the id it continued from;
+  a continuation replays the whole chain through the same chat conversion, routing, and parsers
+  as a stateless request. `store` defaults to `false` when omitted, unlike OpenAI, so storage is
+  opt-in per request.
+</ParamField>
+
+<ParamField path="DYN_HTTP_RESPONSES_STORE_TTL_SECS" type="integer" default="3600">
+  Lifetime of a stored response. `0` keeps records until the record or byte cap evicts them.
+</ParamField>
+
+<ParamField path="DYN_HTTP_RESPONSES_STORE_MAX_RECORDS" type="integer" default="10000">
+  Maximum stored responses held by the `memory` backend; the least recently used record is evicted
+  first.
+</ParamField>
+
+<ParamField path="DYN_HTTP_RESPONSES_STORE_MAX_BYTES" type="integer" default="268435456">
+  Maximum serialized bytes held by the `memory` backend. A single response larger than this is
+  returned with `store: false` and a warning is logged.
+</ParamField>
+
+<ParamField path="DYN_HTTP_RESPONSES_MAX_CHAIN_DEPTH" type="integer" default="256">
+  Maximum number of stored responses a `previous_response_id` chain may span. Longer chains are
+  rejected with 400.
+</ParamField>
+
 <ParamField path="DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS" type="integer" default="0">
   Maximum pre-commit wait in milliseconds for streaming chat completions, completions, Responses,
   and Anthropic messages. Unset or `0` disables the wait; an invalid value also disables it and logs

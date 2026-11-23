@@ -28,6 +28,7 @@ use super::metrics::{
     register_frontend_metrics_start_time_metric, register_lora_allocation_metrics,
     register_model_ready_metric,
 };
+use super::responses_store::ResponseStore;
 use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
@@ -248,6 +249,10 @@ pub struct State {
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
     pub(super) migration_limit: u32,
+    /// Server-side Responses storage; `None` keeps the Responses API stateless.
+    responses_store: Option<Arc<dyn ResponseStore>>,
+    /// Longest `previous_response_id` chain a continuation may replay.
+    responses_max_chain_depth: usize,
     systemone_admission: Arc<Semaphore>,
     systemone_preflight_admission: Arc<Semaphore>,
     systemone_max_inflight_branches: usize,
@@ -314,6 +319,8 @@ struct StateConfig {
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
     migration_limit: u32,
+    responses_store: Option<Arc<dyn ResponseStore>>,
+    responses_max_chain_depth: usize,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -736,6 +743,8 @@ impl State {
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
             migration_limit: config.migration_limit,
+            responses_store: config.responses_store,
+            responses_max_chain_depth: config.responses_max_chain_depth,
             systemone_admission: Arc::new(Semaphore::new(systemone_max_inflight_branches)),
             systemone_preflight_admission: Arc::new(Semaphore::new(
                 SYSTEMONE_MAX_CONCURRENT_PREFLIGHT,
@@ -757,6 +766,16 @@ impl State {
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
+    }
+
+    /// Server-side Responses storage, when configured.
+    pub fn responses_store(&self) -> Option<&Arc<dyn ResponseStore>> {
+        self.responses_store.as_ref()
+    }
+
+    /// Longest `previous_response_id` chain a continuation may replay.
+    pub fn responses_max_chain_depth(&self) -> usize {
+        self.responses_max_chain_depth
     }
 
     pub fn manager(&self) -> &ModelManager {
@@ -1040,6 +1059,17 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
+
+    /// Server-side storage for Responses objects. When unset, the backend named
+    /// by `DYN_HTTP_RESPONSES_STORE` is built (`none` by default), which keeps
+    /// the Responses API stateless.
+    #[builder(default = "None")]
+    responses_store: Option<Arc<dyn ResponseStore>>,
+
+    /// Longest `previous_response_id` chain a continuation may replay. When
+    /// unset, `DYN_HTTP_RESPONSES_MAX_CHAIN_DEPTH` applies (default 256).
+    #[builder(default = "None")]
+    responses_max_chain_depth: Option<usize>,
 
     /// OpenAI-compatible Batch API placeholders. Disabled by default until
     /// batch storage and job lifecycle support are implemented; when enabled,
@@ -1649,6 +1679,21 @@ impl HttpServiceConfigBuilder {
         // builder flag can also force it off (e.g. tests), and wins.
         let nvext_enabled =
             config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
+        let responses_store = match config.responses_store {
+            Some(store) => Some(store),
+            None => super::responses_store::ResponseStoreSelector::from_env()?.build(),
+        };
+        if let Some(store) = responses_store.as_ref() {
+            tracing::info!(
+                backend = store.backend_name(),
+                "Responses API server-side storage enabled"
+            );
+        }
+        let responses_max_chain_depth = match config.responses_max_chain_depth {
+            Some(depth) if depth > 0 => depth,
+            Some(_) => anyhow::bail!("responses_max_chain_depth must be greater than zero"),
+            None => super::responses_store::max_chain_depth_from_env()?,
+        };
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -1662,6 +1707,8 @@ impl HttpServiceConfigBuilder {
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
                 migration_limit: config.migration_limit,
+                responses_store,
+                responses_max_chain_depth,
             },
         ));
         state

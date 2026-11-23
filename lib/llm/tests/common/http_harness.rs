@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use dynamo_llm::http::service::responses_store::ResponseStore;
 use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
@@ -78,6 +79,32 @@ impl HarnessService {
         engine: Arc<ScriptedChatEngine>,
         card: ModelDeploymentCard,
     ) -> Self {
+        Self::start_with_engine_card_and_store(engine, card, None).await
+    }
+
+    /// Start with server-side Responses storage, so `store: true`,
+    /// `previous_response_id`, and the `GET`/`DELETE /v1/responses/{id}` routes
+    /// are exercised against a real store.
+    #[allow(dead_code)]
+    pub async fn start_with_store(
+        scripts: impl IntoIterator<Item = Script>,
+        store: Arc<dyn ResponseStore>,
+    ) -> Self {
+        let engine = Arc::new(ScriptedChatEngine::new(scripts.into_iter().map(Ok)));
+        Self::start_with_engine_card_and_store(
+            engine,
+            ModelDeploymentCard::with_name_only(MODEL),
+            Some(store),
+        )
+        .await
+    }
+
+    #[allow(dead_code)]
+    pub async fn start_with_engine_card_and_store(
+        engine: Arc<ScriptedChatEngine>,
+        card: ModelDeploymentCard,
+        store: Option<Arc<dyn ResponseStore>>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -91,6 +118,7 @@ impl HarnessService {
             .enable_cmpl_endpoints(true)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
+            .responses_store(store)
             .build()
             .expect("failed to build harness HTTP service");
 
