@@ -216,7 +216,9 @@ sidecar_configs = {
             pytest.mark.gpu_1,
             # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
-            pytest.mark.post_merge,
+            # TODO: revert to pytest.mark.post_merge after pre_merge validation
+            # on this PR (see .ai/ci-guidelines.md).
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         env={

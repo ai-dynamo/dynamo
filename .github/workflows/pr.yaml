@@ -132,6 +132,8 @@ jobs:
       - helm-chart-tests
       - power-agent
       - sidecar-build
+      # TODO: remove after the temporary sidecar pre_merge run on this PR.
+      - sidecar-vllm-test
       - sidecar-trtllm-nightly-config-test
       - vllm-build
       - vllm-local-dev-build
@@ -378,9 +380,8 @@ jobs:
       # build exceed 60m with room to spare in run 34547963529.
       build_timeout_minutes: 90
       artifact_retention_days: '7'
-      # Nothing in PR CI runs these binaries; the build checks that the image
-      # and its license policy still build. Post-merge builds the shipping
-      # profile, including the LTO link.
+      # The temporary sidecar-vllm-test job consumes these binaries.
+      # Post-merge builds the shipping profile, including the LTO link.
       fast_release_profile: true
       diff_event_context: pr
       diff_current_branch: ${{ github.ref_name }}
@@ -822,6 +823,27 @@ jobs:
   # ============================================================================
   # TEST PIPELINES
   # ============================================================================
+
+  # TODO: remove after the temporary sidecar pre_merge run on this PR.
+  sidecar-vllm-test:
+    name: sidecar-runtime
+    needs: [changed-files, vllm-build, sidecar-build]
+    if: needs.changed-files.outputs.sidecar == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      framework: vllm
+      test_type: vLLM Sidecar 1-GPU E2E Test
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sidecar and vllm and gpu_1
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: vllm
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
 
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
