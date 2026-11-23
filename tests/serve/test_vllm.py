@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import allure
 import pytest
 import requests
 
@@ -1127,6 +1126,9 @@ def test_cuda_cache_readiness_comparison(
     image_server,
     monkeypatch,
 ):
+    # Marker collection runs in a smaller environment without Allure.
+    import allure
+
     cache_root = _nfs_cuda_cache_root()
     cache_root.mkdir(exist_ok=True)
     manifest_path = cache_root / f"{cuda_cache_config.name}.json"
