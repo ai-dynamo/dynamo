@@ -20,12 +20,14 @@
 //! the requests it has admitted, and is released after that.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dynamo_llm::local_model::model_card_instance;
 use dynamo_llm::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY;
+use dynamo_llm::local_model::{LocalModelBuilder, model_card_instance};
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::DistributedRuntime;
@@ -38,7 +40,6 @@ use dynamo_runtime::pipeline::{
     ResponseStream, SingleIn, StreamingDispatch,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
-use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
@@ -89,13 +90,64 @@ pub struct DirectDispatch {
     /// cleanup releases only this process's client, not the engine, which runs
     /// elsewhere.
     supervisors: TaskTracker,
-    /// Held while an engine's model files are fetched, so engines that start
-    /// together download a model once and then read the local copy. Not held
-    /// while the card is loaded from that copy.
-    model_fetch: tokio::sync::Mutex<()>,
+    /// Each model's files, fetched and read once per model, as a sidecar reads
+    /// them once per worker process. Engines of a model that start together
+    /// download and hash it once, and every later registration copies the card.
+    models: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<ModelFiles>>>>,
+}
+
+/// A model's files on this host and the card read from them.
+#[derive(Clone)]
+struct ModelFiles {
+    directory: PathBuf,
+    card: ModelDeploymentCard,
+}
+
+impl ModelFiles {
+    /// Fetch the files of the model `source` names and read its card from
+    /// them. Reading hashes the files, so it runs off the runtime's worker
+    /// threads, which serve requests.
+    async fn read(source: &str, custom_template: Option<&Path>) -> Result<Self, DynamoError> {
+        let directory = fetch_model_files(source).await?;
+        let (model_path, custom_template) = (directory.clone(), custom_template.map(PathBuf::from));
+        let read_error = |cause: String| {
+            error(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("read the model card of '{source}': {cause}"),
+            )
+        };
+        let card = tokio::task::spawn_blocking(move || {
+            LocalModelBuilder::read_model_card(&model_path, custom_template.as_deref())
+        })
+        .await
+        .map_err(|join_error| read_error(join_error.to_string()))?
+        .map_err(|card_error| read_error(card_error.to_string()))?;
+        Ok(Self { directory, card })
+    }
 }
 
 impl DirectDispatch {
+    /// The files of the model `source` names, read on first use. A failed
+    /// read is not kept: the next registration tries again. The custom
+    /// template is not part of the key: every engine is hosted with the same
+    /// `WorkerConfig`.
+    async fn model_files(
+        &self,
+        source: &str,
+        custom_template: Option<&Path>,
+    ) -> Result<ModelFiles, DynamoError> {
+        let files = self
+            .models
+            .lock()
+            .entry(source.to_string())
+            .or_default()
+            .clone();
+        files
+            .get_or_try_init(|| ModelFiles::read(source, custom_template))
+            .await
+            .cloned()
+    }
+
     /// Resolves once runtime shutdown has drained, withdrawn and released
     /// every engine.
     #[cfg(test)]
@@ -506,26 +558,23 @@ impl DirectEngineHost {
             &mut engine_config.runtime_data,
             engine.kv_event_sources().await?,
         )?;
+        let mut builder = local_model_builder(&config, &engine_config).await?;
         if !config.model_name.is_empty() {
-            let _fetching = self.dispatch.model_fetch.lock().await;
-            fetch_model_files(&config.model_name).await?;
+            let files = self
+                .dispatch
+                .model_files(&config.model_name, config.custom_jinja_template.as_deref())
+                .await?;
+            builder
+                .model_path(files.directory)
+                .source_path(PathBuf::from(&config.model_name))
+                .model_card(files.card);
         }
-        let mut builder = local_model_builder(&config, &engine_config, false).await?;
-        // Loading the card hashes its files, on every probe: off the runtime's
-        // worker threads, which serve requests, and not one engine at a time.
-        // Only the load runs on the blocking pool. It waits for nothing, so it
-        // never needs a second blocking thread, which a full pool cannot give.
-        let build_error = |cause: String| {
+        let local_model = builder.build().await.map_err(|build_error| {
             error(
                 ErrorType::Backend(BackendError::Unknown),
-                format!("build local model: {cause}"),
+                format!("build local model: {build_error}"),
             )
-        };
-        let local_model = tokio::task::spawn_blocking(move || builder.build().now_or_never())
-            .await
-            .map_err(|join_error| build_error(join_error.to_string()))?
-            .ok_or_else(|| build_error("the card load must not wait".to_string()))?
-            .map_err(|load_error| build_error(load_error.to_string()))?;
+        })?;
         let mut card = local_model.card().clone();
         card.model_type = model_type;
         card.model_input = config.model_input;
@@ -696,6 +745,8 @@ mod tests {
         refuses: AtomicBool,
         /// Never open a response stream.
         stalls: AtomicBool,
+        /// The model directory the engine reports, when not `MODEL`.
+        model: Option<String>,
         /// The prompt tokens of the last request served.
         prompt: parking_lot::Mutex<Vec<u32>>,
         /// The most prompt tokens the router took as cached here for a request.
@@ -733,7 +784,7 @@ mod tests {
                 ));
             }
             Ok(EngineConfig {
-                model: MODEL.to_string(),
+                model: self.state.model.as_deref().unwrap_or(MODEL).to_string(),
                 served_model_name: Some("direct-test-model".to_string()),
                 llm: Some(LlmRegistration {
                     kv_cache_block_size: Some(BLOCK_SIZE as u32),
@@ -1183,6 +1234,76 @@ mod tests {
             returned_at - lost_at < REPROBE_INITIAL_DELAY * 2,
             "an engine that served for {REPROBE_MAX_DELAY:?} must be probed after the initial delay"
         );
+        drt.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_engine_that_returns_registers_without_reading_its_models_files_again() {
+        // The engine's model is a copy of the sample model, so that the test
+        // can take its files away.
+        let model = tempfile::tempdir().unwrap();
+        for file in std::fs::read_dir(MODEL).unwrap() {
+            let file = file.unwrap();
+            std::fs::copy(file.path(), model.path().join(file.file_name())).unwrap();
+        }
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(EngineState {
+            up: AtomicBool::new(true),
+            model: Some(model.path().display().to_string()),
+            ..EngineState::default()
+        });
+        let factory_state = state.clone();
+        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
+            Ok(Arc::new(FakeEngine {
+                state: factory_state.clone(),
+                fail_next: Arc::default(),
+                hold_next: Arc::default(),
+                held: Arc::default(),
+            }) as Arc<dyn LLMEngine>)
+        });
+        let spec = DirectEngineSpec {
+            url: A.to_string(),
+            mode: DisaggregationMode::Aggregated,
+        };
+        let config = WorkerConfig::default();
+        let endpoint = DiscoveryQuery::Endpoint {
+            namespace: config.namespace.clone(),
+            component: config.component.clone(),
+            endpoint: config.endpoint.clone(),
+        };
+        serve_direct_engines(&drt, config, vec![spec], factory)
+            .await
+            .unwrap();
+        let registered_after = |starts: usize| {
+            let (drt, state, endpoint) = (drt.clone(), state.clone(), endpoint.clone());
+            async move {
+                tokio::time::timeout(Duration::from_secs(600), async {
+                    loop {
+                        let listed = drt.discovery().list(endpoint.clone()).await.unwrap();
+                        if state.starts.load(Ordering::SeqCst) == starts && !listed.is_empty() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("the engine must register after start {starts}"));
+            }
+        };
+        registered_after(1).await;
+
+        // Without its files the model can no longer be read from disk. The
+        // engine is lost and returns: it registers from the first read.
+        for file in std::fs::read_dir(model.path()).unwrap() {
+            std::fs::remove_file(file.unwrap().path()).unwrap();
+        }
+        state.lost.notify_one();
+        registered_after(2).await;
         drt.shutdown();
     }
 

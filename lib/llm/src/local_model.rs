@@ -56,6 +56,7 @@ fn self_host_metadata_default(value: Option<&str>) -> bool {
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
+    model_card: Option<ModelDeploymentCard>,
     source_path: Option<PathBuf>,
     model_name: Option<String>,
     model_aliases: Vec<String>,
@@ -101,6 +102,7 @@ impl Default for LocalModelBuilder {
             tls_key_path: Default::default(),
             tls_client_ca_cert_path: Default::default(),
             model_path: Default::default(),
+            model_card: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
             model_aliases: Default::default(),
@@ -129,6 +131,25 @@ impl LocalModelBuilder {
     pub fn model_path(&mut self, model_path: PathBuf) -> &mut Self {
         self.model_path = Some(model_path);
         self
+    }
+
+    /// The card of the model at `model_path`, as [`Self::read_model_card`]
+    /// returned it for that path and the same `custom_template_path`. `build`
+    /// then does not read the model's files.
+    pub fn model_card(&mut self, model_card: ModelDeploymentCard) -> &mut Self {
+        self.model_card = Some(model_card);
+        self
+    }
+
+    /// Read the card of the model at `model_path` from its files, as `build`
+    /// does. It hashes the files, so it blocks. To build several models from
+    /// the same files, read the card once and give each builder a copy with
+    /// [`Self::model_card`].
+    pub fn read_model_card(
+        model_path: &Path,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<ModelDeploymentCard> {
+        ModelDeploymentCard::load_from_disk(&fs::canonicalize(model_path)?, custom_template_path)
     }
 
     /// The HF name or NGC URI before we downloaded the model, or a local path if
@@ -423,8 +444,13 @@ impl LocalModelBuilder {
         let original_model_path = model_path;
         let model_path = fs::canonicalize(&original_model_path)?;
 
-        let mut card =
-            ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
+        let mut card = match self.model_card.take() {
+            Some(card) => card,
+            None => ModelDeploymentCard::load_from_disk(
+                &model_path,
+                self.custom_template_path.as_deref(),
+            )?,
+        };
         // Source path is the `--model-path` the user passed. By now our `model_path` is the local
         // path of the downloaded model.
         if let Some(source_path) = self.source_path.take() {
@@ -996,6 +1022,35 @@ mod local_source_tests {
 
     fn model_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+    }
+
+    #[tokio::test]
+    async fn a_card_read_ahead_builds_the_same_model_without_reading_the_files() {
+        async fn card(model: &Path, read_ahead: Option<ModelDeploymentCard>) -> serde_json::Value {
+            let mut builder = LocalModelBuilder::default();
+            builder
+                .model_path(model.to_path_buf())
+                .model_name(Some("served".to_string()))
+                .model_aliases(vec!["alias".to_string()])
+                .self_host_metadata(false);
+            if let Some(read_ahead) = read_ahead {
+                builder.model_card(read_ahead);
+            }
+            serde_json::to_value(builder.build().await.unwrap().card()).unwrap()
+        }
+
+        // A copy of the sample model, so the test can take its files away.
+        let model = tempfile::tempdir().unwrap();
+        for file in fs::read_dir(model_dir()).unwrap() {
+            let file = file.unwrap();
+            fs::copy(file.path(), model.path().join(file.file_name())).unwrap();
+        }
+        let from_files = card(model.path(), None).await;
+        let read_ahead = LocalModelBuilder::read_model_card(model.path(), None).unwrap();
+        for file in fs::read_dir(model.path()).unwrap() {
+            fs::remove_file(file.unwrap().path()).unwrap();
+        }
+        assert_eq!(card(model.path(), Some(read_ahead)).await, from_files);
     }
 
     #[tokio::test]
