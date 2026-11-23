@@ -367,11 +367,12 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		checkpointInfo,
 		containerGPUs,
 	)
-	if err != nil || dcd.GetParentGraphDeploymentName() != "" {
+	if err != nil || dcd.GetParentGraphDeploymentName() != "" || dynamo.GetComponentDynamoSidecar(componentForRendering) != nil {
 		return template, err
 	}
 
 	// No DGD owns an MPI SSH Secret for a standalone DCD, so its Pods keep mounting the shared one.
+	// Native sidecar templates author their own volumes, which stay as written.
 	for i := range template.Spec.Volumes {
 		volume := &template.Spec.Volumes[i]
 		if source := volume.Secret; volume.Name == r.config.MPI.SSHSecretName && source != nil && source.SecretName == dynamo.MPISSHSecretName(dcd.Name) {

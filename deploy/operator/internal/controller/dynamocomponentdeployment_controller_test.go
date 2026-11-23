@@ -3658,10 +3658,19 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		owners     []metav1.OwnerReference
+		authored   *corev1.Volume
 		secretName string
 		mode       int32
 	}{
 		{name: "standalone DCD keeps the shared Secret", secretName: "mpi-run-ssh-secret", mode: 0o644},
+		{
+			name: "standalone native sidecar DCD keeps its authored Secret volume",
+			authored: &corev1.Volume{Name: "mpi-run-ssh-secret", Secret: &corev1.SecretVolumeSource{
+				SecretName: "graph-worker-mpi-ssh", DefaultMode: new(int32(0o400)),
+			}},
+			secretName: "graph-worker-mpi-ssh",
+			mode:       0o400,
+		},
 		{
 			name:       "DGD child mounts the DGD's own Secret owner-read-only",
 			owners:     []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "graph", UID: "uid-graph", Controller: new(true)}},
@@ -3690,6 +3699,20 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 						},
 					},
 				},
+			}
+			if tc.authored != nil {
+				t.Log("Switch to native sidecar role templates that author the SSH volume")
+				leader, worker := dcd.Spec.PodTemplate.DeepCopy(), dcd.Spec.PodTemplate.DeepCopy()
+				leader.Spec.InitContainers = []corev1.Container{{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}}
+				leader.Spec.Containers[0].Args = []string{"mpirun"}
+				worker.Spec.Containers[0].Args = []string{"sshd"}
+				leader.Spec.Volumes = []corev1.Volume{*tc.authored}
+				worker.Spec.Volumes = []corev1.Volume{*tc.authored}
+				dcd.Spec.PodTemplate = nil
+				dcd.Spec.Roles = []v1beta1.ComponentRoleSpec{
+					{Name: v1beta1.ComponentRoleLeader, PodTemplate: leader},
+					{Name: v1beta1.ComponentRoleWorker, PodTemplate: worker},
+				}
 			}
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),

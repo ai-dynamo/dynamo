@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -71,7 +72,7 @@ func checkUpgradeGroveMatrix(t *testing.T, relative string, dgd *api.DynamoGraph
 		require.True(t, found)
 		require.NoError(t, upgradeGroveRoleError(expectedRoles, cliques))
 		if parts[1] == "trtllm" && parts[3] == "multi" {
-			t.Log("Check that every TRT-LLM worker mounts the configured MPI SSH Secret")
+			t.Log("Check that every TRT-LLM worker mounts the DGD's own MPI SSH Secret through the configured volume")
 			for _, value := range cliques {
 				clique := value.(map[string]any)
 				labels := clique["labels"].(map[string]any)
@@ -89,7 +90,7 @@ func checkUpgradeGroveMatrix(t *testing.T, relative string, dgd *api.DynamoGraph
 						continue
 					}
 					require.NotNil(t, volume.Secret)
-					require.Equal(t, upgradeMPISSHSecret, volume.Secret.SecretName)
+					require.Equal(t, dynamo.MPISSHSecretName(dgd.Name), volume.Secret.SecretName)
 					secretVolumes++
 				}
 				for _, container := range spec.Containers {

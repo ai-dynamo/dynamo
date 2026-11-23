@@ -74,8 +74,6 @@ func (r *dgdSSHKeysReconciler) Reconcile(
 // a Secret left by an earlier same-name DGD, so a recreated DGD gets new keys.
 func (r *dgdSSHKeysReconciler) ensureDGDSecret(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	key := client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.MPISSHSecretName(dgd.Name)}
-
-	// Keep a Secret this DGD controls; remove only one an earlier DGD of the same name controlled.
 	existing := &corev1.Secret{}
 	err := r.client.Get(ctx, key, existing)
 	switch {
