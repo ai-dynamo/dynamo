@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -231,6 +232,35 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		t.Fatal(err)
 	}
 	serviceKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
+
+	t.Log("Wait for target publication without guessing from the DGD spec")
+	if err := wait.PollUntilContextTimeout(ctx, 25*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (bool, error) {
+		var pending v1alpha1.DynamoPoolRelay
+		if err := apiClient.Get(ctx, key, &pending); err != nil {
+			return false, err
+		}
+		for _, condition := range pending.Status.Conditions {
+			if condition.Type == "Ready" && condition.Reason == "DiscoveryPending" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, serviceKey, &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Relay published without current target roles: %v", err)
+	}
+
+	t.Log("A DGD status-only update wakes the Relay dependency watch")
+	dgd.Status = v1beta1.DynamoGraphDeploymentStatus{
+		ObservedGeneration: dgd.Generation,
+		State:              v1beta1.DGDStatePending,
+		Components:         map[string]v1beta1.ComponentReplicaStatus{"decode": podDiscoveryComponentStatus("")},
+	}
+	if err := apiClient.Status().Update(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		var service corev1.Service

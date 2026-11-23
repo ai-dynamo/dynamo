@@ -23,7 +23,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -110,12 +109,20 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if !dgd.DeletionTimestamp.IsZero() {
 		return r.withdraw(ctx, &relay, "DGDTerminating", "The named DGD is terminating")
 	}
-	supported, err := supportsPodDiscovery(&dgd, r.defaultBackend)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolve DGD discovery settings: %w", err)
-	}
-	if !supported {
+	switch podDiscoveryStatus(&dgd, r.defaultBackend) {
+	case metav1.ConditionFalse:
 		return r.withdraw(ctx, &relay, "UnsupportedDiscovery", "The named DGD must use Kubernetes pod-mode discovery")
+	case metav1.ConditionUnknown:
+		// Publication can lag lowering; preserve the listener while its DGD status catches up.
+		before := relay.DeepCopy()
+		meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
+			Type: "Ready", Status: metav1.ConditionUnknown, Reason: "DiscoveryPending",
+			Message: "Waiting for current component role discovery settings", ObservedGeneration: relay.Generation,
+		})
+		if !equality.Semantic.DeepEqual(before.Status, relay.Status) {
+			return ctrl.Result{}, r.Status().Update(ctx, &relay)
+		}
+		return ctrl.Result{}, nil
 	}
 	for _, component := range dgd.Spec.Components {
 		if !component.GlobalDynamoNamespace {
@@ -177,85 +184,71 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	return ctrl.Result{}, nil
 }
 
-func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend configv1alpha1.DiscoveryBackend) (bool, error) {
-	// Grove uses the DGD's own backend. Component PodTemplates can override
-	// graph defaults, so inspect the templates after normal DGD propagation.
+// podDiscoveryStatus checks published target runtimes, not authored PodTemplates.
+// dgd must not be nil. Unknown publication is distinct from incompatible discovery.
+func podDiscoveryStatus(dgd *v1beta1.DynamoGraphDeployment, defaultBackend configv1alpha1.DiscoveryBackend) metav1.ConditionStatus {
+	// Grove's graph-wide observer must also use Kubernetes discovery.
 	if commoncontroller.GetDiscoveryBackend(defaultBackend, dgd.Annotations) != configv1alpha1.DiscoveryBackendKubernetes {
-		return false, nil
+		return metav1.ConditionFalse
 	}
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
+	if dgd.Status.ObservedGeneration != dgd.Generation {
+		return metav1.ConditionUnknown
+	}
+
+	// Native runtime containers own discovery; roles without one only run the engine.
+	result := metav1.ConditionTrue
+	for _, component := range dgd.Spec.Components {
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) && component.ComponentType != v1beta1.ComponentTypeFrontend {
 			continue
 		}
-		templates, err := dynamo.EffectiveDGDComponentTemplates(dgd, component)
-		if err != nil {
-			return false, err
+		roles := dgd.Status.Components[component.ComponentName].Roles
+		if len(roles) == 0 {
+			result = metav1.ConditionUnknown
+			continue
 		}
-		for _, template := range templates {
-			discovery := dynamo.NewDiscoveryContext(defaultBackend, template.Annotations)
-			var runtime *corev1.Container
-			for i := range template.Spec.Containers {
-				if template.Spec.Containers[i].Name == commonconsts.MainContainerName {
-					runtime = &template.Spec.Containers[i]
-				}
+		runtimeName := commonconsts.MainContainerName
+		for _, role := range roles {
+			if slices.ContainsFunc(role.InitContainers, func(container v1beta1.ComponentContainerStatus) bool {
+				return container.Name == commonconsts.RuntimeContainerName
+			}) {
+				runtimeName = commonconsts.RuntimeContainerName
 			}
-			for i := range template.Spec.InitContainers {
-				if template.Spec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
-					runtime = &template.Spec.InitContainers[i]
-				}
+		}
+		for _, role := range roles {
+			containers := role.Containers
+			if runtimeName == commonconsts.RuntimeContainerName {
+				containers = role.InitContainers
 			}
-			if runtime != nil {
-				hasBackend, hasMode := false, false
+			index := slices.IndexFunc(containers, func(container v1beta1.ComponentContainerStatus) bool {
+				return container.Name == runtimeName
+			})
+			if index < 0 {
+				if runtimeName == commonconsts.MainContainerName || len(role.Containers) == 0 {
+					result = metav1.ConditionUnknown
+				}
+				continue
+			}
 
-				// Resolve known semantic aliases; runtime inputs remain unsupported.
-				if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
-					backend, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, commonconsts.DynamoDiscoveryBackendEnvVar)
-					hasBackend = exists
-					if exists {
-						if !backend.Known {
-							return false, nil
-						}
-						discovery.Backend = configv1alpha1.DiscoveryBackend(backend.Value)
+			// Runtime defaults are etcd and pod; published values have already been expanded.
+			for _, setting := range []struct{ name, fallback, required string }{
+				{commonconsts.DynamoDiscoveryBackendEnvVar, "etcd", "kubernetes"},
+				{"DYN_KUBE_DISCOVERY_MODE", "pod", "pod"},
+			} {
+				value := setting.fallback
+				if binding, exists := containers[index].Env[setting.name]; exists {
+					if binding.Value == nil || binding.Unresolved {
+						result = metav1.ConditionUnknown
+						continue
 					}
-					mode, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, "DYN_KUBE_DISCOVERY_MODE")
-					hasMode = exists
-					if exists {
-						if !mode.Known {
-							return false, nil
-						}
-						discovery.Mode = configv1alpha1.KubeDiscoveryMode(mode.Value)
-					}
-				} else {
-					// Preserve the legacy raw reader and its duplicate handling.
-					for _, item := range runtime.Env {
-						switch item.Name {
-						case commonconsts.DynamoDiscoveryBackendEnvVar:
-							hasBackend = true
-							if item.ValueFrom != nil {
-								return false, nil
-							}
-							discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
-						case "DYN_KUBE_DISCOVERY_MODE":
-							hasMode = true
-							if item.ValueFrom != nil {
-								return false, nil
-							}
-							discovery.Mode = configv1alpha1.KubeDiscoveryMode(item.Value)
-						}
-					}
+					value = *binding.Value
 				}
-				// Explicit env values override envFrom; missing keys could still come from it.
-				if len(runtime.EnvFrom) != 0 && (!hasBackend || !hasMode) {
-					return false, nil
+				if value != setting.required {
+					return metav1.ConditionFalse
 				}
-			}
-			if discovery.Backend != configv1alpha1.DiscoveryBackendKubernetes || discovery.Mode != configv1alpha1.KubeDiscoveryModePod {
-				return false, nil
 			}
 		}
 	}
-	return true, nil
+	return result
 }
 
 // withdraw removes the publication endpoint before reporting an unresolved source.
