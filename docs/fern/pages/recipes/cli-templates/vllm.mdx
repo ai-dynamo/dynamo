@@ -764,44 +764,6 @@ The default model is `Qwen/Qwen3-0.6B`.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv_router.sh)
 </Accordion>
-<Accordion title="KV Block Manager Offloading for One Worker">
-
-Enables the KV Block Manager (KVBM) on a single worker and configures CPU-backed cache capacity. Use
-it to test local KV-cache offloading.
-
-The default model is `Qwen/Qwen3-0.6B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/agg_kvbm.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm.sh)
-</Accordion>
-<Accordion title="KV Block Manager Offloading with KV Routing">
-
-Starts multiple KVBM-enabled workers behind the KV router. Each worker uses distinct event and
-coordination ports so the router can track its cache state.
-
-The default model is `Qwen/Qwen3-0.6B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/agg_kvbm_router.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm_router.sh)
-</Accordion>
 <Accordion title="LMCache Offloading for One Worker">
 
 Connects one vLLM worker to LMCache through the in-process connector. Use it as the baseline LMCache
@@ -895,63 +857,6 @@ The default model is `Qwen/Qwen3-0.6B`.
 ```
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)
-</Accordion>
-<Accordion title="KV Block Manager on the Prefill Worker">
-
-Runs separate prefill and decode workers with KVBM enabled on prefill and CPU cache storage. Decode
-receives the transferred KV state without enabling KVBM.
-
-The default model is `Qwen/Qwen3-0.6B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/disagg_kvbm.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm.sh)
-</Accordion>
-<Accordion title="Two Prefill and Two Decode Workers with KVBM">
-
-Scales the KVBM topology to two prefill and two decode workers behind the KV router. Distinct
-barrier identifiers keep the prefill workers' offload coordination separate.
-
-The default model is `Qwen/Qwen3-0.6B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/disagg_kvbm_2p2d.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_2p2d.sh)
-</Accordion>
-<Accordion title="KVBM with Cache-Aware Pool Routing">
-
-Combines separate prefill and decode pools, KV-aware routing, and KVBM-backed offloading. Use it to
-test cache placement and offload behavior together.
-
-The default model is `Qwen/Qwen3-0.6B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/disagg_kvbm_router.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_router.sh)
 </Accordion>
 <Accordion title="LMCache on the Prefill Worker">
 

@@ -220,6 +220,11 @@ struct KvIndexerCli {
     #[arg(long)]
     engine_owned_mm_identity: bool,
 
+    /// Initial workers registered via --workers send one remove per block however
+    /// many times they stored it (SGLang), so repeated stores are not counted
+    #[arg(long)]
+    idempotent_stores: bool,
+
     /// Legacy compatibility input; accepted but ignored
     #[arg(long = "tenant-id", default_value = "default", hide = true)]
     _tenant_id: String,
@@ -270,6 +275,7 @@ where
             model_name: cli.model_name,
             routing_group: cli.routing_group,
             engine_owned_mm_identity: cli.engine_owned_mm_identity,
+            idempotent_stores: cli.idempotent_stores,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -1399,8 +1405,9 @@ impl KvEventPublisher {
     ///         format (after sgl-project/sglang#43043), including for caller hashes,
     ///         so every event token at or above 1,000,000 is excluded from the
     ///         index. Otherwise only values that do not fit in 32 bits are.
+    ///     idempotent_stores: Do not refcount repeated stores. Set for SGLang.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false, idempotent_stores=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1415,6 +1422,7 @@ impl KvEventPublisher {
         kv_state_endpoint: Option<String>,
         video_token_id: Option<u32>,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             liveness: None,
@@ -1424,6 +1432,7 @@ impl KvEventPublisher {
             image_token_id,
             video_token_id,
             engine_owned_mm_identity,
+            idempotent_stores,
             recovery: None,
         });
 
@@ -2257,27 +2266,12 @@ impl KvRouter {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
-                let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
                     if first_item {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
                             inject_worker_id_from_tracker(data, tracker);
-                        }
-                    }
-
-                    if !first_token_gauges_observed {
-                        let has_tokens = response
-                            .data
-                            .as_ref()
-                            .map(|d| !d.token_ids.is_empty())
-                            .unwrap_or(false);
-                        if has_tokens {
-                            if let Some(ref tracker) = tracker {
-                                tracker.observe_first_token_gauges();
-                            }
-                            first_token_gauges_observed = true;
                         }
                     }
 
@@ -2304,10 +2298,6 @@ impl KvRouter {
                     if is_error {
                         break;
                     }
-                }
-
-                if let Some(ref tracker) = tracker {
-                    tracker.observe_finish_gauges();
                 }
             });
 
@@ -2558,15 +2548,9 @@ impl KvRouter {
         let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
 
-        // Create tracker if not already set, to capture worker routing info
-        let tracker = match request.tracker {
-            Some(ref t) => t.clone(),
-            None => {
-                let t = Arc::new(RequestTracker::new());
-                request.tracker = Some(t.clone());
-                t
-            }
-        };
+        // The tracker captures worker routing info, and carries on from the age an upstream
+        // router stamped on the request.
+        let tracker = request.ensure_tracker().clone();
         let request = crate::create_request_context(request, &context);
         let dispatch_span = context
             .as_ref()

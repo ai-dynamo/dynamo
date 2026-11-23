@@ -42,7 +42,7 @@
 //!   (`dropped_selection_future_frees_its_booking`,
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
-use super::hint::transfer_hint_payload;
+use super::hint::{BookingHint, booking_hint};
 use dynamo_session_affinity::{SessionAffinityMode, validate_dispatch_target};
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
@@ -50,9 +50,6 @@ use dynamo_session_affinity::{SessionAffinityMode, validate_dispatch_target};
 const JOIN_ATTEMPTS: usize = 2;
 const AFFINITY_INVALIDATIONS_BEFORE_YIELD: usize = 32;
 use super::*;
-
-/// Action id of the single `kv.fetch` action a selection's KV hint carries.
-const KV_HINT_FETCH_ACTION_ID: &str = "a1";
 
 pub(super) struct PreparedSelectionInputs {
     pub(super) block_hashes: Vec<LocalBlockHash>,
@@ -170,10 +167,11 @@ impl SelectionCore {
                 )));
             }
         };
-        // Wire admissions never book without an endpoint; see `Selected::endpoint`.
+        // Only `Lease` omits the endpoint; wire paths run Query, Advisory, or Book.
+        // See `Selected::endpoint`.
         let endpoint = selected.endpoint.take().ok_or_else(|| {
             SelectionError::Internal(format!(
-                "selected worker {} is no longer schedulable",
+                "selected worker {} carries no endpoint; only Lease selections omit it",
                 selected.response.best_worker.worker_id
             ))
         })?;
@@ -201,6 +199,7 @@ impl SelectionCore {
             routing_hashes: _,
             shared_cache_hits: _,
             booking: _,
+            backend_priority: _,
         } = selected;
         let booked = sequence_hashes.is_some();
         let potential_decode_blocks = response.potential_decode_blocks as u64;
@@ -250,6 +249,15 @@ impl SelectionCore {
     /// and (for `Book`) install the reservation. Every host's selection goes
     /// through here.
     pub async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+        self.run_selection_with_cache_credit(operation, true).await
+    }
+
+    /// Run selection with the embedding host's request-wide cache-credit policy.
+    pub async fn run_selection_with_cache_credit(
+        &self,
+        operation: SelectionOperation<'_>,
+        allow_cache_credit: bool,
+    ) -> SelectionRun {
         let mut lookup = None;
         let result = match self.ensure_running() {
             Err(error) => Err(error),
@@ -258,7 +266,7 @@ impl SelectionCore {
                 _ = self.cancel_token.cancelled() => {
                     Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown))
                 }
-                result = self.run_selection_inner(operation, &mut lookup) => result,
+                result = self.run_selection_inner(operation, &mut lookup, allow_cache_credit) => result,
             },
         };
         SelectionRun { result, lookup }
@@ -268,6 +276,7 @@ impl SelectionCore {
         &self,
         operation: SelectionOperation<'_>,
         lookup: &mut Option<LookupTimings>,
+        allow_cache_credit: bool,
     ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
             key,
@@ -321,23 +330,33 @@ impl SelectionCore {
                 .map_err(affinity_error)?,
             _ => affinity_target,
         };
-        // Transfer candidates need a worker in this partition that consumes
-        // router hints and an indexer that can retain the matched chain (local,
-        // event-driven, no approximate writes). Bookings use them for the fetch
-        // hint; when the policy scores fetchable prefixes, every selection
-        // retains them so previews score like bookings.
-        let hint_capable_workers = (book || entry.scores_kv_transfer)
+        // Copy sources need a worker in this partition that consumes router
+        // hints and an indexer that can retain the matched chain (local,
+        // event-driven, no approximate writes). Bookings use them for the
+        // booked worker's copy source; when the policy scores copy offers,
+        // every selection retains them so previews score like bookings.
+        let responsibilities = &entry.responsibilities;
+        let hint_capable_workers = allow_cache_credit
+            && (responsibilities.commit_kv_copy
+                || (book && responsibilities.compute_booked_copy_source))
             && entry.hint_capable_workers.load(Ordering::Relaxed);
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
         if hint_capable_workers && !retain_kv_transfer_chain {
-            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-            WARN_ONCE.call_once(|| {
+            entry.copy_sources_warning.call_once(|| {
                 tracing::warn!(
-                    "router hints need a local event-driven indexer with no approximate side indexer; workers advertise hint capability but no hints will be attached"
+                    partition = %key,
+                    "KV copy sources need a local, event-driven KV index with no approximate side index; this partition's workers advertise router_hint, but the router computes no copy sources for them"
                 );
             });
         }
+        // Hint policies may read the session at booking, now or when a reservation replays this
+        // selection.
+        let hint_session_context = (!responsibilities.run_hint_policies.is_empty()
+            && (book || replay_id.is_some())
+            && entry.hint_capable_workers.load(Ordering::Relaxed))
+        .then(|| session_context.clone())
+        .flatten();
         let PreparedSelectionInputs {
             block_hashes,
             sequence_hashes,
@@ -351,6 +370,7 @@ impl SelectionCore {
                 &prompt,
                 track_active_blocks
                     .then(|| self.config.assume_kv_reuse(router_config_override.as_ref())),
+                allow_cache_credit,
                 true,
                 retain_kv_transfer_chain,
                 lookup,
@@ -400,6 +420,7 @@ impl SelectionCore {
                     SessionBinding::Query { session_id } => Some(session_id.clone()),
                     _ => None,
                 },
+                hint_session_context.clone(),
             )
         });
         let allowed_worker_ids = match self.host.eligibility.lora_worker_filter.as_deref() {
@@ -425,7 +446,8 @@ impl SelectionCore {
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: track_active_blocks.then_some(sequence_hashes),
-            block_hashes: Some(block_hashes),
+            // Queued overlap refresh must not restore credit for an uncached request.
+            block_hashes: allow_cache_credit.then_some(block_hashes),
             isl_tokens,
             overlap,
             kv_transfer_candidates,
@@ -452,16 +474,25 @@ impl SelectionCore {
                 .select_without_admission(schedule_request)
                 .instrument(tracing::info_span!("kv_router.select_without_admission"))
                 .await
-                .map(|advisory| (advisory.response, Some(advisory.selected_worker_load), None))
+                .map(|advisory| {
+                    (
+                        advisory.response,
+                        Some(advisory.selected_worker_load),
+                        None,
+                        None,
+                    )
+                })
         } else {
             entry
                 .scheduler
                 .schedule_request_with_booking(schedule_request)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
-                .map(|(admitted, booking)| (admitted.response, None, booking))
+                .map(|(admitted, booking)| {
+                    (admitted.response, None, booking, admitted.backend_priority)
+                })
         };
-        let (response, advisory_load, booking) = match scheduled {
+        let (response, advisory_load, booking, backend_priority) = match scheduled {
             Ok(scheduled) => scheduled,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok(SelectionOutcome::QueueRejected { rejection });
@@ -490,23 +521,22 @@ impl SelectionCore {
             (Some(endpoint), total_kv_blocks)
         };
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
-        // Hints are attached to bookings only, for the source selection chose.
-        let kv_hint = match (
-            book,
-            response.kv_transfer_source,
-            response.kv_transfer_candidates.as_ref(),
-        ) {
-            (true, Some(source), Some(candidates)) => {
-                transfer_hint_payload(&entry.workers_tx.borrow(), source, candidates).map(
-                    |payload| {
-                        KvHint::new(
-                            admission.request_id().unwrap_or_default(),
-                            vec![KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload)],
-                        )
-                    },
-                )
-            }
-            _ => None,
+        // Hints are composed for bookings only, never for previews. A committed copy that goes
+        // unsent fails here, while the booking is still armed, so it is freed.
+        let kv_hint = if book {
+            booking_hint(
+                &entry,
+                BookingHint {
+                    request_id: admission.request_id().unwrap_or_default(),
+                    worker: response.best_worker,
+                    isl_tokens,
+                    session_context: hint_session_context.as_ref(),
+                    kv_copy_source: response.kv_copy_source,
+                    kv_transfer_candidates: response.kv_transfer_candidates.as_ref(),
+                },
+            )?
+        } else {
+            None
         };
 
         // The routing hashes go to exactly one of: the reservation recorded
@@ -536,8 +566,14 @@ impl SelectionCore {
             booking
         };
 
-        if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens, session_id)) =
-            cached_inputs
+        if let Some((
+            cache_id,
+            sequence_hashes,
+            lora_name,
+            track_prefill_tokens,
+            session_id,
+            session_context,
+        )) = cached_inputs
         {
             self.selection_cache.insert(
                 cache_id,
@@ -553,6 +589,18 @@ impl SelectionCore {
                     accounting_attribution,
                     routing_hashes,
                     session_id,
+                    session_context,
+                    // The replayed booking must send the copy this selection committed to.
+                    kv_copy: entry
+                        .responsibilities
+                        .commit_kv_copy
+                        .then(|| {
+                            response
+                                .kv_copy_source
+                                .zip(response.kv_transfer_candidates.as_ref())
+                        })
+                        .flatten()
+                        .map(|(copy, candidates)| PendingKvCopy::new(copy, candidates)),
                 },
                 Instant::now(),
             );
@@ -572,6 +620,7 @@ impl SelectionCore {
             routing_hashes: returned_routing_hashes,
             shared_cache_hits: host_shared_cache_hits,
             booking,
+            backend_priority,
         }))
     }
 
@@ -714,11 +763,13 @@ impl SelectionCore {
     /// attached, and the prompt carries raw `token_ids`.
     /// `tracking_assume_kv_reuse` is `None` when the caller does not track
     /// active blocks.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare_selection_inputs(
         &self,
         entry: &SelectionEntry,
         prompt: &PromptView<'_>,
         tracking_assume_kv_reuse: Option<bool>,
+        allow_cache_credit: bool,
         query_shared_cache: bool,
         retain_kv_transfer_chain: bool,
         lookup: &mut Option<LookupTimings>,
@@ -734,7 +785,7 @@ impl SelectionCore {
         )?;
         let indexer_lookup = async {
             let started = Instant::now();
-            let tiered = if normalized.block_hashes.is_empty() {
+            let tiered = if !allow_cache_credit || normalized.block_hashes.is_empty() {
                 Ok(TieredMatchDetails::default())
             } else {
                 entry
@@ -751,9 +802,12 @@ impl SelectionCore {
             };
             (tiered, started.elapsed())
         };
-        let shared_cache = query_shared_cache
+        // Shared-cache lookups hash tokens alone, but an adapter's KV differs from
+        // the base model's, and SGLang keys adapter pages apart from base pages.
+        let shared_cache = (allow_cache_credit && query_shared_cache)
             .then_some(self.host.cache.shared.as_deref())
             .flatten()
+            .filter(|_| prompt.lora_name.is_none_or(str::is_empty))
             .zip(prompt.token_ids);
         // `(hits, duration, failed)`; all `None`/`false` without a shared cache.
         let shared_cache_lookup = async {

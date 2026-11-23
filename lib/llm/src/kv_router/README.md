@@ -59,7 +59,9 @@ What a KV request does in `RoutingHost::generate` (call order):
 3. affinity: acquire the session's slot (hard mode pins the worker; soft mode prefers it)
 4. KvRouter → SelectionCore: select and book the worker (Lease admission)
 5. track: RequestGuard takes ownership of the booking and records the routing decision
-6. PushRouter: dispatch to the worker
+6. PushRouter: dispatch to the worker, stamped with `elapsed_since_arrival_ms` (time since the
+   frontend received the request, plus the time a gateway in front of it reports in
+   `x-dynamo-elapsed-since-arrival-ms`) so a backend can order admission by the original arrival
 7. affinity: bind the session to the worker once the stream starts
    (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
 ```
@@ -116,6 +118,8 @@ hops.
   decode is routed immediately. Otherwise the hop waits for `disaggregated_params`.
 - A prefill that finishes the whole request (for example EOS on the one-token step) is returned
   directly; decode does not run.
+- Its KV router tracks neither active nor output blocks, whatever the prefill card, the decode
+  set or the policy file's `router` section configures: prefill load is prompt-side.
 - `into_decode_request` writes the handoff into the decode request: `bootstrap_info` or
   `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
 - Merges the prefill worker's KV-transfer topology constraints into the decode request's
@@ -150,9 +154,14 @@ errors, which return to the client.
 | Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
 | Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
+| Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+| Decode progress (experimental picker input) | Original streamed-output observations in this frontend's native bookings; enabled by the policy's `DECODE_PROGRESS` declaration, independent of output-block accounting. The standalone EPP has no producer and supplies none. |
+
+The token-only Runtime EPP selection API has no output options and retains its existing cache
+behavior. Worker sampling options are unaffected by this conservative accounting rule.
 
 ## Admission modes
 

@@ -1,7 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-mod adapter;
+//! The DC relay's cuckoo-filter pool index: an exact per-pool producer (`DcCkfState`), the
+//! snapshot and delta publication protocol, and the transposed global consumer
+//! (`GlobalCkfIndexer`). The frontend's pool relay (`lib/llm`) and the relay benches are its
+//! consumers; the indexer stage itself does not use it.
+//!
+//! The list of re-exports below is the relay contract: every item a consumer names, plus every
+//! type that appears in the signature of one of those items (`rustc -W unnameable_types` is
+//! clean). The submodules are private, so an item that is not on this list is not part of the
+//! contract.
+
 mod addressing;
 mod bucket;
 mod canonical;
@@ -16,7 +25,6 @@ mod search;
 #[cfg(test)]
 mod tests;
 
-pub use adapter::*;
 pub use canonical::CanonicalSequenceBlockHash;
 pub use dc::{
     DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfMemoryStats,
@@ -33,14 +41,14 @@ pub use global::{
     GlobalCkfSnapshot, LaneLease, ProducerIdentity,
 };
 pub use ingestion_pool::{
-    DEFAULT_GLOBAL_INGESTION_CONTROL_TIMEOUT, DEFAULT_GLOBAL_INGESTION_QUEUE_CAPACITY,
-    DEFAULT_GLOBAL_INGESTION_WORKERS, GlobalCkfIngestionError, GlobalCkfIngestionFault,
-    GlobalCkfIngestionPool, GlobalCkfIngestionPoolBuildError, GlobalCkfIngestionPoolConfig,
+    GlobalCkfIngestionError, GlobalCkfIngestionFault, GlobalCkfIngestionPool,
+    GlobalCkfIngestionPoolBuildError, GlobalCkfIngestionPoolConfig,
 };
 pub use publication::{
     DcCkfDeltaSink, DcCkfPublishError, DcCkfPublisher, PublisherEmitOutcome, PublisherFenceReason,
     PublisherSnapshotError,
 };
+
 /// Fixed number of DC lanes in the transposed CKF replica.
 pub const CKF_LANE_COUNT: usize = 16;
 

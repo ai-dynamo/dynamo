@@ -14,7 +14,9 @@ use parking_lot::Mutex;
 
 use crate::AccountingAttribution;
 use crate::identity::RoutingPartitionId;
-use dynamo_kv_hashing::LocalBlockHash;
+use crate::kv_hints::{KvCopySource, KvTransferCandidates};
+use crate::types::SessionContext;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 /// How long a pending selection lives before it is evicted.
@@ -64,6 +66,34 @@ pub(super) struct PendingSelection {
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
     /// The session the selection steered by, bound when the booking replays.
     pub session_id: Option<String>,
+    /// The request's agent session, kept only for a partition with hint policies, which read it
+    /// when the booking replays.
+    pub session_context: Option<SessionContext>,
+    /// The copy the selection committed the worker to, which the replayed booking must send.
+    pub kv_copy: Option<PendingKvCopy>,
+}
+
+/// A committed copy kept for a replayed booking: the copy, and only what its locations need.
+pub(super) struct PendingKvCopy {
+    pub copy: KvCopySource,
+    /// The request's block chain through the source's prefix, and the cache-owner snapshot.
+    pub candidates: KvTransferCandidates,
+}
+
+impl PendingKvCopy {
+    pub(super) fn new(copy: KvCopySource, candidates: &KvTransferCandidates) -> Self {
+        let blocks = copy
+            .source_prefix_blocks()
+            .min(candidates.block_hashes.len());
+        Self {
+            copy,
+            candidates: KvTransferCandidates {
+                block_hashes: candidates.block_hashes[..blocks].to_vec(),
+                routing_snapshot: candidates.routing_snapshot.clone(),
+                ..KvTransferCandidates::default()
+            },
+        }
+    }
 }
 
 struct Entry {
@@ -76,7 +106,8 @@ struct Entry {
 /// Scoped by `(RoutingPartitionId, selection_id)`.
 type CacheKey = (RoutingPartitionId, String);
 
-/// Approximate resident bytes: sequence hashes plus id and scope strings.
+/// Approximate resident bytes: sequence hashes plus id, scope, and session strings,
+/// including the agent headers the entry keeps alive past the request.
 fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
     selection.sequence_hashes.len() * std::mem::size_of::<SequenceHash>()
         + selection.routing_hashes.as_ref().map_or(0, |hashes| {
@@ -87,6 +118,20 @@ fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
         + key.0.routing_group.len()
         + selection.lora_name.as_deref().map_or(0, str::len)
         + selection.session_id.as_deref().map_or(0, str::len)
+        + selection.session_context.as_ref().map_or(0, |session| {
+            session.session_id().len()
+                + session.parent_session_id().map_or(0, str::len)
+                + session
+                    .agent_headers()
+                    .iter()
+                    .map(|(name, values)| {
+                        name.len() + values.iter().map(String::len).sum::<usize>()
+                    })
+                    .sum::<usize>()
+        })
+        + selection.kv_copy.as_ref().map_or(0, |copy| {
+            copy.candidates.block_hashes.len() * std::mem::size_of::<ExternalSequenceBlockHash>()
+        })
 }
 
 struct State {
@@ -282,6 +327,8 @@ mod tests {
             lora_name: None,
             routing_hashes: None,
             session_id: None,
+            session_context: None,
+            kv_copy: None,
         }
     }
 
@@ -365,6 +412,21 @@ mod tests {
         assert!(cache.peek(&key(), "a", now).is_none());
         assert!(cache.peek(&key(), "b", now).is_some());
         assert!(cache.peek(&key(), "c", now).is_some());
+    }
+
+    #[test]
+    fn byte_budget_counts_agent_headers() {
+        // The headers alone exceed the budget, so the entry evicts itself.
+        let per = entry_bytes(&(key(), "a".to_string()), &pending(1));
+        let cache = cache_with(1024, 2 * per);
+        let headers = BTreeMap::from([("x-agent".to_string(), vec!["v".repeat(2 * per)])]);
+        let mut selection = pending(1);
+        selection.session_context = Some(
+            SessionContext::new("s".to_string(), None, None, None)
+                .with_agent_headers(Arc::new(headers)),
+        );
+        cache.insert("a".to_string(), selection, Instant::now());
+        assert_eq!(cache.len(), 0);
     }
 
     #[test]

@@ -11,49 +11,63 @@
 //! their views, runtime parameter updates, the selection slice of the router config, the
 //! conditional-disaggregation policies, and the LoRA narrowing filter. The kv-transfer source
 //! summary a policy credits fetches with lives in `dynamo-kv-hints`; the kernel builds the
-//! [`WorkerTransferInput`] column from it. The kernel's `WorkerSelector`, its request-to-row
+//! [`WorkerCopyInput`] column from it. The kernel's `WorkerSelector`, its request-to-row
 //! materialization, and the config- and projection-derived columns stay in `lib/router/kv-router`.
 
-pub mod conditional_disagg;
+mod conditional_disagg;
 mod context;
 mod error;
+pub mod experimental;
 pub mod host;
 mod hosted;
 mod inputs;
-pub mod lora_filter;
+mod lora_filter;
 mod policy;
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 mod reference_picker;
 mod runtime;
 /// The selection slice of the router config, with the defaults and validators the flat
 /// router config in `lib/router/kv-router` shares.
-pub mod selection_config;
+mod selection_config;
 mod shared_cache;
 mod trace;
 
+pub use conditional_disagg::{
+    ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicy,
+    ConditionalDisaggPolicyKind, DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD,
+    DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD, IslBoundingPolicy, IslOrLoadPolicy,
+    PrefillLoadPolicy, default_conditional_disagg_eff_isl_ratio_threshold,
+    default_conditional_disagg_eff_isl_threshold, make_conditional_disagg_policy,
+    policy_needs_prefill_worker_busy,
+};
 pub use context::WorkerSelectionContext;
 pub use error::WorkerSelectionPolicyError;
 pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
+#[allow(deprecated)]
+pub use inputs::WorkerTransferInput;
 pub use inputs::{
-    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCacheInput,
-    WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerInfo,
-    WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerTransferInput,
+    CacheSnapshot, CandidateData, ResidentBlockSource, ScoredWorkerCandidate, WorkerCacheData,
+    WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
+    WorkerCopyInput, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
 };
+pub use lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 pub use policy::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
     SelectionFailure, WorkerSelectionPolicy,
 };
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference_picker::{DefaultPick, DefaultWorkerPicker};
-pub(crate) use runtime::RuntimePolicyState;
 pub use runtime::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
-pub use selection_config::{SelectionConfig, SharedCacheType};
+pub use selection_config::{
+    SelectionConfig, SharedCacheType, default_decode_active_request_weight,
+    default_disk_cache_hit_weight, default_host_cache_hit_weight,
+    default_overlap_score_credit_decay, default_prefill_load_scale, validate_finite_non_negative,
+    validate_overlap_score_credit, validate_range,
+};
 pub use shared_cache::SharedCacheHits;
 pub use trace::{SelectionTrace, SelectionTraceRow, SelectionTraceSpec};
-
-pub use dynamo_router_protocol::session::SessionContext;
 
 /// Adds one finite cost contribution to each eligible worker.
 ///

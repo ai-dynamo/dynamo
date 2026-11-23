@@ -20,7 +20,7 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import parse_args, resolve_planner_profile_data
+from .args import parse_args, use_planner_profile_data
 from .config import (
     apply_worker_engine_args_overrides,
     build_runtime_config,
@@ -83,9 +83,7 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
-    # Resolve planner-profile-data: convert profile results dir to NPZ if needed
-    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
-    args.planner_profile_data = profile_data_result.npz_path
+    profile_data_result = use_planner_profile_data(args)
 
     try:
         # Only when something needs the local files: many workers (rate limiting)

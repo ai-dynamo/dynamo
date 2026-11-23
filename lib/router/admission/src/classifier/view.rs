@@ -6,7 +6,7 @@
 //! selection's rows; the kernel implements it over them.
 
 use dynamo_router_protocol::columns::WorkerInfo;
-use dynamo_slot_tracker::busy::RankLoad;
+use dynamo_slot_tracker::RankLoad;
 
 /// Every worker rank eligible for one request, lent to [`super::RequestClassifier::classify`]
 /// for the duration of the call. Views are read-only snapshots, so they are `Sync` and a
@@ -62,10 +62,12 @@ pub struct WorkerCacheView {
     pub disk_overlap_blocks: f64,
 }
 
-/// A view with no rows, for classifiers invoked without a worker table.
+/// A view with no rows, for tests that classify without a worker table.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NoWorkers;
+pub(crate) struct NoWorkers;
 
+#[cfg(test)]
 impl WorkerView for NoWorkers {
     fn len(&self) -> usize {
         0

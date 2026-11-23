@@ -5,8 +5,8 @@
 //!
 //! The crate holds the radix trees (`radix_tree`, `positional`, the concurrent compressed
 //! tree), the thread-pool and branch-sharded wrappers, `KvIndexer` and `LocalKvIndexer`,
-//! approximate LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the hash
-//! lifecycle delegate (`delegate`), the indexer counters (`metrics`), the residency
+//! approximate LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the
+//! indexer counters (`metrics`), the residency
 //! projection (`residency`), overlap scores (`overlap`), KV transfer candidates (`kv_hints`),
 //! the lower-tier continuation index with its per-tier registry, the ingest backend
 //! (`backend`, `lookup`, `recording`, `session_updates`), the session prefix index, the
@@ -14,13 +14,13 @@
 //! slice (`config`). `lib/router/kv-router` re-exports every item here at its old path and keeps the
 //! HTTP, ZMQ, peer-recovery, and Prometheus adapters.
 //!
-//! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, and `dynamo-kv-hashing`. It
+//! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, `dynamo-kv-hashing`, and
+//! `dynamo-tokens`. It
 //! owns what it emits with a match: the transfer candidate vocabulary
 //! (`kv_hints::KvTransferCandidateSource`, `label_key`, `topology_keys`) and the residency
 //! owner key (`residency::ResidencyOwnerKey`); `dynamo-kv-hints` imports them from here, never
 //! the reverse.
-//! The `export` feature (Prometheus counter vectors) is transitional: the design replaces it
-//! with atomics and a `stats()` snapshot in the metrics behavior change.
+//! The `export` feature enables the Prometheus counter vectors.
 //!
 //! # KV RadixTree
 //!
@@ -53,38 +53,38 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 mod active_set;
-pub mod api;
+mod api;
 mod approximate_lru;
-pub mod backend;
+mod backend;
 mod branch_sharded;
 mod compressed_radix;
-pub mod concurrent_radix_tree_compressed;
-pub mod config;
+mod concurrent_radix_tree_compressed;
+mod config;
 pub mod cuckoo;
-pub mod delegate;
 pub mod host;
-pub mod identity;
-pub mod kv_hints;
+mod identity;
+mod kv_hints;
 mod kv_indexer;
 mod local;
-pub mod lookup;
+mod lookup;
 mod lower_tier;
 mod lower_tier_indexers;
-pub mod metrics;
+mod metrics;
 #[cfg(test)]
 mod mm_exclusion_tests;
 #[cfg(feature = "bench")]
 mod observation;
-pub mod overlap;
-pub mod positional;
+mod overlap;
+mod positional;
 mod prelude;
-pub mod pruning;
-pub mod radix_tree;
-pub mod recording;
-pub mod registry;
-pub mod residency;
-pub mod session_prefix_index;
-pub mod session_updates;
+mod pruning;
+mod radix_tree;
+mod recording;
+mod registry;
+mod residency;
+mod resident_blocks;
+mod session_prefix_index;
+mod session_updates;
 mod shard_handle;
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub mod testing;
@@ -92,8 +92,6 @@ mod thread_pool;
 mod traits;
 mod types;
 
-#[cfg(test)]
-mod delegate_tests;
 #[cfg(test)]
 mod local_tests;
 #[cfg(test)]
@@ -123,21 +121,91 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
     }
 }
 
-pub use api::*;
-pub use approximate_lru::*;
-pub use branch_sharded::*;
+pub use api::{
+    IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
+    IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
+    KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT, KvStateAgentIdentity, KvStateAgentStatus,
+    KvStateAttachmentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt, WorkerKvQueryKind,
+    WorkerKvQueryRequest, WorkerKvQueryResponse,
+};
+pub use approximate_lru::{
+    ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruClient, ApproximateLruIncarnation,
+    ApproximateLruLease, ApproximateLruReleaseAck, ApproximateLruReply, ApproximateLruStats,
+    ApproximateLruTask, ApproximateRetentionConfig,
+};
+pub use backend::{
+    Indexer, IndexerPolicy, PrimaryRetention, RemotePrimary, SideIndexer, create_indexer,
+    create_indexer_with_metrics, create_indexer_with_policy,
+};
+// The deprecated alias stays exported for the pre-split paths in `dynamo-kv-router`'s compat list.
+#[allow(deprecated)]
+pub use branch_sharded::AnchorAwareBranchShardedIndexer;
+pub use branch_sharded::BranchShardedIndexer;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-pub use delegate::{HashLifecycle, KvIndexerDelegate};
-pub use kv_indexer::*;
-pub use local::*;
-pub use lower_tier::*;
-pub use lower_tier_indexers::*;
-pub use metrics::*;
+pub use config::{ApproximateCachePolicyKind, IndexerConfig};
+pub use identity::{
+    CanonicalIdentityMaterial, ExplicitIdentityMap, IdentitySpecError, IndexerIdentitySpec,
+    MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
+    MAX_EXPLICIT_IDENTITY_VALUE_BYTES,
+};
+pub use kv_hints::{
+    CacheOwnerKvTransferKeys, KvTransferCandidateSource, KvTransferCandidates,
+    KvTransferSourceInterval, label_key, topology_keys,
+};
+pub use kv_indexer::{KvEventSender, KvIndexer};
+pub use local::LocalKvIndexer;
+pub use lookup::HashInput;
+pub use lower_tier::{
+    CacheOwnerBlockCounts, KvTransferExtensions, LowerTierContinuation, LowerTierIndexer,
+    LowerTierMatchDetails,
+};
+pub use lower_tier_indexers::{
+    LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails, TieredMatchProvider,
+    lower_tier_query_order, query_lower_tiers_with_options,
+    query_lower_tiers_with_options_and_snapshot,
+};
+pub use metrics::{
+    EventKind, EventWarningKind, KvIndexerMetrics, METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED,
+    METRIC_EVENT_STORED, METRIC_STATUS_ALLOCATION_FAILED, METRIC_STATUS_BLOCK_NOT_FOUND,
+    METRIC_STATUS_CAPACITY_EXHAUSTED, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION,
+    METRIC_STATUS_INVALID_BLOCK, METRIC_STATUS_OK, METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW,
+    METRIC_STATUS_PARENT_NOT_FOUND, METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN,
+    METRIC_WARNING_DUPLICATE_STORE, PreBoundEventCounters, record_unsupported_residency_event,
+};
 #[cfg(feature = "bench")]
-pub use observation::*;
+pub use observation::{
+    EventCompletion, EventCompletionBuffer, EventCompletionWriter, ObservationError,
+    ObservationSeal, ObservedEnqueueReceipt, ThreadPoolObservationPlan,
+    ThreadPoolObservationSnapshot, WorkerObservationState,
+};
+pub use overlap::OverlapScores;
+pub use positional::{
+    DYN_ROUTER_POSITIONAL_SEARCH_MODE, LevelIndex, PositionalIndexer, SearchMode,
+};
+pub use pruning::{BlockEntry, PruneConfig, PruneManager, WorkerPruneManager};
 pub use radix_tree::RadixTree;
-pub use residency::RouterHintSourceMetadata;
-pub use session_prefix_index::{SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend};
-pub use thread_pool::*;
-pub use traits::*;
-pub use types::*;
+pub use recording::ApproximateRequestLease;
+pub use registry::{IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard};
+pub use residency::{
+    ResidencyOwnerKey, ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError,
+    ResidencyRoutingSnapshot, ResolvedRouterHintSource, RouterHintSourceMetadata,
+};
+pub(crate) use resident_blocks::ResidentBlockTracker;
+pub use resident_blocks::{ResidentBlockCounts, ResidentBlockCountsHandle};
+pub use session_prefix_index::{
+    LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,
+    SessionResidencyOwner, SharedCacheBackend,
+};
+pub use session_updates::SessionUpdateSender;
+pub use thread_pool::ThreadPoolIndexer;
+#[cfg(feature = "bench")]
+pub use thread_pool::{
+    ThreadPoolObservationDrain, ThreadPoolObservationSession, ThreadPoolSealedObservation,
+};
+pub use traits::{AnchorCapableSyncIndexer, KvIndexerInterface, ShardSizeSnapshot, SyncIndexer};
+pub use types::{
+    AnchorRef, AnchorTask, ContainsWorkerBlockRequest, DumpRequest, FlushRequest,
+    GetWorkersRequest, KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest,
+    RoutingDecisionHashes, WireLowerTierMatchDetails, WireOverlapScores, WireTieredMatchDetails,
+    WorkerLookupStats, WorkerTask,
+};

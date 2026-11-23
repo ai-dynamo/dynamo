@@ -17,9 +17,9 @@ use dynamo_slot_tracker::host::{
     MAX_REPLICA_BATCH_EVENTS, SchedulerGroup, SchedulerLoad,
 };
 pub use dynamo_slot_tracker::host::{
-    ActiveSequences, ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, RequestId,
-    SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError, SequencePublisher,
-    SequenceRequest, SequenceSubscriber,
+    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, RequestId, SchedulerLoadSnapshot,
+    SequenceError, SequencePublishQueueError, SequencePublisher, SequenceRequest,
+    SequenceSubscriber,
 };
 
 use anyhow::Result;
