@@ -216,8 +216,11 @@ def assert_dgd_outputs(
                 assert ("--no-enable-prefix-caching" in args) != config[
                     f"{role}_enable_prefix_caching"
                 ]
-            used_gpus += component["replicas"] * int(
-                container["resources"]["limits"]["nvidia.com/gpu"]
+            node_count = component.get("multinode", {}).get("nodeCount", 1)
+            used_gpus += (
+                component["replicas"]
+                * node_count
+                * int(container["resources"]["limits"]["nvidia.com/gpu"])
             )
         assert used_gpus == candidate.used_gpus
 

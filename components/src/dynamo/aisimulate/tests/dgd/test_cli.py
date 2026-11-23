@@ -48,11 +48,15 @@ def test_run_dgd_recommend_uses_workspace_relative_config(
 
 
 @pytest.mark.parametrize(
-    ("backend", "include_vllm_args"),
-    [("vllm", True), ("trtllm", False)],
+    ("backend", "include_vllm_args", "node_count"),
+    [("vllm", True, 1), ("trtllm", False, 2)],
 )
-def test_assert_dgd_outputs_handles_backend_specific_args(
-    monkeypatch, tmp_path: Path, backend: str, include_vllm_args: bool
+def test_assert_dgd_outputs_handles_backend_specific_manifests(
+    monkeypatch,
+    tmp_path: Path,
+    backend: str,
+    include_vllm_args: bool,
+    node_count: int,
 ) -> None:
     config = {
         "backend": backend,
@@ -73,7 +77,7 @@ def test_assert_dgd_outputs_handles_backend_specific_args(
         "model_validate_json",
         lambda _: SimpleNamespace(
             views=SimpleNamespace(pareto_front=[]),
-            selected_candidates=[SimpleNamespace(config=config, used_gpus=1)],
+            selected_candidates=[SimpleNamespace(config=config, used_gpus=node_count)],
         ),
     )
     (tmp_path / "recommendation.json").write_text("{}")
@@ -117,6 +121,7 @@ def test_assert_dgd_outputs_handles_backend_specific_args(
                             "name": "Worker",
                             "type": "worker",
                             "replicas": 1,
+                            "multinode": {"nodeCount": node_count},
                             "podTemplate": {
                                 "spec": {
                                     "containers": [
