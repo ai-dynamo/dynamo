@@ -801,8 +801,12 @@ impl DistributedRuntime {
             + crate::protocols::maybe_error::MaybeError,
     {
         let dispatches = self.direct_dispatches.lock();
-        let entry: &dyn std::any::Any = dispatches.get(&std::any::TypeId::of::<(T, U)>())?.as_ref();
-        entry
+        // Name the trait object before the upcast. An `&Arc<_>` is itself `Any`,
+        // so it would coerce to `&dyn Any` directly and the downcast would
+        // always miss.
+        let entry: &dyn DirectDispatchEntry =
+            dispatches.get(&std::any::TypeId::of::<(T, U)>())?.as_ref();
+        (entry as &dyn std::any::Any)
             .downcast_ref::<TypedDirectDispatch<T, U>>()
             .map(|typed| typed.0.clone())
     }
