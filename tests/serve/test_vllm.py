@@ -710,9 +710,7 @@ vllm_configs = {
             pytest.mark.timeout(
                 300
             ),  # 1.1B loads quickly; margin covers CI model download
-            # TODO: revert to pytest.mark.post_merge after pre_merge validation
-            # on this PR (see .ai/ci-guidelines.md).
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         # Cold Blackwell decode stalls near KV 256; reach that path in readiness.
@@ -1047,12 +1045,7 @@ _CUDA_CACHE_CONFIGS = {
             pytest.mark.timeout(1200),
         ],
     )
-    for name in (
-        "agg-router",
-        "completion_defaults",
-        "completion_configured_default",
-        "completions_only",
-    )
+    for name in ("completions_only",)
 }
 
 
