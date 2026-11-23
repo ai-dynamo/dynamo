@@ -78,6 +78,12 @@ pytest-order==1.3.0
 pytest-rerunfailures==16.1
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
+# fakeredis through 2.40.0 cannot build a client on redis-py 8.2.0: it raises
+# AttributeError: 'method_descriptor' object has no attribute '__closure__'
+# (cunla/fakeredis-py#636, fixed on its master and in no release). The runtime
+# requirement is redis>=6.2.0,<9.0.0, so the cap is in this file, which pins fakeredis.
+# Remove it when fakeredis is raised to a release that has the fix.
+redis<8.2
 requests==2.33.1
 # Required by kr8s (not declared in kr8s's own dependencies)
 sniffio==1.3.1

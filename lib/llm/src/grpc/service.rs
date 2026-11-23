@@ -12,9 +12,9 @@ use futures::{Stream, StreamExt};
 use tonic::Status;
 
 use crate::http::service::disconnect::ConnectionHandle;
-use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{InflightGuard, request_was_unavailable};
 use crate::types::Annotated;
+use dynamo_error::http::SanitizedError;
 
 /// Map a dispatch error that is not a client-visible rejection onto its gRPC status.
 ///
