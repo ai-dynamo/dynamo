@@ -1,0 +1,407 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Enable GPU Sharing
+subtitle: Install GPU fractions or HAMi so several pods can share one GPU
+---
+
+Two stacks can place several pods on one GPU. GPU fractions caps each pod's compute and memory, and the pods run at the same time through MPS. HAMi caps each pod's memory and a percentage of compute, and HAMi-core enforces the compute share by time-slicing kernel launches. Pick the tab for the stack you plan to install. Both assume the [Dynamo platform](../../kubernetes/installation/install-dynamo.md) is already installed.
+
+<Tabs>
+  <Tab title="GPU Fractions">
+    GPU fractions needs two components on your cluster. KAI-Scheduler places each pod on a share of a GPU, and kai-gpu-fractioning runs the node agents that give each pod its own MPS namespace. These steps build both from their pinned pull requests, install them, and run a smoke test that proves two pods on one GPU each get half of it.
+
+    <Warning>
+    Both components are built from pull requests that are not yet merged upstream. Pin the commits below, validate in a staging cluster, and keep a dedicated-GPU or MIG fallback.
+    </Warning>
+
+    | Component | What it does | Source |
+    |---|---|---|
+    | KAI-Scheduler | Tracks each GPU's free compute as well as its memory, picks a GPU for each fractional pod, and records the GPU and the share on the pod | [KAI-Scheduler#2368](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368) at `44d1d0a966465c69b1fd0d24b40b9a1ebb73699e` |
+    | gpu-fractioning | Node agents. `mpsd` runs the MPS control daemon and creates one namespace per container, `fractiond` (an NRI plugin) gives each container its namespace and memory cap, and `metricsd` exports metrics | [gpu-fractioning#147](https://github.com/kai-scheduler/gpu-fractioning/pull/147) at `af0544e4dbd1d8e03ca14fc1e06d6265fabed99b` |
+
+    ![KAI-Scheduler is the orchestrator: it picks a GPU and a share for each pod. kai-gpu-fractioning runs the per-node infrastructure on every GPU node: mpsd runs the MPS server, fractiond gives each container its MPS namespace and memory cap, and metricsd exports metrics. Pods A and B each run on half of one GPU.](../../../assets/img/gpu-sharing-install-architecture.svg)
+
+    The two are a matched pair: the scheduler writes annotations that only this node agent reads. Build and install both from the commits above, and don't mix either with an upstream release.
+
+    ## Prerequisites
+
+    **On every GPU node:**
+
+    | Requirement | Why | Check |
+    |---|---|---|
+    | NVIDIA driver r615 or newer (CUDA 13.4) | MPS v3 namespaces. This is not the GPU Operator's default driver, so pin it | `nvidia-smi --query-gpu=driver_version --format=csv,noheader` prints `615.x` or newer |
+    | NVIDIA GPU Operator v26.7.1 or newer | Its container toolkit turns the memory cap into a driver-enforced limit | `helm list -n gpu-operator` |
+    | containerd 2.0 or newer with NRI enabled, or CRI-O with NRI | `fractiond` is an NRI plugin. Without NRI, nothing is injected into containers | `ls -l /var/run/nri/nri.sock` shows the socket |
+    | `nvidia.com/gpu.present=true` and `nvidia.com/gpu.memory` node labels | The node agents select GPU nodes by the first label, and the scheduler reads each GPU's memory from the second. GPU Feature Discovery, part of the GPU Operator, sets both | `kubectl get nodes -L nvidia.com/gpu.present,nvidia.com/gpu.memory` |
+    | `nvidia` RuntimeClass | GPU pods and KAI's reservation pod need the driver libraries | `kubectl get runtimeclass nvidia` |
+    | `nvidia-fabricmanager`, on NVLink and NVSwitch systems such as HGX | Required for multi-GPU nodes; match the driver branch | `systemctl is-active nvidia-fabricmanager` |
+
+    With a GPU Operator-managed driver, pin the version when you install or upgrade the operator:
+
+    ```bash
+    helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+    helm upgrade --install gpu-operator nvidia/gpu-operator \
+      -n gpu-operator --create-namespace \
+      --version v26.7.1 \
+      --set driver.version=615.71.09
+    ```
+
+    **On your build machine:** Docker with `buildx`, GNU `make`, `helm` 3.x or 4.x, `git`, Go on your `PATH`, and a container registry you can push to and your cluster can pull from.
+
+    **On your workstation:** `kubectl` and `helm`, with cluster-admin. The charts create CRDs, ClusterRoles, and PriorityClasses.
+
+    <Steps toc={true}>
+    <Step title="Clone the pinned commits" id="clone-the-pinned-commits">
+
+    ```bash
+    mkdir kai-forks && cd kai-forks
+
+    git clone https://github.com/kai-scheduler/KAI-Scheduler.git
+    git -C KAI-Scheduler fetch origin pull/2368/head
+    git -C KAI-Scheduler checkout 44d1d0a966465c69b1fd0d24b40b9a1ebb73699e
+
+    git clone https://github.com/kai-scheduler/gpu-fractioning.git kai-gpu-fractioning
+    git -C kai-gpu-fractioning fetch origin pull/147/head
+    git -C kai-gpu-fractioning checkout af0544e4dbd1d8e03ca14fc1e06d6265fabed99b
+    ```
+
+    </Step>
+    <Step title="Build and push the images" id="build-and-push-the-images">
+
+    Set your registry and one tag for both builds. The tag names both commits, so the pairing is recorded:
+
+    ```bash
+    export REGISTRY=registry.example.com/team/kai-fork   # a registry you can push to
+    export TAG=smshare-44d1d0a-af0544e
+    ```
+
+    Build and push the four node-agent images:
+
+    ```bash
+    cd kai-gpu-fractioning
+    make docker-build docker-push \
+      DOCKER_REPO_BASE="$REGISTRY/kai-gpu-fractioning" \
+      VERSION="$TAG"
+    cd ..
+    ```
+
+    Build and push the fifteen scheduler images. `make push` is only an alias in this Makefile, so pushing comes from the `--push` argument:
+
+    ```bash
+    cd KAI-Scheduler
+    make build \
+      DOCKER_REPO_BASE="$REGISTRY/kai-scheduler" \
+      DOCKER_TAG="$TAG" \
+      DOCKER_BUILDX_ADDITIONAL_ARGS=--push
+    cd ..
+    ```
+
+    <Warning>
+    Always pass an explicit tag. Both charts fall back to their own app version when a tag is empty, so a forgotten tag deploys the wrong code without failing.
+    </Warning>
+
+    Confirm that every image reached the registry:
+
+    ```bash
+    for svc in operator mpsd fractiond metricsd; do
+      docker buildx imagetools inspect "$REGISTRY/kai-gpu-fractioning/$svc:$TAG" >/dev/null \
+        && echo "ok   kai-gpu-fractioning/$svc" || echo "MISSING kai-gpu-fractioning/$svc"
+    done
+
+    for svc in podgrouper scheduler binder resourcereservation snapshot-tool scalingpod \
+        nodescaleadjuster podgroupcontroller queuecontroller fairshare-simulator admission \
+        operator time-based-fairshare-simulator numa-placement-exporter helm-hooks; do
+      docker buildx imagetools inspect "$REGISTRY/kai-scheduler/$svc:$TAG" >/dev/null \
+        && echo "ok   kai-scheduler/$svc" || echo "MISSING kai-scheduler/$svc"
+    done
+    ```
+
+    Every line must print `ok`. The [full build guide](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/build-gpu-fractioning-forks.md#step-2-build-and-push-the-images) covers multi-architecture builds and `buildx` builder problems.
+
+    </Step>
+    <Step title="Install KAI-Scheduler" id="install-kai-scheduler">
+
+    ```bash
+    cd KAI-Scheduler
+    helm dependency build ./deployments/kai-scheduler
+
+    helm upgrade --install kai-scheduler ./deployments/kai-scheduler \
+      -n kai-scheduler --create-namespace \
+      --set global.gpuSharingMode=NvFractions \
+      --set global.registry="$REGISTRY/kai-scheduler" \
+      --set global.tag="$TAG" \
+      --set binder.runtimeClassName=nvidia
+    cd ..
+    ```
+
+    - `global.gpuSharingMode=NvFractions` turns on GPU fractions. The value is case-sensitive.
+    - `binder.runtimeClassName=nvidia` lets KAI's GPU reservation pod load NVML. Without it, every fractional pod stays `Pending`.
+    - Leave `global.nvFractions.set` at its default, `false`. Setting it installs the upstream node agents instead of your build.
+
+    Wait for the scheduler, then check that every deployment runs your image:
+
+    ```bash
+    kubectl -n kai-scheduler wait --for=condition=Available deploy --all --timeout=300s
+    kubectl -n kai-scheduler get deploy \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[0].image}{"\n"}{end}'
+    ```
+
+    Every image must show your `$REGISTRY` and `$TAG`. Until the next step is done, `kai-config` reports `GpuFractioningConfig not found`, which is expected.
+
+    </Step>
+    <Step title="Install the GPU fractioning agents" id="install-the-gpu-fractioning-agents">
+
+    ```bash
+    cd kai-gpu-fractioning
+    helm upgrade --install gpu-fractioning ./operator/charts \
+      -n gpu-fractioning --create-namespace \
+      --set images.operator.repository="$REGISTRY/kai-gpu-fractioning/operator" \
+      --set images.fractiond.repository="$REGISTRY/kai-gpu-fractioning/fractiond" \
+      --set images.metricsd.repository="$REGISTRY/kai-gpu-fractioning/metricsd" \
+      --set images.mpsd.repository="$REGISTRY/kai-gpu-fractioning/mpsd" \
+      --set images.operator.tag="$TAG" \
+      --set images.fractiond.tag="$TAG" \
+      --set images.metricsd.tag="$TAG" \
+      --set images.mpsd.tag="$TAG"
+    cd ..
+    ```
+
+    Add a value if your cluster needs it:
+
+    | Situation | Add |
+    |---|---|
+    | k3s or RKE2 | `--set fractioningAgent.criSocketPath=/run/k3s/containerd/containerd.sock` |
+    | More than 16 GPUs on a node | `--set mpsDaemon.resources.limits.memory=<larger>`, about 50 MiB per GPU |
+    | Private registry | `--set 'imagePullSecrets[0].name=<secret>'` |
+    | MicroK8s | The socket paths in the [full build guide](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/build-gpu-fractioning-forks.md#step-4-install-kai-gpu-fractioning) |
+
+    Wait for the operator and the DaemonSets it creates, then check that every GPU node is ready:
+
+    ```bash
+    kubectl -n gpu-fractioning wait --for=condition=Available deploy --all --timeout=300s
+    sleep 15
+    kubectl -n gpu-fractioning rollout status ds --timeout=300s
+    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="gpu-fractioning.nvidia.com/Ready")].status}{"\n"}{end}'
+    ```
+
+    Every GPU node reports `True`. Then confirm that MPS started in multi-user mode, so pods can run as any non-root user:
+
+    ```bash
+    kubectl -n gpu-fractioning logs ds/gpu-fractioning-mpsd | grep -E "multiuser|active thread percentage"
+    ```
+
+    Expect `Adding server 'shared' [multiuser enabled]`, and a line that caps the `default` namespace at 10%. That cap is a safety net for a pod that reaches the server instead of its own namespace.
+
+    </Step>
+    <Step title="Run the smoke test" id="run-the-smoke-test">
+
+    Start two idle pods that each ask for half a GPU:
+
+    ```bash
+    for n in a b; do
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: fraction-smoke-$n
+      labels:
+        kai.scheduler/queue: default-queue
+      annotations:
+        gpu-fraction: "0.5"
+        nvidia.com/container.main.gpu-compute.mode: sm-sharing
+    spec:
+      schedulerName: kai-scheduler
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: main
+        image: nvidia/cuda:13.3.1-base-ubuntu24.04
+        command: ["sleep", "3600"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+    EOF
+    done
+
+    kubectl wait --for=condition=Ready pod/fraction-smoke-a pod/fraction-smoke-b --timeout=180s
+    ```
+
+    The container must be named `main`, because the `gpu-compute.mode` annotation names the container it applies to. The chart creates `default-queue` for you.
+
+    Run three checks. All three must pass:
+
+    ```bash
+    # 1. Which GPU each pod got, and the share and memory the scheduler recorded
+    for n in a b; do
+      kubectl get pod fraction-smoke-$n -o jsonpath='{.metadata.annotations}' \
+        | grep -o '"nvidia\.com/[^"]*":"[^"]*"' | sort -u
+    done
+
+    # 2. What the node agent gave the container
+    kubectl exec fraction-smoke-a -- env | grep -E 'CUDA_MPS|NVIDIA_VISIBLE_DEVICES'
+
+    # 3. What the MPS server enforces
+    kubectl -n gpu-fractioning exec ds/gpu-fractioning-mpsd -- \
+      nvidia-cuda-mps-control -p 3 namespace list --server=shared
+    ```
+
+    | Check | Pass condition |
+    |---|---|
+    | 1 | Both pods show a `gpu-compute.portion` and a `gpu-memory.request`, and the same `gpus.devices` GPU UUID, so they share one GPU. An empty UUID means the scheduler and node agent don't match |
+    | 2 | `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50`, and `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=<N>M`, where N is half of the GPU's memory in MiB after a 1 GiB reserve for the MPS server |
+    | 3 | Two `kai_*` namespaces at `50.00`, plus `default` at `10.00` |
+
+    Delete the pods:
+
+    ```bash
+    kubectl delete pod fraction-smoke-a fraction-smoke-b
+    ```
+
+    </Step>
+    <Step title="Prove the compute share is enforced" id="prove-the-compute-share-is-enforced">
+
+    The checks above show what was requested. To show that a pod can't take more than its share, run CUDA's `deviceQuery` sample as a half-GPU pod that tries to raise its own share to 100%:
+
+    ```bash
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: fraction-devicequery
+      labels:
+        kai.scheduler/queue: default-queue
+      annotations:
+        gpu-fraction: "0.5"
+        nvidia.com/container.main.gpu-compute.mode: sm-sharing
+    spec:
+      schedulerName: kai-scheduler
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: main
+        image: nvcr.io/nvidia/k8s/cuda-sample:devicequery
+        env:
+        - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+          value: "100"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+    EOF
+
+    kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/fraction-devicequery --timeout=180s
+    kubectl logs fraction-devicequery | grep -E 'Multiprocessors|Result'
+    kubectl delete pod fraction-devicequery
+    ```
+
+    The `Multiprocessors` count must be half the GPU's SMs, despite the override: `(054) Multiprocessors` on an A100 with 108 SMs. The node agent replaces the variable when the container starts, and the MPS server caps the namespace whatever the client asks for.
+
+    <Warning>
+    Keep `runAsNonRoot: true` on every fractional pod. In multi-user mode the MPS server is owned by root, and a pod running as root can raise its own share or delete a neighbor's namespace. Enforce it with Pod Security Admission or a policy engine.
+    </Warning>
+
+    </Step>
+    </Steps>
+
+    ## What You Did
+
+    - Built KAI-Scheduler and the GPU fractioning node agents from their pinned commits.
+    - Installed both, with MPS running in multi-user mode on every GPU node.
+    - Proved that two pods share one GPU, and that each pod's compute share holds even when the pod tries to raise it.
+
+    ## Uninstall
+
+    Delete the `GpuFractioningConfig` first, while the operator is still running, so it stops the node agents and releases the GPUs:
+
+    ```bash
+    kubectl delete gpufractioningconfig default --wait
+    kubectl -n gpu-fractioning wait --for=delete pod -l app.kubernetes.io/component=mpsd --timeout=180s
+    helm uninstall gpu-fractioning -n gpu-fractioning
+    helm uninstall kai-scheduler -n kai-scheduler
+    ```
+
+    ## Next Steps
+
+    - [Deploy Models with GPU Sharing](deploy-models-with-gpu-sharing.mdx): run Dynamo models on the shares you proved in the smoke test.
+    - [Operate Shared GPUs](operate-shared-gpus.md#troubleshooting): what to check when a fractional pod stays `Pending` or gets no limits.
+  </Tab>
+  <Tab title="HAMi">
+    [HAMi](https://project-hami.io/) is a [CNCF Incubating](https://www.cncf.io/projects/hami/) project. It can be deployed with its own scheduler or with Dynamic Resource Allocation (DRA). This page uses the scheduler deployment, which installs the HAMi scheduler and device plugin. The device plugin registers each physical GPU as several vGPUs. A pod takes one by requesting `nvidia.com/gpu` together with a memory cap and a compute percentage, and [HAMi-core](https://project-hami.io/docs/key-features/device-resource-isolation) enforces both inside the container.
+
+    ## Prerequisites
+
+    - **HAMi chart:** 2.11.0 or newer
+    - **Kubernetes:** 1.23 or newer
+    - **NVIDIA driver:** 440 or newer
+    - **NVIDIA Container Toolkit:** from the [GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) v26.3.3, or installed on the host
+    - **Helm:** 3.0 or newer
+
+    The driver must also support the GPU and the workload's CUDA version. Follow [HAMi's NVIDIA node guide](https://project-hami.io/docs/installation/prerequisites) when the driver or Toolkit is installed on the host instead of by the GPU Operator.
+
+    <Warning>
+    HAMi replaces the NVIDIA device plugin. If the GPU Operator is already installed, turn its device plugin off before installing HAMi. GPU Operator 25.10 and newer also enable CDI by default, and HAMi's `envvar` allocation uses the NVIDIA runtime, so turn CDI off in the same upgrade. This restarts GPU pods. Do it while no GPU workload is running, and keep the Operator's other values.
+    </Warning>
+
+    ```bash
+    helm upgrade gpu-operator nvidia/gpu-operator \
+      -n gpu-operator --reuse-values \
+      --set devicePlugin.enabled=false \
+      --set cdi.enabled=false
+    ```
+
+    Wait until `nvidia-device-plugin` is gone from the `gpu-operator` namespace. The nodes report no `nvidia.com/gpu` capacity until HAMi's device plugin is running.
+
+    ## Install
+
+    Label the GPU node, then install the chart. The chart selects a scheduler image for the cluster's Kubernetes version. List the nodes and set `GPU_NODE` before labeling:
+
+    ```bash
+    kubectl get nodes -L nvidia.com/gpu.product,nvidia.com/gpu.count
+    export GPU_NODE=<node-name>
+    kubectl label node "$GPU_NODE" gpu=on --overwrite
+
+    helm repo add hami-charts https://project-hami.github.io/HAMi/
+    helm repo update hami-charts
+    helm upgrade --install hami hami-charts/hami \
+      -n kube-system --version 2.11.0
+    ```
+
+    Wait until the scheduler and the device plugin are ready:
+
+    ```bash
+    kubectl -n kube-system rollout status deployment/hami-scheduler --timeout=180s
+    kubectl -n kube-system rollout status daemonset/hami-device-plugin --timeout=180s
+    ```
+
+    HAMi advertises each physical GPU as `deviceSplitCount` vGPUs, 10 by default. A node with one GPU then reports `nvidia.com/gpu: 10`.
+
+    ## Request a share
+
+    A shared container asks for one vGPU, a memory cap in MiB, and a compute percentage. `50` means 50 percent of the card. Write a plain integer: `50%` and a CPU quantity such as `500m` are rejected.
+
+    ```yaml
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+        nvidia.com/gpumem: 20000
+        nvidia.com/gpucores: 50
+    env:
+      - name: GPU_CORE_UTILIZATION_POLICY
+        value: force
+    ```
+
+    The admission webhook sets `schedulerName` to `hami-scheduler`. A container that requests `nvidia.com/gpu` and sets neither memory nor cores receives `gpucores: 100`, and that container takes the whole card. Set `gpumem` below the card size and `gpucores` below 100 to share it.
+
+    HAMi shows the container a virtual GPU sized to `gpumem`. Set `--gpu-memory-utilization` against that cap.
+
+    The same fields and the node preparation are documented in [HAMi's install guide](https://project-hami.io/docs/installation/prerequisites) and [device sharing](https://project-hami.io/docs/key-features/device-sharing).
+  </Tab>
+</Tabs>

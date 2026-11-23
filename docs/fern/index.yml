@@ -888,10 +888,11 @@ navigation:
             path: pages/use-cases/gpu-sharing/size-each-models-share.mdx
           - page: Try MPS on One GPU
             path: pages/use-cases/gpu-sharing/try-mps-on-one-gpu.mdx
-          - page: Install GPU Fractions on Kubernetes
-            path: pages/use-cases/gpu-sharing/install-gpu-fractions.mdx
-          - page: Deploy Models on GPU Fractions
-            path: pages/use-cases/gpu-sharing/deploy-models-on-gpu-fractions.mdx
+          - page: Enable GPU Sharing
+            slug: enable-gpu-sharing
+            path: pages/use-cases/gpu-sharing/enable-gpu-sharing.mdx
+          - page: Deploy Models with GPU Sharing
+            path: pages/use-cases/gpu-sharing/deploy-models-with-gpu-sharing.mdx
           - page: Benchmark GPU Fractions
             path: pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx
           - page: Benchmark Sized Shares

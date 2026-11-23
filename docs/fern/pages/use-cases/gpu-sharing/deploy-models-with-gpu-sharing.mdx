@@ -1,0 +1,331 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Deploy Models with GPU Sharing
+subtitle: Give each Dynamo worker a share of a GPU, deploy two models onto one GPU, and send them requests
+---
+
+This guide deploys two Qwen3-4B models, each in its own DynamoGraphDeployment (DGD), onto one GPU, with each worker getting half of the GPU. Along the way it explains every field that gives a worker its share, so you can apply the same fields to your own models. Pick the tab for the stack you installed in [Enable GPU Sharing](enable-gpu-sharing.mdx).
+
+The commands use the manifests and scripts in [`examples/gpu-sharing`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing). Run them from that directory in a checkout of the Dynamo repository.
+
+## Prerequisites
+
+- GPU fractions or HAMi, installed as described in [Enable GPU Sharing](enable-gpu-sharing.mdx).
+- A GPU node with at least one free GPU. The commands below were written for an A100 40GB; the memory step in each tab shows what to change for other GPUs.
+- `kubectl` and `helm` with cluster-admin, and egress to Hugging Face and `nvcr.io`.
+- Pods in the target namespace may mount `hostPath` volumes, and the model download runs a root init container. If your cluster enforces the `baseline` or `restricted` Pod Security Standard, use a namespace labeled `pod-security.kubernetes.io/enforce=privileged`, and set `NAMESPACE` for every command.
+
+Pick the GPU node. Every later step uses it:
+
+```bash
+kubectl get nodes -L nvidia.com/gpu.product,nvidia.com/gpu.count
+export GPU_NODE=<node-name>
+```
+
+## Install the Dynamo platform
+
+```bash
+cd examples/gpu-sharing
+common/install-dynamo-platform.sh
+```
+
+The script installs the `dynamo-platform` Helm chart, version 1.4.2, into the `dynamo-system` namespace, with etcd and NATS. The DGDs in this guide use etcd for discovery: with the platform's default Kubernetes-based discovery, the `vllm-runtime:1.3.0` frontend never lists the model.
+
+## Download the model to the GPU node
+
+```bash
+NODE_NAME="$GPU_NODE" common/download-model.sh
+```
+
+A Kubernetes Job on `$GPU_NODE` downloads `Qwen/Qwen3-4B` at a pinned revision into the `hostPath` cache `/opt/hf-cache`. Set `HF_TOKEN` if your Hugging Face account needs one.
+
+## Deploy Two Models onto One GPU
+
+<Tabs>
+  <Tab title="GPU Fractions">
+    <Steps>
+    <Step title="Request a share for each worker" id="fractions-request-a-share">
+
+    A worker asks for its share with a label, two annotations, and three fields on its pod template. This is the worker of each DGD this guide deploys:
+
+    ```yaml {6,8-9,11-12,14}
+    - name: worker
+      type: worker
+      podTemplate:
+        metadata:
+          labels:
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+          containers:
+            - name: main
+              # ... the vLLM worker command, with no nvidia.com/gpu resource
+    ```
+
+    | Field | What it does |
+    |---|---|
+    | `kai.scheduler/queue` | Puts the pod in a KAI queue. Every fractional pod needs one, and the chart creates `default-queue` |
+    | `gpu-fraction: "0.5"` | Asks for half of one GPU's memory, after a 1 GiB reserve for the MPS server. The compute share follows the memory share |
+    | `nvidia.com/container.main.gpu-compute.mode: sm-sharing` | Runs the container in its own MPS namespace, so it runs at the same time as its neighbors, capped at its compute share. `main` is the container's name |
+    | `schedulerName: kai-scheduler` | Hands the pod to KAI-Scheduler instead of the default scheduler |
+    | `runtimeClassName: nvidia` | Gives the container the driver libraries |
+    | `runAsNonRoot: true` | Stops the pod from raising its own share. A root container can change any MPS namespace on the GPU |
+
+    Leave out `nvidia.com/gpu`: KAI rejects a pod that asks for both a fraction and a whole GPU.
+
+    To give a model more compute than memory, or the reverse, ask for each one on its own instead of `gpu-fraction`. This form comes from the [pinned KAI-Scheduler pull request](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368):
+
+    ```yaml
+    annotations:
+      nvidia.com/container.main.gpu-compute.mode: sm-sharing
+      nvidia.com/container.main.gpu-compute.request: "0.3"
+      nvidia.com/container.main.gpu-memory.request: "24576Mi"
+    ```
+
+    Use the values you recorded in [Size Each Model's Share](size-each-models-share.mdx).
+
+    </Step>
+    <Step title="Set the engine's memory setting" id="fractions-set-the-engines-memory-setting">
+
+    The engine sees the GPU's full memory as its total, not its cap. Set vLLM's `--gpu-memory-utilization` to a fraction that fits under the cap:
+
+    ```text
+    --gpu-memory-utilization  ≤  memory cap ÷ GPU memory
+    ```
+
+    On an A100 40GB, half the GPU is a 19,968 MiB cap, so the DGDs in this tab set `--gpu-memory-utilization 0.40`, about 15.8 GiB. On another GPU, recompute it. The next step shows where to change it.
+
+    </Step>
+    <Step title="Deploy two models onto one GPU" id="fractions-deploy-two-models">
+
+    [`kai-gpu-fractions/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/gen-dgds.sh) renders one DGD per model, each with a frontend and the worker from the first step. Render two and apply them:
+
+    ```bash
+    NUM_MODELS=2 NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl apply -f -
+    kubectl get dgd -n default -w      # wait until qwen3-4b-01 and qwen3-4b-02 are Ready
+    ```
+
+    For a GPU other than an A100 40GB, render to a file first, change `"0.40"` after `--gpu-memory-utilization` to your value, and apply the file.
+
+    While the DGDs start, this is what happens to each worker:
+
+    1. KAI-Scheduler finds a GPU with half its compute and half its memory free, and records the GPU and the share on the pod. Both workers fit on one GPU, so the scheduler packs them together.
+    2. On that node, `mpsd` creates an MPS namespace for the pod on the GPU's MPS server, capped at 50% of the SMs.
+    3. When the container starts, `fractiond` mounts only that namespace's pipe directory into it, and sets its memory cap.
+    4. vLLM starts as an MPS client of that namespace, and runs under its limits.
+
+    <Warning>
+    Don't edit a running DGD's worker. The operator starts the new worker before it removes the old one, and with every share on the GPU allocated, the new worker stays `Pending`. Delete the DGD and apply it again instead.
+    </Warning>
+
+    </Step>
+    <Step title="Verify placement and limits" id="fractions-verify-placement-and-limits">
+
+    Check that both workers landed on the same GPU, each with its share:
+
+    ```bash
+    for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
+      echo "$p"
+      kubectl exec -n default "${p#pod/}" -- env | grep -E 'NVIDIA_VISIBLE_DEVICES|CUDA_MPS_ACTIVE_THREAD_PERCENTAGE|CUDA_MPS_PINNED_DEVICE_MEM_LIMIT'
+    done
+    ```
+
+    Both workers report the same `NVIDIA_VISIBLE_DEVICES` GPU UUID, `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50`, and, on an A100 40GB, `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=19968M`.
+
+    Then check what the MPS server enforces, which is the ground truth:
+
+    ```bash
+    kubectl -n gpu-fractioning exec ds/gpu-fractioning-mpsd -- \
+      nvidia-cuda-mps-control -p 3 namespace list --server=shared
+    ```
+
+    Expect two `kai_*` namespaces at `50.00`, plus `default` at `10.00`.
+
+    </Step>
+    </Steps>
+
+    ### Put It All Together
+
+    The same fields scale to a cluster. This example serves fifteen distinct models on GPU fractions, and one large model on whole GPUs, across two nodes. Each colored block is one worker in its own MPS namespace, and its height is the worker's share of the GPU's SMs:
+
+    ![Cluster services: KAI-Scheduler, Dynamo operator, Dynamo frontends, GPU Operator. Two GPU nodes, each with four H100 80GB GPUs, mpsd, and fractiond. gpu-node-1: GPU 0 holds chat-8b 0.5, code-7b 0.3, guard-1b 0.2; GPU 1 holds tenant-a-8b 0.4, tenant-b-8b 0.4, embed 0.2; GPU 2 holds sql-7b 0.3, summarize-3b 0.3, rerank 0.2, with 0.2 free; GPU 3 is free. gpu-node-2: GPUs 0 and 1 run chat-70b on whole GPUs without MPS; GPU 2 holds four tenant models at 0.25 each; GPU 3 holds vision-7b 0.6 and ocr-2b 0.2, with 0.2 free.](../../../assets/img/gpu-sharing-two-node-architecture.svg)
+
+    | Component | Where it runs | What it does |
+    |---|---|---|
+    | KAI-Scheduler | Cluster services | Places each fractional worker on a GPU with room for both its compute share and its memory |
+    | Dynamo operator | Cluster services | Turns each DGD into a frontend and a worker |
+    | Dynamo frontends | CPU nodes | Serve each model's OpenAI-compatible API and route to that model's worker |
+    | GPU Operator | Every GPU node | Installs the driver, the device plugin, and the GPU labels KAI-Scheduler reads |
+    | `mpsd` | Every GPU node | Runs the MPS v3 control daemon, one MPS server per GPU, and a namespace for each fractional worker |
+    | `fractiond` | Every GPU node | Gives each fractional container its namespace's pipe directory and its memory cap |
+
+    Workers that need whole GPUs, such as the two ranks of `chat-70b`, ask for `nvidia.com/gpu` as usual and run without MPS, on the same nodes as the fractional workers.
+  </Tab>
+  <Tab title="HAMi">
+    <Steps>
+    <Step title="Request a share for each worker" id="hami-request-a-share">
+
+    A worker asks for its share with one annotation, three resource limits, and `GPU_CORE_UTILIZATION_POLICY=force` on its container. This is the worker of each DGD this guide deploys:
+
+    ```yaml {6,14-19}
+    - name: worker
+      type: worker
+      podTemplate:
+        metadata:
+          annotations:
+            hami.io/gpu-scheduler-policy: binpack
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: main
+              # ... the vLLM worker command
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+                  nvidia.com/gpumem: "20000"
+                  nvidia.com/gpucores: "50"
+              env:
+                - name: GPU_CORE_UTILIZATION_POLICY
+                  value: force
+    ```
+
+    | Field | What it does |
+    |---|---|
+    | `hami.io/gpu-scheduler-policy: binpack` | Packs workers onto a GPU that already has work. HAMi's default GPU policy is `spread`, which puts each worker on its own GPU while free GPUs remain |
+    | `nvidia.com/gpu: "1"` | Asks for one vGPU, a slot on one physical GPU |
+    | `nvidia.com/gpumem: "20000"` | Caps the container at 20,000 MiB of GPU memory |
+    | `nvidia.com/gpucores: "50"` | Caps the container at 50% of the GPU's compute |
+    | `GPU_CORE_UTILIZATION_POLICY` set to `force` | Enforces the `gpucores` cap when this worker is the only one on the GPU. HAMi 2.11.0 turns the default compute limit off in that case |
+    | `runtimeClassName: nvidia` | Gives the container the driver libraries |
+
+    The pod keeps the default `schedulerName`. HAMi's admission webhook changes it to `hami-scheduler` when the pod requests HAMi resources.
+
+    </Step>
+    <Step title="Set the engine's memory setting" id="hami-set-the-engines-memory-setting">
+
+    HAMi shows the container a virtual GPU whose total memory is `gpumem`, so vLLM's `--gpu-memory-utilization` is a fraction of the cap, not of the physical GPU:
+
+    ```text
+    memory vLLM uses  =  --gpu-memory-utilization × gpumem
+    ```
+
+    The DGDs in this tab keep `--gpu-memory-utilization 0.85`, so each worker uses about 17 GB of its 20,000 MiB cap. On another GPU, set `gpumem` to the share you want and keep `0.85`.
+
+    </Step>
+    <Step title="Deploy two models onto one GPU" id="hami-deploy-two-models">
+
+    [`baseline/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/gen-dgds.sh) renders one DGD per model, each with a frontend and a worker that asks for `nvidia.com/gpu: "1"`. Render two, add the annotation, the HAMi limits, and `GPU_CORE_UTILIZATION_POLICY=force` from the first step, and apply them:
+
+    ```bash
+    NUM_MODELS=2 NODE_NAME="$GPU_NODE" baseline/gen-dgds.sh | awk '{ print }
+      /experiment\.nvidia\.com\/role: worker/ {
+        in_worker = 1
+        indent = substr($0, 1, index($0, "experiment") - 3)
+        print indent "annotations:"
+        print indent "  hami.io/gpu-scheduler-policy: binpack"
+      }
+      in_worker && /^ *env:$/ {
+        indent = substr($0, 1, index($0, "env") - 1)
+        print indent "  - name: GPU_CORE_UTILIZATION_POLICY"
+        print indent "    value: force"
+        in_worker = 0
+      }
+      /^ *limits:$/ { in_limits = 1 }
+      in_limits && /nvidia\.com\/gpu:/ {
+        indent = substr($0, 1, index($0, "nvidia") - 1)
+        print indent "nvidia.com/gpumem: \"20000\""
+        print indent "nvidia.com/gpucores: \"50\""
+        in_limits = 0
+      }' > hami-dgds.yaml
+    kubectl apply -f hami-dgds.yaml
+    kubectl get dgd -n default -w      # wait until qwen3-4b-01 and qwen3-4b-02 are Ready
+    ```
+
+    While the DGDs start, this is what happens to each worker:
+
+    1. HAMi's admission webhook sets the pod's scheduler to `hami-scheduler`.
+    2. `hami-scheduler` finds a GPU with a free vGPU slot, 20,000 MiB of memory, and 50% of its compute free. With `binpack`, the second worker lands on the same GPU as the first.
+    3. When the container starts, HAMi's device plugin mounts HAMi-core into it and passes the memory and compute caps as environment variables.
+    4. vLLM starts and sees a GPU with 20,000 MiB of memory. HAMi-core enforces both caps on its CUDA calls.
+
+    <Warning>
+    Don't edit a running DGD's worker. The operator starts the new worker before it removes the old one, and if the GPU has no room for a third share, the new worker stays `Pending`. Delete the DGD and apply it again instead.
+    </Warning>
+
+    </Step>
+    <Step title="Verify placement and limits" id="hami-verify-placement-and-limits">
+
+    Check that both workers landed on the same GPU, each with its share:
+
+    ```bash
+    for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
+      echo "$p"
+      kubectl get -n default "$p" -o jsonpath='{.metadata.annotations.hami\.io/vgpu-devices-allocated}{"\n"}'
+      kubectl exec -n default "${p#pod/}" -- nvidia-smi --query-gpu=memory.total --format=csv,noheader
+    done
+    ```
+
+    Both workers report the same GPU UUID in an allocation of the form `GPU-<uuid>,NVIDIA,20000,50:;`, which is the UUID, the memory cap in MiB, and the compute share. `nvidia-smi` inside each worker reports `20000 MiB`, not the physical GPU's memory.
+
+    </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Send a Request
+
+Forward the first model's frontend to your workstation:
+
+```bash
+kubectl port-forward -n default svc/qwen3-4b-01-frontend 8000:8000
+```
+
+In another terminal, list the model and send a chat request:
+
+```bash
+curl -s localhost:8000/v1/models
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-4B",
+    "messages": [{"role": "user", "content": "In one sentence, what is a GPU?"}],
+    "max_tokens": 64
+  }'
+```
+
+Repeat with `svc/qwen3-4b-02-frontend` to reach the second model. Each model has its own frontend and endpoint.
+
+## What You Did
+
+- Installed the Dynamo platform and downloaded a model to the GPU node.
+- Deployed two models, each as its own DGD, onto one GPU, with each worker capped at half the GPU.
+- Confirmed the placement and the limits, and sent each model a request.
+
+## Clean Up
+
+Delete the DGDs with the generator you deployed them with:
+
+```bash
+# GPU fractions
+NUM_MODELS=2 NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl delete -f -
+
+# HAMi
+kubectl delete -f hami-dgds.yaml
+
+kubectl delete job download-qwen3-4b -n default --ignore-not-found
+```
+
+The model cache stays in `/opt/hf-cache` on `$GPU_NODE`.
+
+## Next Steps
+
+- [Benchmark GPU Fractions](benchmark-gpu-fractions.mdx): measure throughput and latency with every model loaded.
+- [Operate Shared GPUs](operate-shared-gpus.md): place critical models, resize a model, and fix common problems.

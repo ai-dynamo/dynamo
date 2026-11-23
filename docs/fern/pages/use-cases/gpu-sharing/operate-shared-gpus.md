@@ -38,7 +38,7 @@ kubectl apply -f <dgd-file>.yaml
 
 ## Avoid the MPS v3 Sharp Edges
 
-MPS v3 enforces limits only for clients that actually connect to their namespace, and some failures are silent. The GPU fractioning agents guard against most of them, but verify the limits on every new deployment, as [Install GPU Fractions on Kubernetes](install-gpu-fractions.mdx#run-the-smoke-test) shows.
+MPS v3 enforces limits only for clients that actually connect to their namespace, and some failures are silent. The GPU fractioning agents guard against most of them, but verify the limits on every new deployment, as [Enable GPU Sharing](enable-gpu-sharing.mdx#run-the-smoke-test) shows.
 
 - **A client that misses its namespace runs unlimited.** In the default compute mode, a client whose pipe directory is missing or misspelled runs as an ordinary CUDA process with the whole GPU, and nothing reports an error.
 - **A configuration error can stop MPS without an error.** A namespace name the daemon can't parse, such as one with a hyphen, or a server whose allowed devices name a GPU that isn't on the node, leaves no server running, while the start command still succeeds. Check `server list` and the MPS logs after every start.
