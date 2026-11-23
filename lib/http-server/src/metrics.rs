@@ -176,7 +176,6 @@ impl Collector for ServingLoadCollector {
     }
 }
 
-/// Register the scrape-time model readiness collector with the frontend registry.
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
 pub static WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
