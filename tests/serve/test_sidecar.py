@@ -201,15 +201,8 @@ class SidecarConfig(EngineConfig):
     warm_up_split_kv: bool = False
 
 
-# vLLM's FlashAttention-2 build ships only sm_80 code. On newer GPUs (sm_120
-# Blackwell CI runners) the CUDA driver JIT-compiles its kernels the first time
-# an engine runs them, which blocks that engine for about 70 s with a cold driver
-# cache. Without this warm-up the first routed request, a prefill of several
-# hundred tokens followed by a decode past 128 KV tokens, hit that stall and
-# outlived its 30 s read timeout (DYN-5754). The warm-up runs the same shape: a
-# prompt of about 300 tokens and a 128-token decode. The compiled modules are
-# cached on disk, so a warm-up that completes on one engine warms the rest. The
-# prompt shares no prefix with the KV-routing prompts.
+# vLLM's FlashAttention-2 has only sm_80 code; newer GPUs JIT-compile it on first
+# use, stalling ~70 s (DYN-5754). Warm up with the first routed request's shape.
 SPLIT_KV_WARMUP_PROMPT = "Pale lanterns drift over harbor water at dusk. " * 32
 SPLIT_KV_WARMUP_TOKENS = 128
 
@@ -218,9 +211,8 @@ def _split_kv_warmup_check(port: int, model: str):
     def _prefill_and_decode_past_128_kv_tokens(
         remaining_timeout: float = 30.0,
     ) -> bool:
-        # One attempt that waits out the rest of the readiness budget. A shorter
-        # attempt would time out mid-compile, and its retry could be routed to
-        # another engine and start a second cold compile there.
+        # One attempt for the whole readiness budget: a timed-out retry could be
+        # routed to another engine and start a second cold compile there.
         response = requests.post(
             f"http://localhost:{port}/v1/chat/completions",
             json={
