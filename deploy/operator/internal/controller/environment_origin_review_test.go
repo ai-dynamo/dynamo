@@ -92,7 +92,7 @@ func TestDCDEnvironmentOriginCanDifferBetweenRoles(t *testing.T) {
 	require.True(t, dynamo.DCDUsesOrderedEnvironment(dcd))
 	kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(dcd).Build()
 	reconciler := &DynamoComponentDeploymentReconciler{Client: kubeClient, Recorder: events.NewFakeRecorder(10), Config: &configv1alpha1.OperatorConfiguration{}, RuntimeConfig: &common.RuntimeConfig{}}
-	workload, _, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
+	workload, _, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd}, dcd.Name)
 	require.NoError(t, err)
 	requireEnvironmentOrder(t, workload.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers[0].Env, false)
 	requireEnvironmentOrder(t, workload.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.Containers[0].Env, true)
