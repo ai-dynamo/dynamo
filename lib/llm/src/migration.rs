@@ -706,6 +706,9 @@ where
             if let Some(cause) = migration {
                 self.metrics
                     .inc_migration(&self.model_name, cause.migration_type);
+                if let Some(tracker) = self.request.tracker.as_ref() {
+                    tracker.record_migration();
+                }
             }
             // Once any chunks have arrived from a previous attempt, stamp
             // that worker's span as `migration_link` so the next worker's
