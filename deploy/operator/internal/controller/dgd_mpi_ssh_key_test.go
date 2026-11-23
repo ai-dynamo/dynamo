@@ -25,6 +25,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -67,6 +68,8 @@ func newMPISSHTestReconciler(t *testing.T, objects ...client.Object) *DynamoGrap
 	plannerRole := &rbacv1.ClusterRole{Name: "planner"}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithRESTMapper(groveScaleRESTMapper()).
+		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
 		WithObjects(append(objects, plannerRole)...).
 		WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
@@ -230,6 +233,7 @@ func TestDGDReconcileGivesEachTRTLLMMultinodeDGDItsOwnMPISSHKey(t *testing.T) {
 			t.Log("Check a multinode backend with no MPI Secret reference")
 			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", mpiSSHTestOriginVersion)
 			dgd.Spec.BackendFramework = backend
+			dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo." + backend}
 			reconciler := newMPISSHTestReconciler(t, dgd)
 			sshKeys := newDGDSSHKeysReconciler(reconciler.Client, reconciler.Client, mpiSSHTestSecretName, reconciler.SSHKeyManager)
 			require.NoError(t, sshKeys.Reconcile(t.Context(), dgd))
