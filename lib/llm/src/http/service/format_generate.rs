@@ -512,8 +512,8 @@ impl Dispatch {
                 }
                 if error_type == ErrorType::Overload {
                     // Pre-stream rejections count a rejection metric. A legacy
-                    // 503 rejection also counts as unavailable.
-                    if status == StatusCode::SERVICE_UNAVAILABLE {
+                    // rejection, which keeps its 503, also counts as unavailable.
+                    if super::metrics::request_was_rejected(error.as_ref()) {
                         error_type = ErrorType::Unavailable;
                     }
                     state

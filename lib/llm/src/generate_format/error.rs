@@ -48,8 +48,8 @@ impl WorkerError {
 
     /// Common pre-stream policy of the native Generate endpoints. The format
     /// supplies its validation message; transport failures take precedence.
-    /// Dispatch counts `Overload` as a rejection; a 503 one also counts as an
-    /// unavailable request.
+    /// Dispatch counts `Overload` as a rejection; a legacy one also counts as
+    /// an unavailable request.
     /// A canonical `RateLimited` or `CapacityExhausted` rejection, such as a
     /// request classifier's, takes its status from the shared HTTP policy, as
     /// on the OpenAI path. That includes a `BackendError::WorkerOverloaded`
