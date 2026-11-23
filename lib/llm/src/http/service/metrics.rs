@@ -6446,26 +6446,39 @@ mod tests {
 
                 // The first scrape is rendering when two more arrive. They wait
                 // on the gate, leaving the pool's other thread free.
+                let within = std::time::Duration::from_secs(5);
                 let first = scrape();
-                started.recv().await.expect("first render started");
+                tokio::time::timeout(within, started.recv())
+                    .await
+                    .expect("first render started")
+                    .expect("started");
                 let second = scrape();
                 let third = scrape();
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    tokio::task::spawn_blocking(|| ()),
-                )
-                .await
-                .expect("a waiting scrape occupied a blocking thread")
-                .expect("probe");
+                tokio::time::timeout(within, tokio::task::spawn_blocking(|| ()))
+                    .await
+                    .expect("a waiting scrape occupied a blocking thread")
+                    .expect("probe");
 
                 // The second scrape renders once the first finishes; the third
                 // arrived before that render started and shares it.
                 release.send(()).unwrap();
-                first.await.expect("first scrape");
-                started.recv().await.expect("second render started");
+                tokio::time::timeout(within, first)
+                    .await
+                    .expect("first scrape finished")
+                    .expect("first scrape");
+                tokio::time::timeout(within, started.recv())
+                    .await
+                    .expect("second render started")
+                    .expect("started");
                 release.send(()).unwrap();
-                let second = second.await.expect("second scrape");
-                let third = third.await.expect("third scrape");
+                let second = tokio::time::timeout(within, second)
+                    .await
+                    .expect("second scrape finished")
+                    .expect("second scrape");
+                let third = tokio::time::timeout(within, third)
+                    .await
+                    .expect("third scrape finished")
+                    .expect("third scrape");
                 assert_eq!(second, third);
                 let text = std::str::from_utf8(&second).unwrap();
                 assert!(text.contains("engine_metric 1"), "{text}");

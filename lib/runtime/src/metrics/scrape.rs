@@ -26,16 +26,28 @@ impl ScrapeCoalescer {
         Self::default()
     }
 
-    /// Render for a scrape arriving now. A render that started collecting
-    /// after the scrape arrived is reused; otherwise `render` runs on the
-    /// blocking pool. Waiting scrapes queue on the runtime, not in the pool.
-    /// The owned guard moves into the blocking task, so a cancelled request
-    /// cannot release the gate before its render finishes.
+    /// Render for a scrape arriving now. See [`Self::render_at`].
     pub async fn render<F>(&self, render: F) -> anyhow::Result<bytes::Bytes>
     where
         F: FnOnce() -> anyhow::Result<String> + Send + 'static,
     {
-        let requested_at = Instant::now();
+        self.render_at(Instant::now(), render).await
+    }
+
+    /// Render for a scrape that arrived at `requested_at`. A render that
+    /// started collecting after the scrape arrived is reused; otherwise
+    /// `render` runs on the blocking pool. Waiting scrapes queue on the
+    /// runtime, not in the pool. The owned guard moves into the blocking task,
+    /// so a cancelled request cannot release the gate before its render
+    /// finishes.
+    pub async fn render_at<F>(
+        &self,
+        requested_at: Instant,
+        render: F,
+    ) -> anyhow::Result<bytes::Bytes>
+    where
+        F: FnOnce() -> anyhow::Result<String> + Send + 'static,
+    {
         let mut last = self.last.clone().lock_owned().await;
         if last.started_at.is_some_and(|at| at >= requested_at) {
             return Ok(last.text.clone());
@@ -98,24 +110,37 @@ mod tests {
             let scrapes = ScrapeCoalescer::new();
             let scrape = |scrapes: &ScrapeCoalescer| {
                 let (scrapes, registry) = (scrapes.clone(), registry.clone());
+                // Sample arrival here: the task's first poll can land after the
+                // next render starts (as in #18398).
+                let requested_at = Instant::now();
                 tokio::spawn(async move {
                     scrapes
-                        .render(move || registry.prometheus_expfmt_combined())
+                        .render_at(requested_at, move || registry.prometheus_expfmt_combined())
                         .await
                 })
             };
+            let within = Duration::from_secs(5);
 
             // First scrape starts a render, then its request is cancelled.
             let first = scrape(&scrapes);
-            started.recv().await.expect("first render started");
+            tokio::time::timeout(within, started.recv())
+                .await
+                .expect("first render started")
+                .expect("started");
             first.abort();
-            let _ = first.await;
+            let _ = tokio::time::timeout(within, first)
+                .await
+                .expect("cancelled scrape settled");
+            assert!(
+                scrapes.last.try_lock().is_err(),
+                "cancelling the request must not release the gate"
+            );
 
             // Two scrapes arrive during that render. They must wait on the gate,
             // leaving the pool's other thread free for unrelated work.
             let second = scrape(&scrapes);
             let third = scrape(&scrapes);
-            tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| ()))
+            tokio::time::timeout(within, tokio::task::spawn_blocking(|| ()))
                 .await
                 .expect("a waiting scrape occupied a blocking thread")
                 .expect("probe");
@@ -123,10 +148,21 @@ mod tests {
             // Releasing the cancelled render lets the second scrape render; the
             // third arrived before that render started and shares it.
             release.send(()).unwrap();
-            started.recv().await.expect("second render started");
+            tokio::time::timeout(within, started.recv())
+                .await
+                .expect("second render started")
+                .expect("started");
             release.send(()).unwrap();
-            let second = second.await.expect("task").expect("render");
-            let third = third.await.expect("task").expect("render");
+            let second = tokio::time::timeout(within, second)
+                .await
+                .expect("second scrape finished")
+                .expect("task")
+                .expect("render");
+            let third = tokio::time::timeout(within, third)
+                .await
+                .expect("third scrape finished")
+                .expect("task")
+                .expect("render");
             assert_eq!(second, third);
             assert!(
                 std::str::from_utf8(&second)
