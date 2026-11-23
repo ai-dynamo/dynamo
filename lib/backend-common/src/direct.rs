@@ -329,6 +329,16 @@ async fn serve_engines(
         }
     }
 
+    // Build every engine before any probe: a factory error is a configuration
+    // error, so it fails startup instead of being probed forever. Nothing is
+    // registered with the runtime yet, so the caller can correct its list and
+    // call again.
+    let mut engines = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let engine = factory(&spec)?;
+        engines.push((spec, engine));
+    }
+
     // Before any engine is published: routers check for this dispatch once,
     // when the first model card builds them.
     let dispatch = Arc::new(DirectDispatch::default());
@@ -341,11 +351,8 @@ async fn serve_engines(
             format!("register the direct dispatch: {register_error}"),
         )
     })?;
-    // Build every engine before any probe: a factory error is a configuration
-    // error, so it fails startup instead of being probed forever.
-    let mut hosts = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let engine = factory(&spec)?;
+    let shutdown = drt.primary_token();
+    for (spec, engine) in engines {
         let host = DirectEngineHost {
             drt: drt.clone(),
             config: config.clone(),
@@ -355,10 +362,6 @@ async fn serve_engines(
             dispatch: dispatch.clone(),
             shutdown_drain,
         };
-        hosts.push((host, engine));
-    }
-    let shutdown = drt.primary_token();
-    for (host, engine) in hosts {
         dispatch
             .supervisors
             .spawn(host.supervise(engine, shutdown.clone()).in_current_span());
@@ -1503,10 +1506,23 @@ mod tests {
                 mode: DisaggregationMode::Aggregated,
             })
             .to_vec();
-        let result = serve_direct_engines(&drt, WorkerConfig::default(), specs, factory).await;
+        let result = serve_direct_engines(
+            &drt,
+            WorkerConfig::default(),
+            specs.clone(),
+            factory.clone(),
+        )
+        .await;
         assert!(result.is_err());
         // No engine is started before every engine is built.
         assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+
+        // The failed call left nothing registered with the runtime: the list
+        // can be corrected and served.
+        let corrected = specs.into_iter().filter(|spec| spec.url == A).collect();
+        serve_direct_engines(&drt, WorkerConfig::default(), corrected, factory)
+            .await
+            .expect("the corrected list must be served on the same runtime");
         drt.shutdown();
     }
 
