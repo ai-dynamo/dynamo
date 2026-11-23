@@ -1021,8 +1021,14 @@ def _write_weka_trace(path, block_size):
 
 
 @pytest.mark.timeout(30)
-def test_agentic_replay_matches_the_engine_stack(tmp_path):
-    """An AgentX workload on a state-cache engine replays as on the engine stack."""
+def test_agentic_replay_matches_the_engine_stack(tmp_path, monkeypatch):
+    """An AgentX workload on a state-cache engine replays behind the KV router as on
+    the engine stack.
+
+    The engine stack has no router hook. With one worker, the KV router scoring the
+    chat-templated block hashes must leave every per-request record unchanged apart
+    from its own overlap scores.
+    """
 
     block_size = 64
     trace = tmp_path / "agentic.jsonl"
@@ -1069,18 +1075,79 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path):
         },
         goal={"target": "throughput"},
     )
+    routed = replace(
+        spec,
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        # prefix_match_unit does not export KV events, so the
+                        # router keeps its approximate index, as in production.
+                        config={
+                            "router_mode": "kv_router",
+                            "router_config": {"use_kv_events": False},
+                        },
+                    ),
+                )
+            )
+        },
+    )
+    native_replay = replay_api._run_mocker_trace_replay
+    router_modes = []
+
+    def record_router_mode(*args, **kwargs):
+        router_modes.append(kwargs["router_mode"])
+        return native_replay(*args, **kwargs)
+
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", record_router_mode)
     requirements = ReplayOutputRequirements(capture_per_request=True)
-    dynamo, engine = (
-        factory().create(0).run(spec, output_requirements=requirements)
-        for factory in (
-            simulation.DynamoReplayRunnerFactory,
-            simulation.EngineReplayRunnerFactory,
-        )
+    dynamo = (
+        simulation.DynamoReplayRunnerFactory()
+        .create(0)
+        .run(routed, output_requirements=requirements)
+    )
+    engine = (
+        simulation.EngineReplayRunnerFactory()
+        .create(0)
+        .run(spec, output_requirements=requirements)
     )
 
+    assert router_modes == ["kv_router"]
+    # Only the router's own scores differ: the engine stack routes without
+    # scoring, so it reports no overlap.
+    router_scores = {
+        "reported_overlap_tokens",
+        "selected_overlap_blocks",
+        "best_available_overlap_blocks",
+        "overlap_regret_blocks",
+    }
+
+    def without_router_scores(records):
+        return [
+            {
+                **record,
+                "routing_history": [
+                    {k: v for k, v in hop.items() if k not in router_scores}
+                    for hop in record["routing_history"]
+                ],
+            }
+            for record in records
+        ]
+
     records = dynamo.metadata["native_report"]["per_request"]
-    assert records == engine.metadata["native_report"]["per_request"]
+    assert without_router_scores(records) == without_router_scores(
+        engine.metadata["native_report"]["per_request"]
+    )
     assert len(records) > 100
+    # The router matched the templated prompts' shared prefixes.
+    assert any(
+        hop["selected_overlap_blocks"] > 0
+        for record in records
+        for hop in record["routing_history"]
+    )
     assert dynamo.metadata["agentic_phases"] == engine.metadata["agentic_phases"]
     assert dynamo.metadata["agentic_phases"]["warmup_policy"] == "live_trajectory_v1"
     # Wall-clock rates differ between the runs.
