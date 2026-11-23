@@ -373,30 +373,45 @@ mod local_indexer_tests {
         assert_eq!((stored[0].worker_id, stored[0].event.dp_rank), (7, 1));
     }
 
-    #[tokio::test]
-    async fn test_local_indexer_coalesces_concurrent_tree_dumps() {
+    #[tokio::test(start_paused = true)]
+    async fn test_local_indexer_runs_one_dump_build_at_a_time() {
         let indexer = Arc::new(LocalKvIndexer::new(
             CancellationToken::new(),
             4,
             Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
+            16,
         ));
-
-        let first = {
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.set_dump_build_delay(Some(Duration::from_millis(50)));
+        let dump = || {
             let indexer = indexer.clone();
             tokio::spawn(async move { indexer.get_events_in_id_range(None, None).await })
         };
-        let second = {
-            let indexer = indexer.clone();
-            tokio::spawn(async move { indexer.get_events_in_id_range(None, None).await })
-        };
 
-        let first = first.await.unwrap();
-        let second = second.await.unwrap();
+        let first = dump();
+        while indexer.dump_build_count() < 1 {
+            tokio::task::yield_now().await;
+        }
 
-        assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
-        assert!(matches!(second, WorkerKvQueryResponse::TreeDump { .. }));
+        // The clear closes the cut the first build is working from, so the second request
+        // needs a build of its own. It must not start one beside the build in flight.
+        indexer
+            .apply_event_with_buffer(make_local_clear_event(2))
+            .await
+            .unwrap();
+        let second = dump();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
         assert_eq!(indexer.dump_build_count(), 1);
+
+        let (_, first_last_event_id) = tree_dump_parts(first.await.unwrap());
+        let (_, second_last_event_id) = tree_dump_parts(second.await.unwrap());
+        assert_eq!((first_last_event_id, second_last_event_id), (1, 2));
+        assert_eq!(indexer.dump_build_count(), 2);
     }
 
     fn tree_dump_parts(response: WorkerKvQueryResponse) -> (Vec<RouterEvent>, u64) {

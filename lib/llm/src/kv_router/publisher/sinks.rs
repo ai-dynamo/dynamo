@@ -150,10 +150,9 @@ pub(super) fn event_plane_event_batches(
     })
 }
 
-/// Apply one canonical event using the shared local queue-admission contract.
+/// Apply one canonical event to the local indexer, which holds it when this returns.
 ///
-/// Callers own logging and fail-open/fail-closed policy. `Cleared` is stronger
-/// inside `LocalKvIndexer` and returns only after every affected tier completes.
+/// Callers own logging and fail-open/fail-closed policy.
 pub(super) async fn admit_local_event(
     local_indexer: Option<&LocalKvIndexer>,
     event: &RouterEvent,

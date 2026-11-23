@@ -4,7 +4,7 @@
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, OnceLock};
 
-use dynamo_kv_ledger::{Applied, Effect, Ledger, Replay, Snapshot, Tier};
+use dynamo_kv_ledger::{Applied, Effect, Ledger, Replay};
 use rustc_hash::FxHashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -17,36 +17,30 @@ use crate::prelude::*;
 // Decentralized router: LocalKvIndexer for workers
 // -------------------------------------------------
 
-/// What each residency owner holds: a worker rank's blocks on every tier, or a cache owner's
-/// blocks on the tiers that outlive a worker.
-type Residency = FxHashMap<ResidencyOwner, Ledger>;
+/// The blocks each residency owner holds on each storage tier. A tier keeps its own parent
+/// and token hash for a block, because an engine can describe one block differently per tier.
+type Residency = FxHashMap<(ResidencyOwner, StorageTier), Ledger>;
 
-const LOWER_TIERS: [StorageTier; 3] = [
-    StorageTier::HostPinned,
-    StorageTier::Disk,
-    StorageTier::External,
-];
-
-/// The ledger slot of a storage tier.
-const fn tier_of(storage_tier: StorageTier) -> Tier {
-    let slot = match storage_tier {
-        StorageTier::Device => 0,
-        StorageTier::HostPinned => 1,
-        StorageTier::Disk => 2,
-        StorageTier::External => 3,
-    };
-    Tier::new(slot).unwrap()
+/// A copy of the residency and the tree dump built from it. Requesters that arrive while the
+/// copy's cut is open clone the one dump.
+struct Dump {
+    /// Taken by the build, so the copy is freed as soon as the events exist.
+    residency: parking_lot::Mutex<Option<Residency>>,
+    events: OnceLock<Vec<RouterEvent>>,
 }
 
-/// A snapshot and the tree dump built from it. Requesters that arrive while the snapshot is
-/// shared wait on one build and clone its result.
-struct Dump {
-    snapshot: Arc<Snapshot<Residency>>,
-    events: OnceLock<Vec<RouterEvent>>,
+impl Dump {
+    fn events(&self) -> &[RouterEvent] {
+        self.events.get_or_init(|| {
+            let residency = self.residency.lock().take();
+            dump_events(&residency.expect("the build that sets the events takes the copy"))
+        })
+    }
 }
 
 struct Inner {
     replay: Replay<RouterEvent, Residency>,
+    /// The dump for the replay's open cut.
     dump: Option<Arc<Dump>>,
 }
 
@@ -62,7 +56,14 @@ struct Inner {
 pub struct LocalKvIndexer {
     /// Never held across `.await`.
     inner: parking_lot::Mutex<Inner>,
+    /// Held while a dump is cut and built, so one build and one copy of the residency exist
+    /// at a time.
+    dump_gate: Arc<tokio::sync::Mutex<()>>,
     metrics: Arc<KvIndexerMetrics>,
+    #[cfg(test)]
+    dump_builds: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    dump_build_delay: parking_lot::Mutex<Option<std::time::Duration>>,
 }
 
 impl LocalKvIndexer {
@@ -81,7 +82,12 @@ impl LocalKvIndexer {
                 replay: Replay::new(Residency::default(), max_buffer_size),
                 dump: None,
             }),
+            dump_gate: Arc::default(),
             metrics,
+            #[cfg(test)]
+            dump_builds: Default::default(),
+            #[cfg(test)]
+            dump_build_delay: Default::default(),
         }
     }
 
@@ -125,12 +131,10 @@ impl LocalKvIndexer {
         // guarantee buffered replay: expired/unavailable history falls back to a dump.
         // See test_local_indexer_get_events_in_id_range_all_cases and
         // test_local_indexer_buffer_response_starts_at_last_all_domain_clear.
-        let (dump, tail, last_event_id) = {
-            let mut inner = self.inner.lock();
+        if let Some(start_id) = start_id {
+            let inner = self.inner.lock();
             let last_event_id = inner.replay.last_seq().unwrap_or(0);
-            if let Some(start_id) = start_id
-                && inner.replay.oldest_seq().is_some()
-            {
+            if inner.replay.oldest_seq().is_some() {
                 if start_id > last_event_id {
                     tracing::warn!(
                         start_id,
@@ -151,29 +155,44 @@ impl LocalKvIndexer {
                 }
                 tracing::info!(start_id, "Requested start_id is older than buffer; dumping");
             }
+        }
 
-            // The copy of the residency is made here, under the lock, so the dump is an exact
-            // cut at its last event id. Turning it into events is left to the blocking pool.
-            let (snapshot, tail) = inner.replay.snapshot();
-            let tail = tail.cloned().collect::<Vec<_>>();
-            let dump = match &inner.dump {
-                Some(dump) if Arc::ptr_eq(&dump.snapshot, &snapshot) => dump.clone(),
-                _ => {
-                    let dump = Arc::new(Dump {
-                        snapshot,
-                        events: OnceLock::new(),
-                    });
-                    inner.dump = Some(dump.clone());
-                    dump
-                }
+        // A request that arrives during a build waits here, then shares that build's dump if
+        // its cut is still open. The gate goes into the build task, so a requester that goes
+        // away does not let a second build start beside the one it left running.
+        let one_build = self.dump_gate.clone().lock_owned().await;
+        let (dump, tail, last_event_id) = {
+            let mut inner = self.inner.lock();
+            let shared = match (&inner.dump, inner.replay.tail()) {
+                (Some(dump), Some(tail)) => Some((dump.clone(), tail.cloned().collect())),
+                _ => None,
             };
-            (dump, tail, last_event_id)
+            let (dump, tail) = shared.unwrap_or_else(|| {
+                // The residency is copied here, under the lock, so the dump is an exact cut
+                // at its last event id. Turning it into events is left to the blocking pool.
+                #[cfg(test)]
+                self.dump_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let dump = Arc::new(Dump {
+                    residency: parking_lot::Mutex::new(Some(inner.replay.cut().clone())),
+                    events: OnceLock::new(),
+                });
+                inner.dump = Some(dump.clone());
+                (dump, Vec::new())
+            });
+            (dump, tail, inner.replay.last_seq().unwrap_or(0))
         };
+        #[cfg(test)]
+        {
+            let delay = *self.dump_build_delay.lock();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+        }
 
         let built = tokio::task::spawn_blocking(move || {
-            let dumped = dump
-                .events
-                .get_or_init(|| dump_events(&dump.snapshot.state));
+            let _one_build = one_build;
+            let dumped = dump.events();
             let mut events = Vec::with_capacity(dumped.len() + tail.len());
             events.extend_from_slice(dumped);
             events.extend(tail);
@@ -231,12 +250,12 @@ impl LocalKvIndexer {
             let applied = inner.replay.apply(event_id, event, |event, residency| {
                 fold(event, residency, &self.metrics)
             });
-            // A dump whose snapshot is no longer shared can never be served again. Take it
-            // out so it is freed after the lock is released.
-            let retired = if inner.replay.has_shared_snapshot() {
-                None
-            } else {
+            // A dump whose cut has closed can never be served again. Take it out so it is
+            // freed after the lock is released.
+            let retired = if inner.replay.tail().is_none() {
                 inner.dump.take()
+            } else {
+                None
             };
             (applied, retired)
         };
@@ -270,12 +289,19 @@ impl LocalKvIndexer {
 
     #[cfg(test)]
     pub(crate) fn has_cached_recovery_snapshot(&self) -> bool {
-        self.inner.lock().replay.has_shared_snapshot()
+        self.inner.lock().dump.is_some()
     }
 
+    /// How many times the residency was copied for a dump.
     #[cfg(test)]
     pub(crate) fn dump_build_count(&self) -> usize {
-        self.inner.lock().replay.snapshots_built() as usize
+        self.dump_builds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Holds each dump build open for `delay` before it converts its copy.
+    #[cfg(test)]
+    pub(crate) fn set_dump_build_delay(&self, delay: Option<std::time::Duration>) {
+        *self.dump_build_delay.lock() = delay;
     }
 }
 
@@ -298,7 +324,7 @@ fn from_last_all_domain_clear<'a>(
 /// recorded for replay, so event ids stay consecutive.
 fn fold(event: &RouterEvent, residency: &mut Residency, metrics: &KvIndexerMetrics) -> Effect {
     let placement = || match event.residency_owner() {
-        Ok(owner) => Some((owner, tier_of(event.storage_tier))),
+        Ok(owner) => Some((owner, event.storage_tier)),
         Err(_) => {
             record_unsupported_residency_event(Some(metrics), event);
             None
@@ -306,22 +332,22 @@ fn fold(event: &RouterEvent, residency: &mut Residency, metrics: &KvIndexerMetri
     };
     match &event.event.data {
         KvCacheEventData::Stored(store) => {
-            if let Some((owner, tier)) = placement() {
-                let ledger = residency.entry(owner).or_default();
+            if let Some(placement) = placement() {
+                let ledger = residency.entry(placement).or_default();
                 let mut parent = store.parent_hash.map(|hash| hash.0);
                 for block in &store.blocks {
-                    ledger.store(tier, block.block_hash.0, block.tokens_hash.0, parent);
+                    ledger.store(block.block_hash.0, block.tokens_hash.0, parent);
                     parent = Some(block.block_hash.0);
                 }
             }
             Effect::Delta
         }
         KvCacheEventData::Removed(remove) => {
-            if let Some((owner, tier)) = placement()
-                && let Entry::Occupied(mut ledger) = residency.entry(owner)
+            if let Some(placement) = placement()
+                && let Entry::Occupied(mut ledger) = residency.entry(placement)
             {
                 for hash in &remove.block_hashes {
-                    ledger.get_mut().remove(tier, hash.0);
+                    ledger.get_mut().remove(hash.0);
                 }
                 if ledger.get().is_empty() {
                     ledger.remove();
@@ -349,9 +375,7 @@ fn fold(event: &RouterEvent, residency: &mut Residency, metrics: &KvIndexerMetri
                     [None, None]
                 }
             };
-            for owner in cleared.into_iter().flatten() {
-                residency.remove(&owner);
-            }
+            residency.retain(|(owner, _), _| !cleared.contains(&Some(*owner)));
             Effect::Reset
         }
     }
@@ -367,38 +391,42 @@ fn dump_events(residency: &Residency) -> Vec<RouterEvent> {
         mm_extra_info: None,
     };
     let mut events = Vec::new();
-    for (&owner, ledger) in residency {
-        // The device tier feeds a prefix tree, which takes a block only after its parent. So
-        // these are chains, parents first, and a block that does not chain back to the start
-        // of a sequence on the device is left out: the tree could not hold it.
-        for chain in ledger.chains(tier_of(StorageTier::Device)) {
-            let blocks = chain
-                .blocks
-                .iter()
-                .map(|&(hash, tokens_hash)| stored_block(hash, tokens_hash))
-                .collect();
-            events.push(stored_event(
-                owner,
-                StorageTier::Device,
-                events.len() as u64,
-                chain.parent,
-                blocks,
-            ));
-        }
-        // A lower-tier index keys a block by its parent hash and does not need the parent
-        // present, and it stops a multi-block store at the first block it cannot place. So
-        // every block is dumped, one per event, in any order.
-        for block in ledger.iter() {
-            for storage_tier in LOWER_TIERS {
-                if block.tiers.contains(tier_of(storage_tier)) {
-                    events.push(stored_event(
-                        owner,
-                        storage_tier,
-                        events.len() as u64,
-                        block.parent,
-                        vec![stored_block(block.hash, block.content)],
-                    ));
-                }
+    for (&(owner, storage_tier), ledger) in residency {
+        if storage_tier.is_gpu() {
+            // The device tier feeds a prefix tree, which takes a block only after its parent.
+            // So these are chains, parents first, and a block that does not chain back to the
+            // start of a sequence on the device is left out: the tree could not hold it.
+            for chain in ledger.chains() {
+                let blocks = chain
+                    .blocks
+                    .iter()
+                    .map(|&(hash, tokens_hash)| stored_block(hash, tokens_hash))
+                    .collect();
+                events.push(stored_event(
+                    owner,
+                    storage_tier,
+                    events.len() as u64,
+                    chain.parent,
+                    blocks,
+                ));
+            }
+        } else {
+            // A lower-tier index keys a block by its parent hash and does not need the parent
+            // present, and it stops a multi-block store at the first block it cannot place.
+            // So every block is dumped, one per event, in any order.
+            //
+            // NOTE: That index holds one block per (parent, token hash) and refuses a second.
+            // The ledger keeps the second, so once the first is removed a dump still carries
+            // it and a recovering router takes it. Two engine hashes for one (parent, token
+            // hash) is a collision we do not expect.
+            for (hash, block) in ledger.iter() {
+                events.push(stored_event(
+                    owner,
+                    storage_tier,
+                    events.len() as u64,
+                    block.parent,
+                    vec![stored_block(hash, block.content)],
+                ));
             }
         }
     }
@@ -812,5 +840,67 @@ mod tests {
         }
         assert_eq!(dumped_blocks(&cut_before).await, device(&[1, 2]));
         assert_eq!(dumped_blocks(&cut_after).await, device(&[1, 2, 3]));
+    }
+
+    /// A lower-tier index restored from a tree dump holds what one that followed the same
+    /// events live holds, tier by tier. The disk event gives block 101 a different token hash
+    /// than the host event did, as a store that omits a salt does.
+    #[tokio::test]
+    async fn tree_dump_restores_each_lower_tier_as_live_ingestion_built_it() {
+        use crate::{KvIndexerInterface, LowerTierIndexers};
+
+        async fn held(
+            indexers: &LowerTierIndexers,
+            tier: StorageTier,
+        ) -> FxHashSet<(Option<u64>, u64, u64)> {
+            let events = indexers.get_or_create(tier).dump_events().await.unwrap();
+            let blocks = events.iter().flat_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(store) => store
+                    .blocks
+                    .iter()
+                    .map(|block| {
+                        (
+                            store.parent_hash.map(|hash| hash.0),
+                            block.block_hash.0,
+                            block.tokens_hash.0,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            });
+            blocks.collect()
+        }
+
+        let events = [
+            lower_tier_store_event(7, 0, 1, 900, 11, 101, StorageTier::HostPinned),
+            lower_tier_store_event(7, 0, 2, 900, 12, 101, StorageTier::Disk),
+            lower_tier_store_event(7, 0, 3, 101, 13, 102, StorageTier::Disk),
+        ];
+        let indexer = make_indexer();
+        let live = LowerTierIndexers::new(1, 4);
+        for event in events {
+            live.get_or_create(event.storage_tier)
+                .apply_event_and_wait(event.clone())
+                .await
+                .unwrap();
+            indexer.apply_event_with_buffer(event).await.unwrap();
+        }
+
+        let restored = LowerTierIndexers::new(1, 4);
+        for event in tree_dump(&indexer).await.0 {
+            restored
+                .get_or_create(event.storage_tier)
+                .apply_event_and_wait(event)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            held(&live, StorageTier::Disk).await,
+            FxHashSet::from_iter([(Some(900), 101, 12), (Some(101), 102, 13)])
+        );
+        for tier in [StorageTier::HostPinned, StorageTier::Disk] {
+            assert_eq!(held(&restored, tier).await, held(&live, tier).await);
+        }
     }
 }

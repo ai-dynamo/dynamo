@@ -25,7 +25,7 @@ A KV event consumer (router, cache coordinator) subscribes to a live stream of b
 | **Fallback when buffer too old** | Consumer must rebuild externally | Snapshot of the block ledger |
 | **Initial sync** | Not built in — consumer starts from live stream | Tree dump (request with `start_event_id=None`) |
 | **Recoverable state** | Buffer only | Block ledger snapshot (buffer is an optimization layer) |
-| **Compression / dedup** | Events stored as-is (pre-serialized) | The ledger holds each block once per owner; a dump merges device-tier blocks into chains |
+| **Compression / dedup** | Events stored as-is (pre-serialized) | A ledger holds each block once per owner and tier; a dump merges device-tier blocks into chains |
 | **Expiration** | Replay history expires through `maxlen` eviction | Replay history expires through buffer eviction; event-backed ledger state changes through worker events, not router TTL pruning |
 | **Transport** | ZMQ PUB/SUB + ROUTER/REQ | Dynamo service RPC (request/response) |
 | **Multi-rank** | Port offset per DP rank | Separate query endpoint per DP rank |
@@ -53,13 +53,13 @@ The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serial
 
 ### Dynamo: Buffer + Ledger with Tree Dump Fallback
 
-Dynamo's `LocalKvIndexer` (in `lib/router/kv-indexer/src/local.rs`) keeps a window of recent events and a ledger of the blocks each residency owner holds. Both come from the `dynamo-kv-ledger` crate, which has no Dynamo dependencies so that an engine's own Rust frontend can embed it:
+Dynamo's `LocalKvIndexer` (in `lib/router/kv-indexer/src/local.rs`) keeps a window of recent events and, for each residency owner and storage tier, a ledger of the blocks held there. Both come from the `dynamo-kv-ledger` crate, which has no Dynamo dependencies so that an engine's own Rust frontend can embed it:
 
 ```text
 LocalKvIndexer
 └── Replay
     ├── history: recent RouterEvents   // Bounded window for fast replay
-    └── state: owner -> Ledger         // Current blocks; tree dumps are cut from it
+    └── state: (owner, tier) -> Ledger // Current blocks; tree dumps are cut from it
 ```
 
 When the router queries a worker, the local indexer can return six response variants:

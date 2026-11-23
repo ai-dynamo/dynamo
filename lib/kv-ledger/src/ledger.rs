@@ -1,41 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The block ledger: which blocks one owner holds, on which tiers, and how they chain.
+//! The block ledger: which blocks are held, and how they chain.
 
 use std::collections::VecDeque;
-use std::collections::hash_map::Entry;
 
 use rustc_hash::FxHashMap;
 
-use crate::{Tier, TierSet};
-
+/// What the ledger keeps for one held block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Block {
-    parent: u64,
-    content: u64,
-    tiers: TierSet,
-    has_parent: bool,
+pub struct Block {
+    /// The block that precedes it, or `None` for the first block of a sequence.
+    pub parent: Option<u64>,
+    /// A `u64` of the host's (Dynamo keeps the hash of the block's tokens there).
+    pub content: u64,
 }
 
 // An entry is per block, millions per rank: keep its size a decision, not an accident.
 const _: () = assert!(std::mem::size_of::<(u64, Block)>() == 32);
-
-impl Block {
-    fn parent(&self) -> Option<u64> {
-        self.has_parent.then_some(self.parent)
-    }
-}
-
-/// A block as the ledger holds it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockView {
-    pub hash: u64,
-    pub content: u64,
-    /// The block that precedes it, or `None` for the first block of a sequence.
-    pub parent: Option<u64>,
-    pub tiers: TierSet,
-}
 
 /// Blocks in sequence order: `parent` precedes the first, and each block precedes the next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,91 +27,48 @@ pub struct Chain {
     pub blocks: Vec<(u64, u64)>,
 }
 
-/// One owner's blocks, keyed by the engine's block hash.
+/// The blocks held in one place, keyed by the engine's block hash.
 ///
-/// A block is on a tier or it is not: a second store on the same tier changes nothing, and one
-/// remove takes it off. An engine that holds duplicate blocks under one hash (vLLM) needs its
-/// removes counted before they reach the ledger.
+/// A host with several owners or tiers keeps one ledger for each. A block is held or it is
+/// not: a second store changes nothing, and one remove drops it. An engine that holds
+/// duplicate blocks under one hash (vLLM) needs its removes counted before they reach the
+/// ledger.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ledger {
     blocks: FxHashMap<u64, Block>,
 }
 
 impl Ledger {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn len(&self) -> usize {
-        self.blocks.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
 
-    /// Records `hash` as held on `tier`.
+    /// Records `hash` as held. The first store of a block fixes its `content` and `parent`.
+    pub fn store(&mut self, hash: u64, content: u64, parent: Option<u64>) {
+        self.blocks.entry(hash).or_insert(Block { parent, content });
+    }
+
+    /// Drops `hash`. Returns whether it was held.
+    pub fn remove(&mut self, hash: u64) -> bool {
+        self.blocks.remove(&hash).is_some()
+    }
+
+    /// Every held block with its hash, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, Block)> + '_ {
+        self.blocks.iter().map(|(&hash, &block)| (hash, block))
+    }
+
+    /// The blocks that chain back to the start of a sequence, as chains ordered so that each
+    /// comes after the chain that holds its parent.
     ///
-    /// `content` is a `u64` of the host's that [`chains`](Self::chains) and
-    /// [`iter`](Self::iter) give back (Dynamo keeps the hash of the block's tokens there).
-    /// The first store of a block fixes its `content` and `parent`.
-    pub fn store(&mut self, tier: Tier, hash: u64, content: u64, parent: Option<u64>) {
-        match self.blocks.entry(hash) {
-            Entry::Vacant(slot) => {
-                slot.insert(Block {
-                    parent: parent.unwrap_or(0),
-                    content,
-                    tiers: TierSet::of(tier),
-                    has_parent: parent.is_some(),
-                });
-            }
-            Entry::Occupied(mut slot) => {
-                let block = slot.get_mut();
-                block.tiers = block.tiers.with(tier);
-            }
-        }
-    }
-
-    /// Takes `hash` off `tier`. Returns whether the tier held it.
-    pub fn remove(&mut self, tier: Tier, hash: u64) -> bool {
-        let Entry::Occupied(mut slot) = self.blocks.entry(hash) else {
-            return false;
-        };
-        let block = slot.get_mut();
-        if !block.tiers.contains(tier) {
-            return false;
-        }
-        block.tiers = block.tiers.without(tier);
-        if block.tiers.is_empty() {
-            slot.remove();
-        }
-        true
-    }
-
-    /// Every held block, in no particular order.
-    pub fn iter(&self) -> impl Iterator<Item = BlockView> + '_ {
-        self.blocks.iter().map(|(&hash, block)| BlockView {
-            hash,
-            content: block.content,
-            parent: block.parent(),
-            tiers: block.tiers,
-        })
-    }
-
-    /// The blocks on `tier` that chain back to the start of a sequence through blocks on
-    /// `tier`, as chains ordered so that each comes after the chain that holds its parent.
-    ///
-    /// A block whose parent is not on `tier` is left out, with everything after it: a prefix
-    /// index cannot hold a block it cannot reach. The same ledger always gives the same order.
+    /// A block whose parent is not held is left out, with everything after it: a prefix index
+    /// cannot hold a block it cannot reach. The same ledger always gives the same order.
     /// Walks every block, so call it on a copy, off the thread that applies events.
-    pub fn chains(&self, tier: Tier) -> Vec<Chain> {
+    pub fn chains(&self) -> Vec<Chain> {
         let mut children: FxHashMap<u64, Vec<u64>> = FxHashMap::default();
         let mut roots = Vec::new();
         for (&hash, block) in &self.blocks {
-            if !block.tiers.contains(tier) {
-                continue;
-            }
-            match block.parent() {
+            match block.parent {
                 None => roots.push(hash),
                 Some(parent) => children.entry(parent).or_default().push(hash),
             }
@@ -155,7 +94,7 @@ impl Ledger {
                 break kids;
             };
             chains.push(Chain {
-                parent: first.parent(),
+                parent: first.parent,
                 blocks,
             });
             queue.extend(branches);

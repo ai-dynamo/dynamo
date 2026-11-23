@@ -18,7 +18,7 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `concurrent_radix_tree_compressed/` | `ConcurrentRadixTreeCompressed` — thread-safe compressed trie; see its `README.md` |
 | `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
 | `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTreeCompressed` or `PositionalIndexer` |
-| `local.rs` | `LocalKvIndexer` — worker-side recovery source: a window of recent events for replay and a block ledger per residency owner (`dynamo-kv-ledger`) that tree dumps are cut from |
+| `local.rs` | `LocalKvIndexer` — worker-side recovery source: a window of recent events for replay and a block ledger per residency owner and storage tier (`dynamo-kv-ledger`) that tree dumps are cut from |
 | `pruning.rs` | `PruneManager` — TTL-based approximate expiration via 100ms buckets and per-worker pruning queues |
 | `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |
 | `tests.rs` | Integration tests for all indexer variants |
@@ -397,7 +397,7 @@ There are three main production indexer shapes. This section maps deployment sce
 ```text
 Start
   │
-  ├─ Single worker?
+  ├─ Single-threaded `KvIndexer` or a unit test?
   │      └─ RadixTree
   │
   ├─ < ~1 000 workers, no sharding needed?
