@@ -2728,7 +2728,7 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to gather DRT metrics: {}", e);
+                tracing::warn!(error = %e, "Failed to gather DRT metrics");
             }
         }
     }
