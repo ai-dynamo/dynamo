@@ -13,6 +13,7 @@ use std::{
 use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
+use dynamo_http_server::load::ModelLoadView;
 use dynamo_kv_hints::KvTransferEnforcement;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
@@ -148,22 +149,6 @@ type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, Lora
 pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) representative: ModelDeploymentCard,
     pub(crate) cards: Vec<ModelDeploymentCard>,
-}
-
-pub(crate) struct CommittedModelView {
-    pub(crate) name: String,
-    pub(crate) is_ready: bool,
-    pub(crate) aliases: Vec<String>,
-}
-
-impl From<CommittedModelView> for dynamo_http_server::load::ModelLoadView {
-    fn from(view: CommittedModelView) -> Self {
-        Self {
-            name: view.name,
-            is_ready: view.is_ready,
-            aliases: view.aliases,
-        }
-    }
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -476,7 +461,7 @@ impl ModelManager {
     }
 
     /// Committed primary models with their aliases, sorted by name.
-    pub(crate) fn committed_model_views(&self) -> Vec<CommittedModelView> {
+    pub(crate) fn committed_model_views(&self) -> Vec<ModelLoadView> {
         let catalog = self.catalog.load();
         let mut aliases_by_primary = HashMap::<&str, Vec<String>>::new();
         for (alias, primary) in catalog.aliases.iter() {
@@ -492,7 +477,7 @@ impl ModelManager {
             .map(|(name, model)| {
                 let mut aliases = aliases_by_primary.remove(name.as_str()).unwrap_or_default();
                 aliases.sort_unstable();
-                CommittedModelView {
+                ModelLoadView {
                     name: name.clone(),
                     is_ready: model.is_ready_to_serve(),
                     aliases,
@@ -3790,14 +3775,7 @@ mod tests {
             metrics
                 .clone()
                 .create_inflight_guard("llama", Endpoint::Embeddings, false, "");
-        let frame = metrics.frontend_load(
-            0,
-            true,
-            mm.committed_model_views()
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        );
+        let frame = metrics.frontend_load(0, true, mm.committed_model_views());
         assert_eq!(frame.models.len(), 1);
         assert_eq!(frame.models[0].model, "llama");
         assert_eq!(frame.models[0].totals.requests_started, 2);

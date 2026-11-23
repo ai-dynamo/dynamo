@@ -620,15 +620,7 @@ mod tests {
         let metrics = Metrics::new();
         let load_ready = || {
             metrics
-                .frontend_load(
-                    0,
-                    true,
-                    manager
-                        .committed_model_views()
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                )
+                .frontend_load(0, true, manager.committed_model_views())
                 .models[0]
                 .is_ready
         };
@@ -672,15 +664,7 @@ mod tests {
         worker_tx.send(vec![1]).unwrap();
         assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
         assert!(load_ready());
-        let draining = metrics.frontend_load(
-            0,
-            false,
-            manager
-                .committed_model_views()
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        );
+        let draining = metrics.frontend_load(0, false, manager.committed_model_views());
         assert!(!draining.is_serving_ready);
         assert!(draining.models[0].is_ready);
 

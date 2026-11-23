@@ -72,7 +72,7 @@ pub(crate) fn start_frontend_load_publisher(
                     let frame = metrics.frontend_load(
                         frontend_instance_id,
                         is_ready(),
-                        manager.committed_model_views().into_iter().map(Into::into).collect(),
+                        manager.committed_model_views(),
                     );
                     let result = tokio::select! {
                         biased;
