@@ -1538,6 +1538,81 @@ async def test_generator_cache_salt_survives_multimodal_metadata(
 
 @pytest.mark.asyncio
 @pytest.mark.multimodal
+async def test_generator_does_not_forward_client_uuid_as_mm_hash(
+    cache_salt_processor, vllm_processor_module, monkeypatch
+):
+    """By default a client uuid never becomes the cache identity sent to vLLM."""
+    monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *args, **kwargs: {"block_mm_infos": [None]},
+    )
+
+    async def preprocess(request, **kwargs):
+        # vLLM's renderer reads the part `uuid` into multi_modal_uuids.
+        return SimpleNamespace(
+            request_for_sampling=prepost_module.ChatCompletionRequest.model_construct(
+                **request
+            ),
+            tool_parser=None,
+            chat_template_kwargs={},
+            engine_prompt={
+                "prompt": "Hello",
+                "multi_modal_data": {"image": [object()]},
+                "multi_modal_uuids": {"image": ["shared-image-id"]},
+            },
+            prompt_token_ids=[1, 2, 3],
+            guided_decoding=None,
+            uses_dynamo_json_tool_call_fallback=False,
+        )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        # vLLM's hasher returns a supplied uuid unchanged as the mm_hash.
+        uuids = engine_inputs.get("multi_modal_uuids") or {}
+        mm_features = [
+            SimpleNamespace(
+                modality="image",
+                mm_hash=uuid,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=3),
+            )
+            for uuid in uuids.get("image", [])
+        ]
+        return SimpleNamespace(
+            request_id=request_id,
+            external_req_id=None,
+            sampling_params=sampling_params,
+            prompt_token_ids=engine_inputs["prompt_token_ids"],
+            mm_features=mm_features or None,
+        )
+
+    monkeypatch.setattr(vllm_processor_module, "preprocess_chat_request", preprocess)
+    processor, routed_engine = cache_salt_processor()
+    processor.input_processor.process_inputs = process_inputs
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": "https://example.com/a.png"},
+        "uuid": "shared-image-id",
+    }
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": [image_part]}],
+        "max_completion_tokens": 1,
+    }
+    assert [chunk async for chunk in processor._generator_inner(request)] == []
+
+    extra_args = routed_engine.requests[0].get("extra_args") or {}
+    assert "shared-image-id" not in extra_args.get("mm_hashes", [])
+
+    uuid_only = {"type": "image_url", "image_url": None, "uuid": "shared-image-id"}
+    request["messages"] = [{"role": "user", "content": [uuid_only]}]
+    with pytest.raises(InvalidArgument, match="DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1"):
+        await anext(processor._generator_inner(request))
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
 @pytest.mark.parametrize(
     ("frontend_flags", "expected_options"),
     [

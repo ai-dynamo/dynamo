@@ -17,7 +17,10 @@ use dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage;
 
 pub use common::EncodedMediaData;
 pub use decoders::{Decoder, ImageDecoder, MediaDecoder};
-pub use loader::{MediaFetcher, MediaLoader, max_data_url_bytes};
+pub use loader::{
+    ALLOW_CLIENT_CACHE_UUIDS_ENV, MediaFetcher, MediaLoader, client_cache_uuids_allowed,
+    max_data_url_bytes,
+};
 
 pub use rdma::{DecodedMediaData, RdmaMediaDataDescriptor, get_nixl_agent, get_nixl_metadata};
 

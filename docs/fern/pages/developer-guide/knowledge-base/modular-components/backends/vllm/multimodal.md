@@ -250,6 +250,17 @@ curl http://localhost:8000/v1/chat/completions \
 ### Reuse vLLM multimodal processor cache entries
 
 vLLM can cache processed multimodal inputs under a client-provided opaque UUID.
+This is off by default. Without it, vLLM workers derive the cache identity from
+the media content or URL and ignore the `uuid` on URL-backed parts, and the
+frontend rejects image parts that carry only a `uuid` with HTTP 400. Repeated
+requests that send the same image still reuse the cached entry.
+
+To let clients choose cache identities, set `DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1`
+on the frontend and on every vLLM worker, including the gRPC sidecar. Enable it
+only when every client that can reach the endpoint is trusted to manage these
+keys: the first image cached under a UUID is the one every later request with
+that UUID receives.
+
 Dynamo forwards UUIDs with URL-backed image, video, and audio inputs.
 The extension is specific to vLLM; it is not part of the OpenAI Chat Completions
 API and is not supported by Dynamo's other backends. Dynamo's SGLang and

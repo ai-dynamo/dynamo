@@ -26,6 +26,10 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.audio_loader import AudioLoader
+from dynamo.common.multimodal.cache_uuid import (
+    UUID_ONLY_IMAGE_REJECTED_MESSAGE,
+    client_cache_uuids_allowed,
+)
 from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     UUID_ONLY_VARIANT_KEY,
@@ -631,6 +635,11 @@ class VllmMultimodalRequestProcessor:
         mm_map = request.get("multi_modal_data")
         if not mm_map:
             return
+        if not client_cache_uuids_allowed() and any(
+            isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item
+            for item in mm_map.get(IMAGE_URL_KEY, [])
+        ):
+            raise InvalidArgument(UUID_ONLY_IMAGE_REJECTED_MESSAGE)
         vllm_config = getattr(self.engine_client, "vllm_config", None)
         if vllm_config is None:
             return
@@ -999,6 +1008,10 @@ class VllmMultimodalRequestProcessor:
             explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
             video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
         )
+        # A client uuid says nothing about the media it labels, so by default
+        # the cache identity comes from the content; the map is still validated.
+        if not client_cache_uuids_allowed():
+            mm_uuids = None
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(
                 extra_args,

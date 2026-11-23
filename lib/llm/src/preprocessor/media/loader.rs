@@ -49,6 +49,20 @@ const MEDIA_UNSUPPORTED: &str = "Unsupported media content part type";
 const MAX_DATA_URL_MB_ENV: &str = "DYN_MM_MAX_DATA_URL_MB";
 const DEFAULT_MAX_DATA_URL_MB: usize = 16;
 
+// Keep the name in sync with the Python counterpart
+// (components/src/dynamo/common/multimodal/cache_uuid.py::client_cache_uuids_allowed).
+pub const ALLOW_CLIENT_CACHE_UUIDS_ENV: &str = "DYN_MM_ALLOW_CLIENT_CACHE_UUIDS";
+
+/// Whether a client media `uuid` may be passed to the engine as its cache
+/// identity, from `DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1`.
+///
+/// Off by default: the engine then keys its cache by the media content, and
+/// image parts that carry only a `uuid` are rejected. Read per call, like the
+/// Python workers; any value other than `1` leaves it off.
+pub fn client_cache_uuids_allowed() -> bool {
+    std::env::var(ALLOW_CLIENT_CACHE_UUIDS_ENV).as_deref() == Ok("1")
+}
+
 /// Size cap in bytes for a `data:` URL, from `DYN_MM_MAX_DATA_URL_MB`.
 ///
 /// Read per call, like the Python workers. An unparseable or non-positive

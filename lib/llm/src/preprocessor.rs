@@ -76,7 +76,10 @@ use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
+use crate::preprocessor::media::{
+    ALLOW_CLIENT_CACHE_UUIDS_ENV, MediaDecoder, MediaLoader, client_cache_uuids_allowed,
+    max_data_url_bytes,
+};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
     PreprocessedRequestBuilder, RoutingHints,
@@ -4440,6 +4443,7 @@ impl OpenAIPreprocessor {
             return Ok((Vec::new(), None));
         };
         let has_media_loader = self.media_loader.is_some();
+        let allow_client_uuids = client_cache_uuids_allowed();
 
         let message_order = self.formatter.media_message_order(request);
         for index in 0..messages.len() {
@@ -4535,6 +4539,16 @@ impl OpenAIPreprocessor {
                             }
                         }
                         slots.push(MultimodalData::Url(url));
+                    }
+                    // A UUID-only image has no content to key the cache by, so it
+                    // needs the opt-in. URL-backed uuids pass through to the backend.
+                    (None, Some(_)) if type_str == "image_url" && !allow_client_uuids => {
+                        // Fixed text, so the 400 body can carry it.
+                        return Err(crate::protocols::common::invalid_argument_error(format!(
+                            "Image parts that carry only a `uuid` are not accepted. Send the image URL \
+                             or inline image data. To let clients reuse cached images by `uuid`, set \
+                             {ALLOW_CLIENT_CACHE_UUIDS_ENV}=1 on the frontend and the vLLM workers."
+                        )));
                     }
                     (None, Some(uuid)) if type_str == "image_url" => {
                         slots.push(MultimodalData::UuidOnly(uuid));

@@ -761,20 +761,25 @@ mod cached_multimodal_uuid {
 
         let preprocessor = make_preprocessor();
 
-        #[cfg(feature = "mm-routing")]
-        {
-            let mut builder = dynamo_llm::preprocessor::PreprocessedRequest::builder();
-            let mm_image_entries = preprocessor
-                .gather_multi_modal_data(&request, &mut builder, None, &[])
-                .await
-                .unwrap();
-            assert!(mm_image_entries.is_empty());
-        }
+        let preprocessed =
+            temp_env::async_with_vars([("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", Some("1"))], async {
+                #[cfg(feature = "mm-routing")]
+                {
+                    let mut builder = dynamo_llm::preprocessor::PreprocessedRequest::builder();
+                    let mm_image_entries = preprocessor
+                        .gather_multi_modal_data(&request, &mut builder, None, &[])
+                        .await
+                        .unwrap();
+                    assert!(mm_image_entries.is_empty());
+                }
 
-        let (preprocessed, _, _) = preprocessor
-            .preprocess_request(&request, None)
-            .await
-            .unwrap();
+                let (preprocessed, _, _) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                preprocessed
+            })
+            .await;
 
         let media = preprocessed.multi_modal_data.as_ref().unwrap();
         let uuids = preprocessed.multi_modal_uuids.as_ref().unwrap();
@@ -802,6 +807,33 @@ mod cached_multimodal_uuid {
                 .is_none()
         );
         assert!(preprocessed.mm_routing_info.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_uuid_only_image_by_default() {
+        let messages = r#"[{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": null, "uuid": "cached-image"}]
+        }]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let error = temp_env::async_with_vars(
+            [("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", None::<&str>)],
+            make_preprocessor().preprocess_request(&request, None),
+        )
+        .await
+        .expect_err("UUID-only images must be rejected without the opt-in");
+
+        assert_invalid_argument(&error);
+        // The HTTP layer returns only the public message to the client.
+        let public_message = error
+            .chain()
+            .find_map(|source| source.downcast_ref::<DynamoError>())
+            .and_then(DynamoError::public_message);
+        assert!(
+            public_message.is_some_and(|m| m.contains("set DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1")),
+            "unexpected public message: {public_message:?}"
+        );
     }
 
     #[tokio::test]

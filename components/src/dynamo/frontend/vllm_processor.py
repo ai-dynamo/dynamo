@@ -31,6 +31,10 @@ from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutp
 from vllm.v1.engine.parallel_sampling import ParentRequest
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.multimodal.cache_uuid import (
+    UUID_ONLY_IMAGE_REJECTED_MESSAGE,
+    client_cache_uuids_allowed,
+)
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsSender,
@@ -1029,9 +1033,16 @@ class VllmProcessor:
 
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
-        # Preserve user cache UUIDs alongside URL-backed media. UUID-only image
-        # slots are resolved by the worker-side vLLM processor cache.
-        mm_data, mm_uuids = extract_mm_urls(messages)
+        # Keep user cache UUIDs; the worker ignores them and keys by content
+        # unless DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1.
+        try:
+            mm_data, mm_uuids = extract_mm_urls(messages)
+        except ValueError as exc:
+            raise InvalidArgument(str(exc)) from exc
+        if not client_cache_uuids_allowed() and any(
+            "UuidOnly" in item for item in (mm_data or {}).get("image_url", [])
+        ):
+            raise InvalidArgument(UUID_ONLY_IMAGE_REJECTED_MESSAGE)
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).

@@ -536,7 +536,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         ],
                         # The connector runs in vLLM's spawned EngineCore, so
                         # its debug hit diagnostic uses vLLM's logger level.
-                        env={"VLLM_LOGGING_LEVEL": "DEBUG"},
+                        # UUID-only reuse needs the client cache uuid opt-in.
+                        env={
+                            "VLLM_LOGGING_LEVEL": "DEBUG",
+                            "DYN_MM_ALLOW_CLIENT_CACHE_UUIDS": "1",
+                        },
                     ),
                 ],
             ),
