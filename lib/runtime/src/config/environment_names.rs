@@ -317,6 +317,26 @@ pub mod llm {
     /// disabled.
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
+    /// Server-side storage backend for OpenAI Responses objects (`store: true`,
+    /// `previous_response_id`, `GET`/`DELETE /v1/responses/{id}`). `none`
+    /// (default) disables storage; `memory` keeps bounded records in the
+    /// frontend process.
+    pub const DYN_HTTP_RESPONSES_STORE: &str = "DYN_HTTP_RESPONSES_STORE";
+
+    /// Lifetime in seconds of a stored response (default 3600; `0` keeps
+    /// records until evicted).
+    pub const DYN_HTTP_RESPONSES_STORE_TTL_SECS: &str = "DYN_HTTP_RESPONSES_STORE_TTL_SECS";
+
+    /// Maximum number of stored responses kept by the memory backend (default 10000).
+    pub const DYN_HTTP_RESPONSES_STORE_MAX_RECORDS: &str = "DYN_HTTP_RESPONSES_STORE_MAX_RECORDS";
+
+    /// Maximum serialized bytes kept by the memory backend (default 268435456).
+    pub const DYN_HTTP_RESPONSES_STORE_MAX_BYTES: &str = "DYN_HTTP_RESPONSES_STORE_MAX_BYTES";
+
+    /// Maximum number of stored responses a `previous_response_id` chain may
+    /// span (default 256).
+    pub const DYN_HTTP_RESPONSES_MAX_CHAIN_DEPTH: &str = "DYN_HTTP_RESPONSES_MAX_CHAIN_DEPTH";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -1218,6 +1238,11 @@ mod tests {
             llm::DYN_LORA_MCF_CONFIG,
             llm::DYN_TOKEN_ECHO_DELAY_MS,
             llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+            llm::DYN_HTTP_RESPONSES_STORE,
+            llm::DYN_HTTP_RESPONSES_STORE_TTL_SECS,
+            llm::DYN_HTTP_RESPONSES_STORE_MAX_RECORDS,
+            llm::DYN_HTTP_RESPONSES_STORE_MAX_BYTES,
+            llm::DYN_HTTP_RESPONSES_MAX_CHAIN_DEPTH,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::metrics::DYN_METRICS_REQUEST_DURATION,
             llm::metrics::DYN_METRICS_INPUT_SEQUENCE,
