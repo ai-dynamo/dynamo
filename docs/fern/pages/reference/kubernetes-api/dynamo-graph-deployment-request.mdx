@@ -135,70 +135,11 @@ Setting `interconnect` does not opt out of hardware discovery. `inputOverrides` 
 after lowering, as for every other field: `engine.kv_transfer` can replace the bandwidth,
 set other transfer fields, or delete the transfer model with `null`.
 
-### v1beta2 AISimulate Input Overrides
-
-**Experimental; for development only.** Enable `dynamo-operator.dgdrV1Beta2.enabled`
-in the platform Helm chart to use native `v1beta2` requests.
-
-`spec.aisim.inputOverrides` applies a JSON Merge Patch after the typed fields and
-derived defaults have been lowered to AISimulate input. Object fields merge
-recursively, arrays and scalars replace their previous values, and `null` deletes
-the named field or parent object. The operator does not restore deleted defaults.
-
-Dynamo 1.8 adds the exact object `{$null: true}` as a deletion alias, allowed only
-as the value of an object field outside arrays. The operator expands valid aliases
-before merging and validating the AISimulate input. The stored Request and its
-immutable Run snapshot retain the original spelling.
-
-`$null` is reserved. Its value must be the boolean `true`, and its object must
-contain no other keys. Other values, additional keys, a marker directly on
-`inputOverrides`, and any marker anywhere inside an array are rejected with a
-path-specific error, including on updates that leave the spec unchanged. This
-includes markers nested in objects inside an array.
-To delete an entire array-valued field, put the marker on that object field.
-Native null array values keep their normal JSON meaning. A whole document set
-to native `null` continues to supply no overrides.
-
-| Form | Result |
-| --- | --- |
-| `prefill: {$null: true}` | Deletes the `prefill` object field |
-| `prefill: {$null: false}` or `prefill: {$null: "true"}` | Rejected: the value must be boolean `true` |
-| `prefill: {$null: true, other: 1}` | Rejected: the object has an additional key |
-| `inputOverrides: {$null: true}` | Rejected: marker at the document root |
-| `values: [{$null: true}]` or `values: [{nested: {$null: true}}]` | Rejected: marker inside an array |
-
-<Warning>
-  Client-side `kubectl apply` removes native null values, as observed with kubectl
-  1.34. This happens before the operator receives the Request; preserving unknown
-  CRD fields does not prevent it. Use `{$null: true}` when applying deletion
-  overrides with client-side apply. To submit native nulls, use `kubectl create`
+<Note>
+  Client-side `kubectl apply` incorrectly removes native `null` values. Use
+  `{$null: true}` for deletions, or submit native nulls with `kubectl create`
   or `kubectl apply --server-side`.
-</Warning>
-
-For example, restrict the engine to aggregated mode and delete the unused default
-worker roles without relying on native null transport:
-
-```yaml
-apiVersion: nvidia.com/v1beta2
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: aggregated-search
-spec:
-  model:
-    name: Qwen/Qwen3-0.6B
-  aisim:
-    inputOverrides:
-      engine:
-        mode: aggregated
-        workers:
-          prefill: {$null: true}
-          decode: {$null: true}
-```
-
-The deletion alias does not bypass validation or ownership: operator-owned
-`dgdr_run` fields remain forbidden, and the effective AISimulate input must still
-pass admission validation. Existing requests using native nulls retain their
-meaning. Conversion preserves the override document without interpreting it.
+</Note>
 
 ### v1beta2 DGD Overrides
 
@@ -1589,7 +1530,8 @@ These values are an underlay, like every value lowered from a typed field:
 `spec.aisim.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
 including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
 or `{$null: true}` override deletes the named field or parent object, and the operator does not
-restore it. For example, this override deletes the lowered traffic configuration:
+restore it. The alias must be exactly `{$null: true}` and appear as an object-field value outside
+arrays. For example, this override deletes the lowered traffic configuration:
 
 ```yaml
 spec:
@@ -1601,8 +1543,7 @@ spec:
 The typed `persistentVolumeClaim` source alone decides which claim the Run's Job mounts and which
 claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. Admission validates
 the merged input against the bundled AISimulate schema; the Run's Job also applies AISimulate's
-runtime validation. See [v1beta2 AISimulate Input Overrides](#v1beta2-aisimulate-input-overrides)
-for the client-side `kubectl apply` limitation and deletion syntax.
+runtime validation.
 
 ### Trace claim lifecycle
 
