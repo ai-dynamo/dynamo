@@ -557,7 +557,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
@@ -585,7 +585,7 @@ jobs:
     with:
       framework: trtllm
       target: dev
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
@@ -600,7 +600,7 @@ jobs:
     with:
       framework: trtllm
       target: local-dev
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
@@ -691,7 +691,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
@@ -955,7 +955,7 @@ jobs:
       test_type: Test
       amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and trtllm and gpu_0
@@ -983,7 +983,7 @@ jobs:
       test_type: 2-GPU Test
       amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: pre_merge and trtllm and gpu_2
@@ -1174,7 +1174,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '13.1'
+      cuda_version: '13.4'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
 
@@ -1319,7 +1319,7 @@ jobs:
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      cuda_version: '["13.4"]'
       copy_timeout_minutes: 20
     secrets: inherit
 
