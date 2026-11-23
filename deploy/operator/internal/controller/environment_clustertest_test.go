@@ -181,9 +181,21 @@ func testClusterEnvironment(t *testing.T) {
 func swapEnvironmentEntries(t *testing.T, containers []any) {
 	t.Helper()
 	container := containers[0].(map[string]any)
+	require.Equal(t, "main", container["name"])
 	variables, _, err := unstructured.NestedSlice(container, "env")
 	require.NoError(t, err)
-	variables[0], variables[1] = variables[1], variables[0]
+	first, second := -1, -1
+	for i, variable := range variables {
+		switch variable.(map[string]any)["name"] {
+		case "A":
+			first = i
+		case "B":
+			second = i
+		}
+	}
+	require.NotEqual(t, -1, first, "missing A binding")
+	require.NotEqual(t, -1, second, "missing B binding")
+	variables[first], variables[second] = variables[second], variables[first]
 	require.NoError(t, unstructured.SetNestedSlice(container, variables, "env"))
 }
 
@@ -283,6 +295,27 @@ func requireEnvironmentWorkloads(t *testing.T, before, after []unstructured.Unst
 		require.Equal(t, old.GetUID(), current.GetUID())
 		if edited && len(environmentVariables(t, old)) > 0 {
 			require.Greater(t, current.GetGeneration(), old.GetGeneration())
+			if old.GetKind() == upgradePodCliqueSetKind {
+				t.Log("Only the frontend env order may change; all worker cliques and other PCS fields must remain identical")
+				expectedSpec, _, err := unstructured.NestedMap(old.Object, "spec")
+				require.NoError(t, err)
+				cliques, _, err := unstructured.NestedSlice(expectedSpec, "template", "cliques")
+				require.NoError(t, err)
+				for _, value := range cliques {
+					clique := value.(map[string]any)
+					if clique["name"] != "frontend" {
+						continue
+					}
+					containers, _, err := unstructured.NestedSlice(clique, "spec", "podSpec", "containers")
+					require.NoError(t, err)
+					swapEnvironmentEntries(t, containers)
+					require.NoError(t, unstructured.SetNestedSlice(clique, containers, "spec", "podSpec", "containers"))
+				}
+				require.NoError(t, unstructured.SetNestedSlice(expectedSpec, cliques, "template", "cliques"))
+				actualSpec, _, err := unstructured.NestedMap(current.Object, "spec")
+				require.NoError(t, err)
+				require.Equal(t, expectedSpec, actualSpec, "frontend-only env reorder must not change any worker or other PCS setting")
+			}
 		} else {
 			require.NoError(t, upgradeComponentWorkloadSafetyError(old, current))
 		}

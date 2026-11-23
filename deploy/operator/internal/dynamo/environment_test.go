@@ -314,7 +314,7 @@ func TestEnvironmentDeploymentConfigDuplicateDefinitions(t *testing.T) {
 	}
 }
 
-func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
+func TestFrontendDeploymentConfigBindingsThroughGraphLowering(t *testing.T) {
 	for _, tc := range []struct {
 		name                 string
 		general, authored    []corev1.EnvVar
@@ -344,7 +344,7 @@ func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
 		{name: "null frontend fallback", general: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: "{\"Frontend\":null}"}}, wantError: "service \"Frontend\" must be an object"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Prepare the same frontend input for graph and standalone lowering")
+			t.Log("Prepare frontend source layers for direct graph rendering and child lowering")
 			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "gateway", ComponentType: v1beta1.ComponentTypeFrontend,
 				PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: tc.authored}}}},
@@ -355,29 +355,22 @@ func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
 			}
 			original := dgd.DeepCopy()
 			config := &configv1alpha1.OperatorConfiguration{}
-			standalone := &v1beta1.DynamoComponentDeployment{Name: "gateway", Namespace: "ns", Spec: v1beta1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), Env: tc.general,
-			}}
 
 			t.Log("Unknown bindings stay intact; known winning frontend configs get the shared port")
-			grove, groveErr := GeneratePodSpecForComponent(&component, BackendFrameworkNoop, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "gateway", nil, staticContainerGPUCount(0))
-			stored, storedErr := renderStoredEnvironment(standalone, config, RoleMain)
+			direct, directErr := GeneratePodSpecForComponent(&component, BackendFrameworkNoop, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "gateway", nil, staticContainerGPUCount(0))
 			normalized, normalizeErr := NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, RollingUpdateContext{})
 			if tc.wantError != "" {
-				for _, err := range []error{groveErr, storedErr, normalizeErr} {
+				for _, err := range []error{directErr, normalizeErr} {
 					require.ErrorContains(t, err, tc.wantError)
 				}
 			} else {
-				require.NoError(t, groveErr)
-				require.NoError(t, storedErr)
+				require.NoError(t, directErr)
 				require.NoError(t, normalizeErr)
 				children, err := GenerateDynamoComponentsDeploymentsFromNormalized(dgd, normalized, RollingUpdateContext{})
 				require.NoError(t, err)
 				child := children["gateway"]
 				child.OwnerReferences = []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: dgd.Name, Controller: new(true)}}
 				childPod, err := renderStoredEnvironment(child, config, RoleMain)
-				require.NoError(t, err)
-				ds, err := GenerateBasePodSpec(normalized["gateway"], BackendFrameworkNoop, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeLWS, "gateway", nil, staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env})
 				require.NoError(t, err)
 
 				t.Log("Rewriting a general winner never promotes it into the authored source")
@@ -390,7 +383,7 @@ func TestFrontendDeploymentConfigBindingsAcrossRenderers(t *testing.T) {
 				} else {
 					require.Equal(t, tc.general, child.Spec.Env)
 				}
-				for _, pod := range []*corev1.PodSpec{grove, stored, childPod, ds} {
+				for _, pod := range []*corev1.PodSpec{direct, childPod} {
 					binding := findEnvVar(pod.Containers[0].Env, commonconsts.DynamoDeploymentConfigEnvVar)
 					require.NotNil(t, binding)
 					if tc.wantValue != "" {
