@@ -22,6 +22,9 @@ Dynamo patches this crate in through `[patch.crates-io]` so that
   same codec, format and metadata features minus `aac`.
 - `Cargo.toml`: the `[[test]]` and `[[bench]]` targets are removed because
   `tests/`, `benches/` and `scripts/` are not vendored.
+- `Cargo.toml`: a `[package.metadata.cargo-machete]` section ignores
+  `serde_bytes`, which upstream declares but does not use from `src/`. Without
+  it, the repository's `cargo machete` CI check fails on the vendored path crate.
 - Not vendored: `tests/`, `benches/`, `scripts/`, `Cargo.lock`,
   `Cargo.toml.orig`, `.cargo_vcs_info.json`.
 - `build.rs` and `src/` are unchanged.

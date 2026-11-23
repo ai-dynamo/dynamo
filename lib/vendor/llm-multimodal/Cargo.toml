@@ -249,3 +249,8 @@ unwrap_used = "deny"
 [lints.rust]
 unsafe_code = "deny"
 unused_qualifications = "warn"
+
+[package.metadata.cargo-machete]
+# Declared by upstream llm-multimodal 1.9.0 but not referenced from src/.
+# Kept so this vendored copy stays identical to the published crate.
+ignored = ["serde_bytes"]
