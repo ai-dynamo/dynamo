@@ -123,6 +123,42 @@ export XDG_CACHE_HOME="${WORK_DIR}/.cache"
 mkdir -p "${XDG_CACHE_HOME}"
 echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> "${GITHUB_ENV}"
 
+# TODO: remove after the NFS CUDA cache comparison on PR #19332.
+if [[ "${GPU_TESTS:-}" == "true" && "${TEST_SUITE_NAME}" == vllm* ]]; then
+  python - <<'PY'
+import os
+import re
+from pathlib import Path
+
+cache_path = Path(
+    os.environ.get("CUDA_CACHE_PATH") or Path.home() / ".nv/ComputeCache"
+).resolve()
+for key in ("CUDA_CACHE_PATH", "CUDA_CACHE_DISABLE", "CUDA_CACHE_MAXSIZE"):
+    print(f"CUDA cache setting {key}={os.environ.get(key, '<unset>')}")
+print(f"CUDA driver cache directory: {cache_path}, exists={cache_path.is_dir()}")
+cache_mount = None
+for line in Path("/proc/self/mountinfo").read_text().splitlines():
+    mount_fields, filesystem_fields = line.split(" - ", 1)
+    mount = Path(
+        re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), mount_fields.split()[4])
+    )
+    filesystem = filesystem_fields.split()[0]
+    if filesystem in ("nfs", "nfs4"):
+        print(
+            f"NFS mount: {mount}, filesystem={filesystem}, "
+            f"writable={os.access(mount, os.W_OK)}"
+        )
+    if cache_path.is_relative_to(mount) and (
+        cache_mount is None or len(mount.parts) > len(cache_mount[0].parts)
+    ):
+        cache_mount = (mount, filesystem)
+if cache_mount is not None:
+    print(f"CUDA driver cache mount: {cache_mount[0]}, filesystem={cache_mount[1]}")
+else:
+    print("CUDA driver cache mount: unknown")
+PY
+fi
+
 if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
   echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
   exit 1
