@@ -18,7 +18,7 @@ Set `ENDPOINT` and `CONCURRENCY` in [`perf.yaml`](perf.yaml):
 | B200 disaggregated | `dsv41-flash-vllm-b200-disagg-agentic-frontend:8000` | 184 |
 | GB200 aggregated | `dsv41-flash-vllm-gb200-agg-agentic-frontend:8000` | 168 |
 | GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-agentic-frontend:8000` | 168 |
-| H200 aggregated | `dsv41-flash-vllm-h200-agg-agentic-frontend:8000` | 80 |
+| H200 aggregated | `dsv41-flash-vllm-h200-agg-agentic-frontend:8000` | 56 |
 | H200 disaggregated | `dsv41-flash-vllm-h200-disagg-agentic-frontend:8000` | 64 |
 
 Run one target per namespace. The benchmark Job is scheduled on the same node
@@ -106,7 +106,7 @@ kubectl delete job dsv41-flash-vllm-bench -n "${NAMESPACE}"
 ## Measured Results
 
 Results for the agentic workload (64K input tokens, 400 output tokens), using
-eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs for disaggregated serving. Output throughput includes reasoning tokens.
+eight B200, GB200, or H200 GPUs. Output throughput includes reasoning tokens.
 
 Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 
@@ -116,7 +116,7 @@ Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 | Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | B200 | 184 | 1,087.71 | 82.12 | 135.12 |
 | Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 |
 | Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 |
-| Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | H200 | 56 | 315.45 | 50.63 | 153.68 |
 | Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | H200 | 64 | 359.41 | 50.63 | 177.59 |
 
 ### TTFT Distribution
@@ -129,7 +129,7 @@ Milliseconds across successful requests:
 | B200 disaggregated | 18,597.21 | 135.12 | 2,002.87 | 90,076.83 | 126,866.47 | 168,049.68 | 256,824.39 |
 | GB200 aggregated | 1,601.63 | 286.75 | 951.37 | 3,524.82 | 6,980.67 | 26,793.16 | 52,808.90 |
 | GB200 disaggregated | 12,149.79 | 169.02 | 1,126.26 | 57,116.54 | 100,309.52 | 124,167.34 | 160,272.44 |
-| H200 aggregated | 2,314.58 | 171.29 | 1,365.00 | 6,368.76 | 11,694.66 | 30,075.76 | 108,304.39 |
+| H200 aggregated | 1,330.16 | 153.68 | 645.29 | 3,453.68 | 6,690.01 | 17,691.12 | 52,338.68 |
 | H200 disaggregated | 7,957.03 | 177.59 | 514.62 | 35,043.23 | 54,419.43 | 82,772.24 | 118,023.32 |
 
 ### ITL Distribution
@@ -142,7 +142,7 @@ Milliseconds, calculated from each request's average interval between tokens.
 | B200 disaggregated | 12.64 | 12.18 | 14.34 | 16.52 | 18.58 | 25.03 | 44.31 |
 | GB200 aggregated | 26.40 | 19.29 | 27.22 | 48.76 | 83.17 | 110.46 | 321.77 |
 | GB200 disaggregated | 13.19 | 12.37 | 14.61 | 17.75 | 21.14 | 30.59 | 81.71 |
-| H200 aggregated | 29.33 | 19.49 | 29.90 | 54.01 | 84.55 | 183.57 | 381.82 |
+| H200 aggregated | 24.53 | 19.75 | 25.72 | 36.48 | 55.89 | 110.11 | 198.98 |
 | H200 disaggregated | 20.19 | 19.75 | 21.64 | 24.00 | 26.56 | 34.31 | 53.45 |
 
 For GB200 at the selected concurrency, disaggregated serving delivers 21%

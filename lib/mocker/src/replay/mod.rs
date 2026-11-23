@@ -3,6 +3,7 @@
 
 mod agentic;
 mod artifacts;
+mod default_selector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
@@ -14,13 +15,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockerConfig};
-use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_scheduler::host::PrefillLoadEstimator;
 
 pub use agentic::AgenticReplayOptions;
-/// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
-pub use aisimulate_core::ReplayReport as TraceSimulationReport;
-pub(crate) use aisimulate_core::replay::TraceCollector;
-pub use aisimulate_core::replay::{
+/// Backward-compatible Dynamo Mocker name for [`aisim_core::ReplayReport`].
+pub use aisim_core::ReplayReport as TraceSimulationReport;
+pub(crate) use aisim_core::replay::TraceCollector;
+pub use aisim_core::replay::{
     CanonicalReplayCoverage, CanonicalReplayRecord, LifecycleOperation, OfflineRuntimeEvidence,
     PerRequestRecord, ReplayCaptureOptions, ReplayDeterminism, ReplayTerminalStatus, SlaThresholds,
     TraceDistributionStats, TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats,
@@ -65,8 +67,8 @@ impl OfflineDisaggReplayConfig {
     }
 }
 
-pub use aisimulate_core::replay::TrafficStats;
-pub use aisimulate_core::replay::{
+pub use aisim_core::replay::TrafficStats;
+pub use aisim_core::replay::{
     ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
     ReplaySchedulerIntervalMetrics, ReplaySchedulerMetricsSnapshot, ReplayTelemetryObserver,
     ReplayTelemetrySampleKind, ReplayTelemetrySnapshot, ReplayTrafficMetricsSnapshot,
@@ -161,12 +163,52 @@ pub use router_controls::{
 };
 pub use validate::validate_replay_args_mode;
 
+/// Conversation grouping used by native session affinity in offline replay.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAffinityMode {
+    #[default]
+    Session,
+    SiblingGroup,
+}
+
+/// Optional native binding policy; its TTL follows virtual replay time.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConversationAffinityConfig {
+    pub mode: ConversationAffinityMode,
+    pub ttl_seconds: f64,
+}
+
+impl Default for ConversationAffinityConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConversationAffinityMode::Session,
+            ttl_seconds: 300.0,
+        }
+    }
+}
+
+impl ConversationAffinityConfig {
+    pub fn validate(self) -> anyhow::Result<()> {
+        use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_TTL_SECS;
+        anyhow::ensure!(
+            self.ttl_seconds.is_finite()
+                && (1.0..=MAX_SESSION_AFFINITY_TTL_SECS as f64).contains(&self.ttl_seconds),
+            "conversation affinity TTL must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS} seconds"
+        );
+        Ok(())
+    }
+}
+
 /// Settings for the offline replays a host runs on one thread, installed by [`with_replay_scope`].
 ///
 /// They reach replay internals that the entrypoint signatures do not carry. The default scope is
 /// the behavior outside any [`with_replay_scope`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ReplayScope {
+    /// Native session/sibling affinity, independently scoped to each worker pool.
+    pub conversation_affinity: Option<ConversationAffinityConfig>,
     /// Delays the KV cache events (blocks stored and removed) the router's indexer observes by this
     /// much simulated time. Prefill and request completions stay immediate, as a live router
     /// observes them in-band on the response path. `0.0` keeps synchronous updates. Offline
@@ -175,18 +217,23 @@ pub struct ReplayScope {
     /// Registry in which each offline KV-router placement registers its selector, so the host can
     /// change router policy parameters during the replay. `None` registers nothing.
     pub router_controls: Option<ReplayRouterControls>,
+    /// Registry a worker-selection policy named in the router config resolves from. `None`
+    /// offers the policies Dynamo ships.
+    pub router_plugins: Option<RouterPluginRegistry>,
     /// Request identity and KV-router selection semantics of offline replays that do not pass
     /// their own [`ReplayCaptureOptions`]. [`ReplayDeterminism::CanonicalV1`] assigns ordinal
     /// request IDs and seeds every KV-router selector, so two replays of the same input and
-    /// configuration produce the same report.
+    /// configuration produce the same report. A configured worker-selection policy is not seeded.
     pub determinism: ReplayDeterminism,
 }
 
 thread_local! {
     static REPLAY_SCOPE: std::cell::RefCell<ReplayScope> = const {
         std::cell::RefCell::new(ReplayScope {
+            conversation_affinity: None,
             kv_event_lag_ms: 0.0,
             router_controls: None,
+            router_plugins: None,
             determinism: ReplayDeterminism::Random,
         })
     };
@@ -198,6 +245,9 @@ thread_local! {
 /// control registry it does not own. The previous scope is restored when `replay` returns or
 /// unwinds.
 pub fn with_replay_scope<T>(scope: ReplayScope, replay: impl FnOnce() -> T) -> anyhow::Result<T> {
+    if let Some(config) = scope.conversation_affinity {
+        config.validate()?;
+    }
     let lag_ms = scope.kv_event_lag_ms;
     anyhow::ensure!(
         lag_ms.is_finite() && lag_ms >= 0.0,
@@ -295,6 +345,7 @@ mod tests {
         let is_default = |scope: ReplayScope| {
             scope.kv_event_lag_ms == 0.0
                 && scope.router_controls.is_none()
+                && scope.conversation_affinity.is_none()
                 && scope.determinism == ReplayDeterminism::Random
         };
         assert!(is_default(replay_scope()));
@@ -303,6 +354,7 @@ mod tests {
             kv_event_lag_ms: 25.0,
             router_controls: Some(ReplayRouterControls::new()),
             determinism: ReplayDeterminism::CanonicalV1,
+            ..Default::default()
         };
         with_replay_scope(outer, || {
             let current = replay_scope();

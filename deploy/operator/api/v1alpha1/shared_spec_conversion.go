@@ -130,8 +130,10 @@ func delAnnFromObj(obj metav1.Object, key string) {
 // conversion context that leaf converters cannot derive from local inputs.
 // +kubebuilder:object:generate=false
 type DynamoComponentDeploymentSharedSpecConversionContext struct {
+	// +required
 	IncludeOriginSplits bool
-	PodTemplateOrigin   bool
+	// +required
+	PodTemplateOrigin bool
 }
 
 // ConvertFromDynamoComponentDeploymentSharedSpec converts the shared spec from

@@ -793,8 +793,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynamo-error"
+version = "1.8.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-runtime"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -812,6 +820,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-error",
  "dynamo-truthy",
  "educe",
  "either",
@@ -874,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
 ]
@@ -1333,7 +1342,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello_world"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -3336,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "service_metrics"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -3538,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "system_metrics"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -3701,9 +3710,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.54.0"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0c168a474b95bfecfe908a65d4bdffc523144b649a74c09c286afb35d53e0bc"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -4220,9 +4229,9 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "velo"
-version = "0.20.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "453d58e5ca96c625d763468579fc1088e406abbb02e616714bf12433d109651f"
+checksum = "cb17718402fd39480f1aca50c6dd625ccc266a3bbc49c45adad8322b06586a1e"
 dependencies = [
  "anyhow",
  "async-stream",

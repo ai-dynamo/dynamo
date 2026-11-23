@@ -36,3 +36,5 @@ jobs:
           days-before-close: 5
           any-of-issue-labels: 'bug'
           exempt-issue-labels: 'backlog'
+          operations-per-run: 500
+          ascending: true

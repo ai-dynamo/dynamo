@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::State,
-    http::{HeaderMap, Method, Request, StatusCode, Uri},
+    http::{HeaderMap, Method, Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -42,6 +42,7 @@ use super::{
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
+use crate::frontend_config::ChatTemplateDefaults;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
@@ -64,11 +65,16 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
-    invalid_argument,
+    Protocol, anthropic_context_length_message, invalid_argument, public_message_for,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
+use dynamo_error::http::{
+    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
+};
+
+mod validation;
+use validation::ValidatedRequest;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -125,25 +131,85 @@ pub fn anthropic_models_router(
 // Error middleware
 // ---------------------------------------------------------------------------
 
-/// Converts 422 validation errors to Anthropic error format.
-async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Response {
-    let response = next.run(request).await;
+#[derive(Clone)]
+struct AnthropicRequestId(String);
 
-    if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+/// Assign the ID before extraction, so even malformed requests have one, and
+/// normalize extractor rejections without losing existing error types or headers.
+async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> Response {
+    let request_id = get_or_create_request_id(request.headers());
+    request
+        .extensions_mut()
+        .insert(AnthropicRequestId(request_id.clone()));
+    let mut response = next.run(request).await;
+
+    if response.status().is_client_error() || response.status().is_server_error() {
+        let (mut parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
-        let error_message = String::from_utf8_lossy(&body_bytes).to_string();
-        return anthropic_error(
-            ErrorClass::InvalidRequest,
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &error_message,
+        let mut body = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
+            // Keep the body as sent, with fields the typed envelope lacks (`error.details`).
+            Ok(error) if error.object_type == "error" => serde_json::from_slice(&body_bytes)
+                .unwrap_or_else(|_| {
+                    serde_json::to_value(error).expect("Anthropic error is serializable")
+                }),
+            _ => {
+                if matches!(
+                    parts.status,
+                    StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNSUPPORTED_MEDIA_TYPE
+                ) {
+                    parts.status = StatusCode::BAD_REQUEST;
+                }
+                super::openai::record_local_failure(
+                    if parts.status == StatusCode::PAYLOAD_TOO_LARGE {
+                        ErrorClass::PayloadTooLarge
+                    } else if parts.status.is_client_error() {
+                        ErrorClass::InvalidRequest
+                    } else {
+                        ErrorClass::Internal
+                    },
+                );
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": anthropic_error_type_for_status(parts.status, "api_error"),
+                        "message": if body_bytes.is_empty() {
+                            parts.status.canonical_reason().unwrap_or("Request failed").into()
+                        } else {
+                            String::from_utf8_lossy(&body_bytes)
+                        },
+                    },
+                })
+            }
+        };
+        stamp_request_id(&mut body, &mut parts.headers, &request_id);
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
         );
+        parts.headers.remove(header::CONTENT_LENGTH);
+        Response::from_parts(parts, Body::from(body.to_string()))
+    } else {
+        insert_request_id_header(response.headers_mut(), &request_id);
+        response
     }
+}
 
-    response
+/// Sets the `request-id` header that Anthropic clients read.
+fn insert_request_id_header(headers: &mut HeaderMap, request_id: &str) {
+    headers.insert(
+        "request-id",
+        request_id
+            .parse()
+            .expect("assigned request ID is a valid header"),
+    );
+}
+
+/// Adds the request ID to an Anthropic error body and its response headers.
+fn stamp_request_id(body: &mut serde_json::Value, headers: &mut HeaderMap, request_id: &str) {
+    body["request_id"] = serde_json::Value::String(request_id.to_owned());
+    insert_request_id_header(headers, request_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +361,19 @@ impl AnthropicHandlerError {
     }
 }
 
+/// A message thread keeps the conversation on the server, so a continue request carries only
+/// the new messages. No thread is kept here, so refuse one rather than answer from those alone,
+/// with the code on which the Anthropic SDK tool runner resends the turn without `thread`.
+fn thread_unsupported_response() -> Response {
+    super::openai::record_local_failure(ErrorClass::InvalidRequest);
+    let mut body = serde_json::to_value(AnthropicErrorResponse::invalid_request(
+        "thread: message threads are not supported; send the full conversation without `thread`",
+    ))
+    .expect("Anthropic error is serializable");
+    body["error"]["details"] = serde_json::json!({"error_code": "thread_unsupported_request"});
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
 fn validate_anthropic_messages(
     messages: &[AnthropicMessage],
 ) -> Result<(), AnthropicRequestValidationError> {
@@ -370,12 +449,12 @@ fn validate_anthropic_tools(
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Extension(AnthropicRequestId(request_id)): Extension<AnthropicRequestId>,
     headers: HeaderMap,
-    Json(mut request): Json<AnthropicCreateMessageRequest>,
+    request: ValidatedRequest<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
-    let request_id = get_or_create_request_id(&headers);
-    let streaming = request.stream;
-    let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    let (model, streaming) = request.identity();
+    let resolved_model = resolve_request_model(&model, template.as_ref());
     let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let metric_model = state
         .manager()
@@ -387,6 +466,30 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    if request.has_thread() {
+        inflight_guard.mark_error(ErrorType::NotImplemented);
+        return Err(thread_unsupported_response());
+    }
+    if state.media_rejection().enabled() {
+        let content_type = request.media_content_type(&headers).map_err(|error| {
+            AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+        })?;
+        if let Some(refusal) =
+            super::openai::media_refusal_for_content_type(&state, || content_type)
+        {
+            return Err(AnthropicHandlerError::new(
+                ErrorClass::UnsupportedMedia,
+                refusal.status,
+                "invalid_request_error",
+                refusal.message,
+                ErrorType::UnsupportedModality,
+            )
+            .into_marked_response(&mut inflight_guard));
+        }
+    }
+    let mut request = request.into_request(&headers).map_err(|error| {
+        AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+    })?;
 
     validate_anthropic_messages(&request.messages).map_err(|error| {
         AnthropicHandlerError::from_request_validation(error)
@@ -432,6 +535,7 @@ async fn handler_anthropic_messages(
     if let Some(session_affinity) = session_affinity_from_headers(&headers) {
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
+    super::openai::attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     let context = request.context();
 
     // Create connection handles
@@ -511,11 +615,14 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    // Look up engine and parsing options early so we know whether a reasoning
-    // parser is configured before converting the request.
-    let (engine, parsing_options) = state
+    let (mut orig_request, context) = request.into_parts();
+    let model_for_resp = orig_request.model.clone();
+
+    // Looked up after the media refusal so a refused request gets the
+    // configured status, not this lookup's 404/503.
+    let (engine, parsing_options, input_policy) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_input_policy(&model)
         .map_err(|e| match e {
             // Registered but not ready to serve yet → retryable 503 (mapped to
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
@@ -539,8 +646,7 @@ async fn anthropic_messages(
             .into_marked_response(&mut inflight_guard),
         })?;
 
-    let (orig_request, context) = request.into_parts();
-    let model_for_resp = orig_request.model.clone();
+    input_policy.prepare_anthropic(&mut orig_request);
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -610,20 +716,11 @@ async fn anthropic_messages(
     let prompt_injected_reasoning =
         parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
 
-    if prompt_injected_reasoning {
-        let args = chat_request
-            .chat_template_args
-            .get_or_insert_with(Default::default);
-        args.entry("enable_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(true));
-        // Preserve reasoning from prior turns. Some templates (Nemotron)
-        // strip historical <think> content by default to save context.
-        // For agentic flows the model needs to see why it made prior decisions.
-        // Ref: NVIDIA's SWE training config also sets this to false:
-        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
-        args.entry("truncate_history_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(false));
-    }
+    apply_anthropic_template_args(
+        &mut chat_request,
+        prompt_injected_reasoning,
+        state.chat_template_defaults(),
+    );
 
     let mut request = context.map(|_req| chat_request);
 
@@ -648,6 +745,11 @@ async fn anthropic_messages(
     request.insert(
         crate::preprocessor::REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
         parsing_options.clone(),
+    );
+    // Clients get `tool_use_id`s, not backend IDs; request traces record them.
+    request.insert(
+        crate::request_trace::CLIENT_TOOL_CALL_IDS_CONTEXT_KEY,
+        crate::request_trace::ClientToolCallIds(crate::protocols::anthropic::types::tool_use_id),
     );
 
     // Computed before `request` moves into `generate`. Only a stream that can
@@ -888,6 +990,7 @@ async fn anthropic_messages(
             stream_handle,
             activity_rx,
             error_signal,
+            false,
         );
 
         let mut sse_stream = Sse::new(stream);
@@ -961,8 +1064,15 @@ async fn anthropic_messages(
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<AnthropicCountTokensRequest>,
+    headers: HeaderMap,
+    request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if request.has_thread() {
+        return Err(thread_unsupported_response());
+    }
+    let mut request = request
+        .into_request(&headers)
+        .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         return Err(AnthropicHandlerError::from_request_validation(error).into_response());
     }
@@ -1256,6 +1366,35 @@ fn gate_anthropic_nvext(
     Ok(())
 }
 
+fn apply_anthropic_template_args(
+    request: &mut NvCreateChatCompletionRequest,
+    prompt_injected_reasoning: bool,
+    chat_template_defaults: &ChatTemplateDefaults,
+) {
+    if prompt_injected_reasoning {
+        request
+            .chat_template_args
+            .get_or_insert_with(Default::default)
+            .entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+    }
+    // After the thinking decision, so the defaults' thinking keys yield to it, and
+    // before the history fallback, so a default can still set that key.
+    chat_template_defaults.apply_to_request(request);
+    if prompt_injected_reasoning {
+        // Preserve reasoning from prior turns. Some templates (Nemotron)
+        // strip historical <think> content by default to save context.
+        // For agentic flows the model needs to see why it made prior decisions.
+        // Ref: NVIDIA's SWE training config also sets this to false:
+        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
+        request
+            .chat_template_args
+            .get_or_insert_with(Default::default)
+            .entry("truncate_history_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+    }
+}
+
 fn apply_anthropic_nvext_policy(
     request: &mut NvCreateChatCompletionRequest,
     headers: &HeaderMap,
@@ -1277,7 +1416,11 @@ fn anthropic_backend_error_response(error_response: super::openai::ErrorResponse
     } else {
         anthropic_error_type_for_status(status, "api_error")
     };
-    anthropic_error_unrecorded(status, error_type, error.message())
+    let rendered_message = error
+        .context_length_details()
+        .and_then(anthropic_context_length_message)
+        .unwrap_or_else(|| error.message().to_string());
+    anthropic_error_unrecorded(status, error_type, &rendered_message)
 }
 
 /// Build an Anthropic-formatted error response from a canonical
@@ -1348,7 +1491,8 @@ fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> An
     };
     AnthropicErrorBody {
         error_type: anthropic_error_type_for_class(error.class()).to_string(),
-        message: error.public_message().unwrap_or(message).to_string(),
+        message: public_message_for(error, Protocol::Anthropic)
+            .unwrap_or_else(|| message.to_string()),
     }
 }
 
@@ -1379,10 +1523,12 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
     } else {
         tracing::debug!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
     }
+    let rendered_message = public_message_for(error, Protocol::Anthropic)
+        .unwrap_or_else(|| public_message.to_string());
     Some(anthropic_error_unrecorded(
         status,
         anthropic_error_type_for_class(error.class()),
-        error.public_message().unwrap_or(public_message),
+        &rendered_message,
     ))
 }
 
@@ -1446,6 +1592,29 @@ fn anthropic_error_unrecorded(status: StatusCode, error_type: &str, message: &st
         }),
     )
         .into_response()
+}
+
+/// Returns the Anthropic error for a request the readiness gate rejects.
+///
+/// The gate runs outside `anthropic_error_middleware`, so this adds the same
+/// `request-id` header and body field. The caller has already recorded the failure.
+pub(crate) fn readiness_rejection_response(
+    headers: &HeaderMap,
+    status: StatusCode,
+    message: &str,
+) -> Response {
+    let request_id = get_or_create_request_id(headers);
+    let mut body = serde_json::to_value(AnthropicErrorResponse {
+        object_type: "error".to_string(),
+        error: AnthropicErrorBody {
+            error_type: anthropic_error_type_for_status(status, "api_error").to_string(),
+            message: message.to_string(),
+        },
+    })
+    .expect("Anthropic error is serializable");
+    let mut response_headers = HeaderMap::new();
+    stamp_request_id(&mut body, &mut response_headers, &request_id);
+    (status, response_headers, Json(body)).into_response()
 }
 
 /// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.
@@ -1557,6 +1726,111 @@ mod tests {
         assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
     }
 
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_renders_context_length_wording() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(9000),
+            })
+            .build();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match super::super::openai::check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => anthropic_backend_error_response(response),
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "prompt is too long: this model's maximum context length is 8192 tokens, but the \
+             prompt contains 9000 tokens. Please reduce the length of the messages."
+        );
+        assert!(
+            body.error
+                .message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.error.message.contains("prompt is too long"));
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_reports_prompt_tokens_for_combined_budget() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match super::super::openai::check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => anthropic_backend_error_response(response),
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "this model's maximum context length is 8192 tokens. However, the request would use \
+             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
+             reduce the length of the messages or the requested output."
+        );
+        assert!(
+            body.error
+                .message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.error.message.contains("4000 prompt tokens"));
+        assert!(body.error.message.contains("5000 requested output tokens"));
+        assert!(!body.error.message.contains("prompt is too long"));
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+    }
+
     #[test]
     fn anthropic_nvext_gate_preserves_when_enabled() {
         let mut request = request_with_nvext();
@@ -1619,6 +1893,36 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn anthropic_template_args_layer_defaults_between_thinking_and_history() {
+        let args = |defaults: serde_json::Value, prompt_injected_reasoning: bool| {
+            let mut template_defaults = ChatTemplateDefaults::default();
+            template_defaults.set_default_chat_template_kwargs(defaults.as_object().cloned());
+            let mut chat_request: NvCreateChatCompletionRequest =
+                request_with_nvext().try_into().unwrap();
+            apply_anthropic_template_args(
+                &mut chat_request,
+                prompt_injected_reasoning,
+                &template_defaults,
+            );
+            serde_json::to_value(chat_request.chat_template_args).unwrap()
+        };
+        let defaults = serde_json::json!({
+            "enable_thinking": false,
+            "truncate_history_thinking": true,
+        });
+
+        assert_eq!(
+            args(defaults.clone(), true),
+            serde_json::json!({"enable_thinking": true, "truncate_history_thinking": true})
+        );
+        assert_eq!(
+            args(serde_json::json!({}), true),
+            serde_json::json!({"enable_thinking": true, "truncate_history_thinking": false})
+        );
+        assert_eq!(args(defaults.clone(), false), defaults);
     }
 
     #[test]
@@ -1701,6 +2005,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_semantic_error_renders_context_length_details() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+        let response = anthropic_semantic_error(&error).expect("invalid request response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "this model's maximum context length is 8192 tokens. However, the request would use \
+             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
+             reduce the length of the messages or the requested output."
+        );
+        assert!(
+            body.error
+                .message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.error.message.contains("4000 prompt tokens"));
+        assert!(body.error.message.contains("5000 requested output tokens"));
+        assert!(!body.error.message.contains("prompt is too long"));
+        assert!(!body.error.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+    }
+
+    #[tokio::test]
     async fn anthropic_semantic_conflict_uses_invalid_request_type() {
         let error = dynamo_runtime::error::DynamoError::builder()
             .class(dynamo_runtime::error::ErrorClass::Conflict)
@@ -1761,6 +2103,64 @@ mod tests {
         assert_eq!(body.error_type, "invalid_request_error");
         assert_eq!(body.message, "Invalid request");
         assert!(!body.message.contains("PRIVATE_STREAM_DIAGNOSTIC"));
+    }
+
+    #[test]
+    fn anthropic_stream_error_renders_context_length_details() {
+        use dynamo_runtime::error::{ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(body.error_type, "invalid_request_error");
+        assert_eq!(
+            body.message,
+            "this model's maximum context length is 8192 tokens. However, the request would use \
+             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
+             reduce the length of the messages or the requested output."
+        );
+        assert!(
+            body.message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(!body.message.contains("prompt is too long"));
+    }
+
+    #[test]
+    fn anthropic_stream_error_prompt_at_limit_reports_missing_output_room() {
+        use dynamo_runtime::error::{ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8192),
+                prompt_tokens: Some(8192),
+            })
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(
+            body.message,
+            "prompt is too long: this model's maximum context length is 8192 tokens and the \
+             prompt contains 8192 tokens, which leaves no room for output. Please reduce the \
+             length of the messages."
+        );
+        assert!(
+            body.message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.message.contains("prompt is too long"));
+        assert!(body.message.contains("leaves no room for output"));
     }
 
     #[test]

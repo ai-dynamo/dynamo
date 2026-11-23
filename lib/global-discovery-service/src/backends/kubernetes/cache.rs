@@ -325,7 +325,7 @@ impl<I: SliceIndex> SliceCache<I> {
         }
     }
 
-    /// A watch stream that starts at the first complete list and ends when
+    /// A watch stream that starts at the first full listing and ends when
     /// `cancel` (the caller's) or `stop` (the directory's) is cancelled.
     pub(super) fn subscribe(
         self: &Arc<Self>,
@@ -504,7 +504,7 @@ impl<I: SliceIndex> Directory<I::Item, I::Key> for SliceDirectory<I> {
         Ok(index.snapshot())
     }
 
-    /// The stream starts at the first complete list. Until then it waits while
+    /// The stream starts at the first full listing. Until then it waits while
     /// the watch retries and logs its failures, as `dynamo_runtime`'s
     /// Kubernetes discovery waits to be ready; `cancel_token` ends the wait.
     async fn list_and_watch(

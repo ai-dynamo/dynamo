@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.global_planner.capacity_manager import PoolSpec
+from dynamo.global_planner.gpu_cost import GpuCostConfig, GpuCostResolver
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.errors import GPUShapeUnavailableError
@@ -309,6 +310,50 @@ def test_observe_generic_worker_keyed_by_name_then_role_hint():
     pools = cm.observe()["default/w"]
     assert "worker-svc" not in pools
     assert pools["decode"].component_name == "worker-svc"
+
+
+def test_generic_worker_cost_uses_component_identity_before_and_after_role_hint():
+    cm = KubernetesCapacityManager(
+        "default",
+        gpu_cost=GpuCostResolver(
+            GpuCostConfig(
+                pools=[
+                    {"selector": "default/w/worker-svc", "gpu_per_replica": 4},
+                    {"selector": "default/w/other-svc", "gpu_per_replica": 2},
+                    {"selector": "default/w/decode", "gpu_per_replica": 9},
+                ]
+            )
+        ),
+    )
+    deployment = _with_operator_gpu_status(
+        [
+            _component("worker-svc", 2, gpu=None, ctype="worker"),
+            _component("other-svc", 1, gpu=None, ctype="worker"),
+        ]
+    )
+    deployment["status"]["components"] = {
+        "worker-svc": {"gpusPerEngine": 0, "gpusPerReplica": 0},
+        "other-svc": {"gpusPerEngine": 0, "gpusPerReplica": 0},
+    }
+    _install_connector(cm, "default/w", deployment)
+
+    pools = cm.observe(require_complete=True)["default/w"]
+    assert pools["worker-svc"].gpu_per_replica == 4
+    assert pools["other-svc"].gpu_per_replica == 2
+
+    cm.remember_roles(
+        "default/w",
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker-svc",
+                desired_replicas=2,
+            )
+        ],
+    )
+    pools = cm.observe(require_complete=True)["default/w"]
+    assert pools["decode"].gpu_per_replica == 4
+    assert pools["other-svc"].gpu_per_replica == 2
 
 
 def test_observe_untyped_worker_with_gpu_counts_toward_budget():

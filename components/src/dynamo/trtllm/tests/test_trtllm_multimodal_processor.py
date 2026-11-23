@@ -5,17 +5,22 @@
 loading propagate (so the frontend returns a 4xx) instead of swallowing them to
 None."""
 
+import asyncio
 import base64
 import http.server
+import io
 import json
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
+import numpy as np
 import pytest
 import pytest_asyncio
+import soundfile as sf
 import torch
+from PIL import Image
 from safetensors.torch import save as safetensors_save
 
 # multimodal_processor imports tensorrt_llm, whose import needs CUDA. -m selection
@@ -27,11 +32,16 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
+from tensorrt_llm import SamplingParams
+from tensorrt_llm.inputs.registry import create_input_processor_with_hash
+
 import dynamo.common.http as dynamo_http
 from dynamo.common.http import HttpConfigurationError, HttpStatusError, HttpTimeoutError
 from dynamo.common.http.aiohttp_client import AiohttpClient
 from dynamo.common.http.base import HttpClient
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.trtllm import audio_loader as trt_audio
 from dynamo.trtllm import multimodal_processor as mmp
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 
@@ -62,6 +72,294 @@ def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
         enable_frontend_decoding=False,
         max_bytes=200 * 1024 * 1024,
     )
+
+
+@pytest.fixture
+def audio_registry(monkeypatch):
+    monkeypatch.setattr(
+        mmp,
+        "MULTIMODAL_PLACEHOLDER_REGISTRY",
+        SimpleNamespace(
+            is_valid=lambda model_type, modality: model_type == "multimodal"
+            and modality == "audio"
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_type", ["data", "https"])
+async def test_audio_is_forwarded_to_trtllm_processor(
+    source_type, monkeypatch, audio_registry
+) -> None:
+    clips = [
+        (np.array([0.125, -0.25, 0.5], dtype=np.float32), 16000),
+        (np.array([-0.5, 0.25, -0.125, 0.75], dtype=np.float32), 8000),
+    ]
+    audio_bytes = []
+    for samples, sample_rate in clips:
+        wav = io.BytesIO()
+        sf.write(wav, samples, sample_rate, format="WAV", subtype="PCM_16")
+        audio_bytes.append(wav.getvalue())
+    if source_type == "data":
+        urls = [
+            "data:audio/wav;base64," + base64.b64encode(content).decode()
+            for content in audio_bytes
+        ]
+    else:
+        urls = ["https://example.com/first.wav", "https://example.com/second.wav"]
+        monkeypatch.setattr(
+            trt_audio, "validate_media_url", AsyncMock(side_effect=urls)
+        )
+        fetch = AsyncMock(side_effect=audio_bytes)
+        monkeypatch.setattr(trt_audio, "fetch_bytes", fetch)
+
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    result = await processor.process_openai_request(
+        {
+            "token_ids": [1, 2],
+            "extra_args": {"formatted_prompt": "Transcribe <|audio|> then <|audio|>"},
+            "multi_modal_data": {"audio_url": [{"Url": url} for url in urls]},
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert result["prompt"] == "Transcribe <|audio|> then <|audio|>"
+    assert "prompt_token_ids" not in result
+    decoded = result["multi_modal_data"]["audio"]
+    assert len(decoded) == len(clips)
+    for (waveform, sample_rate), (samples, expected_rate) in zip(
+        decoded, clips, strict=True
+    ):
+        np.testing.assert_array_equal(waveform, samples)
+        assert sample_rate == expected_rate
+    if source_type == "https":
+        assert fetch.await_args_list == [
+            call(
+                url,
+                30.0,
+                policy=processor._url_policy,
+                max_bytes=processor.max_file_size_bytes,
+            )
+            for url in urls
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channels", [1, 2], ids=["mono", "stereo"])
+@pytest.mark.parametrize("exceeds_limit", [False, True], ids=["at_limit", "over_limit"])
+async def test_audio_loader_enforces_decoded_sample_limit(
+    channels, exceeds_limit, monkeypatch
+) -> None:
+    max_samples = 64
+    monkeypatch.setattr(trt_audio.AudioLoader, "_MAX_DECODED_SAMPLES", max_samples)
+    frames = max_samples // channels + int(exceeds_limit)
+    samples = np.full((frames, channels), 0.25, dtype=np.float32)
+    clip = io.BytesIO()
+    sf.write(clip, samples, 16000, format="FLAC", subtype="PCM_16")
+    content = clip.getvalue()
+    loader = trt_audio.AudioLoader(1024, UrlValidationPolicy.from_env())
+    assert len(content) < 1024
+    url = "data:audio/flac;base64," + base64.b64encode(content).decode()
+
+    if exceeds_limit:
+        with pytest.raises(HttpStatusError, match="Audio is too long") as excinfo:
+            await loader.load_audio_batch([{"Url": url}])
+        assert excinfo.value.status == 400
+    else:
+        [(waveform, sample_rate)] = await loader.load_audio_batch([{"Url": url}])
+        assert waveform.size == max_samples
+        expected = samples[:, 0] if channels == 1 else samples
+        np.testing.assert_allclose(waveform, expected)
+        assert sample_rate == 16000
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_limits_concurrency_and_preserves_order(
+    monkeypatch,
+) -> None:
+    loader = trt_audio.AudioLoader(1024, UrlValidationPolicy.from_env())
+    started = [asyncio.Event() for _ in range(6)]
+    release = [asyncio.Event() for _ in range(6)]
+    finished = [asyncio.Event() for _ in range(6)]
+    completion_order = []
+    active = 0
+    peak = 0
+
+    async def load(index):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        started[index].set()
+        try:
+            await release[index].wait()
+            completion_order.append(index)
+            finished[index].set()
+            return index, 16000
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(loader, "_load_audio", load)
+    batch = asyncio.create_task(loader.load_audio_batch(list(range(6))))
+    try:
+        for event in started[:4]:
+            await asyncio.wait_for(event.wait(), timeout=5)
+        assert active == 4
+        assert not started[4].is_set()
+        assert not started[5].is_set()
+
+        for index in (3, 4, 5, 2, 1, 0):
+            await asyncio.wait_for(started[index].wait(), timeout=5)
+            release[index].set()
+            await asyncio.wait_for(finished[index].wait(), timeout=5)
+
+        result = await asyncio.wait_for(batch, timeout=5)
+        assert peak == 4
+        assert completion_order == [3, 4, 5, 2, 1, 0]
+        assert result == [(index, 16000) for index in range(6)]
+    finally:
+        batch.cancel()
+        await asyncio.gather(batch, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_cancels_pending_loads_on_error(
+    monkeypatch,
+) -> None:
+    loader = trt_audio.AudioLoader(1024, UrlValidationPolicy.from_env())
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    error = HttpStatusError(400, "Invalid audio data", "audio item")
+
+    async def load(item):
+        if item == "bad":
+            await started.wait()
+            raise error
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(loader, "_load_audio", load)
+    with pytest.raises(HttpStatusError) as excinfo:
+        await asyncio.wait_for(loader.load_audio_batch(["bad", "blocked"]), timeout=5)
+    assert excinfo.value is error
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_audio_with_embedding_paths_is_rejected_before_loading(
+    audio_registry,
+) -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    processor.load_tensor_from_path_or_url = AsyncMock()
+    processor.image_loader.load_image_batch = AsyncMock()
+    processor.audio_loader.load_audio_batch = AsyncMock()
+
+    with pytest.raises(
+        HttpStatusError, match="Audio with precomputed image embeddings"
+    ) as excinfo:
+        await processor.process_openai_request(
+            {
+                "extra_args": {"formatted_prompt": "<|audio|> Transcribe this"},
+                "multi_modal_data": {
+                    "image_url": [
+                        {"Url": "https://example.com/image.png"},
+                        {"Url": "https://example.com/embedding.safetensors"},
+                    ],
+                    "audio_url": [{"Url": "https://example.com/speech.wav"}],
+                },
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
+    processor.load_tensor_from_path_or_url.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["AAAA!!!!", "AAAA"])
+async def test_invalid_audio_returns_client_error(payload, audio_registry) -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {
+                "extra_args": {"formatted_prompt": "<|audio|> Transcribe this"},
+                "multi_modal_data": {
+                    "audio_url": [{"Url": "data:audio/wav;base64," + payload}]
+                },
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_type,supports_audio",
+    [("qwen3_vl", True), ("unknown", True), ("multimodal", False)],
+)
+async def test_unsupported_audio_returns_client_error_before_loading(
+    model_type, supports_audio, audio_registry
+) -> None:
+    processor = MultimodalRequestProcessor(
+        model_type=model_type,
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+        supports_audio=supports_audio,
+    )
+    processor.audio_loader.load_audio_batch = AsyncMock()
+
+    with pytest.raises(InvalidArgument, match="does not support audio input"):
+        await processor.process_openai_request(
+            {
+                "extra_args": {"formatted_prompt": "Transcribe this"},
+                "multi_modal_data": {
+                    "audio_url": [{"Url": "https://example.com/speech.wav"}]
+                },
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_audio_with_remote_image_embeddings_fails_closed() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"multi_modal_data": {"audio_url": [{"Url": "https://example.com/a.wav"}]}},
+            embeddings=object(),
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
 
 
 @pytest.mark.asyncio
@@ -223,6 +521,478 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
     nvdec.assert_called_once()  # the NVDEC transform ran ...
     assert nvdec.call_args.args[0] == b"h264 bytes"
     load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
+
+
+def _decoded_frames(n: int = 2, h: int = 4, w: int = 5) -> np.ndarray:
+    """(N, H, W, 3) uint8 RGB frames, as a video decoder returns them."""
+    # Mod in the default int dtype, then cast (NumPy 2.x / NEP 50).
+    return (np.arange(n * h * w * 3) % 256).astype(np.uint8).reshape(n, h, w, 3)
+
+
+def _pt_video(frames_u8: np.ndarray):
+    """VideoData in the float [0,1] (C, H, W) form both decode paths return."""
+    nchw = torch.from_numpy(frames_u8.astype("float32") * (1.0 / 255.0)).permute(
+        0, 3, 1, 2
+    )
+    return mmp.VideoData(
+        frames=list(torch.unbind(nchw.contiguous(), dim=0)),
+        metadata={
+            "total_num_frames": 24,
+            "fps": 12.0,
+            "duration": 2.0,
+            "frames_indices": list(range(len(frames_u8))),
+        },
+        audio=None,
+    )
+
+
+@pytest.fixture
+def image_video_processor(monkeypatch):
+    """Factory for a processor of ``model_type`` whose image loader returns one
+    PIL image and whose input processor asks for ``video_format`` video (None:
+    no preference).
+
+    The test media URLs are link-local. The processor reads the URL policy when
+    it is built, so internal URLs are allowed before any processor is built."""
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+
+    def make(video_format: str | None, model_type: str = "multimodal"):
+        processor = MultimodalRequestProcessor(
+            model_type=model_type,
+            model_dir="unused",
+            max_file_size_mb=10,
+            tokenizer=MagicMock(),
+        )
+        image = Image.new("RGB", (5, 4), (200, 30, 30))
+        processor.image_loader.load_image_batch = AsyncMock(return_value=[image])
+        ip = MagicMock()
+        ip.config = SimpleNamespace(model_type="test_vl")  # not in TRT-LLM's registry
+        ip.get_mm_token_ids.return_value = None
+        ip.get_num_tokens_per_image.return_value = 4
+        ip.get_preferred_media_io_kwargs.return_value = (
+            {"image": {"format": "np"}, "video": {"format": video_format}}
+            if video_format
+            else {}
+        )
+        processor.input_processor = ip
+        return processor, image
+
+    return make
+
+
+def _route_video(monkeypatch, path: str, video) -> None:
+    """Send the next video through NVDEC or the vendor loader, returning ``video``."""
+    monkeypatch.setattr(mmp, "fetch_bytes", AsyncMock(return_value=b"video bytes"))
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: path == "nvdec")
+    monkeypatch.setattr(mmp, "_nvdec_video_data", MagicMock(return_value=video))
+    monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=video))
+
+
+_IMAGE_URL = "http://169.254.169.254/i.png"
+_VIDEO_URL = "http://169.254.169.254/v.mp4"
+
+
+def _request(image: bool = True, video: bool = True, video_first: bool = False) -> dict:
+    """A request as the frontend forwards it: media in ``multi_modal_data``,
+    their message order in ``multi_modal_order``, chat structure in
+    ``extra_args.messages``."""
+    parts, mm_data = [], {}
+    if image:
+        mm_data["image_url"] = [{"Url": _IMAGE_URL}]
+        parts.append({"type": "image_url", "image_url": {"url": _IMAGE_URL}})
+    if video:
+        mm_data["video_url"] = [{"Url": _VIDEO_URL}]
+        parts.insert(
+            0 if video_first else len(parts),
+            {"type": "video_url", "video_url": {"url": _VIDEO_URL}},
+        )
+    order = [{"modality": part["type"], "index": 0} for part in parts]
+    parts.append({"type": "text", "text": "What colors are these?"})
+    return {
+        "multi_modal_data": mm_data,
+        "multi_modal_order": order,
+        "token_ids": [1, 2, 3],
+        "extra_args": {"messages": [{"role": "user", "content": parts}]},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["nvdec", "vendor"])
+async def test_video_next_to_an_image_is_handed_over_as_uint8(
+    path, image_video_processor, monkeypatch
+) -> None:
+    """Qwen3-VL rescales images and videos together and rejects a PIL image
+    next to float [0,1] video frames. With an image in the request, videos go
+    over as the uint8 (N, H, W, 3) array the model asks for, holding exactly
+    the decoded pixels; the image and the metadata are untouched."""
+    processor, image = image_video_processor("np")
+    frames_u8 = _decoded_frames()
+    source = _pt_video(frames_u8)
+    _route_video(monkeypatch, path, source)
+
+    processed = await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+
+    mm_data = processed["multi_modal_data"]
+    assert mm_data["image"] == [image]
+    (video,) = mm_data["video"]
+    assert isinstance(video.frames, np.ndarray)
+    assert video.frames.dtype == np.uint8
+    assert np.array_equal(video.frames, frames_u8)
+    assert video.metadata == source.metadata
+    assert isinstance(source.frames[0], torch.Tensor)  # the input is not modified
+
+
+@pytest.mark.asyncio
+async def test_video_conversion_runs_off_the_event_loop(
+    image_video_processor, monkeypatch
+) -> None:
+    """Converting a clip takes CPU time that grows with its frame count, so it
+    must not hold up other requests on the worker's event loop."""
+    processor, _ = image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    convert, threads = mmp._video_frames_to_uint8, []
+
+    def spy(video):
+        threads.append(threading.get_ident())
+        return convert(video)
+
+    monkeypatch.setattr(mmp, "_video_frames_to_uint8", spy)
+
+    await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert threads and threading.get_ident() not in threads
+
+
+@pytest.mark.asyncio
+async def test_image_only_request_keeps_pil_images(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, image = image_video_processor("np")
+
+    processed = await processor.process_openai_request(
+        _request(video=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"] == {"image": [image]}
+    assert "mm_item_order" not in processed
+    processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_video_only_request_keeps_float_frames(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, _ = image_video_processor("np")
+    source = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, "nvdec", source)
+
+    processed = await processor.process_openai_request(
+        _request(image=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"]["video"] == [source]
+    assert "mm_item_order" not in processed
+    processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_uint8_video_next_to_an_image_is_passed_through(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, _ = image_video_processor("np")
+    source = mmp.VideoData(
+        frames=_decoded_frames(), metadata={"total_num_frames": 2}, audio=None
+    )
+    _route_video(monkeypatch, "nvdec", source)
+
+    processed = await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"]["video"][0] is source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_type", ["qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"]
+)
+async def test_image_and_video_request_is_rejected_for_a_shared_rescale_flag(
+    model_type, image_video_processor, monkeypatch
+) -> None:
+    """These models' processors take one rescale flag for images and videos,
+    so next to float frames the PIL image would go in unscaled (Qwen2/2.5-VL).
+    Refuse the request, before the video is fetched."""
+    processor, _ = image_video_processor(None, model_type)
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+
+    with pytest.raises(InvalidArgument) as excinfo:
+        await processor.process_openai_request(
+            _request(), embeddings=None, ep_disaggregated_params=None
+        )
+
+    assert "cannot take an image and a video in the same request" in str(excinfo.value)
+    mmp.fetch_bytes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_single_modality_requests_are_served_for_a_shared_rescale_flag(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, image = image_video_processor(None, "qwen2_5_vl")
+    source = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, "nvdec", source)
+
+    image_only = await processor.process_openai_request(
+        _request(video=False), embeddings=None, ep_disaggregated_params=None
+    )
+    video_only = await processor.process_openai_request(
+        _request(image=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert image_only["multi_modal_data"] == {"image": [image]}
+    assert video_only["multi_modal_data"]["video"] == [source]
+    assert "mm_item_order" not in image_only and "mm_item_order" not in video_only
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_type", ["glm5_next", "NemotronH_Nano_VL_V2"])
+async def test_image_and_video_request_keeps_float_frames_for_other_models(
+    model_type, image_video_processor, monkeypatch
+) -> None:
+    """Other models that do not ask for uint8 video get the decoded frames,
+    and the item order as the frontend sends it."""
+    processor, image = image_video_processor(None, model_type)
+    source = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, "nvdec", source)
+
+    processed = await processor.process_openai_request(
+        _request(video_first=True), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"]["image"] == [image]
+    assert processed["multi_modal_data"]["video"][0] is source
+    assert isinstance(source.frames[0], torch.Tensor)
+    assert [(e["modality"], e["index"]) for e in processed["mm_item_order"]] == [
+        ("video", 0),
+        ("image", 0),
+    ]
+
+
+def test_video_frames_to_uint8_round_trips_every_value() -> None:
+    """Every uint8 value survives the 1/255 scaling both decode paths apply."""
+    levels = np.arange(256, dtype=np.uint8).reshape(1, 16, 16, 1)
+    frames_u8 = np.repeat(levels, 3, axis=3)
+    source = _pt_video(frames_u8)
+    before = [f.clone() for f in source.frames]
+
+    video = mmp._video_frames_to_uint8(source)
+
+    assert video.frames.shape == (1, 16, 16, 3)
+    assert np.array_equal(video.frames, frames_u8)
+    assert video.metadata == source.metadata and video.audio is source.audio
+    assert all(torch.equal(a, b) for a, b in zip(before, source.frames))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video_first, expected",
+    [
+        (False, [("image", 0), ("video", 0)]),
+        (True, [("video", 0), ("image", 0)]),
+    ],
+    ids=["image_first", "video_first"],
+)
+async def test_image_and_video_request_carries_the_prompt_item_order(
+    video_first, expected, image_video_processor, monkeypatch
+) -> None:
+    """TRT-LLM matches each item to its tokens and embeddings through
+    ``mm_item_order`` when a request has more than one modality."""
+    processor, _ = image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+
+    processed = await processor.process_openai_request(
+        _request(video_first=video_first),
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert [(e["modality"], e["index"]) for e in processed["mm_item_order"]] == expected
+
+
+@pytest.mark.asyncio
+async def test_item_order_follows_the_models_modality_grouping(
+    image_video_processor, monkeypatch
+) -> None:
+    """A chat template that writes all image placeholders before the video ones
+    (TRT-LLM's ``prompt_modality_order``) decides the order, not the messages."""
+    processor, _ = image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    monkeypatch.setattr(
+        mmp.MULTIMODAL_PLACEHOLDER_REGISTRY,
+        "get_prompt_modality_order",
+        lambda model_type: ("image", "video", "audio"),
+    )
+
+    processed = await processor.process_openai_request(
+        _request(video_first=True), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert [e["modality"] for e in processed["mm_item_order"]] == ["image", "video"]
+
+
+@pytest.mark.asyncio
+async def test_an_item_order_that_does_not_match_the_loaded_items_is_rejected(
+    image_video_processor, monkeypatch
+) -> None:
+    """Unless the order names each loaded item once, the items' prompt
+    positions are unknown; reject the request instead of letting TRT-LLM fail
+    on it."""
+    processor, _ = image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    request = _request()
+    request["multi_modal_order"].pop(0)  # the order leaves the image out
+
+    with pytest.raises(InvalidArgument) as excinfo:
+        await processor.process_openai_request(
+            request, embeddings=None, ep_disaggregated_params=None
+        )
+    assert "does not name each loaded item exactly once" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video_format, model_type", [("np", "multimodal"), (None, "glm5_next")]
+)
+async def test_image_and_video_request_without_an_item_order_is_rejected(
+    video_format, model_type, image_video_processor, monkeypatch
+) -> None:
+    """A frontend that does not send ``multi_modal_order`` gets its own 400,
+    not the one for models that cannot take the mix."""
+    processor, _ = image_video_processor(video_format, model_type)
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    request = _request()
+    del request["multi_modal_order"]
+
+    with pytest.raises(InvalidArgument) as excinfo:
+        await processor.process_openai_request(
+            request, embeddings=None, ep_disaggregated_params=None
+        )
+    assert "the request has no multi_modal_order" in str(excinfo.value)
+    assert "cannot take an image and a video" not in str(excinfo.value)
+
+
+def test_item_order_maps_each_frontend_modality_by_name() -> None:
+    """The frontend names each item by its content part type; ``<m>_url``
+    becomes TRT-LLM's ``<m>``, so a new modality needs no change here."""
+    order = mmp._mm_item_order(
+        [
+            {"modality": "audio_url", "index": 0},
+            {"modality": "image_url", "index": 1},
+            {"modality": "image_url", "index": 0},
+        ],
+        {"image": 2, "audio": 1},
+    )
+
+    assert order == [
+        {"modality": "audio", "index": 0},
+        {"modality": "image", "index": 1},
+        {"modality": "image", "index": 0},
+    ]
+
+
+_IMAGE_TOKEN, _VIDEO_TOKEN = 900, 901
+
+
+def _with_placeholders(request: dict) -> dict:
+    """Give ``request`` token_ids with one placeholder per media part, in
+    message order, as the chat template writes them."""
+    token_of = {"image_url": _IMAGE_TOKEN, "video_url": _VIDEO_TOKEN}
+    parts = request["extra_args"]["messages"][0]["content"]
+    request["token_ids"] = (
+        [1] + [token_of[p["type"]] for p in parts if p["type"] in token_of] + [2, 3]
+    )
+    return request
+
+
+class _ExpandingInputProcessor:
+    """Stands in for a Qwen-VL input processor under TRT-LLM's hashing wrapper:
+    each image placeholder expands to 3 tokens and each video placeholder to 5."""
+
+    TOKENS = {_IMAGE_TOKEN: 3, _VIDEO_TOKEN: 5}
+
+    def __init__(self) -> None:
+        self.multimodal_hashing_supported = None
+
+    def __call__(self, inputs, sampling_params):
+        ids = [
+            t for t in inputs["prompt_token_ids"] for _ in range(self.TOKENS.get(t, 1))
+        ]
+        return ids, {"multimodal_data": {}}
+
+    def get_num_tokens_per_image(self, *, image, **kwargs) -> int:
+        return self.TOKENS[_IMAGE_TOKEN]
+
+    def get_num_tokens_per_video(self, *, video, **kwargs) -> int:
+        return self.TOKENS[_VIDEO_TOKEN]
+
+    def get_vocab_size(self) -> int:
+        return 1000
+
+    def get_mm_token_ids(self) -> torch.Tensor:
+        return torch.tensor(list(self.TOKENS), dtype=torch.int32)
+
+    def get_mm_special_token_ids(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_image_and_video_request_after_single_modality_requests_passes_trtllm_hashing(
+    image_video_processor, monkeypatch
+) -> None:
+    """A worker sees image-only and video-only requests first, which settles
+    TRT-LLM's hashing as supported; after that a failure in it is raised and
+    stops the engine. Image + video requests, in either order, must then hash
+    with every item at its own tokens."""
+    processor, _ = image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    input_processor = _ExpandingInputProcessor()
+    hashed = create_input_processor_with_hash(input_processor)
+
+    async def run(request):
+        inputs = await processor.process_openai_request(
+            _with_placeholders(request), embeddings=None, ep_disaggregated_params=None
+        )
+        return inputs, hashed(inputs, SamplingParams())
+
+    await run(_request(video=False))
+    await run(_request(image=False))
+    assert input_processor.multimodal_hashing_supported is True
+
+    token_of = {"image": _IMAGE_TOKEN, "video": _VIDEO_TOKEN}
+    for video_first in (False, True):
+        inputs, (ids, extra) = await run(_request(video_first=video_first))
+        mm_input = extra["multimodal_input"]
+        placed = [
+            ids[pos : pos + n]
+            for pos, n in zip(
+                mm_input.multimodal_positions, mm_input.multimodal_lengths
+            )
+        ]
+        expected = []
+        for e in inputs["mm_item_order"]:
+            token = token_of[e["modality"]]
+            expected.append([token] * input_processor.TOKENS[token])
+        assert placed == expected
+
+    # Without the order TRT-LLM rejects mixed-modality inputs.
+    inputs.pop("mm_item_order")
+    with pytest.raises(ValueError, match="require prompt-ordered item metadata"):
+        hashed(inputs, SamplingParams())
 
 
 @pytest.mark.asyncio
@@ -626,6 +1396,28 @@ async def test_expanded_prompt_len_skipped_when_kwargs_override() -> None:
 
     assert "expanded_prompt_len" not in processed
     ip.get_num_tokens_per_image.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_expanded_prompt_len_left_to_engine_when_request_has_video(
+    image_video_processor, monkeypatch
+) -> None:
+    """The estimate counts image tokens only. With a video as well it would
+    drop the video's tokens and size max_tokens past the context, so a request
+    with video gets no hint, as a video-only request already does."""
+    processor, _ = image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+
+    mixed = await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+    image_only = await processor.process_openai_request(
+        _request(video=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert "expanded_prompt_len" not in mixed
+    assert image_only["expanded_prompt_len"] == 3 + 4  # 3 text ids + 4 image tokens
+    processor.input_processor.get_num_tokens_per_image.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,11 @@ class PipelineOutcome:
     reconcile_outcome: Optional[MergeOutcome] = None
     constrain_outcome: Optional[MergeOutcome] = None
     proposed_components: frozenset[ComponentKey] = field(default_factory=frozenset)
+    # Components explicitly targeted by a scaling override in PROPOSE or
+    # RECONCILE. Unlike the merged proposal, this excludes baseline-filled
+    # targets. CONSTRAIN bounds remain available separately in
+    # ``constrain_results`` so native targets can be clamped identically.
+    targeted_components: frozenset[ComponentKey] = field(default_factory=frozenset)
     # Startup reversal needs both intent and evaluation provenance: an idle
     # plugin tick is not a fresh hold, and a CONSTRAIN ceiling is not demand.
     propose_results: Optional[list[PluginResult]] = None
@@ -265,6 +270,16 @@ def _proposed_component_mask(
         if isinstance(plugin_result.result, OverrideResult)
         for target in plugin_result.result.targets
         if target.replicas is not None
+    )
+
+
+def _targeted_component_mask(
+    *plugin_result_groups: list[PluginResult],
+) -> frozenset[ComponentKey]:
+    """Return components explicitly targeted across mutating stages."""
+
+    return frozenset().union(
+        *(_proposed_component_mask(results) for results in plugin_result_groups)
     )
 
 
@@ -817,6 +832,7 @@ async def run_pipeline(
             evaluated_plugins=evaluated_proposal_plugins,
         )
         proposed_components = _proposed_component_mask(propose_plugin_results)
+        targeted_components = proposed_components
         if propose.short_circuited:
             return PipelineOutcome(
                 execute_action="skip_short_circuit",
@@ -825,6 +841,7 @@ async def run_pipeline(
                 predict_outcome=ca,
                 propose_outcome=propose,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
                 audit_events=audit,
             )
         if propose.proposal is not None:
@@ -850,6 +867,10 @@ async def run_pipeline(
             propose_results=propose_proposals,
             evaluated_plugins=evaluated_proposal_plugins,
         )
+        targeted_components = _targeted_component_mask(
+            propose_plugin_results,
+            reconcile_plugin_results,
+        )
         if reconcile.short_circuited:
             return PipelineOutcome(
                 execute_action="skip_short_circuit",
@@ -859,6 +880,7 @@ async def run_pipeline(
                 propose_outcome=propose,
                 reconcile_outcome=reconcile,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
                 audit_events=audit,
             )
         if reconcile.proposal is not None:
@@ -890,6 +912,10 @@ async def run_pipeline(
                 reconcile_outcome=reconcile,
                 constrain_outcome=constrain,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
+                propose_results=propose_plugin_results,
+                reconcile_results=reconcile_plugin_results,
+                constrain_results=constrain_plugin_results,
                 audit_events=audit,
             )
 
@@ -907,6 +933,10 @@ async def run_pipeline(
                 reconcile_outcome=reconcile,
                 constrain_outcome=constrain,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
+                propose_results=propose_plugin_results,
+                reconcile_results=reconcile_plugin_results,
+                constrain_results=constrain_plugin_results,
                 audit_events=audit,
             )
 
@@ -918,6 +948,7 @@ async def run_pipeline(
             reconcile_outcome=reconcile,
             constrain_outcome=constrain,
             proposed_components=proposed_components,
+            targeted_components=targeted_components,
             propose_results=propose_plugin_results,
             reconcile_results=reconcile_plugin_results,
             constrain_results=constrain_plugin_results,

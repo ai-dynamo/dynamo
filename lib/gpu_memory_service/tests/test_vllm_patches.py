@@ -3,6 +3,7 @@
 
 """Focused API regression coverage for vLLM GMS monkey-patches."""
 
+import inspect
 import sys
 from types import ModuleType
 
@@ -62,3 +63,17 @@ def test_nixl_base_patch_covers_pull_and_push_registration(monkeypatch):
 
     assert pull._scratch_kv_pending is kv_caches
     assert push._scratch_kv_pending is kv_caches
+
+
+def test_request_memory_patch_accepts_upstream_signature(monkeypatch):
+    """The shadow-mode patch must accept every argument vLLM passes."""
+    worker_utils = pytest.importorskip("vllm.v1.worker.utils")
+    original = worker_utils.request_memory
+    monkeypatch.setattr(worker_utils, "request_memory", original)
+    monkeypatch.setattr(patches, "_request_memory_patched", False)
+
+    patches.patch_request_memory()
+
+    patched = worker_utils.request_memory
+    assert patched is not original
+    inspect.signature(patched).bind(*inspect.signature(original).parameters)

@@ -54,7 +54,7 @@ pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
 }
 
 /// Canonical XXH3 seed used by every chain-step `(parent_seq, child_block_hash) → next_seq`
-/// in this codebase. Must match `dynamo_kv_router::protocols::XXH3_SEED` — the router's
+/// in this codebase. Must match `dynamo_kv_hashing::routing::XXH3_SEED` — the router's
 /// `compute_seq_hash_for_block` and the `PositionalIndexer`'s chain re-computation both
 /// route through [`compute_next_sequence_hash`] (or equivalently seeded helpers in
 /// `kv-router`), so changing this constant requires all of them to flip in lockstep.
@@ -66,8 +66,8 @@ pub const CHAIN_XXH3_SEED: u64 = 1337;
 /// This is the single source of truth for the chain recurrence used by:
 /// - [`PositionalLineageHash::extend`]
 /// - `TokenBlock::from_chunk`
-/// - `dynamo_kv_router::protocols::compute_next_seq_hash` (request side)
-/// - `dynamo_kv_router::indexer::PositionalIndexer` (chain re-validation)
+/// - `dynamo_kv_hashing::routing::compute_next_seq_hash` (request side)
+/// - `dynamo_kv_indexer::host::PositionalIndexer` (chain re-validation)
 ///
 /// Salt is already mixed into `block_hash[0]` and propagates through every parent, so
 /// the per-step seed is a constant: re-feeding salt at each step would be redundant.
@@ -310,7 +310,7 @@ fn block_has_mm(block_offset: usize, len: usize, mm_runs: &[TokenBlockMmInfo]) -
 /// 1. **Legacy / zero-MM** — when no run in `mm_runs` overlaps this block, the buffer is
 ///    `bytemuck::cast_slice(tokens)` (4 bytes per slot, LE u32). This matches the existing
 ///    `compute_hash_v2(cast_slice(&tokens), salt_hash)` path used by every existing
-///    [`TokenBlock`] in `dynamo_tokens` and kvbm — preserving cache identity for any block
+///    [`TokenBlock`] in `dynamo_tokens` — preserving cache identity for any block
 ///    that is not itself MM-affected.
 ///
 /// 2. **Tagged / MM-affected** — when at least one run overlaps this block, every slot

@@ -15,13 +15,19 @@
 //!
 //! ## Naming Conventions
 //!
+//! Before adding or changing a name here, read `.ai/metrics-guidelines.md`, which also covers
+//! labels, registration, stability, and documentation. Existing names that break these
+//! conventions are kept for compatibility; do not copy them, and do not rename them as a
+//! side effect of another change.
+//!
 //! All metric names should follow: `{prefix}_{name}_{suffix}`
 //!
 //! **Prefix**: Component identifier (`dynamo_component_`, `dynamo_frontend_`, etc.)
 //! **Name**: Descriptive snake_case name indicating what is measured
 //! **Suffix**:
-//!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`, `_messages`, `_connections`
-//!   - Counters: `_total` (not `total_` prefix) - for cumulative metrics that only increase
+//!   - Units, in base form: `_seconds` (not `_ms`), `_bytes`, `_tokens`, and `_ratio` for a
+//!     value from 0 to 1 (not `_percent`)
+//!   - Counters: `_total` (not `total_` prefix), after the unit - for cumulative metrics that only increase
 //!   - Gauges: No `_total` suffix - for current state metrics that can go up and down
 //!   - Note: Do not use `_counter`, `_gauge`, `_time`, or `_size` in Prometheus names (too vague)
 //!
@@ -29,14 +35,13 @@
 //! - ❌ `_counter` → ✅ `_total`
 //! - ❌ `_sum` → ✅ `_total`
 //! - ❌ `_gauge` → ✅ (no suffix needed for current values)
-//! - ❌ `_time` → ✅ `_seconds`, `_ms`, `_hours`, `_duration_seconds`
-//! - ❌ `_time_total` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
-//! - ❌ `_total_time` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
+//! - ❌ `_time`, `_ms` → ✅ `_seconds`, `_duration_seconds`
+//! - ❌ `_time_total`, `_total_time`, `_ms_total` → ✅ `_seconds_total`
 //! - ❌ `_total_time_seconds` → ✅ `_seconds_total`
-//! - ❌ `_average_time` → ✅ `_seconds_avg`, `_ms_avg`
-//! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
-//! - ❌ `_some_request_size` → ✅ `_some_request_bytes_avg`
-//! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
+//! - ❌ `_average_time` → ✅ a `_seconds` histogram; its average is `rate(x_sum[5m]) / rate(x_count[5m])`
+//! - ❌ `_size` → ✅ `_bytes`, `_tokens`
+//! - ❌ `_percent` → ✅ `_ratio` (0 to 1)
+//! - ❌ `_rate`, `_per_second` → ✅ a `_total` counter, charted with `rate()`
 //! - ❌ `disconnected_clients_total` → ✅ `disconnected_clients` (gauge, not counter)
 //! - ❌ `inflight_requests_total` → ✅ `inflight_requests` (gauge, not counter)
 //! - ❌ `connections_total` → ✅ `current_connections` (gauge, not counter)
@@ -47,9 +52,9 @@
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
 //! - ✅ `dynamo_frontend_active_requests` - Current active requests gauge
-//! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
-//! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
-//! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
+//! - ✅ `dynamo_component_cpu_usage_ratio` - CPU usage from 0 to 1
+//! - ✅ `dynamo_frontend_output_tokens_total` - Output token counter; `rate()` gives tokens per second
+//! - ✅ `dynamo_messaging_client_connection_duration_seconds` - Connection time histogram
 //! - ✅ `dynamo_messaging_client_current_connections` - Current active connections gauge
 //! - ✅ `dynamo_messaging_client_in_messages_total` - Total messages received counter
 //!
@@ -193,6 +198,24 @@ pub mod frontend_service {
     pub const INFLIGHT_INPUT_TOKENS: &str = "inflight_input_tokens";
     /// Total known input tokens of admitted requests.
     pub const INPUT_TOKENS_TOTAL: &str = "input_tokens_total";
+
+    /// Questions per admitted System One request.
+    pub const SYSTEMONE_QUESTIONS: &str = "systemone_questions";
+
+    /// Expanded prompt tokens per admitted System One request.
+    pub const SYSTEMONE_INPUT_TOKENS: &str = "systemone_input_tokens";
+
+    /// Requested candidate token IDs per admitted System One request.
+    pub const SYSTEMONE_CANDIDATE_IDS: &str = "systemone_candidate_ids";
+
+    /// Cached prompt tokens reported by a completed System One branch.
+    pub const SYSTEMONE_CACHED_TOKENS: &str = "systemone_cached_tokens";
+
+    /// Total question branches admitted for System One dispatch.
+    pub const SYSTEMONE_ADMITTED_BRANCHES_TOTAL: &str = "systemone_admitted_branches_total";
+
+    /// Duration of a System One execution phase in seconds.
+    pub const SYSTEMONE_PHASE_SECONDS: &str = "systemone_phase_seconds";
 
     /// Total number of terminal semantic request failures.
     pub const FAILURES_TOTAL: &str = "failures_total";
@@ -459,6 +482,10 @@ pub mod frontend_service {
 
         /// Feature not implemented (501)
         pub const NOT_IMPLEMENTED: &str = "not_implemented";
+
+        /// Media refused by a frontend serving a text-only model
+        /// (`--reject-media`)
+        pub const UNSUPPORTED_MODALITY: &str = "unsupported_modality";
     }
 }
 
@@ -564,54 +591,6 @@ pub mod task_tracker {
 pub mod distributed_runtime {
     /// Total uptime of the DistributedRuntime in seconds
     pub const UPTIME_SECONDS: &str = "uptime_seconds";
-}
-
-/// KVBM
-pub mod kvbm {
-    /// The number of offload blocks from device to host
-    pub const OFFLOAD_BLOCKS_D2H: &str = "offload_blocks_d2h";
-
-    /// The number of offload blocks from host to disk
-    pub const OFFLOAD_BLOCKS_H2D: &str = "offload_blocks_h2d";
-
-    /// The number of offload blocks from device to disk (bypassing host memory)
-    pub const OFFLOAD_BLOCKS_D2D: &str = "offload_blocks_d2d";
-
-    /// The number of onboard blocks from host to device
-    pub const ONBOARD_BLOCKS_H2D: &str = "onboard_blocks_h2d";
-
-    /// The number of onboard blocks from disk to device
-    pub const ONBOARD_BLOCKS_D2D: &str = "onboard_blocks_d2d";
-
-    /// The number of matched tokens
-    pub const MATCHED_TOKENS: &str = "matched_tokens";
-
-    /// Host cache hit rate (0.0-1.0) from the sliding window
-    pub const HOST_CACHE_HIT_RATE: &str = "host_cache_hit_rate";
-
-    /// Disk cache hit rate (0.0-1.0) from the sliding window
-    pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
-
-    /// Object storage cache hit rate (0.0-1.0) from the sliding window
-    pub const OBJECT_CACHE_HIT_RATE: &str = "object_cache_hit_rate";
-
-    /// Number of blocks offloaded from device to object storage
-    pub const OFFLOAD_BLOCKS_D2O: &str = "offload_blocks_d2o";
-
-    /// Number of blocks onboarded from object storage to device
-    pub const ONBOARD_BLOCKS_O2D: &str = "onboard_blocks_o2d";
-
-    /// Bytes transferred to object storage (offload)
-    pub const OFFLOAD_BYTES_OBJECT: &str = "offload_bytes_object";
-
-    /// Bytes transferred from object storage (onboard)
-    pub const ONBOARD_BYTES_OBJECT: &str = "onboard_bytes_object";
-
-    /// Number of failed object storage read operations (blocks)
-    pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
-
-    /// Number of failed object storage write operations (blocks)
-    pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
 /// Router per-request metrics (component-scoped via `MetricsHierarchy`).

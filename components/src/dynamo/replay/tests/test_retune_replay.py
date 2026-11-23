@@ -16,6 +16,7 @@ point and the replay router picks it up mid-run.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import multiprocessing
@@ -26,17 +27,18 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate.replay",
+    "aisim.replay",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from dynamo.llm import KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config
 from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
 from dynamo.planner.core.types import RetuneParams, TrafficObservation
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.retune import sweep
 from dynamo.replay import api, run_synthetic_trace_replay, run_trace_replay
+from tests.utils.ais_perf_model import IDENTITY
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -246,6 +248,76 @@ def test_retune_lands_router_and_planner_changes_mid_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+@pytest.mark.timeout(300)
+def test_retune_lands_a_scaling_policy_change_mid_run(tmp_path, monkeypatch):
+    # The router temperature wins the window; the load interval rides along.
+    # Neither grid interval is the running 5 s, so the decision changes it,
+    # and the running engine re-registers its load plugin at the new one.
+    traces = _write_workload(tmp_path, blocks=16, output_tokens=128)
+    seen: list[tuple[float, int, float]] = []
+    original_tick = OrchestratorEngineAdapter.tick
+
+    async def recording_tick(self, scheduled_tick, tick_input):
+        plugin = self._orchestrator.registry.get_plugin("builtin_load_propose")
+        seen.append(
+            (
+                tick_input.now_s,
+                self._config.load_adjustment_interval_seconds,
+                plugin.execution_interval_seconds,
+            )
+        )
+        return await original_tick(self, scheduled_tick, tick_input)
+
+    monkeypatch.setattr(OrchestratorEngineAdapter, "tick", recording_tick)
+    planner_config = {
+        "mode": "agg",
+        "optimization_target": "throughput",
+        "report_interval_hours": None,
+        "live_dashboard_port": 0,
+        "min_endpoint": 4,
+        "retune": {
+            "interval_seconds": _INTERVAL_S,
+            "grace_seconds": 1,
+            "max_parallel": 2,
+            "sla_ttft_ms": 60.0,
+            "sla_itl_ms": 100.0,
+            "router": _ROUTER_DOMAIN,
+            "planner": {
+                "scaling_policy": {"preset": False},
+                "load_adjustment_interval_seconds": {"choices": [10, 15]},
+                "load_sensitivity": {"preset": False},
+                "load_scaling_down_sensitivity": 80,
+            },
+        },
+    }
+
+    report = run_trace_replay(
+        traces,
+        trace_format="dynamo",
+        router_mode="kv_router",
+        router_config=KvRouterConfig(router_temperature=100.0),
+        num_workers=4,
+        extra_engine_args=_engine(),
+        planner_config=planner_config,
+    )
+
+    assert report.summary["completed_requests"] == _HEAD_REQUESTS + _TAIL_REQUESTS
+    first = report.planner.retune_events[0]
+    assert first["outcome"] == "applied", first
+    assert first["chosen"]["router"] == _router_point(0.0)
+    changes = first["planner_changes"]
+    assert set(changes) == {"load_adjustment_interval_seconds"}
+    new_interval = changes["load_adjustment_interval_seconds"]
+    assert new_interval in (10, 15)
+    # Easy mode scales on load only: no predictor to swap.
+    assert first["predictor_warmup"] is None
+    before = {(value, plugin) for now_s, value, plugin in seen if now_s <= _DECIDE_S}
+    after = {(value, plugin) for now_s, value, plugin in seen if now_s > _DECIDE_S}
+    assert before == {(5, 5.0)}
+    assert after == {(new_interval, float(new_interval))}
+
+
+@pytest.mark.integration
 @pytest.mark.timeout(120)
 def test_candidate_replays_share_common_random_numbers(tmp_path):
     # Near-random routing (router_temperature 100) makes every placement a
@@ -276,8 +348,8 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
 
     baseline = evaluate({})
     assert evaluate({}) == baseline
-    # Replay reports no shared cache hits, so this candidate changes no
-    # routing decision: it ties the baseline, and the controller keeps it.
+    # These workers take no KV fetch hints and replay has no shared cache, so
+    # this candidate changes no routing decision: it ties the baseline and is kept.
     assert evaluate({"shared_cache_multiplier": 0.5}) == baseline
     assert evaluate({"router_temperature": 0.0})[0] != baseline[0]
 
@@ -579,6 +651,38 @@ def test_retune_rejects_an_engine_shape_that_differs_from_the_planner_mode(
 
 
 @pytest.mark.unit
+def test_retune_rejects_the_dgdr_executor(tmp_path):
+    # Replay runs local sweeps only; executor 'dgdr' needs a live Planner.
+    preset = dict.fromkeys(
+        ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert"), 1
+    )
+    worker = {
+        "parallelism": {"preset": [preset]},
+        "scheduler": {"max_batched_tokens": 8192, "max_sequences": 256},
+    }
+    engine = {"mode": "aggregated", "workers": {"aggregated": worker}}
+    dgdr = {"claim_name": "traces", "model": "m", "sku": "h200_sxm", "engine": engine}
+    config = PlannerConfig.model_validate(
+        _guard_config()
+        | {
+            "retune": {
+                "interval_seconds": 21600,
+                "timeout_seconds": 20400,
+                "router": "default",
+                "executor": "dgdr",
+                "dgdr": dgdr,
+            }
+        }
+    )
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
+    )
+
+    with pytest.raises(ValueError, match="executor 'dgdr' is not supported in replay"):
+        api._retune_inputs(config, **_inputs_kwargs(trace))
+
+
+@pytest.mark.unit
 def test_synthetic_replay_rejects_retune():
     with pytest.raises(
         ValueError, match="traffic.source type: trace with format: dynamo"
@@ -672,7 +776,12 @@ def test_only_a_throughput_planner_reads_the_warmup_trace_as_history(tmp_path):
 
 # Every run_trace_replay kwarg, classified for retune candidate replays, so a
 # new kwarg cannot silently replay candidates on another engine.
-_PINNED = set(RetuneEngineSpec.model_fields)  # from the outer replay
+# From the outer replay. A candidate takes the pinned router perf config
+# under the keyword that is not deprecated, unless only the deprecated one
+# takes it (see test_engine_spec_returns_old_keyword_config_of_another_worker_type).
+_PINNED = (set(RetuneEngineSpec.model_fields) - {"ais_perf_config"}) | {
+    "router_ais_perf_model"
+}
 _PER_CANDIDATE = {  # set by sweep.evaluate_candidate
     "num_workers",
     "num_prefill_workers",
@@ -688,6 +797,7 @@ _PER_CANDIDATE = {  # set by sweep.evaluate_candidate
     "_deterministic",
 }
 _REJECTED = {  # by _retune_inputs: retune replays complete open-loop windows
+    "conversation_affinity",  # rejected before constructing the Planner
     "replay_concurrency",
     "agentic_lanes",
     "agentic_snapshot",
@@ -705,12 +815,18 @@ _IGNORED = {  # no effect on a candidate's engine or score
     "trace_shared_prefix_ratio",  # other trace formats only
     "trace_num_prefix_groups",
     "weka_nested_timestamp_basis",
+    "agentic_warmup_policy",  # only with agentic_warmup, which retune rejects
+}
+# The outer replay resolves these into the pinned engine fields.
+_RESOLVED_BY_OUTER_REPLAY = {
+    "ais_perf_config",
+    "ais_perf_model",
 }
 
 
 @pytest.mark.unit
 def test_every_replay_kwarg_is_classified_for_retune(tmp_path, monkeypatch):
-    groups = [_PINNED, _PER_CANDIDATE, _REJECTED, _IGNORED]
+    groups = [_PINNED, _PER_CANDIDATE, _REJECTED, _IGNORED, _RESOLVED_BY_OUTER_REPLAY]
     params = set(inspect.signature(run_trace_replay).parameters) - {"trace_files"}
     assert set().union(*groups) == params
     assert sum(len(group) for group in groups) == len(params)
@@ -771,3 +887,159 @@ def test_run_trace_replay_hands_the_warmup_to_the_inner_planner(monkeypatch):
         )
 
     assert received["warmup_observations"] is warmup
+
+
+def _evaluate_candidate(engine, base_planner=None):
+    return sweep.evaluate_candidate(
+        "window.jsonl",
+        engine,
+        1.0,
+        RetuneParams(router={}, planner={}),
+        {"aggregated": 1},
+        base_planner,
+        None,
+        100.0,
+        10.0,
+        60.0,
+        "GoodputPerGPU",
+    )
+
+
+def _pinned_router_perf_config(worker_type: str) -> dict:
+    return AisPerfConfig(config={**IDENTITY, "worker_type": worker_type}).to_dict()
+
+
+_DISAGGREGATED = {"prefill_engine_args": {}, "decode_engine_args": {}}
+
+
+@pytest.fixture
+def native_calls(monkeypatch) -> list[dict]:
+    """The keyword arguments of each native replay call; the stand-in raises."""
+    calls: list[dict] = []
+
+    def record(*_args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(api, "_run_mocker_trace_replay", record)
+    return calls
+
+
+@pytest.fixture
+def planner_adapter_calls(monkeypatch) -> list[dict]:
+    """The keyword arguments of each planner adapter call; no planner is built."""
+    calls: list[dict] = []
+
+    def adapter(**kwargs):
+        calls.append(kwargs)
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(api, "_planner_replay_adapter", lambda: adapter)
+    return calls
+
+
+@pytest.mark.unit
+def test_sweep_candidate_engine_perf_config_reaches_native_call(native_calls):
+    pinned = _pinned_router_perf_config("aggregated")
+    engine = RetuneEngineSpec(
+        router_config={"router_prefill_load_model": "ais"}, ais_perf_config=pinned
+    )
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        _evaluate_candidate(engine)
+
+    (call,) = native_calls
+    assert call["ais_perf_config"].to_dict() == pinned
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "engine_args,worker_type",
+    [
+        pytest.param({}, "aggregated", id="aggregated-replay"),
+        pytest.param(_DISAGGREGATED, "prefill", id="disaggregated-replay"),
+    ],
+)
+def test_engine_spec_returns_pinned_perf_config_as_router_keyword(
+    engine_args, worker_type
+):
+    # The worker type the replay's router reads.
+    pinned = _pinned_router_perf_config(worker_type)
+
+    kwargs = RetuneEngineSpec(ais_perf_config=pinned, **engine_args).replay_kwargs()
+
+    # The mapping as pinned, under the keyword that reads a mapping.
+    assert kwargs["router_ais_perf_model"] == pinned
+    assert set(kwargs) == _PINNED
+    assert (
+        RetuneEngineSpec(**engine_args).replay_kwargs()["router_ais_perf_model"] is None
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "engine_args,worker_type",
+    [
+        pytest.param({}, "prefill", id="aggregated-replay-prefill"),
+        pytest.param({}, "decode", id="aggregated-replay-decode"),
+        pytest.param(
+            _DISAGGREGATED, "aggregated", id="disaggregated-replay-aggregated"
+        ),
+        pytest.param(_DISAGGREGATED, "decode", id="disaggregated-replay-decode"),
+    ],
+)
+def test_engine_spec_returns_old_keyword_config_of_another_worker_type(
+    engine_args, worker_type
+):
+    # The deprecated ais_perf_config= of the outer replay takes any worker
+    # type; router_ais_perf_model= would refuse this one.
+    pinned = _pinned_router_perf_config(worker_type)
+
+    kwargs = RetuneEngineSpec(ais_perf_config=pinned, **engine_args).replay_kwargs()
+
+    assert isinstance(kwargs["ais_perf_config"], AisPerfConfig)
+    assert kwargs["ais_perf_config"].to_dict() == pinned
+    assert set(kwargs) == (_PINNED - {"router_ais_perf_model"}) | {"ais_perf_config"}
+
+
+@pytest.mark.unit
+def test_sweep_candidate_replays_old_keyword_config_of_another_worker_type(
+    native_calls,
+):
+    # The outer replay can pin such a config only through the deprecated
+    # ais_perf_config= keyword, which takes any worker type.
+    pinned = _pinned_router_perf_config("prefill")
+    engine = RetuneEngineSpec(
+        router_mode="kv_router",
+        router_config={"router_prefill_load_model": "ais"},
+        ais_perf_config=pinned,
+    )
+
+    # The outer replay warned about the keyword; its candidates do not.
+    with pytest.raises(RuntimeError, match="recorded"):
+        _evaluate_candidate(engine)
+
+    (call,) = native_calls
+    assert call["ais_perf_config"].to_dict() == pinned
+
+
+@pytest.mark.unit
+def test_sweep_candidate_does_not_warn_about_old_planner_config(
+    planner_adapter_calls, native_calls
+):
+    # What a running Planner written with the deprecated keys hands its sweep.
+    base_planner = {
+        "mode": "agg",
+        "ais_perf_model": {"roles": {"aggregated": IDENTITY}},
+    }
+
+    # The Planner warned when it read its config; its candidates do not.
+    with pytest.raises(RuntimeError, match="recorded"):
+        _evaluate_candidate(RetuneEngineSpec(), base_planner)
+
+    (adapter_call,) = planner_adapter_calls
+    assert set(adapter_call["planner_config_arg"].ais_perf_model.roles) == {
+        "aggregated"
+    }
+    # The replay went on past the point where it warns.
+    assert len(native_calls) == 1

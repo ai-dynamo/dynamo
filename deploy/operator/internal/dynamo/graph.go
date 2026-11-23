@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
-	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -38,6 +37,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -56,7 +56,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -939,162 +938,6 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-// ComponentServiceParams contains all the fields needed to generate a Kubernetes
-// Service for a Dynamo component, independent of whether the caller is the DGD
-// (Grove) or DCD controller.
-type ComponentServiceParams struct {
-	ServiceName     string
-	Namespace       string
-	ComponentType   string
-	DynamoNamespace string
-	ComponentName   string // original user-provided name, used in selector
-	Labels          map[string]string
-	Annotations     map[string]string
-	IsK8sDiscovery  bool
-}
-
-func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, error) {
-	var servicePort corev1.ServicePort
-	switch params.ComponentType {
-	case commonconsts.ComponentTypeFrontend:
-		servicePort = corev1.ServicePort{
-			Name:       commonconsts.DynamoServicePortName,
-			Port:       commonconsts.DynamoServicePort,
-			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
-			Protocol:   corev1.ProtocolTCP,
-		}
-	case commonconsts.ComponentTypeEPP:
-		servicePort = corev1.ServicePort{
-			Name:        commonconsts.EPPGRPCPortName,
-			Port:        commonconsts.EPPGRPCPort,
-			TargetPort:  intstr.FromInt(commonconsts.EPPGRPCPort),
-			Protocol:    corev1.ProtocolTCP,
-			AppProtocol: new("http2"),
-		}
-	default:
-		servicePort = corev1.ServicePort{
-			Name:       commonconsts.DynamoSystemPortName,
-			Port:       commonconsts.DynamoSystemPort,
-			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
-			Protocol:   corev1.ProtocolTCP,
-		}
-	}
-
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
-	if params.IsK8sDiscovery {
-		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
-		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
-	}
-
-	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
-		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
-	}
-
-	annotations := make(map[string]string)
-	maps.Copy(annotations, params.Annotations)
-
-	service := &corev1.Service{
-		// Service names must be DNS-1035 labels (no dots). Replace dots with
-		// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
-		Name:        NormalizeKubeResourceName(params.ServiceName),
-		Namespace:   params.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-		Spec: corev1.ServiceSpec{
-			Selector: selector,
-			Ports:    []corev1.ServicePort{servicePort},
-		},
-	}
-	return service, nil
-}
-
-// maxServiceNameLength is the Kubernetes limit on a Service name, which must be a
-// DNS-1035 label.
-const maxServiceNameLength = 63
-
-// ElasticEPLeaderServiceName returns the name a single-pod elastic-EP leader is
-// reachable at: its component service name plus a "-ray" suffix.
-//
-// That suffix can push a long name past the DNS-1035 limit, which the API server
-// rejects, failing the whole stable-resources reconcile. Truncate with a hash suffix
-// instead, as PCSNameForDGD does. The hash must be deterministic because the follower
-// derives this name independently rather than reading it back from the Service.
-func ElasticEPLeaderServiceName(componentServiceName string) string {
-	name := NormalizeKubeResourceName(componentServiceName + "-ray")
-	if len(name) <= maxServiceNameLength {
-		return name
-	}
-
-	hash := fnv.New32a()
-	hash.Write([]byte(name))
-	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
-	return name[:maxServiceNameLength-len(suffix)-1] + "-" + suffix
-}
-
-// GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
-// elastic-EP leader a stable address its followers join with
-// `ray start --address=<service>:6379` (see injectElasticEPRayLaunchFlags).
-//
-// Two spec choices are deliberate:
-//
-//   - clusterIP: None, because a load-balanced ClusterIP cannot carry Ray's multi-port
-//     head<->worker traffic.
-//   - PublishNotReadyAddresses, because the leader's engine only starts once its
-//     data-parallel ranks join, so gating the address on readiness would deadlock.
-//
-// The selector matches every pod carrying the component labels, so the caller must emit
-// this only while the component renders as one pod. A follower clique sharing that label
-// would have to narrow the selector to the leader role.
-func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
-	// Copy the caller's metadata so the Service carries the component's labels and
-	// annotations without aliasing the caller's maps.
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
-
-	annotations := make(map[string]string)
-	maps.Copy(annotations, params.Annotations)
-
-	// Select the elastic-EP component itself; the caller's single-pod gate is what makes
-	// this resolve to the one leader pod.
-	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
-		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
-	}
-
-	return &corev1.Service{
-		Name:        ElasticEPLeaderServiceName(params.ServiceName),
-		Namespace:   params.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-		Spec: corev1.ServiceSpec{
-			ClusterIP:                corev1.ClusterIPNone,
-			PublishNotReadyAddresses: true,
-			Selector:                 selector,
-			Ports: []corev1.ServicePort{
-				{
-					// Ray GCS head port (VLLMPort). Followers connect their raylet
-					// here via `ray start --address=<svc>:6379`.
-					Name:       "ray-gcs",
-					Port:       6379,
-					TargetPort: intstr.FromInt(6379),
-					Protocol:   corev1.ProtocolTCP,
-				},
-				{
-					// Leader system/health port; the follower's /live gate polls it.
-					Name:       commonconsts.DynamoSystemPortName,
-					Port:       commonconsts.DynamoSystemPort,
-					TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-		},
-	}
-}
-
 func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1.Ingress {
 	resourceName := NormalizeKubeResourceName(componentName)
 	ingress := &networkingv1.Ingress{
@@ -1191,7 +1034,7 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 // This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
 // avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
 func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
-	// Normalize the service name the same way GenerateComponentService does
+	// Normalize the service name the same way componentdeployment.RenderService does
 	// so the DestinationRule host matches the actual Service DNS name.
 	normalizedName := NormalizeKubeResourceName(serviceName)
 
@@ -1469,7 +1312,10 @@ func PCSNameForDGD(
 	hash := fnv.New32a()
 	hash.Write([]byte(dgd.Name))
 	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
-	return dgd.Name[:pcsBudget-5] + "-" + suffix
+	// Trim only dots, since ".-" is not a valid DNS-1123 subdomain. Trimming "-"
+	// too would rename the PodCliqueSet of a running DGD.
+	prefix := strings.TrimRight(dgd.Name[:pcsBudget-5], ".")
+	return prefix + "-" + suffix
 }
 
 func isDelegatedComponent(
@@ -1649,7 +1495,7 @@ func GenerateBasePodSpec(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Validate the complete component before selecting its authored role template.
-	component, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(component, role, backendFramework)
+	component, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
 		return nil, err
 	}
@@ -1688,7 +1534,7 @@ func generateBasePodSpecWithDefaults(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Stored objects must satisfy admission invariants before defaults are applied.
-	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}
 	return generateBasePodSpecWithDefaultsAndOwnership(
@@ -2200,14 +2046,18 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		base.Env = MergeEnvs(baseEnv, user.Env)
 
 		// Replace complete probes so handlers cannot merge with the defaults.
-		if user.LivenessProbe != nil {
-			base.LivenessProbe = user.LivenessProbe.DeepCopy()
-		}
-		if user.ReadinessProbe != nil {
-			base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
-		}
-		if user.StartupProbe != nil {
-			base.StartupProbe = user.StartupProbe.DeepCopy()
+		// Workloads created before operator 1.7.0 keep the field merge above so an
+		// operator-only upgrade does not change their rendered probes.
+		if compatibility.FrontendSidecarProbeReplacement.Enabled(parentContext.Annotations) {
+			if user.LivenessProbe != nil {
+				base.LivenessProbe = user.LivenessProbe.DeepCopy()
+			}
+			if user.ReadinessProbe != nil {
+				base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+			}
+			if user.StartupProbe != nil {
+				base.StartupProbe = user.StartupProbe.DeepCopy()
+			}
 		}
 
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
@@ -2303,7 +2153,7 @@ func GeneratePodSpecForComponent(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Validate the complete component before selecting its authored role template.
-	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role, backendFramework)
+	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
 		return nil, err
 	}
@@ -2412,6 +2262,18 @@ func applyDGDTemplateDefaults(
 
 	propagateDGDSpecMetadata(dynamoDeployment, component)
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+}
+
+// EffectiveDGDComponentTemplates applies the same defaults used when rendering
+// DGD component Pods. It leaves the stored DGD unchanged.
+func EffectiveDGDComponentTemplates(dgd *v1beta1.DynamoGraphDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) ([]*corev1.PodTemplateSpec, error) {
+	var alpha v1alpha1.DynamoGraphDeployment
+	if err := alpha.ConvertFrom(dgd); err != nil {
+		return nil, fmt.Errorf("read preserved DGD service settings: %w", err)
+	}
+	effective := component.DeepCopy()
+	applyDGDTemplateDefaults(effective, dgd, nil, GetComponentDynamoSidecar(effective) != nil)
+	return ComponentPodTemplates(effective), nil
 }
 
 func shouldApplyKvTransferPolicyToWorkerComponent(
@@ -2666,7 +2528,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 			templateRole = RoleLeader
 		}
 	}
-	effectiveComponent, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(p.component, templateRole, p.backendFramework)
+	effectiveComponent, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(p.component, templateRole)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve component for role %s: %w", p.r.Name, err)
 	}
@@ -2781,7 +2643,7 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 
-	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName, p.operatorConfig.Orchestrators.KaiScheduler.SchedulerName)
 	injectVolcanoSchedulerIfEnabled(clique, p.runtimeConfig)
 	return clique, nil
 }
@@ -3229,8 +3091,6 @@ func generatePodMetadata(
 	maps.Copy(labels, GetPodTemplateLabels(component))
 	maps.Copy(annotations, GetPodTemplateAnnotations(component))
 	// Apply system labels after user merge to prevent override
-	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
-	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
@@ -3258,7 +3118,7 @@ func generatePodMetadata(
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
-	return metav1.ObjectMeta{Labels: labels, Annotations: annotations}
+	return grove.RenderPodMetadata(dynamoDeployment.Name, GetDCDResourceName(dynamoDeployment, componentName, ""), metav1.ObjectMeta{Labels: labels, Annotations: annotations})
 }
 
 func getDGDComponentAlphaLabels(dgd *v1beta1.DynamoGraphDeployment, componentName string) map[string]string {
@@ -3307,14 +3167,12 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 	return append([]v1alpha1.PVC(nil), alpha.Spec.PVCs...)
 }
 
-// DetectBackendFrameworkFromArgs detects the backend framework from command/args.
+// DetectBackendFrameworkFromArgs detects the backend framework from the Dynamo
+// launcher in command/args. Native engine commands such as vllm-rs are not
+// detected: the resolved backend is persisted on the child DCD and hashed into
+// the worker generation, so a new launcher heuristic would roll existing
+// workloads (#17543). Native engines set backendFramework explicitly.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
-	// Kubernetes command is argv, not shell source. Wrapped native launches
-	// require an explicit backendFramework rather than shell interpretation.
-	if len(command) > 0 && !strings.Contains(command[0], "$(") && path.Base(command[0]) == "vllm-rs" {
-		return BackendFrameworkVLLM, nil
-	}
-
 	// Combine command and args to search through all parts
 	allParts := slices.Concat(command, args)
 	fullCommand := strings.Join(allParts, " ")
@@ -3462,97 +3320,12 @@ func getBackendFrameworkFromComponent(
 	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
 }
 
-// ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
-// This is a helper for the controller to use our backend logic
-func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1beta1.DynamoComponentDeployment) *v1beta1.DynamoComponentDeploymentSharedSpec {
-	return dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
-}
-
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
 func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponentDeployment) (BackendFramework, error) {
 	return determineBackendFrameworkForComponent(
 		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
 		dynComponent.Spec.BackendFramework,
 	)
-}
-
-type GenerateBasePodSpecForControllerOptions struct {
-	// WorkloadComponentType overrides the component type used for pod workload
-	// defaults and env vars. Empty means use dynComponent.Spec.ComponentType.
-	WorkloadComponentType v1beta1.ComponentType
-}
-
-// GenerateBasePodSpecForController generates a PodSpec using backend logic for controller usage
-// This preserves the base pod generation while allowing controller-specific enhancements
-func GenerateBasePodSpecForController(
-	dynComponent *v1beta1.DynamoComponentDeployment,
-	secretsRetriever SecretsRetriever,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
-	role Role,
-	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
-	containerGPUs ContainerGPUCount,
-	options GenerateBasePodSpecForControllerOptions,
-) (*corev1.PodSpec, error) {
-	// Validate the complete component before selecting its authored role template.
-	componentSpec, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(
-		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec, role, BackendFramework(dynComponent.Spec.BackendFramework),
-	)
-	if err != nil {
-		return nil, err
-	}
-	if options.WorkloadComponentType != "" {
-		componentSpec.ComponentType = options.WorkloadComponentType
-	}
-	if workerHash := GetDCDEffectiveWorkerHash(dynComponent); workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
-		ensurePodTemplate(componentSpec).Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
-	}
-
-	numberOfNodes := componentSpec.GetNumberOfNodes()
-
-	// Backend configuration belongs to the engine in main, independently of the runtime launch.
-	var command, args []string
-	if main := GetMainContainer(componentSpec); main != nil {
-		command = main.Command
-		args = main.Args
-	}
-	backendFramework, err := determineBackendFramework(
-		string(componentSpec.ComponentType),
-		command,
-		args,
-		dynComponent.Spec.BackendFramework,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
-	}
-
-	parentGraphDeploymentName := dynComponent.GetParentGraphDeploymentName()
-	if parentGraphDeploymentName == "" {
-		parentGraphDeploymentName = dynComponent.Name
-	}
-
-	// Generate base PodSpec with standard env vars using merged component envs
-	componentName := GetDCDComponentName(dynComponent)
-	podSpec, err := generateBasePodSpec(
-		componentSpec,
-		backendFramework,
-		secretsRetriever,
-		parentGraphDeploymentName,
-		dynComponent.Namespace,
-		role,
-		numberOfNodes,
-		operatorConfig,
-		multinodeDeploymentType,
-		componentName,
-		nil, // use default deployer
-		roleLaunchOwnership,
-		nativeSidecar,
-		containerGPUs,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return podSpec, nil
 }
 
 // getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework

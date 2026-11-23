@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 """CPU-only end-to-end coverage for the public Dynamo-stack CLI."""
 
@@ -14,14 +13,10 @@ from typing import Any
 
 import pytest
 import yaml
+from aisim.config.cli import CorePredictionConfig
+from aisim.config.common import split_config_sections
 
-pytest.importorskip(
-    "aisimulate.config.cli",
-    reason="AISimulate is an optional Dynamo simulation dependency",
-)
-
-from aisimulate.config.cli import CorePredictionConfig
-from aisimulate.config.common import split_config_sections
+from dynamo.common.ais_perf_model import AIS_OLD_INPUTS_REMOVE_IN
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
@@ -46,7 +41,7 @@ _RECOMMEND_CASES = tuple(
 
 def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        [sys.executable, "-m", "aisimulate", *args],
+        [sys.executable, "-m", "aisim", *args],
         cwd=_REPO_ROOT,
         text=True,
         capture_output=True,
@@ -54,7 +49,7 @@ def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[
         check=False,
     )
     assert result.returncode == 0, (
-        f"aisimulate {' '.join(args)} failed with {result.returncode}\n"
+        f"aisim {' '.join(args)} failed with {result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     return result
@@ -99,15 +94,26 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         "11-trace-agentic-mooncake.yaml": 3,
         "12-trace-applied-compute-agentic.yaml": 3,
         "13-trace-dynamo-agentic.yaml": 4,
+        "14-trace-dynamo-kvcr.yaml": 2,
     }
     if config_path.name in expected_trace_requests:
         assert (
             summary["completed_requests"] == expected_trace_requests[config_path.name]
         )
 
+    if config_path.name == "14-trace-dynamo-kvcr.yaml":
+        assert "kvcr" in report["summary"]
+
     if config_path.name == "08-synthetic-throughput-planner.yaml":
         assert report["planner"]["metadata"]["bootstrap"]["status"] == "installed"
         assert "falling back to load-based scaling only" not in result.stderr
+
+    if config_path.name == "07-synthetic-ais-router.yaml":
+        # This case writes router.ais_perf_model, so no old AIS input is left.
+        assert (
+            f" deprecated and will be removed in {AIS_OLD_INPUTS_REMOVE_IN}; use "
+            not in result.stderr
+        )
 
 
 @pytest.mark.parametrize("config_path", _RECOMMEND_CASES, ids=lambda path: path.stem)
@@ -128,6 +134,12 @@ def test_dynamo_recommend_cli_cases_round_trip(
     )
 
     rows = json.loads(result.stdout)
+    if config_path.name == "05-router-planner-pareto.yaml":
+        # This case keeps the old form on purpose: it must still warn.
+        assert (
+            "router.prefill_load_model.type: ais without router.ais_perf_model "
+            "is deprecated" in result.stderr
+        )
     recommendation_paths = sorted((output / "recommendations").glob("*.yaml"))
     assert rows
     assert len(recommendation_paths) == len(rows)

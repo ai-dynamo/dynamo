@@ -17,6 +17,8 @@ use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+use crate::model_card::ModelDeploymentCard;
+use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -28,9 +30,12 @@ use crate::types::{
         classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
         embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
         images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-        rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
+        rerank::OpenAIRerankStreamingEngine, transcriptions::OpenAITranscriptionsStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
+
+const SYSTEMONE_MAX_QUESTIONS: usize = 128;
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -86,6 +91,69 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
+}
+
+/// Scoring engine and model assets selected from one WorkerSet snapshot.
+#[derive(Clone)]
+pub(crate) struct SystemOneExecutionSelection {
+    pub(crate) backend: crate::protocols::systemone::ScoringBackend,
+    pub(crate) canonical_model: String,
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) card: ModelDeploymentCard,
+    pub(crate) preprocessor: Arc<OpenAIPreprocessor>,
+    pub(crate) admitted_ids: Option<tokio::sync::watch::Receiver<Vec<u64>>>,
+    pub(crate) lifecycle_cancellation: Option<tokio_util::sync::CancellationToken>,
+}
+
+impl SystemOneExecutionSelection {
+    pub(crate) fn validate_dispatch(
+        &self,
+        pinned_worker: Option<u64>,
+    ) -> Result<(), SystemOneSelectionError> {
+        if self
+            .lifecycle_cancellation
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        let Some(admitted) = &self.admitted_ids else {
+            // In-process engines have one trusted local worker and no discovery watcher.
+            return Ok(());
+        };
+        if admitted.has_changed().is_err() {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        let workers = admitted.borrow();
+        if workers.is_empty() || pinned_worker.is_some_and(|worker| !workers.contains(&worker)) {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
+        // Both qualified profiles provide vocabulary logprobs and measured cache reads.
+        // Tokenizer-specific candidate limits are checked during preflight.
+        dynamo_decisions::Capabilities {
+            max_questions: SYSTEMONE_MAX_QUESTIONS,
+            max_candidates: self.backend.max_candidates(),
+            supports_predicate: true,
+            supports_choice: true,
+            supports_score: true,
+            measured_cache_reads: true,
+            prompt_format_version: 1,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum SystemOneSelectionError {
+    #[error("model is not registered")]
+    NotFound,
+    #[error("model does not support aggregate SGLang scoring")]
+    Unsupported,
+    #[error("SGLang scoring worker is unavailable")]
+    Unavailable,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -299,6 +367,14 @@ impl Model {
             .any(|worker_set| worker_set.has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a transcriptions engine.
+    pub fn has_transcriptions_engine(&self) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_transcriptions_engine())
+    }
+
     /// Check if any WorkerSet has a realtime engine.
     pub fn has_realtime_engine(&self) -> bool {
         self.worker_sets
@@ -313,6 +389,13 @@ impl Model {
             .load()
             .values()
             .any(|worker_set| worker_set.has_generate_engine())
+    }
+
+    /// Check whether a chat worker also advertises `capability`.
+    pub fn has_chat_engine_for_capability(&self, capability: &str) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set.has_chat_engine() && worker_set.supports_runtime_capability(capability)
+        })
     }
 
     /// Check whether a Generate worker also advertises `capability`.
@@ -666,6 +749,13 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_audios_engine()))
     }
 
+    pub fn get_transcriptions_engine(
+        &self,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.transcriptions_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_transcriptions_engine()))
+    }
+
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
@@ -718,13 +808,114 @@ impl Model {
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
 
+    pub(crate) fn get_systemone_execution_selection(
+        &self,
+        required_candidates: usize,
+    ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
+        self.select_worker_set_with_worker_count(
+            |ws| {
+                let backend = ws.card().systemone_backend()?;
+                if required_candidates > backend.max_candidates() {
+                    return None;
+                }
+                self.systemone_execution_inputs(ws)
+            },
+            WorkerSet::decision_worker_count,
+        )
+        .or_else(|| {
+            let has_capable_profile = self.worker_sets.load().values().any(|ws| {
+                ws.card()
+                    .systemone_backend()
+                    .is_some_and(|backend| required_candidates <= backend.max_candidates())
+            });
+            if has_capable_profile {
+                return None;
+            }
+            // Preserve canonical validation errors when every advertised profile is too small.
+            self.select_worker_set_with_worker_count(
+                |ws| self.systemone_execution_inputs(ws),
+                WorkerSet::decision_worker_count,
+            )
+        })
+        .ok_or_else(|| {
+            if self
+                .worker_sets
+                .load()
+                .values()
+                .any(|worker_set| worker_set.card().is_systemone_serial_eligible())
+            {
+                SystemOneSelectionError::Unavailable
+            } else {
+                SystemOneSelectionError::Unsupported
+            }
+        })
+    }
+
+    fn systemone_execution_inputs(
+        &self,
+        worker_set: &WorkerSet,
+    ) -> Option<SystemOneExecutionSelection> {
+        let card = worker_set.card();
+        let backend = card.systemone_backend()?;
+        Some(SystemOneExecutionSelection {
+            backend,
+            canonical_model: self.name.clone(),
+            engine: worker_set.generate_engine.clone()?,
+            card: card.clone(),
+            preprocessor: worker_set.systemone_preprocessor.clone()?,
+            admitted_ids: worker_set.decision_admissions().cloned(),
+            lifecycle_cancellation: worker_set.lifecycle_cancellation(),
+        })
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_engine_with_parsing(
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+        self.get_chat_engine_with_input_policy()
+            .map(|(engine, parsing, _)| (engine, parsing))
+    }
+
+    pub(crate) fn get_chat_engine_with_input_policy(
+        &self,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            ParsingOptions,
+            crate::chat_input::ChatInputPolicy,
+        ),
+        ModelManagerError,
+    > {
+        self.select_worker_set_with(|ws| {
+            ws.chat_engine
+                .clone()
+                .map(|engine| (engine, ws.parsing_options(), ws.input_policy()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+    }
+
+    /// Select a chat engine from a WorkerSet that advertises `capability`.
+    /// `Ok(None)` means chat WorkerSets exist but none advertises it.
+    pub fn get_chat_engine_with_parsing_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
+    {
+        if !self.has_chat_engine_for_capability(capability) {
+            return if self.has_chat_engine() {
+                Ok(None)
+            } else {
+                Err(self.engine_error(false))
+            };
+        }
+        self.select_worker_set_with(|ws| {
+            ws.supports_runtime_capability(capability)
+                .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
+                .flatten()
+        })
+        .map(Some)
+        .ok_or_else(|| self.engine_error(true))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -751,24 +942,36 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet with a threshold handle.
-    /// When `config` is Some, updates every handle. WorkerSets may share a handle.
+    /// Get load threshold config from the first WorkerSet with a threshold handle,
+    /// preferring an enabled one. When `config` is Some, updates every handle.
+    /// WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
-        let mut result = None;
-        for worker_set in self.worker_sets.load().values() {
-            if let Some(ref thresholds) = worker_set.load_thresholds {
-                if let Some(cfg) = config {
-                    thresholds.update(cfg);
-                }
-                if result.is_none() {
-                    result = Some(thresholds.get());
-                }
-            }
+        let worker_sets = self.worker_sets.load();
+        let handles: Vec<_> = worker_sets
+            .values()
+            .filter_map(|worker_set| worker_set.load_thresholds.as_ref())
+            .collect();
+        if let Some(cfg) = config {
+            handles.iter().for_each(|handle| handle.update(cfg));
         }
-        result
+        handles
+            .iter()
+            .find(|handle| handle.is_enabled())
+            .or(handles.first())
+            .map(|handle| handle.get())
+    }
+
+    /// Whether any WorkerSet has an enabled threshold handle.
+    pub(crate) fn accepts_load_thresholds(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set
+                .load_thresholds
+                .as_ref()
+                .is_some_and(|thresholds| thresholds.is_enabled())
+        })
     }
 
     /// Total worker count across all WorkerSets.
@@ -808,6 +1011,18 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
+        self.select_worker_set_with_worker_count(extract, WorkerSet::worker_count)
+    }
+
+    fn select_worker_set_with_worker_count<T, F, C>(
+        &self,
+        extract: F,
+        count_workers: C,
+    ) -> Option<T>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        C: Fn(&WorkerSet) -> usize,
+    {
         // One immutable membership map drives both the readiness filter and
         // candidate eligibility, so a concurrent add/remove can't make us treat a
         // namespace as complete while routing to a set that lost a peer.
@@ -833,7 +1048,7 @@ impl Model {
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
             let ws = snapshot[0];
-            if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
+            if count_workers(ws) == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
             return extract(ws);
@@ -846,7 +1061,7 @@ impl Model {
         let eligible: Vec<(T, usize)> = snapshot
             .iter()
             .filter_map(|&ws| {
-                let count = ws.worker_count();
+                let count = count_workers(ws);
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
@@ -1178,6 +1393,69 @@ mod tests {
         assert!(model.get_generate_engine().is_err());
     }
 
+    struct StubChatEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> for StubChatEngine {
+        async fn generate(&self, _: SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>)
+            -> Result<ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> {
+            unreachable!("selection must not generate")
+        }
+    }
+
+    #[test]
+    fn chat_selection_keeps_engine_parsing_and_input_policy_atomic() {
+        use crate::chat_input::ChatInputPolicy;
+        let model = Model::new("chat-policy".into());
+        let make_set = |namespace: &str, native: bool| {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.tool_call_parser = native.then(|| "mistral".into());
+            let mut set = WorkerSet::new(namespace.into(), namespace.into(), card);
+            let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(StubChatEngine);
+            set.chat_engine = Some(engine.clone());
+            let policy = if native {
+                ChatInputPolicy::Mistral
+            } else {
+                ChatInputPolicy::Standard
+            };
+            set.set_input_policy(policy.clone());
+            let (tx, rx) = watch::channel(vec![1]);
+            set.set_instance_watcher(rx);
+            (Arc::new(set), engine, policy, tx)
+        };
+        let (standard, standard_engine, standard_policy, standard_tx) = make_set("standard", false);
+        let (native, native_engine, native_policy, native_tx) = make_set("native", true);
+        model.add_worker_set("standard".into(), standard);
+        model.add_worker_set("native".into(), native);
+        for native_active in [false, true] {
+            standard_tx.send_replace(if native_active { vec![] } else { vec![1] });
+            native_tx.send_replace(if native_active { vec![2] } else { vec![] });
+            let (engine, parsing, policy) = model.get_chat_engine_with_input_policy().unwrap();
+            assert!(Arc::ptr_eq(
+                &engine,
+                if native_active {
+                    &native_engine
+                } else {
+                    &standard_engine
+                }
+            ));
+            assert_eq!(
+                policy,
+                if native_active {
+                    native_policy.clone()
+                } else {
+                    standard_policy.clone()
+                }
+            );
+            assert_eq!(
+                parsing.tool_call_parser.as_deref(),
+                native_active.then_some("mistral")
+            );
+        }
+    }
+
     #[test]
     fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
         let model = Model::new("generate-model".to_string());
@@ -1207,6 +1485,337 @@ mod tests {
         assert_eq!(selection_b.kv_cache_block_size, 32);
         assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
         assert!(selection_b.tower_connector_lora_enabled);
+    }
+
+    #[test]
+    fn chat_capability_selection_skips_worker_sets_without_the_flag() {
+        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
+        let chat_set = |namespace: &str, flagged: bool| {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config
+                .runtime_data
+                .insert(JSON_MULTIMODAL_CAPABILITY.to_string(), flagged.into());
+            let mut ws = WorkerSet::new(namespace.to_string(), format!("{namespace}-sum"), card);
+            ws.chat_engine = Some(make_test_chat_engine());
+            Arc::new(ws)
+        };
+        let model = Model::new("custom".to_string());
+        assert!(matches!(
+            model.get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+
+        model.add_worker_set("text".to_string(), chat_set("text", false));
+        assert!(
+            model
+                .get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut idle = WorkerSet::new("idle".to_string(), "idle-sum".to_string(), {
+            let mut card = ModelDeploymentCard::default();
+            card.runtime_config
+                .runtime_data
+                .insert(JSON_MULTIMODAL_CAPABILITY.to_string(), true.into());
+            card
+        });
+        let (_idle_tx, idle_rx) = watch::channel::<Vec<u64>>(vec![]);
+        idle.set_instance_watcher(idle_rx);
+        idle.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("idle".to_string(), Arc::new(idle));
+        assert!(matches!(
+            model.get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY),
+            Err(ModelManagerError::ModelUnavailable(_))
+        ));
+
+        let flagged = chat_set("vllm", true);
+        let flagged_engine = flagged.chat_engine.clone().unwrap();
+        model.add_worker_set("vllm".to_string(), flagged);
+        for _ in 0..32 {
+            let (engine, _) = model
+                .get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&engine, &flagged_engine));
+        }
+    }
+
+    fn systemone_worker_set(
+        namespace: &str,
+        configure: impl FnOnce(&mut ModelDeploymentCard),
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        card.runtime_config
+            .runtime_data
+            .insert("sglang_systemone_serial_v1".to_string(), true.into());
+        card.runtime_config.max_num_seqs = Some(1);
+        configure(&mut card);
+        let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
+        let mut worker_set = WorkerSet::new(namespace.to_string(), namespace.to_string(), card);
+        worker_set.generate_engine = Some(Arc::new(StubGenerateEngine));
+        worker_set.systemone_preprocessor = Some(preprocessor);
+        let (worker_tx, worker_rx) = watch::channel(vec![1]);
+        worker_set.set_instance_watcher(worker_rx);
+        (Arc::new(worker_set), worker_tx)
+    }
+
+    #[test]
+    fn systemone_selection_keeps_engine_card_and_assets_atomic() {
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set_a, workers_a) = systemone_worker_set("ns-a", |card| {
+            card.kv_cache_block_size = 16;
+        });
+        let (worker_set_b, workers_b) = systemone_worker_set("ns-b", |card| {
+            card.kv_cache_block_size = 32;
+        });
+        workers_b.send(vec![]).unwrap();
+        model.add_worker_set("ns-a".to_string(), worker_set_a.clone());
+        model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
+        let selection_a = model.get_systemone_execution_selection(2).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection_a.engine,
+            worker_set_a.generate_engine.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &selection_a.preprocessor,
+            worker_set_a.systemone_preprocessor.as_ref().unwrap()
+        ));
+        assert_eq!(selection_a.card.kv_cache_block_size, 16);
+        assert_eq!(selection_a.canonical_model, "scoring-model");
+
+        workers_a.send(vec![]).unwrap();
+        workers_b.send(vec![2]).unwrap();
+        let selection_b = model.get_systemone_execution_selection(2).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection_b.engine,
+            worker_set_b.generate_engine.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &selection_b.preprocessor,
+            worker_set_b.systemone_preprocessor.as_ref().unwrap()
+        ));
+        assert_eq!(selection_b.card.kv_cache_block_size, 32);
+        assert_eq!(selection_a.card.kv_cache_block_size, 16);
+    }
+
+    #[test]
+    fn incomplete_vllm_flag_cannot_change_a_selected_sglang_backend() {
+        let model = Model::new("scoring-model".into());
+        let (workers, _tx) = systemone_worker_set("ns", |card| {
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_causal_decision_v1".into(), true.into());
+        });
+        model.add_worker_set("ns".into(), workers);
+        let selected = model.get_systemone_execution_selection(2).unwrap();
+        assert_eq!(
+            selected.backend,
+            crate::protocols::systemone::ScoringBackend::Sglang
+        );
+    }
+
+    #[test]
+    fn systemone_selection_distinguishes_unsupported_from_unavailable() {
+        let unsupported: [fn(&mut ModelDeploymentCard); 9] = [
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove("sglang_systemone_serial_v1");
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = None;
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = Some(2);
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove(crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY);
+            },
+            |card| {
+                card.worker_type = None;
+            },
+            |card| {
+                card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
+            },
+            |card| {
+                card.lora = Some(LoraInfo {
+                    name: "adapter".to_string(),
+                    max_gpu_lora_count: None,
+                });
+            },
+            |card| {
+                card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]];
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".to_string(), serde_json::json!({}));
+            },
+        ];
+        for configure in unsupported {
+            let model = Model::new("scoring-model".to_string());
+            let (worker_set, _workers) = systemone_worker_set("ns", configure);
+            model.add_worker_set("ns".to_string(), worker_set);
+            assert!(matches!(
+                model.get_systemone_execution_selection(2),
+                Err(SystemOneSelectionError::Unsupported)
+            ));
+        }
+        let model = Model::new("scoring-model".to_string());
+        let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
+        Arc::get_mut(&mut worker_set)
+            .unwrap()
+            .systemone_preprocessor = None;
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(2),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let model = Model::new("scoring-model".to_string());
+        let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
+        Arc::get_mut(&mut worker_set).unwrap().generate_engine = None;
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(2),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set, workers) = systemone_worker_set("ns", |_| {});
+        workers.send(vec![]).unwrap();
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(2),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn systemone_selection_ignores_unrelated_card_migration_limit() {
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set, _workers) = systemone_worker_set("ns", |card| {
+            card.migration_limit = 1;
+        });
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(model.get_systemone_execution_selection(2).is_ok());
+    }
+
+    #[test]
+    fn systemone_retained_selection_rejects_lifecycle_retirement() {
+        let model = Model::new("scoring-model".to_string());
+        let (mut workers, _tx) = systemone_worker_set("ns", |_| {});
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        Arc::get_mut(&mut workers)
+            .unwrap()
+            .set_lifecycle_cancellation(cancellation.clone());
+        model.add_worker_set("ns".to_string(), workers);
+        let selection = model.get_systemone_execution_selection(2).unwrap();
+        assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
+        cancellation.cancel();
+        assert_eq!(
+            selection.validate_dispatch(Some(1)),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+        assert!(matches!(
+            model.get_systemone_execution_selection(2),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn systemone_in_process_selection_does_not_require_discovery_admissions() {
+        let model = Model::new("scoring-model".to_string());
+        let (registered, _tx) = systemone_worker_set("ns", |_| {});
+        let mut local = WorkerSet::new(
+            "local".to_string(),
+            "local".to_string(),
+            registered.card().clone(),
+        );
+        local.generate_engine = registered.generate_engine.clone();
+        local.systemone_preprocessor = registered.systemone_preprocessor.clone();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        local.set_lifecycle_cancellation(cancellation.clone());
+        assert_eq!(local.decision_worker_count(), 1);
+        model.add_worker_set("local".to_string(), Arc::new(local));
+        let selection = model.get_systemone_execution_selection(2).unwrap();
+        assert!(selection.admitted_ids.is_none());
+        assert_eq!(selection.validate_dispatch(None), Ok(()));
+        cancellation.cancel();
+        assert_eq!(
+            selection.validate_dispatch(None),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn systemone_selection_excludes_discovered_but_unadmitted_workers() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("decision-admission-test".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let model = Model::new("scoring-model".to_string());
+        let (mut unadmitted, discovered) = systemone_worker_set("ns-a", |_| {});
+        let (admitted_tx, admitted_rx) = watch::channel(Vec::new());
+        let selected_card = Arc::new(unadmitted.card().clone());
+        Arc::get_mut(&mut unadmitted).unwrap().set_topology_target(
+            super::super::worker_set::CommittedWorkerSetTarget {
+                endpoint: component.endpoint("generate".to_string()),
+                group: "group-a".to_string(),
+                generation: 1,
+                card: selected_card,
+                admitted_ids: admitted_rx,
+            },
+        );
+        model.add_worker_set("ns-a".to_string(), unadmitted);
+        assert!(matches!(
+            model.get_systemone_execution_selection(2),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let (available, _available_tx) = systemone_worker_set("ns-b", |_| {});
+        model.add_worker_set("ns-b".to_string(), available.clone());
+        let selection = model.get_systemone_execution_selection(2).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection.engine,
+            available.generate_engine.as_ref().unwrap()
+        ));
+        admitted_tx.send(vec![1, 2]).unwrap();
+        let workers = model.get_worker_set("ns-a").unwrap();
+        assert_eq!(workers.worker_count(), 1);
+        assert_eq!(workers.decision_worker_count(), 1);
+        admitted_tx.send(vec![2]).unwrap();
+        assert_eq!(workers.decision_worker_count(), 0);
+        admitted_tx.send(vec![1]).unwrap();
+        assert_eq!(workers.decision_worker_count(), 1);
+        drop(discovered);
+        assert_eq!(workers.decision_worker_count(), 0);
+        drop(admitted_tx);
+        assert_eq!(workers.decision_worker_count(), 0);
+        let selection = model.get_systemone_execution_selection(2).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection.engine,
+            available.generate_engine.as_ref().unwrap()
+        ));
+        runtime.shutdown();
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {

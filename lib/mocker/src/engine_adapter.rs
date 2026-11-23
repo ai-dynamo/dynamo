@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use aisimulate_core::engine::{EngineConfig, EngineFactory, TimingModel, TimingModelConfig};
-use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
+use aisim_core::engine::{EngineConfig, EngineFactory, TimingModel, TimingModelConfig};
+use aisim_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
@@ -176,14 +176,14 @@ impl TimingModel for DynamoPerfTimingModel {
 mod tests {
     use std::num::NonZeroU32;
 
-    use aisimulate_core::engine::generalized::EngineIdentity;
-    use aisimulate_core::replay::WorkerStage;
+    use aisim_core::engine::generalized::EngineIdentity;
+    use aisim_core::replay::WorkerStage;
     use ndarray_interp::InterpolateError;
 
     use super::*;
     use crate::common::perf_model::{AisCallback, DecodeInterpolator, PrefillInterpolator};
     use crate::common::protocols::NativeHostOffloadConfig;
-    use aisimulate_core::engine::{Backend, SglangSchedulePolicy};
+    use aisim_core::engine::{Backend, SglangSchedulePolicy};
 
     struct EchoPrefill;
 

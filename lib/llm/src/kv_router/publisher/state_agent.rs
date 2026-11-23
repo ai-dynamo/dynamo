@@ -31,18 +31,19 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use dynamo_kv_router::{
-    identity::{CacheOwnerId, CanonicalIdentityMaterial, ExplicitIdentityMap, StableDpSlotId},
-    indexer::{
-        KvIndexerMetrics, KvStateAgentIdentity, KvStateAgentStatus, KvStateAttachmentStatus,
-        KvStateProtocolVersion, LocalKvIndexer,
-    },
-    protocols::{
-        KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
-        RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
-    },
-    zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer},
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::placement::PlacementEvent;
+use dynamo_kv_events::residency::{ResidencyDomain, ResidencyOwner, StorageTier};
+use dynamo_kv_events::zmq_wire::{
+    EventDedupFilter, EventDedupPolicy, KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer,
 };
+use dynamo_kv_indexer::host::{
+    CanonicalIdentityMaterial, ExplicitIdentityMap, KvIndexerMetrics, KvStateAgentIdentity,
+    KvStateAgentStatus, KvStateAttachmentStatus, KvStateProtocolVersion, LocalKvIndexer,
+    RouterHintSourceMetadata,
+};
+use dynamo_router_protocol::identity::{CacheOwnerId, StableDpSlotId};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
     discovery::{DiscoveryInstance, DiscoverySpec, EventScope},
@@ -72,7 +73,6 @@ use crate::{
 use super::{
     DEFAULT_MAX_BATCH_BLOCKS,
     batching::PlacementEventCoalescer,
-    dedup::{EventDedupFilter, EventDedupPolicy},
     sinks::{EventPlanePublisher, RouterEventBatchSink, admit_local_event},
     zmq_listener::{DecodedZmqKvBatch, decode_zmq_kv_batch},
 };
@@ -108,7 +108,17 @@ pub struct KvStateAgentVllmSource {
     pub topic: String,
     pub image_token_id: Option<u32>,
     pub video_token_id: Option<u32>,
+    pub engine_owned_mm_identity: bool,
     pub ingress_protocol: KvStateIngressProtocol,
+}
+
+impl KvStateAgentVllmSource {
+    fn normalizer(&self, kv_block_size: u32) -> ZmqEventNormalizer {
+        ZmqEventNormalizer::new(kv_block_size)
+            .with_image_token_id(self.image_token_id)
+            .with_video_token_id(self.video_token_id)
+            .with_engine_owned_mm_identity(self.engine_owned_mm_identity)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -616,11 +626,16 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         &mut self,
         placement_events: Vec<PlacementEvent>,
     ) -> Result<()> {
-        let attachment_worker = self
+        let attachment = self
             .attachment
             .as_ref()
-            .context("KV state agent has no framework attachment")?
-            .worker;
+            .context("KV state agent has no framework attachment")?;
+        let attachment_worker = attachment.worker;
+        let worker_dedup_policy = if attachment.ingress_protocol.has_idempotent_stores() {
+            EventDedupPolicy::SetLike
+        } else {
+            EventDedupPolicy::RefCounted
+        };
         let mut coalescer = PlacementEventCoalescer::new(DEFAULT_MAX_BATCH_BLOCKS);
         let mut coalesced = Vec::with_capacity(placement_events.len());
         for placement_event in placement_events {
@@ -646,7 +661,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         for placement_event in coalesced {
             let domain = placement_event.placement.residency_domain;
             let dedup_policy = match domain {
-                ResidencyDomain::Worker => EventDedupPolicy::RefCounted,
+                ResidencyDomain::Worker => worker_dedup_policy,
                 // This state agent creates CacheOwner events only from KVCR ownership.
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
             };
@@ -794,8 +809,8 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         worker: WorkerWithDpRank,
         domain: ResidencyDomain,
     ) -> Result<u64> {
-        let placement = dynamo_kv_router::protocols::Placement {
-            owner: dynamo_kv_router::protocols::PlacementOwner::LocalWorker(worker),
+        let placement = dynamo_kv_events::placement::Placement {
+            owner: dynamo_kv_events::placement::PlacementOwner::LocalWorker(worker),
             tier: StorageTier::Device,
             residency_domain: domain,
         };
@@ -1691,12 +1706,8 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         status,
         cancel,
     } = task;
-    let mut framework_normalizer = ZmqEventNormalizer::new(kv_block_size)
-        .with_image_token_id(source.image_token_id)
-        .with_video_token_id(source.video_token_id);
-    let mut cache_owner_normalizer = ZmqEventNormalizer::new(kv_block_size)
-        .with_image_token_id(source.image_token_id)
-        .with_video_token_id(source.video_token_id);
+    let mut framework_normalizer = source.normalizer(kv_block_size);
+    let mut cache_owner_normalizer = source.normalizer(kv_block_size);
     loop {
         if !status
             .load()
@@ -1784,7 +1795,7 @@ struct NormalizedRawBatch {
 }
 
 fn normalize_raw_batch(
-    raw_events: Vec<dynamo_kv_router::zmq_wire::RawKvEvent>,
+    raw_events: Vec<dynamo_kv_events::zmq_wire::RawKvEvent>,
     worker: WorkerWithDpRank,
     kv_block_size: u32,
     ingress_protocol: KvStateIngressProtocol,
@@ -1815,7 +1826,7 @@ fn normalize_raw_batch(
             )
             && !matches!(
                 raw_event,
-                dynamo_kv_router::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
+                dynamo_kv_events::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
             )
         {
             cache_owner_fault.get_or_insert("KVCR ownership has an unsupported storage medium");
@@ -1839,7 +1850,7 @@ fn normalize_raw_batch(
             Err(_) => continue,
         };
         if ownership == KvEventOwnership::Kvcr
-            && let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored {
+            && let dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored {
                 block_size,
                 group_idx,
                 kv_cache_spec_kind,
@@ -1929,17 +1940,14 @@ mod tests {
         },
     };
 
-    use dynamo_kv_router::{
-        identity::{
-            CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-            StableDpSlotId,
-        },
-        indexer::WorkerKvQueryResponse,
-        protocols::{
-            ExternalSequenceBlockHash, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
-            Placement, PlacementOwner,
-        },
-        zmq_wire::{BlockHashValue, RawKvEvent},
+    use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_events::placement::{Placement, PlacementOwner};
+    use dynamo_kv_events::zmq_wire::{BlockHashValue, RawKvEvent};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_indexer::host::WorkerKvQueryResponse;
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        StableDpSlotId,
     };
 
     use super::*;
@@ -2087,6 +2095,55 @@ mod tests {
             locality: None,
             ownership: ownership.map(str::to_owned),
             session_id: None,
+        }
+    }
+
+    #[test]
+    fn sglang_source_applies_mm_exclusion_to_framework_and_cache_owner() {
+        let worker = WorkerWithDpRank::new(17, 0);
+        for engine_owned_mm_identity in [false, true] {
+            let source = KvStateAgentVllmSource {
+                endpoint: String::new(),
+                topic: String::new(),
+                image_token_id: None,
+                video_token_id: None,
+                engine_owned_mm_identity,
+                ingress_protocol: KvStateIngressProtocol::SglangHiCacheV1,
+            };
+            let mut events = vec![
+                raw_store(None, None, 101),
+                raw_store(Some("CPU"), Some("kvcr"), 102),
+            ];
+            for event in &mut events {
+                let RawKvEvent::BlockStored { token_ids, .. } = event else {
+                    panic!("expected store");
+                };
+                token_ids.fill(dynamo_kv_hashing::multimodal::MM_PAD_SHIFT_VALUE as u32);
+            }
+            let normalized = normalize_raw_batch(
+                events,
+                worker,
+                4,
+                source.ingress_protocol,
+                &mut source.normalizer(4),
+                &mut source.normalizer(4),
+            );
+            assert_eq!(normalized.source_fault, None);
+            assert_eq!(normalized.cache_owner_fault, None);
+            assert_eq!(normalized.events.len(), 2);
+            for event in normalized.events {
+                if engine_owned_mm_identity {
+                    assert!(matches!(
+                        event.event.data,
+                        KvCacheEventData::Removed(data) if data.block_hashes.is_empty()
+                    ));
+                } else {
+                    assert!(matches!(
+                        event.event.data,
+                        KvCacheEventData::Stored(data) if data.blocks.len() == 1
+                    ));
+                }
+            }
         }
     }
 
@@ -2296,7 +2353,7 @@ mod tests {
             ZmqEventNormalizer::new(4)
                 .preprocess_with_reason(raw_store(Some("CPU"), Some("kvcr"), 107), worker)
                 .unwrap_err(),
-            dynamo_kv_router::zmq_wire::ZmqEventFilterReason::UnsupportedOwnership
+            dynamo_kv_events::zmq_wire::ZmqEventFilterReason::UnsupportedOwnership
         );
 
         let normalized = normalize_raw_batch(
@@ -2380,7 +2437,7 @@ mod tests {
             Some(3i32),
         );
         let payload = rmp_serde::to_vec_named(&wire).unwrap();
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&payload).unwrap();
         let worker = WorkerWithDpRank::new(17, 3);
         let mut framework = ZmqEventNormalizer::new(4);
         let mut cache_owner = ZmqEventNormalizer::new(4);
@@ -2501,7 +2558,7 @@ mod tests {
             Some(3i32),
         );
         let payload = rmp_serde::to_vec_named(&boundary_wire).unwrap();
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload).unwrap();
+        let batch = dynamo_kv_events::zmq_wire::decode_event_batch(&payload).unwrap();
         let normalized = normalize_raw_batch(
             batch.events,
             worker,
@@ -2761,6 +2818,97 @@ mod tests {
             .unwrap();
         received.await.unwrap();
         task.await.unwrap();
+    }
+
+    /// Whether a slot on `protocol` publishes the only remove of a Worker-domain block it saw
+    /// stored twice.
+    async fn repeated_store_publishes_its_remove(protocol: KvStateIngressProtocol) -> bool {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let identity = KvStateAgentIdentity {
+            cache_owner_id: cache_owner_id(),
+            publisher_id: 41,
+            protocol_version: KvStateProtocolVersion::V2,
+        };
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
+            identity: identity.clone(),
+            attachment: None,
+            cache_owner_ready: true,
+            outbound_cursor: 0,
+        }));
+        let local_indexer = Arc::new(LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        ));
+        let sink = RecordingSink::default();
+        let output = sink.events.clone();
+        let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let mut coordinator = Coordinator {
+            publisher: sink,
+            local_indexer,
+            identity,
+            slot_dp_rank: 3,
+            status,
+            withdrawal_tx: mpsc::unbounded_channel().0,
+            control_rx,
+            ingress_rx,
+            attachment: None,
+            ingress_generation: None,
+            next_outbound_id: 1,
+            next_attachment_generation: 1,
+            source_cursor: SourceCursorState::default(),
+            dedup: EventDedupFilter::new(),
+            worker_domain_failed: false,
+            cache_owner_domain_failed: false,
+            source_failed: false,
+        };
+        let mut attachment = test_attachment(worker, "tcp://framework");
+        attachment.ingress_protocol = protocol;
+        coordinator.attach(&mut attachment).await.unwrap();
+
+        let mut removal = store(worker, ResidencyDomain::Worker, None, 101, 11);
+        removal.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(101)],
+        });
+        let events = [
+            store(worker, ResidencyDomain::Worker, None, 101, 11),
+            store(worker, ResidencyDomain::Worker, None, 101, 11),
+            removal,
+        ];
+        for (source_cursor, event) in (1..).zip(events) {
+            coordinator
+                .handle_ingress(IngressBatch {
+                    generation: attachment.generation,
+                    source_cursor,
+                    chunk_index: 0,
+                    final_chunk: true,
+                    events: vec![event],
+                    source_fault: None,
+                    cache_owner_fault: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let published = output.lock().unwrap();
+        published
+            .iter()
+            .any(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+    }
+
+    #[tokio::test]
+    async fn sglang_slot_publishes_the_only_remove_of_a_repeated_store() {
+        let protocol = KvStateIngressProtocol::SglangHiCacheV1;
+        assert!(repeated_store_publishes_its_remove(protocol).await);
+    }
+
+    #[tokio::test]
+    async fn vllm_slot_keeps_counting_repeated_stores() {
+        // vLLM emits a remove per store, so the first of two removes must not pass.
+        let protocol = KvStateIngressProtocol::VllmResidencyV1;
+        assert!(!repeated_store_publishes_its_remove(protocol).await);
     }
 
     #[tokio::test]

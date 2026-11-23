@@ -138,9 +138,10 @@ impl DiscoverySource {
         kube_client: KubeClient,
         events: mpsc::Sender<ReadinessEvent>,
     ) -> Self {
-        let labels = Config::default()
-            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
-            .labels("nvidia.com/dynamo-discovery-enabled=true");
+        // One selector with both labels: a second `Config::labels` call would replace the first.
+        let labels = Config::default().labels(
+            "nvidia.com/dynamo-discovery-backend=kubernetes,nvidia.com/dynamo-discovery-enabled=true",
+        );
 
         match pod_info.mode {
             KubeDiscoveryMode::Pod => {

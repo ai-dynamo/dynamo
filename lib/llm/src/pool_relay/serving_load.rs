@@ -21,8 +21,8 @@ mod roster;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
+use dynamo_kv_indexer::cuckoo::ProducerIdentity;
+use dynamo_router_protocol::identity::PoolId;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::discovery::EventChannelQuery;

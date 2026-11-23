@@ -539,19 +539,44 @@ impl GenericHeaders for std::collections::HashMap<String, String> {
     }
 }
 
-struct GenericHeaderExtractor<'a, H>(&'a H);
+struct GenericHeaderExtractor<'a, H> {
+    headers: &'a H,
+    /// Stands in for the `traceparent` header when set.
+    traceparent: Option<String>,
+}
 
 impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
     fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key)
+        match &self.traceparent {
+            Some(traceparent) if key == "traceparent" => Some(traceparent),
+            _ => self.headers.get(key),
+        }
     }
 
     fn keys(&self) -> Vec<&str> {
         ["traceparent", "tracestate"]
             .into_iter()
-            .filter(|key| self.0.get(key).is_some())
+            .filter(|key| self.headers.get(key).is_some())
             .collect()
     }
+}
+
+/// Returns a version-00 `traceparent` with trace-flags above `02` reduced to the sampled bit.
+///
+/// `opentelemetry_sdk` 0.31 rejects such a header, for example `03` (sampled plus the W3C
+/// Level 2 random-trace-id flag). W3C says to ignore unknown flags, as 0.32 does itself.
+fn mask_trace_flags(traceparent: &str) -> Option<String> {
+    let traceparent = traceparent.trim();
+    let flags = traceparent.strip_prefix("00-")?.rsplit('-').next()?;
+    let bits = u8::from_str_radix(flags, 16).ok()?;
+    // Uppercase flags are invalid: leave them for the propagator to reject.
+    if bits <= 2 || flags.contains(|c: char| !matches!(c, '0'..='9' | 'a'..='f')) {
+        return None;
+    }
+    let mut masked = traceparent.to_owned();
+    let sampled = if bits & 1 == 0 { "00" } else { "01" };
+    masked.replace_range(traceparent.len() - flags.len().., sampled);
+    Some(masked)
 }
 
 fn extract_trace_parent<H: GenericHeaders>(
@@ -572,7 +597,10 @@ fn extract_trace_parent<H: GenericHeaders>(
     let context = if valid_widths {
         TRACE_PROPAGATOR.extract_with_context(
             &opentelemetry::Context::new(),
-            &GenericHeaderExtractor(headers),
+            &GenericHeaderExtractor {
+                headers,
+                traceparent: headers.get("traceparent").and_then(mask_trace_flags),
+            },
         )
     } else {
         opentelemetry::Context::new()
@@ -590,6 +618,8 @@ fn extract_trace_parent<H: GenericHeaders>(
         (None, None, None, None)
     };
 
+    // Transport hop only: workers read the frontend's forwarded `request-id`.
+    // HTTP ingress spans ignore it so a client cannot choose the internal request id.
     let request_id = headers
         .get("request-id")
         .or_else(|| headers.get("x-dynamo-request-id"))
@@ -626,12 +656,9 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     let version = format!("{:?}", req.version());
     let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
-    // Ensure every inference request has a request_id on the span.
-    // This is the single source of truth — workers and get_or_create_request_id
-    // read it back via DistributedTraceIdLayer.
-    let request_id = trace_parent
-        .request_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    // Always server-minted and the single source of truth; client `request-id` headers are
+    // ignored. Client correlation travels separately as `x_request_id`.
+    let request_id = Uuid::new_v4().to_string();
 
     let span = tracing::info_span!(
             target: "request_span",
@@ -676,10 +703,7 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let version = format!("{:?}", req.version());
     let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
-    // Ensure every system request has a request_id on the span.
-    let request_id = trace_parent
-        .request_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let request_id = Uuid::new_v4().to_string();
 
     let span = tracing::debug_span!(
         target: "system_span",
@@ -1359,9 +1383,13 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
         let tracer = tracer_provider.tracer(service_name.to_string());
+        // Filter outside the `Option`: a bare `None` layer registers interest in every
+        // callsite, so each disabled `debug!`/`trace!` would run every per-layer filter
+        // on every call instead of being skipped at its callsite.
         let otel_logs_layer = logger_provider_opt
             .as_ref()
-            .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
+            .map(OpenTelemetryTracingBridge::new)
+            .with_filter(otel_logs_filter_layer);
 
         let l = console_layer(console_format, span_events, fmt_filter_layer);
         tracing_subscriber::registry()
@@ -2419,12 +2447,25 @@ pub mod tests {
             "00-bad-2222222222222222-01",                              // bad trace_id
             "00-11111111111111111111111111111111-bad-01",              // bad span_id
             "00-11111111111111111111111111111111-2222222222222222-0x", // bad flags
+            "00-11111111111111111111111111111111-2222222222222222-0B", // uppercase flags
         ] {
             assert_eq!(
                 parse_traceparent(tp),
                 (None, None, None),
                 "should reject: {tp}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_traceparent_masks_unknown_version_00_flags() {
+        // `03` is sampled plus the W3C Level 2 random-trace-id flag.
+        for (flags, expected) in [("03", "01"), ("fe", "00")] {
+            let (trace_id, _, trace_flags) = parse_traceparent(&format!(
+                "00-11111111111111111111111111111111-2222222222222222-{flags}"
+            ));
+            assert!(trace_id.is_some(), "flags {flags}");
+            assert_eq!(trace_flags.as_deref(), Some(expected), "flags {flags}");
         }
     }
 
@@ -2525,6 +2566,48 @@ pub mod tests {
             headers.get("traceparent").map(String::as_str),
             Some("00-11111111111111111111111111111111-3333333333333333-00")
         );
+    }
+
+    #[test]
+    fn http_request_spans_mint_request_id_and_ignore_client_headers() {
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("test");
+        // Core `set_default`: `SubscriberInitExt::set_default` installs the global `log`
+        // LogTracer, which would make a later `logging::init()` fail with SetLoggerError.
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(DistributedTraceIdLayer),
+        );
+        let client_id = "11111111-2222-3333-4444-555555555555";
+        let make_req = || {
+            Request::builder()
+                .header("request-id", client_id)
+                .header("x-dynamo-request-id", client_id)
+                .header("x-request-id", "client-correlation")
+                .body(())
+                .unwrap()
+        };
+
+        let mut seen = Vec::new();
+        for make_span in [
+            make_inference_request_span::<()>,
+            make_inference_request_span::<()>,
+            make_system_request_span::<()>,
+        ] {
+            let span = make_span(&make_req());
+            let _enter = span.enter();
+            let ctx = get_distributed_tracing_context().expect("span has trace context");
+            let request_id = ctx.request_id.expect("span has a request_id");
+            assert_ne!(request_id, client_id);
+            assert!(Uuid::parse_str(&request_id).is_ok());
+            assert_eq!(ctx.x_request_id.as_deref(), Some("client-correlation"));
+            seen.push(request_id);
+        }
+        assert_ne!(seen[0], seen[1], "each HTTP request must get its own id");
+
+        let trace_parent = TraceParent::from_headers(make_req().headers());
+        assert_eq!(trace_parent.request_id.as_deref(), Some(client_id));
     }
 
     #[test]
@@ -3297,6 +3380,9 @@ pub mod tests {
         let file_name = tmp_file.path().to_str().unwrap();
         let guard = StderrOverride::from_file(file_name)?;
         init();
+
+        // Trace context without OTLP export must keep levels below `DYN_LOG` disabled.
+        assert!(!tracing::enabled!(tracing::Level::TRACE));
 
         // Run parent/child/grandchild spans (all INFO level by default)
         parent().await;

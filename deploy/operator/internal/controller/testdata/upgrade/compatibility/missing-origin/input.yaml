@@ -1,0 +1,505 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Generated from observed API objects; do not edit historical inputs.
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: "1"
+    nvidia.com/last-applied-hash: ec408f98f2c825f406d4efa930744f3635b0f4c9ab9b2dc4f34c53a2d1013cdb
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  generation: 1
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: workers
+  name: workers
+  namespace: upgrade-compatibility-missing-origin
+  ownerReferences:
+    - apiVersion: nvidia.com/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: DynamoGraphDeployment
+      name: workers
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeAnyOrder
+    cliques:
+      - annotations:
+          nvidia.com/dynamo-discovery-backend: kubernetes
+        labels:
+          nvidia.com/dynamo-component: frontend
+          nvidia.com/dynamo-component-type: frontend
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: "true"
+          nvidia.com/dynamo-graph-deployment-name: workers
+          nvidia.com/dynamo-namespace: upgrade-compatibility-missing-origin-workers
+          nvidia.com/metrics-enabled: "true"
+          nvidia.com/selector: workers-frontend
+        name: frontend
+        spec:
+          minAvailable: 1
+          podSpec:
+            containers:
+              - args:
+                  - -m
+                  - dynamo.frontend
+                command:
+                  - python3
+                env:
+                  - name: DYNAMO_PORT
+                    value: "8000"
+                  - name: DYN_COMPONENT
+                    value: frontend
+                  - name: DYN_DISCOVERY_BACKEND
+                    value: kubernetes
+                  - name: DYN_HTTP_PORT
+                    value: "8000"
+                  - name: DYN_NAMESPACE
+                    value: upgrade-compatibility-missing-origin-workers
+                  - name: DYN_NAMESPACE_PREFIX
+                    value: upgrade-compatibility-missing-origin-workers
+                  - name: DYN_PARENT_DGD_K8S_NAME
+                    value: workers
+                  - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                    value: upgrade-compatibility-missing-origin
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: POD_NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: POD_UID
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.uid
+                image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
+                livenessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /live
+                    port: http
+                  initialDelaySeconds: 15
+                  periodSeconds: 10
+                  timeoutSeconds: 1
+                name: main
+                ports:
+                  - containerPort: 8000
+                    name: http
+                    protocol: TCP
+                readinessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: http
+                  initialDelaySeconds: 10
+                  periodSeconds: 10
+                  timeoutSeconds: 3
+                resources: {}
+                volumeMounts:
+                  - mountPath: /dev/shm
+                    name: shared-memory
+            restartPolicy: Always
+            securityContext:
+              fsGroup: 1000
+            serviceAccountName: workers-k8s-service-discovery
+            terminationGracePeriodSeconds: 60
+            volumes:
+              - emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
+                name: shared-memory
+          replicas: 1
+          roleName: frontend
+      - annotations:
+          nvidia.com/dynamo-discovery-backend: kubernetes
+        labels:
+          nvidia.com/dynamo-component: worker
+          nvidia.com/dynamo-component-type: worker
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: "true"
+          nvidia.com/dynamo-graph-deployment-name: workers
+          nvidia.com/dynamo-namespace: upgrade-compatibility-missing-origin-workers
+          nvidia.com/metrics-enabled: "true"
+          nvidia.com/selector: workers-worker
+        name: worker
+        spec:
+          minAvailable: 1
+          podSpec:
+            containers:
+              - args:
+                  - --model-path
+                  - Qwen/Qwen3-0.6B
+                command:
+                  - python3
+                  - -m
+                  - dynamo.sglang
+                env:
+                  - name: DYN_COMPONENT
+                    value: worker
+                  - name: DYN_DISCOVERY_BACKEND
+                    value: kubernetes
+                  - name: DYN_FORWARDPASS_METRIC_PORT
+                    value: "20380"
+                  - name: DYN_HEALTH_CHECK_ENABLED
+                    value: "false"
+                  - name: DYN_NAMESPACE
+                    value: upgrade-compatibility-missing-origin-workers
+                  - name: DYN_PARENT_DGD_K8S_NAME
+                    value: workers
+                  - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                    value: upgrade-compatibility-missing-origin
+                  - name: DYN_SYSTEM_ENABLED
+                    value: "true"
+                  - name: DYN_SYSTEM_PORT
+                    value: "9090"
+                  - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+                    value: '["generate"]'
+                  - name: NIXL_TELEMETRY_ENABLE
+                    value: "n"
+                  - name: NIXL_TELEMETRY_EXPORTER
+                    value: prometheus
+                  - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+                    value: "19090"
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: POD_NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: POD_UID
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.uid
+                image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+                livenessProbe:
+                  failureThreshold: 1
+                  httpGet:
+                    path: /live
+                    port: system
+                  periodSeconds: 5
+                  timeoutSeconds: 4
+                name: main
+                ports:
+                  - containerPort: 9090
+                    name: system
+                    protocol: TCP
+                  - containerPort: 19090
+                    name: nixl
+                    protocol: TCP
+                readinessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: system
+                  periodSeconds: 10
+                  timeoutSeconds: 4
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                startupProbe:
+                  failureThreshold: 720
+                  httpGet:
+                    path: /live
+                    port: system
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                volumeMounts:
+                  - mountPath: /dev/shm
+                    name: shared-memory
+            restartPolicy: Always
+            securityContext:
+              fsGroup: 1000
+            serviceAccountName: workers-k8s-service-discovery
+            terminationGracePeriodSeconds: 60
+            volumes:
+              - emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
+                name: shared-memory
+          replicas: 2
+          roleName: worker
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    terminationDelay: 15m0s
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/current-worker-hash-v2: 7df86e24
+    nvidia.com/enable-grove: "true"
+    nvidia.com/workload-provider: grove
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  finalizers:
+    - nvidia.com/finalizer
+  generation: 1
+  name: workers
+  namespace: upgrade-compatibility-missing-origin
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
+spec:
+  backendFramework: sglang
+  components:
+    - minAvailable: 1
+      name: frontend
+      podTemplate:
+        spec:
+          containers:
+            - args:
+                - -m
+                - dynamo.frontend
+              command:
+                - python3
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
+              name: main
+      replicas: 1
+      type: frontend
+    - minAvailable: 1
+      name: worker
+      podTemplate:
+        spec:
+          containers:
+            - args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+              command:
+                - python3
+                - -m
+                - dynamo.sglang
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+              name: main
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+      replicas: 2
+      type: worker
+status:
+  components:
+    frontend:
+      componentKind: PodClique
+      componentNames:
+        - workers-0-frontend
+      gpusPerEngine: 0
+      gpusPerReplica: 0
+      replicas: 0
+      runtimeNamespace: upgrade-compatibility-missing-origin-workers
+      updatedReplicas: 0
+    worker:
+      componentKind: PodClique
+      componentNames:
+        - workers-0-worker
+      gpusPerEngine: 1
+      gpusPerReplica: 1
+      replicas: 0
+      runtimeNamespace: upgrade-compatibility-missing-origin-workers
+      servedModelName: Qwen/Qwen3-0.6B
+      updatedReplicas: 0
+  conditions:
+    - lastTransitionTime: "2026-10-29T10:04:34Z"
+      message: 'Resources not ready: workers: frontend: resource not found; worker: resource not found'
+      observedGeneration: 1
+      reason: some_resources_are_not_ready
+      status: "False"
+      type: Ready
+  observedGeneration: 1
+  state: pending
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: "1"
+    nvidia.com/last-applied-hash: 0d454cc8266ac38ed6453ee2ef3cf6d9dd237faebc63af22f67ca911e106796c
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-role
+  namespace: upgrade-compatibility-missing-origin
+  ownerReferences:
+    - apiVersion: nvidia.com/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: DynamoGraphDeployment
+      name: workers
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - nvidia.com
+    resources:
+      - dynamoworkermetadatas
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: "1"
+    nvidia.com/last-applied-hash: c9c58ad5f27c948a717a39ecfd905776d0dd35f2b55566c385a73ddaeba05a7d
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-binding
+  namespace: upgrade-compatibility-missing-origin
+  ownerReferences:
+    - apiVersion: nvidia.com/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: DynamoGraphDeployment
+      name: workers
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workers-k8s-service-discovery-role
+subjects:
+  - kind: ServiceAccount
+    name: workers-k8s-service-discovery
+    namespace: upgrade-compatibility-missing-origin
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: "1"
+    nvidia.com/last-applied-hash: 2ba270635a6689bac780144ee4dd97351dbe58ffa33fbd8106ca73b227fed143
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: "true"
+  name: workers-frontend
+  namespace: upgrade-compatibility-missing-origin
+  ownerReferences:
+    - apiVersion: nvidia.com/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: DynamoGraphDeployment
+      name: workers
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
+spec:
+  clusterIP: 10.0.0.176
+  clusterIPs:
+    - 10.0.0.176
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: http
+      port: 8000
+      protocol: TCP
+      targetPort: http
+  selector:
+    nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-component-type: frontend
+    nvidia.com/dynamo-namespace: upgrade-compatibility-missing-origin-workers
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: "1"
+    nvidia.com/last-applied-hash: 1ba3ba8a4fe86791a4fb6550f47419dfc1d9b3fec61ea0de3cca5188889934da
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: "true"
+  name: workers-worker
+  namespace: upgrade-compatibility-missing-origin
+  ownerReferences:
+    - apiVersion: nvidia.com/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: DynamoGraphDeployment
+      name: workers
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
+spec:
+  clusterIP: 10.0.0.106
+  clusterIPs:
+    - 10.0.0.106
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: system
+      port: 9090
+      protocol: TCP
+      targetPort: system
+  selector:
+    nvidia.com/dynamo-component: worker
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-namespace: upgrade-compatibility-missing-origin-workers
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: "1"
+    nvidia.com/last-applied-hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery
+  namespace: upgrade-compatibility-missing-origin
+  ownerReferences:
+    - apiVersion: nvidia.com/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: DynamoGraphDeployment
+      name: workers
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000

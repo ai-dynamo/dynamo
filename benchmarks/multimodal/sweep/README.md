@@ -1,7 +1,7 @@
 # Multimodal Benchmark Sweep
 
 YAML-driven benchmark orchestrator that launches serving backends, runs
-[aiperf](https://github.com/triton-inference-server/perf_analyzer) concurrency
+[aiperf](https://github.com/ai-dynamo/aiperf) concurrency
 sweeps, and optionally generates comparison plots.
 
 ## Quick Start

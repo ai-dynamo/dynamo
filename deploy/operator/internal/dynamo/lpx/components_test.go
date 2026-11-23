@@ -83,6 +83,7 @@ func TestComponentGroups(t *testing.T) {
 		{name: "shared conductor first", serving: []string{conductor, draft}, want: map[string][]string{"component-0": {"component-0", "component-1"}}},
 		{name: "shared conductor last", serving: []string{draft, conductor}, want: map[string][]string{"component-1": {"component-0", "component-1"}}},
 		{name: "agent runtime sidecar beside a conductor workload", serving: []string{sidecar, conductor}, want: map[string][]string{"component-0": {"component-0"}, "component-1": {"component-1"}}},
+		{name: "draft joins an agent runtime sidecar target", serving: []string{draft, sidecar}, want: map[string][]string{"component-1": {"component-0", "component-1"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Author LPX members beside an ordinary frontend")

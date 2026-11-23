@@ -1,0 +1,49 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Public filter, scorer, and picker contracts and their input signals.
+//!
+//! The stage lives in `dynamo-worker-selection`; this module re-exports it at the paths
+//! plugins and hosts already name and adds what only the composed router knows: the
+//! policy factory keyed by routing partition, the host's instance config, the registry,
+//! and the kernel's config- and projection-derived row columns.
+
+mod config;
+
+#[allow(deprecated)]
+pub use dynamo_worker_selection::WorkerTransferInput;
+pub use dynamo_worker_selection::experimental;
+/// The selection slice of the router config, with its defaults and validators.
+pub mod selection_config {
+    pub use dynamo_worker_selection::{
+        SelectionConfig, SharedCacheType, default_decode_active_request_weight,
+        default_disk_cache_hit_weight, default_host_cache_hit_weight,
+        default_overlap_score_credit_decay, default_prefill_load_scale,
+        validate_finite_non_negative, validate_overlap_score_credit, validate_range,
+    };
+}
+pub use super::registry::{
+    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
+};
+pub(crate) use config::RawWorkerSelectionConfig;
+pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
+pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
+pub use dynamo_scheduler::{
+    Commitments, KvCopyLocations, KvCopySource, WorkerCapacityExt, WorkerInfoExt,
+    WorkerLoadInputExt,
+};
+pub use dynamo_worker_selection::{
+    CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
+    HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+    ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
+    SelectionTraceSpec, SharedCacheHits, SharedCacheType, WorkerCacheData, WorkerCacheInput,
+    WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput,
+    WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError,
+};
+
+/// Factory that creates one worker-selection policy per routing partition.
+pub use dynamo_scheduler::WorkerSelectionPolicyFactory;

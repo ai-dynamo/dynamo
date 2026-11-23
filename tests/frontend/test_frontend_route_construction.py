@@ -3,8 +3,8 @@
 
 """Unit tests for the FrontendRoute / FrontendResponse construction contract.
 
-The initial extension surface is static-path GET routes with a synchronous
-handler. These assertions pin that contract at construction time so malformed
+Routes are static paths with GET, POST, PUT, PATCH or DELETE and a positive
+timeout. These assertions pin that contract at construction time so malformed
 routes never reach (and panic) the axum router.
 """
 
@@ -35,10 +35,21 @@ def test_get_is_case_insensitive():
     assert FrontendRoute("get", "/ok", _handler).method == "GET"
 
 
-@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "HEAD"])
-def test_rejects_non_get_methods(method):
+@pytest.mark.parametrize("method", ["post", "PUT", "PATCH", "DELETE"])
+def test_accepts_body_methods(method):
+    assert FrontendRoute(method, "/ok", _handler).method == method.upper()
+
+
+@pytest.mark.parametrize("method", ["HEAD", "OPTIONS", "TRACE", "CONNECT", "BOGUS"])
+def test_rejects_unsupported_methods(method):
     with pytest.raises(ValueError):
         FrontendRoute(method, "/ok", _handler)
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1, float("nan"), float("inf"), 2**63])
+def test_rejects_invalid_timeout(timeout_s):
+    with pytest.raises(ValueError):
+        FrontendRoute("GET", "/ok", _handler, timeout_s=timeout_s)
 
 
 @pytest.mark.parametrize(
@@ -57,14 +68,6 @@ def test_rejects_non_get_methods(method):
 def test_rejects_non_static_paths(path):
     with pytest.raises(ValueError):
         FrontendRoute("GET", path, _handler)
-
-
-def test_rejects_async_handler():
-    async def _async_handler(ctx):
-        return {}
-
-    with pytest.raises(ValueError):
-        FrontendRoute("GET", "/ok", _async_handler)
 
 
 def test_rejects_non_callable_handler():

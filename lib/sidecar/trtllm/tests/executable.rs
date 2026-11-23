@@ -55,3 +55,22 @@ fn invalid_arguments_fail_before_runtime_configuration() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("model-path must not be empty"), "{stderr}");
 }
+
+#[test]
+fn invalid_remote_url_policy_fails_before_runtime_configuration() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-trtllm-sidecar"))
+        .args([
+            "--grpc-endpoint",
+            "http://127.0.0.1:1",
+            "--model-path",
+            "model",
+        ])
+        .env("DYN_MM_ALLOW_REMOTE_URLS", "invalid")
+        .env("ETCD_ENDPOINTS", "://invalid")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("DYN_MM_ALLOW_REMOTE_URLS"), "{stderr}");
+    assert!(stderr.contains("Invalid boolean value"), "{stderr}");
+}

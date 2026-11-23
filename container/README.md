@@ -242,7 +242,7 @@ container/render.py --framework=vllm --target=local-dev --output-short-filename
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
 # Build TensorRT-LLM runtime image called dynamo:latest-trtllm-runtime
-container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.4
 docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Build SGLang runtime image for Intel XPU (instead of the default CUDA device)
@@ -252,9 +252,9 @@ docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu
 # Build Triton runtime image (prebuilt Dynamo wheels from PyPI on the upstream
 # Triton release image). --network=host lets the build reach PyPI.
 # The Triton release is selected with --build-arg RUNTIME_IMAGE_TAG=<tag>
-# (defaults to 26.09-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
+# (defaults to 26.11-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
 container/render.py --framework=triton --target=runtime --output-short-filename
-docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.09-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
+docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.11-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
 ```
 
 The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`
@@ -478,13 +478,10 @@ container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
 
 # From this point forward, commands run inside the container started in step 2.
 
-# 3. Editable install of dynamo into the SGLang conda env
+# 3. Editable install of dynamo into the upstream SGLang venv at /opt/venv
 # (local-dev images intentionally skip the dynamo wheel install; see
 #  container/templates/dev.Dockerfile -> "The editable install must be done at runtime")
-# The conda env at /opt/miniforge3/envs/sglang is root-owned, so chown it once
-# to the dynamo user (the image grants NOPASSWD sudo) before installing.
-sudo chown -R dynamo:0 /opt/miniforge3/envs/sglang
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 # 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
 # Add `--features request-trace-s3` to enable the S3 request-trace sink
 # (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
@@ -547,7 +544,7 @@ nats-server -js &
 etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 
 # 4. Compile code
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 # Add `--features request-trace-s3` to enable the S3 request-trace sink
 # (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
 cd lib/bindings/python && maturin develop --uv && cd -

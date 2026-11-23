@@ -1,18 +1,36 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
+from vllm import SamplingParams
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.media.image import ImageMediaIO
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    VisionChunkProcessorItems,
+    parse_mm_uuids,
+)
+from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.renderers.base import BaseRenderer
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.handlers import _translate_vllm_client_errors
 from dynamo.vllm.multimodal_utils import request_processor as mod
 from dynamo.vllm.multimodal_utils.models import qwen as qwen_mod
 
@@ -33,6 +51,7 @@ def _processor(
     video_loader=None,
     frontend_decoding: bool = False,
     media_limits: dict[str, int] | None = None,
+    real_image_loader: bool = False,
 ) -> mod.VllmMultimodalRequestProcessor:
     engine_client = None
     if media_limits is not None:
@@ -50,7 +69,9 @@ def _processor(
         engine_client=engine_client,
         enable_multimodal=enabled,
         enable_frontend_decoding=frontend_decoding,
-        image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
+        image_loader=None
+        if real_image_loader
+        else SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
         video_loader=video_loader
         or SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
         audio_loader=SimpleNamespace(
@@ -69,6 +90,7 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         prepared.request,
         prepared.multi_modal_data,
         prepared.mm_processor_kwargs,
+        custom_data=prepared.custom_data,
     )
     return SimpleNamespace(
         prompt=prompt,
@@ -76,6 +98,103 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         multi_modal_data=prepared.multi_modal_data,
         mm_processor_kwargs=prepared.mm_processor_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_custom_data_reaches_the_registered_processor():
+    processor = _processor()  # Qwen3-VL: the geometry gate is P/D-only
+    descriptor = {
+        "dtype": "float32-le",
+        "shape": [2, 4],
+        "data_base64": "AAAAAA==",
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"custom_input": [{"Json": descriptor}]},
+    }
+
+    prepared = await _prepare_prompt(
+        processor,
+        request,
+        "request-1",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert "multi_modal_data" not in prepared.request
+    assert prepared.prompt["multi_modal_data"] == {"custom_input": descriptor}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model", ["Qwen/Qwen3-VL-2B-Instruct", "meta-llama/Llama-3.2-1B"]
+)
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.PREFILL, DisaggregationMode.DECODE]
+)
+async def test_custom_json_disaggregation_is_rejected(model, mode):
+    processor = _processor(model=model)
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"custom_input": [{"Json": {"payload": "x"}}]},
+    }
+    with pytest.raises(mod.InvalidArgument, match="supported only in aggregated"):
+        await processor.prepare_input(request, "request-1", None, mode)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "vision_chunk"])
+@pytest.mark.parametrize("mode", [DisaggregationMode.AGGREGATED])
+async def test_custom_data_passes_engine_modality_names_through(modality, mode):
+    """Modality names belong to the engine's processor, not to Dynamo.
+
+    A custom payload never reaches frontend media handling, so a name the
+    frontend also uses for its own media must survive untouched rather than be
+    interpreted by UUID inference or structural pad expansion.
+    """
+    # A generic family, so the P/D leg is not refused for mRoPE geometry.
+    processor = _processor(model="meta-llama/Llama-3.2-1B")
+    payload = {
+        modality: {
+            "values": [None, False, 0],
+            "data_base64": "AA==",
+            "$dynamo_tensor": {"plugin_owned": True},
+        }
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {key: [{"Json": value}] for key, value in payload.items()},
+    }
+
+    prepared = await _prepare_prompt(processor, request, "request-1", None, mode)
+
+    assert prepared.prompt["multi_modal_data"] == payload
+    assert "multi_modal_uuids" not in prepared.prompt
+    assert prepared.prompt["prompt_token_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_custom_data_merges_with_frontend_media():
+    processor = _processor()
+    image = Image.new("RGB", (2, 2))
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "chemistry": [{"Json": {"payload": [1, 2]}}],
+        },
+    }
+    processor.extract_multimodal_data = AsyncMock(return_value={"image": [image]})
+    prepared = await _prepare_prompt(
+        processor, request, "request-1", None, DisaggregationMode.AGGREGATED
+    )
+    assert prepared.prompt["multi_modal_data"] == {
+        "image": [image],
+        "chemistry": {"payload": [1, 2]},
+    }
+    assert processor.extract_multimodal_data.call_args.args[0]["multi_modal_data"] == {
+        "image_url": [{"Url": "https://image"}]
+    }
 
 
 @pytest.mark.asyncio
@@ -155,6 +274,116 @@ async def test_image_cache_has_no_scope_for_malformed_scope():
     processor.image_loader.load_image_batch.assert_awaited_once_with(
         image_items, cache_scope=None, preserve_uuid_slots=True
     )
+
+
+def _encode_image(image: Image.Image, fmt: str = "PNG", **save_kwargs) -> bytes:
+    buf = BytesIO()
+    image.save(buf, format=fmt, **save_kwargs)
+    return buf.getvalue()
+
+
+def _ink_on_transparent(mode: str) -> Image.Image:
+    """4x2 image: black ink in the top-left pixel, every other pixel fully transparent."""
+    image = Image.new(mode, (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255) if mode == "RGBA" else (0, 255))
+    return image
+
+
+def _palette_with_transparent_entry() -> bytes:
+    image = Image.new("P", (4, 2))
+    image.putpalette([0, 0, 0, 255, 0, 0, 0, 0, 0])  # 0 black, 1 red, 2 black
+    image.putdata([0, 1, 2, 0, 0, 1, 2, 0])
+    return _encode_image(image, transparency=0)
+
+
+def _exif_rotate_90() -> bytes:
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+    return exif.tobytes()
+
+
+def _rgba_ink_png() -> bytes:
+    return _encode_image(_ink_on_transparent("RGBA"))
+
+
+def _image_request(content: bytes) -> dict:
+    # The loader reads the format from the bytes, so one media type serves every kind.
+    url = "data:image/png;base64," + base64.b64encode(content).decode()
+    return {"multi_modal_data": {"image_url": [{"Url": url}]}}
+
+
+def _pixels(image: Image.Image) -> tuple[str, tuple[int, int], bytes]:
+    return image.mode, image.size, image.tobytes()
+
+
+def _vllm_pixels(content: bytes) -> tuple[str, tuple[int, int], bytes]:
+    return _pixels(ImageMediaIO(image_mode="RGB").load_bytes(content).media)
+
+
+@pytest.mark.asyncio
+async def test_worker_transparent_pixels_become_white():
+    """Black ink on a transparent canvas stays readable: the canvas is white, as in vLLM."""
+    processor = _processor(real_image_loader=True)
+
+    result = await processor.extract_multimodal_data(
+        _image_request(_rgba_ink_png()), "request-1", None
+    )
+
+    image = result["image"]
+    assert [image.getpixel((0, 0)), image.getpixel((1, 0))] == [
+        (0, 0, 0),
+        (255, 255, 255),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "build_image",
+    [
+        pytest.param(_rgba_ink_png, id="rgba"),
+        pytest.param(lambda: _encode_image(_ink_on_transparent("LA")), id="grey_alpha"),
+        pytest.param(_palette_with_transparent_entry, id="palette_transparent_entry"),
+        pytest.param(
+            lambda: _encode_image(_ink_on_transparent("RGBA"), "WEBP", lossless=True),
+            id="webp_alpha",
+        ),
+        pytest.param(
+            lambda: _encode_image(_ink_on_transparent("RGBA"), exif=_exif_rotate_90()),
+            id="rgba_with_exif_rotation",
+        ),
+    ],
+)
+async def test_worker_image_matches_vllm_loader(build_image):
+    content = build_image()
+    processor = _processor(real_image_loader=True)
+
+    result = await processor.extract_multimodal_data(
+        _image_request(content), "request-1", None
+    )
+
+    assert _pixels(result["image"]) == _vllm_pixels(content)
+
+
+@pytest.mark.asyncio
+async def test_worker_frontend_decoded_image_matches_vllm_loader():
+    """Frontend decoding on or off, a transparent image gives the same pixels."""
+    content = _rgba_ink_png()
+    # The frontend decoder sends an RGBA PNG as an (H, W, 4) uint8 array.
+    decoded = np.asarray(Image.open(BytesIO(content)))
+    processor = _processor(real_image_loader=True)
+    # Stand in for the NIXL connector that --frontend-decoding creates at start-up.
+    processor.image_loader._enable_frontend_decoding = True
+    processor.image_loader._nixl_connector = object()
+
+    with patch(
+        "dynamo.common.multimodal.image_loader.read_decoded_media_via_nixl",
+        new=AsyncMock(return_value=decoded),
+    ):
+        result = await processor.extract_multimodal_data(
+            {"multi_modal_data": {"image_url": [{"Decoded": {}}]}}, "request-1", None
+        )
+
+    assert _pixels(result["image"]) == _vllm_pixels(content)
 
 
 @pytest.mark.asyncio
@@ -649,7 +878,7 @@ async def test_audio_in_video_rejects_unusable_audio(video_item, audio_error, me
     if audio_error is not None:
         processor.audio_loader.load_audio.side_effect = audio_error
 
-    with pytest.raises((ValueError, RuntimeError), match=message):
+    with pytest.raises((mod.InvalidArgument, RuntimeError), match=message):
         await processor.extract_multimodal_data(
             {"multi_modal_data": {"video_url": [video_item]}},
             "request-audio-error",
@@ -714,15 +943,6 @@ def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
 
 
 def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
-    from vllm.multimodal.parse import (
-        MultiModalDataItems,
-        VisionChunkProcessorItems,
-        parse_mm_uuids,
-    )
-    from vllm.multimodal.processing.inputs import ProcessorInputs
-    from vllm.multimodal.processing.processor import BaseMultiModalProcessor
-    from vllm.renderers.base import BaseRenderer
-
     data_items = MultiModalDataItems(
         {"vision_chunk": VisionChunkProcessorItems([None])}
     )
@@ -754,22 +974,63 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
     parse_mm_data.assert_called_once()
-    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.args[0] == {}
     assert parse_mm_data.call_args.kwargs == {"validate": False}
 
-    cache.is_cached.return_value = [False]
-    parse_mm_data.reset_mock()
-    with pytest.raises(
-        ValueError,
-        match="Cache miss for vision_chunk at index 0 but data is not provided",
-    ):
-        BaseMultiModalProcessor._get_cache_missing_items(
-            processor,
-            cache,
-            data_items,
-            mm_hashes,
+
+@pytest.mark.asyncio
+async def test_worker_uuid_cache_miss_has_actionable_recovery_advice():
+    uuid = "catalog/image:v2"
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"UuidOnly": uuid}]},
+        "multi_modal_uuids": {"image_url": [uuid]},
+    }
+    prompt = _processor(unified_vision_chunk=True).build_tokens_prompt(
+        request, {"vision_chunk": [None]}, None
+    )
+    data_items = MultiModalDataItems(
+        {
+            "vision_chunk": VisionChunkProcessorItems(
+                prompt["multi_modal_data"]["vision_chunk"]
+            )
+        }
+    )
+    mm_hashes = prompt["multi_modal_uuids"]
+
+    def parse_mm_data(data, *, validate):
+        return MultiModalDataItems(
+            {
+                modality: VisionChunkProcessorItems(items)
+                for modality, items in data.items()
+            }
         )
-    parse_mm_data.assert_not_called()
+
+    processor = SimpleNamespace(info=SimpleNamespace(parse_mm_data=parse_mm_data))
+    cache = MultiModalProcessorOnlyCache(
+        SimpleNamespace(
+            get_multimodal_config=lambda: SimpleNamespace(mm_processor_cache_gb=0.001)
+        )
+    )
+
+    async def add_request(*args, **kwargs):
+        return BaseMultiModalProcessor._get_cache_missing_items(
+            processor, cache, data_items, mm_hashes
+        )
+
+    # Exercise vLLM's actual wrapping of a processor failure, not a fabricated
+    # exception chain that could diverge from AsyncLLM.generate.
+    engine = SimpleNamespace(add_request=add_request, log_requests=False)
+    stream = AsyncLLM.generate(
+        engine, prompt, SamplingParams(max_tokens=1), "cache-miss"
+    )
+    with pytest.raises(InvalidArgument, match="Resend.*same UUID") as raised:
+        await asyncio.wait_for(
+            anext(_translate_vllm_client_errors(stream, request)), timeout=5
+        )
+    assert isinstance(raised.value.__cause__, EngineGenerateError)
+    assert type(raised.value.__cause__.__cause__) is ValueError
+    assert uuid not in str(raised.value)
 
 
 def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
@@ -818,7 +1079,7 @@ def test_build_tokens_prompt_rejects_malformed_user_uuids(
 ) -> None:
     processor = _processor()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(mod.InvalidArgument, match=message):
         processor.build_tokens_prompt(
             {
                 "token_ids": [1, 2, 3],
@@ -841,7 +1102,7 @@ def test_build_tokens_prompt_reports_uuid_only_cache_miss(
 ) -> None:
     processor = _processor(unified_vision_chunk="vision_chunk" in multi_modal_data)
 
-    with pytest.raises(ValueError, match="require aligned multi_modal_uuids"):
+    with pytest.raises(mod.InvalidArgument, match="require aligned multi_modal_uuids"):
         processor.build_tokens_prompt(
             {"token_ids": [1, 2, 3]},
             multi_modal_data,
@@ -1776,7 +2037,6 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
 
 def _real_kwargs_item(key: str = "pixel_values"):
     """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
-    import torch
     from vllm.multimodal.inputs import (
         MultiModalBatchedField,
         MultiModalFieldElem,
@@ -2027,8 +2287,6 @@ def test_qwen_handoff_computes_grid_for_pil_images():
 
 
 def test_qwen_handoff_accepts_encoder_embeddings():
-    import torch
-
     processor = _processor()
     result = processor.build_prefill_handoff(
         multi_modal_data={
@@ -2085,8 +2343,9 @@ def _k3_processor(
     return processor, engine_client
 
 
-def test_k3_pad_expands_once_for_scalar_image():
-    processor, _ = _k3_processor()
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_pad_expands_once_for_scalar_image(model_type):
+    processor, _ = _k3_processor(model_type=model_type)
 
     result = processor._expand_kimi_k3_pads(
         [1, _K3_PAD_ID, 2],
@@ -2096,8 +2355,9 @@ def test_k3_pad_expands_once_for_scalar_image():
     assert result == [1, *_K3_NATIVE_IDS, 2]
 
 
-def test_k3_pad_expands_once_per_image():
-    processor, _ = _k3_processor()
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_pad_expands_once_per_image(model_type):
+    processor, _ = _k3_processor(model_type=model_type)
 
     result = processor._expand_kimi_k3_pads(
         [_K3_PAD_ID, 7, _K3_PAD_ID],
@@ -2121,7 +2381,7 @@ def test_k3_pad_expands_for_unified_vision_chunk():
 def test_k3_mismatched_pad_count_is_rejected():
     processor, _ = _k3_processor()
 
-    with pytest.raises(ValueError, match="refusing to expand"):
+    with pytest.raises(mod.InvalidArgument, match="refusing to expand"):
         processor._expand_kimi_k3_pads(
             [_K3_PAD_ID],
             {"image": [object(), object()]},
@@ -2182,13 +2442,16 @@ def test_k3_without_raw_image_media_is_untouched():
         (_K3_PAD_ID, "<|kimi_image_placeholder|>", ["bad"], "non-empty integer"),
     ],
 )
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
 def test_invalid_k3_metadata_fails_fast(
     pad_id: object,
     image_placeholder: object,
     native_ids: object,
     message: str,
+    model_type: str,
 ):
     processor, _ = _k3_processor(
+        model_type=model_type,
         pad_id=pad_id,
         image_placeholder=image_placeholder,
         native_ids=native_ids,
@@ -2245,6 +2508,85 @@ def test_k3_long_prompt_splices_only_rare_pads():
     assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
 
 
+# --- Per-model image placeholder dispatch ------------------------------------
+
+_IMG, _IMG_BREAK, _IMG_END = 10, 12, 13
+
+
+def _mistral_processor(
+    tokenizer: object,
+) -> tuple[mod.VllmMultimodalRequestProcessor, SimpleNamespace]:
+    engine_client = SimpleNamespace(get_tokenizer=MagicMock(return_value=tokenizer))
+    processor = mod.VllmMultimodalRequestProcessor(
+        model="mistral",
+        engine_client=engine_client,
+        enable_multimodal=True,
+        use_unified_vision_chunk=False,
+    )
+    return processor, engine_client
+
+
+def _mistral_tokenizer() -> SimpleNamespace:
+    """A Mistral tokenizer whose image encoder spends one token per 28 pixels."""
+    encoder = SimpleNamespace(
+        special_ids=SimpleNamespace(img=_IMG, img_break=_IMG_BREAK, img_end=_IMG_END),
+        _image_to_num_tokens=lambda image: (
+            (image.size[0] - 1) // 28 + 1,
+            (image.size[1] - 1) // 28 + 1,
+        ),
+    )
+    return SimpleNamespace(instruct=SimpleNamespace(mm_encoder=encoder))
+
+
+def test_mistral_build_tokens_prompt_expands_placeholders():
+    processor, _ = _mistral_processor(_mistral_tokenizer())
+
+    prompt = processor.build_tokens_prompt(
+        {"token_ids": [1, _IMG, 2], "multi_modal_uuids": {"image_url": ["a"]}},
+        {"image": Image.new("RGB", (56, 28))},
+        None,
+    )
+
+    # A 56x28 image is a 2x1 grid.
+    assert prompt["prompt_token_ids"] == [1, _IMG, _IMG, _IMG_END, 2]
+
+
+@pytest.mark.parametrize(
+    "tokenizer",
+    [SimpleNamespace(encode=MagicMock()), None],
+    ids=["no-mm-encoder", "missing"],
+)
+def test_non_mistral_tokenizers_are_never_rewritten(tokenizer: object):
+    processor, engine_client = _mistral_processor(tokenizer)
+    tokens = [1, _IMG, 2]
+
+    assert processor._adapt_image_placeholders(tokens, {"image": object()}) is tokens
+    assert processor._adapt_image_placeholders(tokens, {"image": object()}) is tokens
+    # A known non-Mistral tokenizer is resolved once; a missing one is retried.
+    assert engine_client.get_tokenizer.call_count == (2 if tokenizer is None else 1)
+
+
+def test_text_only_requests_never_resolve_the_tokenizer():
+    processor, engine_client = _mistral_processor(_mistral_tokenizer())
+    tokens = [1, _IMG, 2]
+
+    assert processor._adapt_image_placeholders(tokens, None) is tokens
+    assert processor._adapt_image_placeholders(tokens, {}) is tokens
+    engine_client.get_tokenizer.assert_not_called()
+
+
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_placeholders_skip_the_mistral_path(model_type: str):
+    processor, engine_client = _k3_processor(model_type=model_type)
+
+    result = processor._adapt_image_placeholders(
+        [1, _K3_PAD_ID, 2], {"image": object()}
+    )
+
+    assert result == [1, *_K3_NATIVE_IDS, 2]
+    engine_client.get_tokenizer.assert_called_once_with()
+
+
 class TestLoadQwenGridParams:
     """Tests for embedding dimensions loaded from Qwen vision configs."""
 
@@ -2284,6 +2626,53 @@ class TestLoadQwenGridParams:
         assert params.vision_hidden_dim == 2048
         # DeepStack concatenates intermediate outputs with the final vision output.
         assert params.decode_embedding_dim == expected_decode_embedding_dim
+
+
+def test_unsupported_audio_is_rejected_before_any_media_loader(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "audio_url": [{"Url": "https://example.com/clip.wav"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="Model does not support audio input"):
+        processor.validate_multimodal_request(request)
+
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_not_awaited()
+
+
+def test_image_and_video_remain_allowed_when_audio_is_unsupported(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 1})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    processor.validate_multimodal_request(
+        {
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+            }
+        }
+    )
+
+
+def test_unified_vision_chunk_image_is_allowed(monkeypatch):
+    processor = _processor(unified_vision_chunk=True, media_limits={"vision_chunk": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"vision_chunk"})
+    )
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]}}
+    )
 
 
 def test_zero_video_limit_rejects_before_any_media_loader():
@@ -2407,3 +2796,55 @@ def test_video_derived_audio_respects_flag_and_limit(
     else:
         request.update(kwargs)
     processor.validate_multimodal_request(request)
+
+
+@pytest.mark.parametrize("value", [None, [1, 2], {"atoms": ["C", "O"]}])
+def test_custom_payload_values_and_repeated_parts(value):
+    single, media = mod._split_multimodal_data(
+        {"multi_modal_data": {"custom": [{"Json": value}]}}
+    )
+    assert single == {"custom": value}
+    assert not media
+    repeated, _ = mod._split_multimodal_data(
+        {"multi_modal_data": {"custom": [{"Json": value}, {"Json": value}]}}
+    )
+    assert repeated == {"custom": [value, value]}
+
+
+@pytest.mark.asyncio
+async def test_custom_and_media_engine_key_collision_is_rejected():
+    processor = _processor()
+    processor.extract_multimodal_data = AsyncMock(
+        return_value={"image": [Image.new("RGB", (1, 1))]}
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "image": [{"Json": {"data": "opaque"}}],
+        },
+    }
+    with pytest.raises(mod.InvalidArgument, match="same engine modality"):
+        await _prepare_prompt(
+            processor, request, "request-1", None, DisaggregationMode.AGGREGATED
+        )
+
+
+@pytest.mark.asyncio
+async def test_custom_json_cannot_merge_with_processed_media():
+    processor = _processor()
+    processor.try_receive_mm_kwargs = AsyncMock(
+        return_value={"type": "multimodal", "prompt_token_ids": [1, 99, 2]}
+    )
+    request = {
+        "token_ids": [1, 2],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "chemistry": [{"Json": {"data": "opaque"}}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="frontend-processed multimodal"):
+        await processor.prepare_input(
+            request, "request-1", None, DisaggregationMode.AGGREGATED
+        )
