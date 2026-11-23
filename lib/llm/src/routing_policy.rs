@@ -6,8 +6,8 @@ use std::{
     sync::Arc,
 };
 
-use dynamo_kv_router::{protocols::RoutingConstraints, scheduling::SchedulingRequest};
 use dynamo_runtime::pipeline::Error;
+use dynamo_scheduler::host::{RoutingConstraints, SchedulingRequest};
 
 use crate::{
     discovery::RuntimeConfigWatch, local_model::runtime_config::ModelRuntimeConfig,
@@ -81,7 +81,7 @@ pub(crate) enum ExecutionStage {
 pub(crate) struct ExecutionRequirements {
     pub allows_replay: bool,
     pub policy_required: bool,
-    pub accounting_attribution: dynamo_kv_router::scheduling::AccountingAttribution,
+    pub accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
 }
 
 pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements {

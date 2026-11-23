@@ -31,6 +31,7 @@ use lease::*;
 pub use lock::*;
 
 use super::utils::build_in_runtime;
+use crate::config::env_config::positive_secs_or_default;
 use crate::config::environment_names::etcd as env_etcd;
 
 const DEFAULT_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -783,10 +784,10 @@ impl Client {
                 .watch(
                     prefix.as_str(),
                     Some(
+                        // No prev_kv: events are read for their new key and value only.
                         WatchOptions::new()
                             .with_prefix()
-                            .with_start_revision(start_revision)
-                            .with_prev_key(),
+                            .with_start_revision(start_revision),
                     ),
                 )
                 .await
@@ -1011,29 +1012,12 @@ fn default_lease_ttl() -> u64 {
 }
 
 fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
-    match value {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-        },
-        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
-    }
+    positive_secs_or_default(
+        env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+        value,
+        DEFAULT_STARTUP_CONNECT_TIMEOUT,
+        |message| tracing::warn!("{message}"),
+    )
 }
 
 /// Resolve the etcd channel keepalive `(interval, timeout)`, or `None` when disabled
@@ -1067,29 +1051,12 @@ fn keep_alive_from_values(
             ETCD_SERVER_KEEPALIVE_MIN_TIME.as_secs()
         );
     }
-    let timeout = match timeout {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
-                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
-                );
-                DEFAULT_KEEPALIVE_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
-                );
-                DEFAULT_KEEPALIVE_TIMEOUT
-            }
-        },
-        None => DEFAULT_KEEPALIVE_TIMEOUT,
-    };
+    let timeout = positive_secs_or_default(
+        env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
+        timeout,
+        DEFAULT_KEEPALIVE_TIMEOUT,
+        |message| tracing::warn!("{message}"),
+    );
     Some((interval, timeout))
 }
 
@@ -1300,6 +1267,32 @@ impl KvCache {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn timeout_warnings_keep_transport_target() {
+        let warnings = crate::config::env_config::tests::capture_warnings(
+            "dynamo_runtime::transports::etcd",
+            || {
+                for value in [None, Some("45"), Some("0"), Some("invalid")] {
+                    let _ = startup_connect_timeout_from_value(value);
+                    let _ = keep_alive_from_values(None, value);
+                }
+                let _ = keep_alive_from_values(Some("0"), Some("invalid"));
+            },
+        );
+        assert_eq!(warnings.lines().count(), 4);
+        for (name, default) in [
+            (env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS, 120),
+            (env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS, 10),
+        ] {
+            assert!(warnings.contains(&format!(
+                "{name} must be >= 1; got 0. Falling back to {default}."
+            )));
+            assert!(warnings.contains(&format!(
+                "Invalid {name}='invalid' (invalid digit found in string). Falling back to {default}."
+            )));
+        }
+    }
 
     #[test]
     fn parses_startup_connect_timeout() {

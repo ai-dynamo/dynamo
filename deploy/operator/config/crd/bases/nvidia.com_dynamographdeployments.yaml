@@ -11670,8 +11670,6 @@ spec:
                             format: int32
                             minimum: 2
                             type: integer
-                        required:
-                          - nodeCount
                         type: object
                       providerOverride:
                         description: |-

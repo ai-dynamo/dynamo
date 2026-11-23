@@ -20,6 +20,8 @@ Covers (after realignment to the merged TRT-LLM PR #13199):
   * First-stat schema probe disables the publisher when the nested IBS dict
     is missing or any of the 11 required fields is absent — protecting
     against silent planner poison when running against pre-#13199 TRT-LLM.
+  * Under attention DP only rank 0 reaches the native metrics collector,
+    while Dynamo metrics still receive every rank.
 
 The handle_stat closure is defined inside Publisher._publish_stats_task,
 so we mirror its FPM branch via ``_invoke_handler`` below — kept in
@@ -717,14 +719,17 @@ async def test_stats_polling_processes_complete_drain_through_batch_handler():
     pub.engine = MagicMock()
     pub.metrics_publisher = MagicMock()
     pub.component_gauges = MagicMock()
-    pub.metrics_collector = None
+    pub.metrics_collector = MagicMock()
     pub.fpm_publisher = None
     pub._fpm_schema_checked = False
 
+    rank0 = _build_fake_stat(attentionDpRank=0)
+    rank1 = _build_fake_stat(attentionDpRank=1)
+
     async def fetch_stats(timeout):
         assert timeout == publisher_mod._STATS_TIMEOUT_SEC
-        yield _build_fake_stat(attentionDpRank=0)
-        yield _build_fake_stat(attentionDpRank=1)
+        yield rank0
+        yield rank1
 
     def publish_metric(*_args, **_kwargs):
         if pub.metrics_publisher.publish.call_count == 2:
@@ -739,6 +744,7 @@ async def test_stats_polling_processes_complete_drain_through_batch_handler():
         0,
         1,
     ]
+    pub.metrics_collector.log_iteration_stats.assert_called_once_with(rank0)
 
 
 @pytest.mark.asyncio

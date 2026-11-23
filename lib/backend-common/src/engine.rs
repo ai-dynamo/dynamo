@@ -523,6 +523,8 @@ pub enum KvEventSource {
         image_token_id: Option<u32>,
         /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
         heartbeat_timeout: Option<std::time::Duration>,
+        /// Skip store refcounting; see `KvEventSourceConfig::Zmq` in `dynamo-llm`.
+        idempotent_stores: bool,
     },
     Push {
         on_ready: OnPublisherReady,
@@ -672,7 +674,7 @@ impl LLMEngineOutputExt for LLMEngineOutput {
         mut self,
         encoder_result: serde_json::Map<String, serde_json::Value>,
     ) -> Self {
-        self.encoder_result = Some(serde_json::Value::Object(encoder_result));
+        self.encoder_result = Some(Box::new(serde_json::Value::Object(encoder_result)));
         self
     }
 }

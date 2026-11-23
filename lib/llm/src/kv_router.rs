@@ -9,55 +9,54 @@ use std::{
 };
 
 use anyhow::Result;
+use dynamo_kv_events::event::{KV_EVENT_SUBJECT, RouterEvent};
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::routing::{BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq};
+use dynamo_kv_hints::KvHint;
+use dynamo_kv_indexer::host::{
+    ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
+    SessionPrefixIndexer,
+};
+use dynamo_kv_router::config::{KvRouterConfig, min_initial_workers_from_env};
+use dynamo_kv_router::plugins::check_role;
+use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
+use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
-use dynamo_kv_router::{
-    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
-    SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope,
-    config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
-    indexer::{
-        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
-    },
-    kv_hints::KvHint,
-    plugins::{
-        request_classifier::{RequestClassifier, RequestClassifierContext},
-        worker_selection::{WorkerInfo, WorkerInputs, WorkerSelectionPolicyFactory},
-    },
-    protocols::KV_EVENT_SUBJECT,
-    protocols::{
-        BlockExtraInfo, BlockHashOptions, PrefillLoadHint, RouterEvent, RouterRequest,
-        RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike, WorkerId,
-        WorkerWithDpRank, compute_block_hash_for_seq,
-    },
-    scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
-        RejectThresholdsProvider, WorkerAvailabilityProvider, effective_prefill_tokens,
-        overlap::cache_hit_estimates_from_tiered_matches,
-        queue::{BookingHandle, SchedulerBookingDescriptor},
-    },
-    services::selection::{
-        PromptView, Selected, SelectionAdmission, SelectionError, SelectionOperation,
-        SelectionOutcome, SelectionRun, SessionBinding,
-    },
+use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicyFactory,
 };
+use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionRef};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{
     CancellationToken,
     component::{Client, Endpoint},
     error::{DynamoError, ErrorType},
-    pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
-        async_trait, error::PipelineError,
-    },
-    protocols::annotated::Annotated,
+    pipeline::error::PipelineError,
     traits::DistributedRuntimeProvider,
 };
-use futures::stream;
+use dynamo_scheduler::host::{
+    BookingHandle, CacheHitEstimates, CacheHitWeights, KvSchedulerError, OverlapAnalysis,
+    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, PromptView,
+    RejectThresholdsProvider, RouterConfigOverride, RoutingConstraints, Selected,
+    SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome, SelectionRun,
+    SessionBinding, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    WorkerAvailabilityProvider, WorkerConfigLike, cache_hit_estimates_from_tiered_matches,
+    effective_prefill_tokens,
+};
+use dynamo_slot_tracker::host::{PrefillLoadHint, SchedulerBookingDescriptor};
+use dynamo_worker_selection::host::SelectionConfig;
 
 // Re-export from dynamo-kv-router crate
-pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
+pub use dynamo_scheduler::host::OverlapScoresResponse;
+// The 1.7 path `dynamo_llm::kv_router::protocols`, through the composition crate's pre-split list
+// (removed with it in 1.10).
+pub use dynamo_kv_router::protocols;
 
+pub mod active_load;
 pub(crate) mod embedded;
 pub mod encoder_router;
 pub mod indexer;
@@ -67,6 +66,7 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+pub(crate) mod role_routing;
 mod routing_host;
 pub(crate) use routing_host::hosted_picker;
 pub(crate) use routing_host::hosted_request;
@@ -74,11 +74,13 @@ pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
 
-pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
+pub use active_load::ActiveLoad;
+
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
+pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
 pub use routing_host::{
     KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
 };
@@ -147,7 +149,7 @@ impl SelectionPolicySource {
                 config,
                 worker_type,
                 model_name,
-            ),
+            )?,
         };
         if !prepared.inputs().contains(WorkerInputs::CACHE) {
             anyhow::ensure!(
@@ -157,6 +159,12 @@ impl SelectionPolicySource {
             anyhow::ensure!(
                 !config.enable_session_prefix_index,
                 "enable_session_prefix_index requires the worker-selection policy to declare WorkerInputs::CACHE"
+            );
+            // Resident block counts come from the indexer that CACHE starts. The input is
+            // experimental; this check is the frontend's only use of that namespace.
+            anyhow::ensure!(
+                !prepared.inputs().contains(RESIDENT_BLOCKS),
+                "RESIDENT_BLOCKS requires the worker-selection policy to declare WorkerInputs::CACHE"
             );
         }
         Ok(prepared)
@@ -168,10 +176,15 @@ impl SelectionPolicySource {
 /// `embedded::EmbeddedSelection::start` builds) and defers every other call to
 /// the wrapped factory. This keeps the one-call-per-partition contract while
 /// letting the router read the inputs of the instance that actually serves.
+///
+/// Preparing also resolves the role's hint policies and checks, with [`check_role`], that they
+/// fit the policy, so a bad combination fails when the router is built.
 #[derive(Clone)]
 pub struct PreparedSelectionPolicy {
     factory: WorkerSelectionPolicyFactory,
     inputs: WorkerInputs,
+    prepare_inputs: WorkerInputs,
+    hint_policies: HintPolicyFactory,
 }
 
 impl PreparedSelectionPolicy {
@@ -180,16 +193,23 @@ impl PreparedSelectionPolicy {
         config: &KvRouterConfig,
         worker_type: WorkerType,
         model_name: Option<&str>,
-    ) -> Self {
+    ) -> Result<Self> {
         let key = embedded::embedded_partition_key(model_name);
-        let policy = inner(config, worker_type, key.as_ref());
+        let policy = inner(&SelectionConfig::from(config), worker_type, key.as_ref());
         let inputs =
-            dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
+            dynamo_scheduler::host::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
                 &policy,
             );
+        let hint_policies = plugins::router_plugin_registry().resolve_hint_policies(config)?;
+        let prepare_inputs = check_role(
+            worker_type,
+            &policy,
+            hint_policies.instances(&SelectionConfig::from(config), worker_type, key.as_ref()),
+            config,
+        )?;
         let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
         let factory: WorkerSelectionPolicyFactory = Arc::new(
-            move |config: &KvRouterConfig, worker_type, partition: RoutingPartitionRef<'_>| {
+            move |config: &SelectionConfig, worker_type, partition: RoutingPartitionRef<'_>| {
                 if partition == key.as_ref()
                     && let Some(policy) = slot.lock().take()
                 {
@@ -198,12 +218,28 @@ impl PreparedSelectionPolicy {
                 inner(config, worker_type, partition)
             },
         );
-        Self { factory, inputs }
+        Ok(Self {
+            factory,
+            inputs,
+            prepare_inputs,
+            hint_policies,
+        })
     }
 
     /// The optional worker inputs the prepared instance consumes.
     pub fn inputs(&self) -> WorkerInputs {
         self.inputs
+    }
+
+    /// The worker inputs whose resources the router starts: the policy's, plus those of the
+    /// role's configured hint policies. Default hint policies add none.
+    pub fn prepare_inputs(&self) -> WorkerInputs {
+        self.prepare_inputs
+    }
+
+    /// The resolved hint policies the router's partitions run.
+    pub fn hint_policies(&self) -> &HintPolicyFactory {
+        &self.hint_policies
     }
 }
 
@@ -373,9 +409,9 @@ fn start_approximate_lru_metrics(
 
 pub(crate) fn to_worker_selection_session_context(
     context: &crate::protocols::common::extensions::AgentContext,
-) -> dynamo_kv_router::SessionContext {
+) -> dynamo_router_protocol::session::SessionContext {
     use crate::protocols::common::extensions::{AgentContext, InputTrigger};
-    use dynamo_kv_router::{SessionContext, WorkerSelectionInputTrigger};
+    use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 
     // Keep this exhaustive so a new wire-level field must be handled here.
     let AgentContext {
@@ -466,7 +502,7 @@ pub enum FindBestMatchOutcome {
         kv_hint: Option<KvHint>,
     },
     QueueRejected {
-        rejection: scheduling::QueueRejection,
+        rejection: dynamo_admission::host::QueueRejection,
     },
 }
 
@@ -485,7 +521,9 @@ pub struct AdmittedFindBestMatchOutcome {
     pub(super) booking: Option<BookingHandle>,
     /// The selected worker's scheduler-load snapshot; set only by advisory
     /// probes (`FindBestMatchAdmission::WithoutAdmission`), which never book.
-    pub(super) advisory_load: Option<scheduling::AdvisoryWorkerLoad>,
+    pub(super) advisory_load: Option<dynamo_scheduler::host::AdvisoryWorkerLoad>,
+    /// Set by the request classifier; replaces the request's `priority` on dispatch.
+    pub(super) backend_priority: Option<i32>,
 }
 
 impl AdmittedFindBestMatchOutcome {
@@ -546,22 +584,31 @@ impl std::fmt::Display for UnknownPolicyClassRefusal {
     }
 }
 
-fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
+fn map_scheduler_error(error: dynamo_scheduler::host::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
     // would just bounce the request around. A filter rejection is unavailable,
     // not overload, and becomes HTTP 503.
-    let unknown_policy_class = matches!(error, scheduling::KvSchedulerError::UnknownPolicyClass(_));
+    let unknown_policy_class = matches!(
+        error,
+        dynamo_scheduler::host::KvSchedulerError::UnknownPolicyClass(_)
+    );
     let (error_type, overloaded) = match error {
-        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
+        dynamo_scheduler::host::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
             (ErrorType::WorkerOverloaded, true)
         }
-        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
+        dynamo_scheduler::host::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
-        scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
-        scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
-        scheduling::KvSchedulerError::UnknownPolicyClass(_) => (ErrorType::InvalidArgument, false),
+        dynamo_scheduler::host::KvSchedulerError::DeadlineExceeded => {
+            (ErrorType::DeadlineExceeded, false)
+        }
+        dynamo_scheduler::host::KvSchedulerError::AllEligibleWorkersFiltered => {
+            (ErrorType::Unavailable, false)
+        }
+        dynamo_scheduler::host::KvSchedulerError::UnknownPolicyClass(_) => {
+            (ErrorType::InvalidArgument, false)
+        }
         _ => return error.into(),
     };
 
@@ -588,14 +635,6 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     } else {
         error.build().into()
     }
-}
-
-fn cancelled_error(context_id: &str) -> anyhow::Error {
-    DynamoError::builder()
-        .error_type(ErrorType::Cancelled)
-        .message(format!("Request {context_id} was cancelled"))
-        .build()
-        .into()
 }
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
@@ -748,23 +787,24 @@ impl KvRouter {
             metric_worker_type,
             model_name.as_deref(),
         )?;
+        // A configured hint policy that reads KV copy sources starts the KV index even when the
+        // worker-selection policy does not read it.
         let required_worker_inputs = prepared.inputs();
+        let index_inputs = prepared.prepare_inputs();
+        let hint_policies = prepared.hint_policies().clone();
         let policy_factory = prepared.factory;
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
-        let shared_cache = if required_worker_inputs.contains(WorkerInputs::CACHE) {
+        let shared_cache = if index_inputs.contains(WorkerInputs::CACHE) {
             shared_cache
         } else {
             None
         };
-        let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
+        let tracking_hash = tracking_hash_context(&kv_router_config)?;
         let tracking_model_name =
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
-        let kv_event_source_requirement = KvEventSourceRequirement::derive(
-            worker_role,
-            &kv_router_config,
-            required_worker_inputs,
-        );
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &kv_router_config, index_inputs);
         let component = endpoint.component();
         // All chooser tasks are children of the routing load context owner.
         let cancellation_token = parent_token.child_token();
@@ -784,7 +824,7 @@ impl KvRouter {
             model_name: model_name.as_deref(),
             worker_role,
             metric_worker_type,
-            worker_inputs: required_worker_inputs,
+            worker_inputs: index_inputs,
             kv_event_source_requirement,
             kv_source_membership,
             cancellation_token: cancellation_token.clone(),
@@ -881,12 +921,12 @@ impl KvRouter {
                 shared_cache: shared_cache.clone(),
                 // The availability provider refreshes LoRA eligibility at admission.
                 lora_worker_filter: None,
-                ingress: Arc::clone(&ingress)
-                    as Arc<dyn dynamo_kv_router::services::selection::KvEventIngress>,
+                ingress: Arc::clone(&ingress) as Arc<dyn dynamo_scheduler::host::KvEventIngress>,
                 scheduler_load,
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
                 policy_factory,
+                hint_policies,
             },
             workers_with_configs.clone(),
             Some(request_leases.replica_observer()),
@@ -963,7 +1003,7 @@ impl KvRouter {
     pub(crate) fn begin_request_lifecycle(
         &self,
         request_id: &str,
-    ) -> Result<Option<scheduling::RequestLifecycle>, KvSchedulerError> {
+    ) -> Result<Option<dynamo_scheduler::host::RequestLifecycle>, KvSchedulerError> {
         self.selection
             .scheduler()
             .begin_request_lifecycle(request_id)
@@ -990,9 +1030,7 @@ impl KvRouter {
         &self.kv_router_config
     }
 
-    pub fn policy_control(
-        &self,
-    ) -> &Arc<dynamo_kv_router::scheduling::queue::RuntimePolicyControl> {
+    pub fn policy_control(&self) -> &Arc<dynamo_scheduler::host::RuntimePolicyControl> {
         self.selection.scheduler().policy_control()
     }
 
@@ -1075,7 +1113,7 @@ impl KvRouter {
         tiered_matches: &indexer::TieredMatchDetails,
     ) -> CacheHitEstimates {
         cache_hit_estimates_from_tiered_matches(
-            &self.kv_router_config,
+            &CacheHitWeights::from(&self.kv_router_config),
             self.block_size,
             tiered_matches,
         )
@@ -1224,7 +1262,7 @@ impl KvRouter {
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_context: Option<dynamo_kv_router::SessionContext>,
+        session_context: Option<dynamo_router_protocol::session::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -1274,7 +1312,7 @@ impl KvRouter {
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_context: Option<dynamo_kv_router::SessionContext>,
+        session_context: Option<dynamo_router_protocol::session::SessionContext>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -1300,6 +1338,7 @@ impl KvRouter {
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
             Default::default(),
+            false,
         )
         .await
     }
@@ -1318,14 +1357,15 @@ impl KvRouter {
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_context: Option<dynamo_kv_router::SessionContext>,
+        session_context: Option<dynamo_router_protocol::session::SessionContext>,
         expected_output_tokens: Option<u32>,
-        affinity_target: Option<dynamo_kv_router::protocols::WorkerAffinityTarget>,
+        affinity_target: Option<dynamo_session_affinity::host::WorkerAffinityTarget>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
-        accounting_attribution: dynamo_kv_router::scheduling::AccountingAttribution,
+        accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
+        needs_uncached_prefill: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1356,37 +1396,40 @@ impl KvRouter {
             lookup,
         } = self
             .selection
-            .run_selection(SelectionOperation {
-                accounting_attribution,
-                key: self.selection.partition_key().clone(),
-                prompt: PromptView {
-                    token_ids: Some(tokens),
-                    mm_routing_info: None,
-                    block_mm_infos,
-                    block_hashes: None,
-                    sequence_hashes: None,
-                    isl_tokens: None,
-                    lora_name: lora_name.as_deref(),
-                    cache_namespace: cache_namespace.as_deref(),
-                    is_eagle: Some(self.is_eagle),
+            .run_selection(
+                SelectionOperation {
+                    accounting_attribution,
+                    key: self.selection.partition_key().clone(),
+                    prompt: PromptView {
+                        token_ids: Some(tokens),
+                        mm_routing_info: None,
+                        block_mm_infos,
+                        block_hashes: None,
+                        sequence_hashes: None,
+                        isl_tokens: None,
+                        lora_name: lora_name.as_deref(),
+                        cache_namespace: cache_namespace.as_deref(),
+                        is_eagle: Some(self.is_eagle),
+                    },
+                    router_config_override: router_config_override.cloned(),
+                    expected_output_tokens,
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    session_context,
+                    session: SessionBinding::None,
+                    affinity_target,
+                    pinned_worker,
+                    allowed_worker_ids,
+                    routing_constraints,
+                    admission: core_admission,
+                    track_active_blocks: self.kv_router_config.router_track_active_blocks,
+                    return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                    // Hosted selections do not populate the public reservation replay cache.
+                    replay_id: None,
                 },
-                router_config_override: router_config_override.cloned(),
-                expected_output_tokens,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_context,
-                session: SessionBinding::None,
-                affinity_target,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                admission: core_admission,
-                track_active_blocks: self.kv_router_config.router_track_active_blocks,
-                return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
-                // Hosted selections do not populate the public reservation replay cache.
-                replay_id: None,
-            })
+                !needs_uncached_prefill,
+            )
             .await;
         if lookup.is_some_and(|lookup| lookup.shared_cache_error)
             && let Some(m) = metrics::RoutingOverheadMetrics::get()
@@ -1400,6 +1443,7 @@ impl KvRouter {
                     outcome: FindBestMatchOutcome::QueueRejected { rejection },
                     booking: None,
                     advisory_load: None,
+                    backend_priority: None,
                 });
             }
             Err(SelectionError::Scheduler(error)) => return Err(map_scheduler_error(error)),
@@ -1418,6 +1462,7 @@ impl KvRouter {
             routing_hashes,
             shared_cache_hits,
             booking,
+            backend_priority,
             ..
         } = selected;
         if update_states && is_admitted_routing && booking.is_none() {
@@ -1513,8 +1558,11 @@ impl KvRouter {
                     m.shared_cache_hit_rate
                         .observe(hits.total_hits as f64 / num_blocks as f64);
                 }
+                // What the scorer credits: the run past the worker's device, host and
+                // disk prefix. A multi-rank worker's snapshot holds its deepest rank.
+                let local_blocks = overlap_blocks.max(response.selected_worker_tiers.disk_blocks);
                 m.shared_cache_beyond_blocks
-                    .observe(hits.hits_beyond(overlap_blocks) as f64);
+                    .observe(hits.loadable_beyond(local_blocks) as f64);
             }
         }
 
@@ -1539,6 +1587,7 @@ impl KvRouter {
             },
             booking,
             advisory_load,
+            backend_priority,
         })
     }
 
@@ -1655,11 +1704,6 @@ impl KvRouter {
         self.selection.scheduler().pending_count()
     }
 
-    /// Sum of ISL tokens for requests currently parked in the scheduler queue.
-    pub fn pending_isl_tokens(&self) -> usize {
-        self.selection.scheduler().pending_isl_tokens()
-    }
-
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
@@ -1710,15 +1754,16 @@ impl KvRouter {
         (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
-    pub(crate) async fn add_output_blocks_if_booking(
+    pub(crate) async fn update_output_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
         num_blocks: usize,
         decay_fraction: Option<f64>,
+        progress: Option<dynamo_slot_tracker::host::DecodeProgressUpdate>,
     ) -> Result<(), KvSchedulerError> {
         self.selection
             .scheduler()
-            .add_output_blocks_if_booking(booking, num_blocks, decay_fraction)
+            .update_output_if_booking(booking, num_blocks, decay_fraction, progress)
             .await
     }
 
@@ -1811,7 +1856,8 @@ impl KvRouter {
     ///
     /// Device, host-pinned, and disk values are keyed by `(worker_id, dp_rank)`.
     /// Shared-cache hits are global to the request, so each worker row reports
-    /// only the shared blocks beyond that rank's device-local prefix.
+    /// only the shared blocks that rank can load past its local prefix. LoRA
+    /// requests skip the shared cache, as worker selection does.
     pub async fn get_overlap_scores(
         &self,
         tokens: &[u32],
@@ -1831,7 +1877,7 @@ impl KvRouter {
 
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
 
-        let (shared_hits, shared_error) = if include_shared {
+        let (shared_hits, shared_error) = if include_shared && lora_name.is_none_or(str::is_empty) {
             if let Some(shared_cache) = self.shared_cache.as_ref() {
                 match shared_cache
                     .check_blocks(tokens, self.block_size, cache_namespace)
@@ -1862,140 +1908,23 @@ impl KvRouter {
                 })
                 .collect::<Vec<_>>()
         };
-        Ok(
-            OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
-                .scores_response(
-                    num_blocks,
-                    expected_workers,
-                    shared_enabled,
-                    shared_hits.as_ref(),
-                    shared_error,
-                ),
+        Ok(OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.kv_router_config),
+            self.block_size,
+            &tiered_matches,
         )
+        .scores_response(
+            num_blocks,
+            expected_workers,
+            shared_enabled,
+            shared_hits.as_ref(),
+            shared_error,
+        ))
     }
 
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
-    }
-}
-
-// NOTE: KVRouter works like a PushRouter,
-// but without the reverse proxy functionality, but based on the RouterRequest contract
-#[async_trait]
-impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error> for KvRouter {
-    async fn generate(
-        &self,
-        request: SingleIn<RouterRequest>,
-    ) -> Result<ManyOut<Annotated<RouterResponse>>> {
-        let (request, ctx) = request.into_parts();
-        let context_id = ctx.context().id().to_string();
-        let policy_class = ctx.metadata().get("policy-class").cloned();
-        // Handle different request types
-        let response = match request {
-            RouterRequest::New {
-                tokens,
-                block_mm_infos,
-                routing_constraints,
-                priority_jump,
-                strict_priority,
-                lora_name,
-                cache_namespace,
-            } => {
-                let request_context = ctx.context();
-                let mut schedule = Box::pin(self.find_best_match_details_with_policy_class(
-                    Some(&context_id),
-                    &tokens,
-                    block_mm_infos.as_deref(),
-                    None,
-                    true,
-                    false,
-                    lora_name,
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    policy_class,
-                    None,
-                    None,
-                    None,
-                    None,
-                    routing_constraints,
-                ));
-                let outcome = tokio::select! {
-                    biased;
-
-                    _ = request_context.stopped() => None,
-                    outcome = &mut schedule => Some(outcome),
-                };
-                drop(schedule);
-
-                let Some(outcome) = outcome else {
-                    if let Err(error) = self.free(&context_id).await {
-                        tracing::warn!(
-                            request_id = %context_id,
-                            %error,
-                            "Failed to free scheduler state after RouterRequest::New cancellation"
-                        );
-                    }
-                    return Err(cancelled_error(&context_id));
-                };
-                match outcome {
-                    Ok(FindBestMatchOutcome::Routed {
-                        worker,
-                        overlap_blocks,
-                        ..
-                    }) => RouterResponse::New {
-                        worker_id: worker.worker_id,
-                        dp_rank: worker.dp_rank,
-                        overlap_blocks,
-                    },
-                    Ok(FindBestMatchOutcome::QueueRejected { rejection }) => {
-                        RouterResponse::QueueRejected { rejection }
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            RouterRequest::PotentialLoads {
-                tokens,
-                block_mm_infos,
-                lora_name,
-                cache_namespace,
-            } => RouterResponse::PotentialLoads {
-                loads: self
-                    .get_potential_loads(
-                        &tokens,
-                        None,
-                        block_mm_infos.as_deref(),
-                        lora_name.as_deref(),
-                        cache_namespace.as_deref(),
-                    )
-                    .await?,
-                pending_count: self.pending_count(),
-                pending_isl_tokens: self.pending_isl_tokens(),
-            },
-            RouterRequest::MarkPrefill { request_id } => {
-                let request_id = match request_id.as_deref() {
-                    Some(request_id) if !request_id.trim().is_empty() => request_id,
-                    _ => &context_id,
-                };
-                RouterResponse::PrefillMarked {
-                    success: self.mark_prefill_completed(request_id).await.is_ok(),
-                }
-            }
-            RouterRequest::MarkFree { request_id } => {
-                let request_id = match request_id.as_deref() {
-                    Some(request_id) if !request_id.trim().is_empty() => request_id,
-                    _ => &context_id,
-                };
-                RouterResponse::FreeMarked {
-                    success: self.free(request_id).await.is_ok(),
-                }
-            }
-        };
-
-        let response = Annotated::from_data(response);
-        let stream = stream::iter(vec![response]);
-        Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
 
@@ -2009,18 +1938,18 @@ impl Drop for KvRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+    use dynamo_kv_router::plugins::worker_selection::{
+        WorkerCandidate, WorkerCapacity, WorkerFilter, WorkerInputView, WorkerPicker,
+        WorkerSelectionContext, WorkerSelectionPolicyError,
+    };
     use std::collections::{HashMap, HashSet};
 
     use async_trait::async_trait;
-    use dynamo_kv_router::{WorkerSelectionPolicyError, protocols::compute_seq_hash_for_block};
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
     use crate::local_model::runtime_config::ModelRuntimeConfig;
-    use dynamo_kv_router::plugins::worker_selection::{
-        WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerSelectionContext,
-    };
 
     #[test]
     fn all_filtered_workers_map_to_unavailable() {
@@ -2054,7 +1983,7 @@ mod tests {
         assert!(error.downcast_ref::<UnknownPolicyClassRefusal>().is_some());
         assert_eq!(error.to_string(), dynamo_error.to_string());
         assert_eq!(
-            crate::http::service::error::find_canonical_error_in_chain(error.as_ref()),
+            dynamo_error::http::find_canonical_error_in_chain(error.as_ref()),
             Some(dynamo_error)
         );
     }
@@ -2075,7 +2004,7 @@ mod tests {
     #[test]
     fn worker_selection_receives_complete_session_context() {
         use crate::protocols::common::extensions::{AgentContext, InputTrigger};
-        use dynamo_kv_router::WorkerSelectionInputTrigger;
+        use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
 
         let context = AgentContext {
             session_id: "child-session".into(),
@@ -2139,7 +2068,7 @@ mod tests {
             for inputs in [
                 WorkerInputs::LOAD,
                 WorkerInputs::CACHE | WorkerInputs::LOAD,
-                WorkerInputs::KV_TRANSFER | WorkerInputs::LOAD,
+                WorkerInputs::KV_COPY | WorkerInputs::LOAD,
             ] {
                 for overlap_score_credit in [0.0, 1.0, 2.0] {
                     for use_kv_events in [false, true] {
@@ -2153,7 +2082,7 @@ mod tests {
                                     ..Default::default()
                                 };
                                 let reads_index = inputs.contains(WorkerInputs::CACHE)
-                                    || inputs.contains(WorkerInputs::KV_TRANSFER);
+                                    || inputs.contains(WorkerInputs::KV_COPY);
                                 let expected =
                                     if !reads_index || !use_kv_events || use_remote_indexer {
                                         KvEventSourceRequirement::NotRequired
@@ -2182,7 +2111,7 @@ mod tests {
     }
 
     struct FakeSharedCache {
-        hits: Option<dynamo_kv_router::protocols::SharedCacheHits>,
+        hits: Option<dynamo_worker_selection::host::SharedCacheHits>,
         should_error: bool,
     }
 
@@ -2193,7 +2122,7 @@ mod tests {
             _tokens: &[u32],
             _block_size: u32,
             _cache_namespace: Option<&str>,
-        ) -> Result<dynamo_kv_router::protocols::SharedCacheHits, KvRouterError> {
+        ) -> Result<dynamo_worker_selection::host::SharedCacheHits, KvRouterError> {
             if self.should_error {
                 Err(KvRouterError::IndexerOffline)
             } else {
@@ -2262,11 +2191,27 @@ mod tests {
         }
     }
 
+    struct DeclaredInputsPicker(WorkerInputs);
+
+    impl WorkerPicker for DeclaredInputsPicker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            unreachable!("capability construction test does not select a worker")
+        }
+    }
+
     fn fixed_policy(
         expected_shared_blocks: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> SelectionPolicySource {
-        SelectionPolicySource::Factory(Arc::new(move |config: &KvRouterConfig, _, _| {
+        SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 "decode",
@@ -2282,7 +2227,7 @@ mod tests {
     fn picker_policy(
         picker: impl Fn() -> Box<dyn WorkerPicker> + Send + Sync + 'static,
     ) -> SelectionPolicySource {
-        SelectionPolicySource::Factory(Arc::new(move |config: &KvRouterConfig, _, _| {
+        SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
             WorkerSelectionPolicy::new(config.clone(), "decode", Vec::new(), picker())
         }))
     }
@@ -2497,6 +2442,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resident_blocks_require_declared_cache_input() {
+        let config = KvRouterConfig::default();
+        let error = picker_policy(|| Box::new(DeclaredInputsPicker(RESIDENT_BLOCKS)))
+            .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+            .err()
+            .expect("without CACHE there is no indexer to count blocks");
+        assert!(error.to_string().contains("RESIDENT_BLOCKS"));
+        assert!(error.to_string().contains("WorkerInputs::CACHE"));
+        picker_policy(|| Box::new(DeclaredInputsPicker(RESIDENT_BLOCKS | WorkerInputs::CACHE)))
+            .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+            .expect("CACHE starts the indexer the counts come from");
+    }
+
+    #[tokio::test]
     async fn load_only_selector_skips_cache_inputs() {
         let router = make_router(
             "load-only-capability",
@@ -2675,7 +2634,8 @@ mod tests {
     #[case::concurrent(2)]
     #[tokio::test]
     async fn session_prefix_tracking_survives_shared_core_selection(#[case] threads: u32) {
-        use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, StorageTier};
+        use dynamo_kv_events::residency::StorageTier;
+        use dynamo_kv_hashing::ExternalSequenceBlockHash;
 
         let component = make_test_component("session-prefix-core").await;
         let endpoint = component.endpoint("backend");
@@ -2772,7 +2732,7 @@ mod tests {
                     0.0,
                     0,
                     None,
-                    Some(dynamo_kv_router::SessionContext::new(
+                    Some(dynamo_router_protocol::session::SessionContext::new(
                         session.into(),
                         None,
                         None,
@@ -2785,6 +2745,7 @@ mod tests {
                     RoutingConstraints::default(),
                     admission,
                     Default::default(),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -2971,6 +2932,7 @@ mod tests {
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
                     Default::default(),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -3007,7 +2969,7 @@ mod tests {
     /// the scheduler's booking cleanup.
     #[tokio::test]
     async fn request_lease_manager_releases_bookings_only_once_scheduler_is_set() {
-        use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
+        use dynamo_slot_tracker::host::SchedulerBookingDescriptor;
 
         let router = tracked_router("lease-manager").await;
         let worker = WorkerWithDpRank::from_worker_id(1);
@@ -3055,9 +3017,8 @@ mod tests {
     async fn enroll_public_request_attempt_cancelled_during_routing_update_frees_booking() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        use dynamo_kv_router::indexer::TieredMatchDetails;
-        use dynamo_kv_router::protocols::LocalBlockHash;
-        use dynamo_kv_router::services::indexer::backend::RemotePrimary;
+        use dynamo_kv_hashing::LocalBlockHash;
+        use dynamo_kv_indexer::host::{RemotePrimary, TieredMatchDetails};
 
         /// Records park until `release` is notified.
         struct PausedRecord {
@@ -3120,6 +3081,7 @@ mod tests {
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
                 Default::default(),
+                false,
             )
             .await
             .unwrap();
@@ -3376,7 +3338,7 @@ mod tests {
         let constructions = Arc::new(AtomicUsize::new(0));
         let counting: WorkerSelectionPolicyFactory = {
             let constructions = Arc::clone(&constructions);
-            Arc::new(move |config: &KvRouterConfig, _, _| {
+            Arc::new(move |config: &SelectionConfig, _, _| {
                 constructions.fetch_add(1, Ordering::SeqCst);
                 dynamo_router_policies::default_policy(config.clone(), "decode")
             })
@@ -3387,21 +3349,33 @@ mod tests {
             &config,
             WorkerType::Decode,
             Some("named-model"),
-        );
+        )
+        .expect("prepare");
         assert_eq!(constructions.load(Ordering::SeqCst), 1);
         let inputs = prepared.inputs();
 
         // The first call for the embedded key takes the parked instance.
         let key = embedded::embedded_partition_key(Some("named-model"));
-        let _served = (prepared.factory)(&config, WorkerType::Decode, key.as_ref());
+        let _served = (prepared.factory)(
+            &SelectionConfig::from(&config),
+            WorkerType::Decode,
+            key.as_ref(),
+        );
         assert_eq!(
             constructions.load(Ordering::SeqCst),
             1,
             "parked instance served"
         );
         // Another partition constructs its own.
-        let other = dynamo_kv_router::RoutingPartitionId::new("other-model", DEFAULT_ROUTING_GROUP);
-        let _other = (prepared.factory)(&config, WorkerType::Decode, other.as_ref());
+        let other = dynamo_router_protocol::identity::RoutingPartitionId::new(
+            "other-model",
+            DEFAULT_ROUTING_GROUP,
+        );
+        let _other = (prepared.factory)(
+            &SelectionConfig::from(&config),
+            WorkerType::Decode,
+            other.as_ref(),
+        );
         assert_eq!(constructions.load(Ordering::SeqCst), 2);
 
         // Preparing an already prepared source is a passthrough.
@@ -3423,7 +3397,7 @@ mod tests {
         let counting = {
             let constructions = Arc::clone(&constructions);
             let picked_tag = Arc::clone(&picked_tag);
-            SelectionPolicySource::Factory(Arc::new(move |config: &KvRouterConfig, _, _| {
+            SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
                 let tag = constructions.fetch_add(1, Ordering::SeqCst) + 1;
                 WorkerSelectionPolicy::new(
                     config.clone(),
@@ -3465,7 +3439,7 @@ mod tests {
             fixed_policy(Some(2), WorkerWithDpRank::from_worker_id(1)),
             Some(Arc::new(FakeSharedCache {
                 #[allow(clippy::single_range_in_vec_init)]
-                hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_ranges(
+                hits: Some(dynamo_worker_selection::host::SharedCacheHits::from_ranges(
                     vec![0..2],
                 )),
                 should_error: false,
@@ -3539,7 +3513,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_best_match_maps_filtered_workers_to_unavailable() {
-        let policy = SelectionPolicySource::Factory(Arc::new(|config: &KvRouterConfig, _, _| {
+        let policy = SelectionPolicySource::Factory(Arc::new(|config: &SelectionConfig, _, _| {
             WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
                 "decode",
@@ -3601,7 +3575,7 @@ mod tests {
             fixed_policy(None, WorkerWithDpRank::from_worker_id(0)),
             Some(Arc::new(FakeSharedCache {
                 #[allow(clippy::single_range_in_vec_init)]
-                hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_ranges(
+                hits: Some(dynamo_worker_selection::host::SharedCacheHits::from_ranges(
                     vec![0..2],
                 )),
                 should_error: false,
@@ -3630,13 +3604,25 @@ mod tests {
             assert_eq!(worker.disk_extension_blocks, 0);
             assert_eq!(worker.shared_beyond_device_blocks, Some(2));
         }
+
+        // Shared-cache keys carry no adapter, so a LoRA request reports no shared hits.
+        let scores = router
+            .get_overlap_scores(&[11, 12, 21, 22], None, Some("adapter-a"), None, true)
+            .await
+            .unwrap();
+        assert!(scores.shared_cache.enabled);
+        assert_eq!(scores.shared_cache.total_hit_blocks, 0);
+        assert!(
+            scores
+                .workers
+                .iter()
+                .all(|worker| worker.shared_beyond_device_blocks.is_none())
+        );
     }
 
     #[tokio::test]
     async fn client_availability_distinguishes_startup_from_last_worker_removal() {
-        use dynamo_kv_router::scheduling::{
-            RoutingEligibility, WorkerEligibilityError, WorkerIdSet,
-        };
+        use dynamo_scheduler::host::{RoutingEligibility, WorkerEligibilityError, WorkerIdSet};
 
         const DECODE_WORKER: u64 = 1;
         const PREFILL_WORKER: u64 = 2;

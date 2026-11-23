@@ -241,3 +241,68 @@ The default `deletionPolicy: Delete` removes the DGD-managed capture and artifac
 The model-cache PVC and the Snapshot installation remain available for other
 workloads. See the [checkpoint configuration reference](../../../reference/kubernetes-api/dynamo-component-deployment.mdx#experimentalspec)
 for reuse and retention rules.
+
+## Use a Custom Worker Entrypoint
+
+Restore admission accepts a worker container only if it directly runs
+`python -m <module>`. The Dynamo modules `dynamo.vllm`, `dynamo.sglang`, and
+`dynamo.trtllm` put the Pod into restore standby before they initialize the
+engine. A worker that wraps Dynamo in its own `python -m <module>` entrypoint is
+accepted as well, and there is no extra annotation or flag to set:
+`experimental.checkpoint.enabled: true` is your confirmation that the module
+implements the restore contract.
+
+### Honor the standby contract
+
+When the operator shapes a restore Pod, it sets `SNAPSHOT_RESTORE_STANDBY=1` on
+the destination container. Your module must call `maybe_run_restore_standby_mode()`
+first in `__main__`, before it imports any runtime or backend code:
+
+```python
+if __name__ == "__main__":
+    from dynamo.common.snapshot.restore_context import maybe_run_restore_standby_mode
+
+    # Must run before any import that initializes the engine or runtime.
+    maybe_run_restore_standby_mode()
+
+    from my_worker.main import main
+
+    main()
+```
+
+In standby mode the function writes the destination Pod's restore context and
+replaces the process with `sleep infinity`, so nothing initializes before the
+checkpointed worker resumes. Otherwise it returns and the worker starts normally.
+
+### Configure the component
+
+Enable checkpointing and set the custom `command`; nothing else changes compared
+with the Dynamo modules:
+
+```yaml
+spec:
+  components:
+    - name: my-worker
+      type: worker
+      experimental:
+        checkpoint:
+          enabled: true
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              command: ["python3", "-m", "my_worker"]
+```
+
+- The container must directly invoke `python -m <module>` with a non-empty module
+  name. Shell wrappers such as `/bin/sh -c ...` and non-Python launchers are
+  rejected.
+- The module name is not restricted.
+
+<Warning>
+Admission cannot inspect your module, so it does not verify the contract. A module
+that does not call `maybe_run_restore_standby_mode()` passes admission, still
+receives the restore environment and startup probe, and then starts its normal
+workload instead of standing by. For example, `dynamo.frontend` does not implement
+the hook, so do not run it as a restore destination.
+</Warning>

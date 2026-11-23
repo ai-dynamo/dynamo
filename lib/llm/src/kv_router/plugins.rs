@@ -5,9 +5,10 @@
 
 use std::sync::{Arc, OnceLock};
 
-use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
+use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicyFactory};
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPlugins};
 use dynamo_runtime::pipeline::{InstanceSelector, ModeSelectors, PushRouterOptions};
+use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 
 use super::{KvRouter, SelectionPolicySource};
 
@@ -49,8 +50,30 @@ pub fn mode_selectors() -> ModeSelectors {
                 tracing::warn!(?mode, %error, "router-mode plugin unavailable");
             })
             .ok()?;
-        Some(Arc::new(picker) as Arc<dyn InstanceSelector>)
+        Some(Arc::new(HostedInstanceSelector(picker)) as Arc<dyn InstanceSelector>)
     })
+}
+
+/// Lets `PushRouter` run a hosted picker. Its callers carry no LLM request, so the selection
+/// sees a zero-token request. The runtime names no router crate, so the frontend host, which
+/// depends on both, carries the adapter.
+struct HostedInstanceSelector(HostedWorkerPicker);
+
+impl InstanceSelector for HostedInstanceSelector {
+    fn reads_active_requests(&self) -> bool {
+        self.0.inputs().contains(WorkerInputs::ACTIVE_REQUESTS)
+    }
+
+    fn select_instance(
+        &self,
+        instance_ids: &[u64],
+        active_requests: &dyn Fn(u64) -> u64,
+        preview: bool,
+    ) -> Option<u64> {
+        let request = HostedSelectionRequest::new(0).with_preview(preview);
+        let active_requests = self.reads_active_requests().then_some(active_requests);
+        self.0.select(instance_ids, active_requests, &request).ok()
+    }
 }
 
 /// `PushRouter` options that pick with the router-mode plugins.
@@ -74,7 +97,7 @@ impl RouterPluginBuilder {
 
     pub(crate) fn validate_config(
         &self,
-        config: &dynamo_kv_router::KvRouterConfig,
+        config: &dynamo_kv_router::config::KvRouterConfig,
     ) -> anyhow::Result<()> {
         if config.request_classifier_config()?.is_some()
             && self.plugins.request_classifier().is_none()

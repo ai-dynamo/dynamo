@@ -9,6 +9,9 @@ templates:
 tests:
   - it: renders global admission for the cluster-wide installation
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    set:
+      # Enable checkpoint so the pod webhook (webhooks[3] of the mutating configuration) is rendered.
+      dynamo-operator.checkpoint.enabled: true
     asserts:
       - hasDocuments:
           count: 2
@@ -43,6 +46,8 @@ tests:
   - it: scopes namespace-restricted admission to the target namespace
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
+      # Enable checkpoint so the pod webhook (webhooks[3] of the mutating configuration) is rendered.
+      dynamo-operator.checkpoint.enabled: true
       dynamo-operator.namespaceRestriction.enabled: true
       # Exercise a YAML boolean-like namespace to ensure the rendered selector stays a string.
       dynamo-operator.namespaceRestriction.targetNamespace: "true"
@@ -90,6 +95,8 @@ tests:
   - it: registers Run and Candidate admission only when the v1beta2 API is enabled
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
+      # Enable checkpoint so the mutating configuration keeps its 4 webhooks (incl. the pod webhook).
+      dynamo-operator.checkpoint.enabled: true
       dynamo-operator.dgdrV1Beta2.enabled: true
     asserts:
       - lengthEqual:

@@ -19,6 +19,7 @@ use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
 use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
 use super::require_image_url;
+use super::{IMAGE_FETCH_FORBIDDEN_MESSAGE, IMAGE_FETCH_NOT_FOUND_MESSAGE};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
@@ -36,6 +37,11 @@ const VIDEO_FETCH_FAILED: &str = "Failed to fetch the video_url media";
 #[cfg(feature = "media-ffmpeg")]
 const VIDEO_DECODE_FAILED: &str =
     "Failed to decode the video_url data: it is not a valid or supported video";
+// Modality refusals; the cause, e.g. a missing build feature, stays in the internal message.
+const IMAGE_UNSUPPORTED: &str = "image_url input is not supported by this model deployment";
+const VIDEO_UNSUPPORTED: &str = "video_url input is not supported by this model deployment";
+const AUDIO_UNSUPPORTED: &str = "audio_url input is not supported by this model deployment";
+const MEDIA_UNSUPPORTED: &str = "Unsupported media content part type";
 
 // Size cap for a `data:` URL, which carries its whole payload inline. Keep the
 // name and default in sync with the Python counterpart
@@ -169,6 +175,19 @@ fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Erro
         .public_message(public)
         .build()
         .into()
+}
+
+fn image_fetch_error(error: anyhow::Error) -> anyhow::Error {
+    let status = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .find_map(reqwest::Error::status);
+    let public = match status {
+        Some(reqwest::StatusCode::FORBIDDEN) => IMAGE_FETCH_FORBIDDEN_MESSAGE,
+        Some(reqwest::StatusCode::NOT_FOUND) => IMAGE_FETCH_NOT_FOUND_MESSAGE,
+        _ => IMAGE_FETCH_FAILED,
+    };
+    media_input_error(public, error)
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -669,11 +688,12 @@ impl MediaLoader {
         // fetch the media, decode and NIXL-register
         let decoded = match oai_content_part {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                let mdc_decoder = self
-                    .media_decoder
-                    .image
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
+                let mdc_decoder = self.media_decoder.image.as_ref().ok_or_else(|| {
+                    media_input_error(
+                        IMAGE_UNSUPPORTED,
+                        anyhow::anyhow!("Model does not support image inputs"),
+                    )
+                })?;
 
                 let url = require_image_url(image_part)?;
                 self.media_fetcher
@@ -683,7 +703,7 @@ impl MediaLoader {
                 let data = EncodedMediaData::from_url(url, &self.http_client)
                     .await
                     .map_err(MediaFetcher::map_fetch_error)
-                    .map_err(|e| media_input_error(IMAGE_FETCH_FAILED, e))?;
+                    .map_err(image_fetch_error)?;
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =
@@ -696,14 +716,21 @@ impl MediaLoader {
             #[allow(unused_variables)]
             ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
                 #[cfg(not(feature = "media-ffmpeg"))]
-                anyhow::bail!("Video decoding requires the 'media-ffmpeg' feature to be enabled");
+                return Err(media_input_error(
+                    VIDEO_UNSUPPORTED,
+                    anyhow::anyhow!(
+                        "Video decoding requires the 'media-ffmpeg' feature to be enabled"
+                    ),
+                ));
 
                 #[cfg(feature = "media-ffmpeg")]
                 {
-                    let mdc_decoder =
-                        self.media_decoder.video.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("Model does not support video inputs")
-                        })?;
+                    let mdc_decoder = self.media_decoder.video.as_ref().ok_or_else(|| {
+                        media_input_error(
+                            VIDEO_UNSUPPORTED,
+                            anyhow::anyhow!("Model does not support video inputs"),
+                        )
+                    })?;
 
                     let url = video_part
                         .video_url
@@ -731,9 +758,17 @@ impl MediaLoader {
                 }
             }
             ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
-                anyhow::bail!("Audio decoding is not supported yet");
+                return Err(media_input_error(
+                    AUDIO_UNSUPPORTED,
+                    anyhow::anyhow!("Audio decoding is not supported yet"),
+                ));
             }
-            _ => anyhow::bail!("Unsupported media type"),
+            _ => {
+                return Err(media_input_error(
+                    MEDIA_UNSUPPORTED,
+                    anyhow::anyhow!("Unsupported media type"),
+                ));
+            }
         };
 
         // A NIXL registration failure is a server fault and stays a 500.
@@ -1236,10 +1271,40 @@ mod tests_non_nixl {
             .build()
             .into();
         let passed = media_input_error(IMAGE_DECODE_FAILED, host_fault);
+        let passed = image_fetch_error(passed);
         let dynamo_error = passed
             .downcast_ref::<DynamoError>()
             .expect("classified error passes through");
         assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
+    }
+
+    #[tokio::test]
+    async fn image_fetch_errors_are_bad_requests_with_safe_recovery_message() {
+        let mut server = mockito::Server::new_async().await;
+        let client = reqwest::Client::new();
+        for status in [403, 404] {
+            let origin = server
+                .mock("GET", "/image?token=SECRET")
+                .with_status(status)
+                .with_body("private origin response")
+                .create_async()
+                .await;
+            let url = format!("{}/image?token=SECRET", server.url())
+                .parse()
+                .unwrap();
+            let error = EncodedMediaData::from_url(&url, &client)
+                .await
+                .expect_err("origin refused the image");
+            let error = image_fetch_error(error);
+            let error = error.downcast_ref::<DynamoError>().unwrap();
+            assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+            let public = error.public_message().unwrap();
+            assert!(public.starts_with(&format!("Image download returned HTTP {status}.")));
+            assert!(public.contains("resend the image data before retrying"));
+            assert!(!public.contains("SECRET"));
+            assert!(!public.contains("private origin response"));
+            origin.assert_async().await;
+        }
     }
 
     #[rstest::rstest]
@@ -1736,5 +1801,82 @@ mod tests_non_nixl {
                 .is_err(),
             "DNS-filtered target unexpectedly received a connection"
         );
+    }
+
+    /// A modality the loader cannot decode is the client's fault: `InvalidArgument`
+    /// (HTTP 400) with a fixed public message, not an unclassified 500.
+    #[tokio::test]
+    async fn test_unsupported_media_is_invalid_argument() {
+        // No decoders at all. Without `media-ffmpeg` the video case hits the
+        // missing-feature arm; with it, the missing-video-decoder arm.
+        let media_decoder = MediaDecoder {
+            image: None,
+            #[cfg(feature = "media-ffmpeg")]
+            video: None,
+            ..Default::default()
+        };
+        // These arms return before NIXL registration, so an agent without the UCX
+        // backend suffices; `MediaLoader::new` needs UCX, which some hosts lack.
+        let nixl_agent = match NixlAgent::new("media-loader-unsupported-test") {
+            Ok(agent) => agent,
+            Err(e) => {
+                println!(
+                    "test test_unsupported_media_is_invalid_argument ... ignored (NIXL not available: {e})"
+                );
+                return;
+            }
+        };
+        let media_fetcher = MediaFetcher::default();
+        let loader = MediaLoader {
+            media_decoder,
+            http_client: media_fetcher.build_http_client().unwrap(),
+            media_fetcher,
+            nixl_agent,
+            cache: None,
+        };
+
+        // The branches fail before any fetch, so the URLs are never read.
+        let cases = [
+            (
+                serde_json::json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}),
+                IMAGE_UNSUPPORTED,
+            ),
+            (
+                serde_json::json!({"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}}),
+                VIDEO_UNSUPPORTED,
+            ),
+            (
+                serde_json::json!({"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}),
+                AUDIO_UNSUPPORTED,
+            ),
+            (
+                serde_json::json!({"type": "text", "text": "not media"}),
+                MEDIA_UNSUPPORTED,
+            ),
+        ];
+
+        for (part, expected) in cases {
+            let content_part: ChatCompletionRequestUserMessageContentPart =
+                serde_json::from_value(part.clone()).unwrap();
+            let error = loader
+                .fetch_and_decode_media_part(&content_part, None)
+                .await
+                .expect_err("unsupported media must be rejected");
+            let dynamo_error = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<DynamoError>())
+                .unwrap_or_else(|| panic!("{part}: unclassified error: {error:#}"));
+            assert_eq!(
+                dynamo_error.error_type(),
+                ErrorType::InvalidArgument,
+                "{part}: {error:#}"
+            );
+            assert_eq!(dynamo_error.public_message(), Some(expected), "{part}");
+            // The operator-facing cause stays in the internal message.
+            assert!(
+                dynamo_error.message().starts_with(&format!("{expected}: ")),
+                "{part}: {error:#}"
+            );
+        }
     }
 }

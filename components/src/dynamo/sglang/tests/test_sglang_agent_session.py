@@ -195,6 +195,7 @@ def _new_decode_handler(engine: Any, serving_mode: DisaggregationMode):
 def _new_prefill_handler(engine: Any):
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.engine = engine
+    handler.use_sglang_tokenizer = False
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(), dynamo_args=SimpleNamespace(enable_rl=False)
     )

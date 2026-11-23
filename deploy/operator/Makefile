@@ -97,9 +97,9 @@ REGISTRY ?=
 TAG ?= latest
 
 # CUDA versions used by render.py. Override for non-default builds.
-# Valid values are constrained by container/render.py (currently 13.0 / 13.1).
+# Valid values are constrained by container/render.py (currently 13.0 / 13.4).
 CUDA_VERSION ?= 13.0
-CUDA_VERSION_TRTLLM ?= 13.1
+CUDA_VERSION_TRTLLM ?= 13.4
 # CUDA version for the dynamo-framework images (planner, frontend).
 CUDA_VERSION_DYNAMO ?= 13.0
 
@@ -402,8 +402,8 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
 .PHONY: lint-api
-lint-api: kube-api-linter ## Check the v1beta2 API types against Kubernetes API conventions
-	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/v1beta2/...
+lint-api: kube-api-linter ## Check the CRD API types against Kubernetes API conventions
+	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/...
 
 ##@ Build
 

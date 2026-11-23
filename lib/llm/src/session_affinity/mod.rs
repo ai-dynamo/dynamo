@@ -6,24 +6,18 @@ mod replica_sync;
 
 use std::{env::VarError, num::NonZeroUsize, time::Duration};
 
-use dynamo_kv_router::services::selection::affinity::{
-    MAX_SESSION_AFFINITY_ENTRIES, SessionAffinityConfig,
-};
 use dynamo_runtime::{
     component::Client, config::environment_names::router::DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES,
     pipeline::Error,
 };
+use dynamo_session_affinity::host::{MAX_SESSION_AFFINITY_ENTRIES, SessionAffinityConfig};
 
 #[cfg(test)]
 pub(crate) use coordinator::to_table;
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
 pub(crate) use coordinator::{affinity_id, from_table, invalid_argument};
-pub(crate) use dynamo_kv_router::services::selection::affinity::{
-    Hold, subagent_group_affinity_id,
-};
-pub use dynamo_kv_router::services::selection::affinity::{
-    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode,
-};
+pub(crate) use dynamo_session_affinity::host::{Hold, subagent_group_affinity_id};
+pub use dynamo_session_affinity::host::{MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode};
 
 pub type LlmResponse =
     crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>;

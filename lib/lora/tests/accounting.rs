@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
 use dynamo_lora::LoadEstimator;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_slot_tracker::host::{ActiveSequenceEvent, ActiveSequenceEventData};
 use std::{sync::Arc, time::Duration};
 
 fn lora_event(

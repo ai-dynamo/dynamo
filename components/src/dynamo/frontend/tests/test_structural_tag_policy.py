@@ -5,6 +5,7 @@ import pytest
 
 from dynamo.frontend.structural_tag_policy import (
     effective_tool_strict,
+    runtime_backend_defers_grammar,
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
     should_attempt_structural_tag,
@@ -15,6 +16,34 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    ("advertised", "boundary", "expected"),
+    [
+        (None, "backend", False),
+        (False, "backend", False),
+        (True, "auto", True),
+        (True, "structural_tag", True),
+        ("true", "auto", False),
+        (1, "auto", False),
+    ],
+)
+def test_backend_grammar_capability_is_not_a_frontend_policy(
+    advertised, boundary, expected
+):
+    """A boundary override must not claim a scheduling capability the worker lacks."""
+    assert (
+        runtime_backend_defers_grammar(
+            {
+                "runtime_data": {
+                    "tool_call_structural_tag_excludes_reasoning": advertised
+                },
+                "structural_tag": {"reasoning_boundary": boundary},
+            }
+        )
+        is expected
+    )
 
 
 @pytest.mark.parametrize(

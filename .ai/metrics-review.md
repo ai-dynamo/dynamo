@@ -135,8 +135,8 @@ rule violation is a contract defect, not a style preference.
 18. **S1-S4.** For a change to an existing metric, decide its stability from its catalog entry
     (Operator Metrics for operator metrics) at the base revision, for example with
     `git show <base>:<catalog file>`, because a pull request that removes a metric may also
-    remove its entry. A table row with the Status `Current` is stable, `Experimental` is
-    experimental, and `Deprecated` is deprecated; a detailed entry is stable unless its
+    remove its entry. A table row whose Status is empty or `Current` is stable, `Experimental`
+    is experimental, and `Deprecated` is deprecated; a detailed entry is stable unless its
     description starts with `**Experimental.**` or it carries `deprecated={true}`. Report, on a
     stable metric, a rename, a type or unit change, or an added or removed label that does not
     add a new metric and deprecate the old one. Report a deprecation whose entry at the pull

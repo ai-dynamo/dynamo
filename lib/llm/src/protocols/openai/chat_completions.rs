@@ -21,8 +21,10 @@ use crate::protocols::common::extensions::{
 };
 
 pub mod aggregator;
+pub(crate) mod allowed_tools;
 pub(crate) mod custom_tools;
 mod delta;
+pub(crate) mod tool_call_merge;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 
@@ -117,6 +119,11 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(skip)]
     #[schema(ignore)]
     pub responses_tools: Option<super::responses::ResponsesToolContext>,
+
+    /// Full catalog for rendering when Chat Completions limits callable tools.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub chat_template_tools: Option<std::sync::Arc<[dynamo_protocols::types::ChatCompletionTool]>>,
 
     /// OpenAI-style thinking control from client request payloads.
     /// Normalized into `chat_template_args` before preprocessing.
@@ -322,6 +329,21 @@ pub enum ResponseOutputEvent {
     Boundary(MessageBoundary),
     Text(String),
     ToolCall(String),
+    /// The next `n` entries of choice 0's aggregated `logprobs.content` arrived at
+    /// this point of the stream on chunks with visible text or no content (EOS),
+    /// so a Responses projection can give each message the scores generated while
+    /// it was open.
+    Scores(usize),
+    /// The next `n` entries arrived on reasoning or tool-call chunks. They are not
+    /// output text, so a Responses projection skips them.
+    HiddenScores(usize),
+}
+
+impl ResponseOutputEvent {
+    /// Score bookkeeping that never changes the projected output items.
+    pub fn is_score(&self) -> bool {
+        matches!(self, Self::Scores(_) | Self::HiddenScores(_))
+    }
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -706,7 +728,12 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `Some(Vec<String>)` if stop conditions are set.
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+        // `"stop": []` means no stop sequences.
+        self.inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+            .filter(|v| !v.is_empty())
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {

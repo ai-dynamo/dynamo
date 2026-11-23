@@ -42,11 +42,8 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
-| Thu, Nov 12, 2026 | **[SIG Frontend — Biweekly Sync](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261112T210000Z%2F20261112T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)** | – |
-| Thu, Nov 12, 2026 | **[SIG Engines — Biweekly Sync](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Engines+%E2%80%94+Biweekly+Sync&dates=20261113T010000Z%2F20261113T020000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhha-vzes-szx%0AOr+dial%3A+%28US%29+%2B1+724-505-2767+PIN%3A+501573420%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhha-vzes-szx%3Fpin%3D9222789232381%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)** | – |
-| Thu, Nov 19, 2026 | **[SIG Router](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)** | – |
-| Thu, Nov 5, 2026 | ~~[Dynamo SIG RL](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+RL&dates=20261106T020000Z%2F20261106T023000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzcd-qdkb-jvg%0AOr+dial%3A+%28US%29+%2B1+216-755-4682+PIN%3A+144011069%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzcd-qdkb-jvg%3Fpin%3D7388412058326%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
-| Thu, Nov 5, 2026 | ~~[SIG Router](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261105T163000Z%2F20261105T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
+| Thu, Nov 19, 2026 | ~~[SIG Frontend — Biweekly Sync](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261119T210000Z%2F20261119T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
+| Thu, Nov 19, 2026 | ~~[SIG Router](https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
@@ -68,7 +65,6 @@ If you're running a single model on a single GPU, your inference engine alone is
 | [**Disaggregated Serving**](https://docs.nvidia.com/dynamo/dev/knowledge-base/concepts/system-architecture/disaggregated-serving) | ✅ | ✅ | ✅ |
 | [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | ✅ | ✅ | ✅ |
 | [**SLA-Based Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | ✅ | ✅ | ✅ |
-| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
 | [**Tool Calling**](docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx) | ✅ | ✅ | ✅ |
 
@@ -101,11 +97,10 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 |------------|-------------|----------------|
 | [**Disaggregated Prefill/Decode**](https://docs.nvidia.com/dynamo/dev/knowledge-base/concepts/system-architecture/disaggregated-serving) | Separates prefill and decode into independently scalable GPU pools | Maximizes GPU utilization; each phase runs on hardware tuned for its workload |
 | [**KV-Aware Routing**](https://docs.nvidia.com/dynamo/components/router) | Routes requests based on worker load and KV cache overlap | Eliminates redundant prefill computation — 2x faster TTFT |
-| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | Offloads KV cache across GPU → CPU → SSD → remote storage | Extends effective context length beyond GPU memory |
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
 | [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
 | [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
-| [**AISimulate**](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline | Finds a strong serving configuration without bringing up a GPU cluster |
+| [**AISimulate**](https://pypi.org/project/aisim/) | Predicts serving behavior and searches deployment configurations offline | Finds a strong serving configuration without bringing up a GPU cluster |
 | [**Fault Tolerance**](https://docs.nvidia.com/dynamo/user-guides/fault-tolerance/request-migration) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
 
 ### New in 1.0
@@ -329,7 +324,6 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 [disagg]: docs/design-docs/disagg-serving.md
 [kv-routing]: docs/components/router/README.md
 [planner]: docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
-[kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
 [tools]: docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx

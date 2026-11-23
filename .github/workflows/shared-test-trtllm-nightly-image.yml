@@ -67,7 +67,7 @@ jobs:
       matrix:
         scenario: [image, video, audio, image-routing]
     needs: build
-    runs-on: [gpu-1, amd64, v2, us-west-2]
+    runs-on: [gpu-1, amd64, runner-version-v1, gpu-generic, us-west-2]
     timeout-minutes: 30
     container:
       image: ${{ needs.build.outputs.image }}
