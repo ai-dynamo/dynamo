@@ -27,6 +27,8 @@
 //! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
 //! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
 //!
+//! [`ConnectionStatus`]: dynamo_http_server::disconnect::ConnectionStatus
+//! [`ConnectionStatus::ClosedUnexpectedly`]: dynamo_http_server::disconnect::ConnectionStatus::ClosedUnexpectedly
 
 use axum::{http::StatusCode, response::sse::Event};
 use dynamo_runtime::engine::AsyncEngineContext;
