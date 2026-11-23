@@ -100,6 +100,10 @@ pub struct ResponseStreamConverter {
     // The backend ended with a terminal reason that is not success-like.
     incomplete_reason: Option<&'static str>,
     terminal_failure_emitted: bool,
+    /// The `response.completed` / `response.incomplete` event emitted by
+    /// `append_end_events`, kept so the response can be persisted and the
+    /// event re-serialized when persistence changes its `store` flag.
+    terminal_event: Option<ResponseStreamEvent>,
 }
 
 struct ReasoningState {
@@ -161,7 +165,10 @@ impl ResponseStreamConverter {
         let allowed_names = params.allowed_backend_names(&tool_names);
 
         Self {
-            response_id: format!("resp_{}", Uuid::new_v4().simple()),
+            response_id: params
+                .response_id
+                .clone()
+                .unwrap_or_else(|| format!("resp_{}", Uuid::new_v4().simple())),
             model,
             tool_names,
             allowed_names,
@@ -194,6 +201,42 @@ impl ResponseStreamConverter {
             usage: None,
             incomplete_reason: None,
             terminal_failure_emitted: false,
+            terminal_event: None,
+        }
+    }
+
+    /// The final response object of a stream that ended with
+    /// `response.completed` or `response.incomplete`, once `append_end_events`
+    /// has run. Failed streams return `None`.
+    pub fn terminal_response(&self) -> Option<&Response> {
+        match self.terminal_event.as_ref()? {
+            ResponseStreamEvent::ResponseCompleted(event) => Some(&event.response),
+            ResponseStreamEvent::ResponseIncomplete(event) => Some(&event.response),
+            _ => None,
+        }
+    }
+
+    /// Public JSON of `response` as the terminal event carries it, including
+    /// the spec fields the converter writes around the upstream object.
+    pub fn response_json(&self, response: &Response) -> Result<serde_json::Value, anyhow::Error> {
+        let echoed_tools = self.params.echoed_tools();
+        let spec = ResponseSpecFields {
+            template_tools: echoed_tools.as_deref(),
+            requested_tool_choice: self.params.tool_choice.as_ref(),
+            presence_penalty: self.params.presence_penalty.unwrap_or(0.0),
+            frequency_penalty: self.params.frequency_penalty.unwrap_or(0.0),
+            store: self.params.store.unwrap_or(false),
+        };
+        Ok(serde_json::to_value(ResponseForSpec { response, spec })?)
+    }
+
+    /// Record that the terminal response was not persisted after all and
+    /// rewrite the trailing terminal event in `events` so its `store` flag
+    /// says so.
+    pub fn mark_not_stored(&mut self, events: &mut [Result<Event, anyhow::Error>]) {
+        self.params.store = Some(false);
+        if let (Some(terminal), Some(last)) = (self.terminal_event.as_ref(), events.last_mut()) {
+            *last = self.make_sse_event(terminal);
         }
     }
 
@@ -1467,6 +1510,7 @@ impl ResponseStreamConverter {
             })
         };
         events.push(self.make_sse_event(&terminal));
+        self.terminal_event = Some(terminal);
     }
 
     /// Emit error events when the stream ends due to a backend error.

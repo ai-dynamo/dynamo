@@ -18,16 +18,17 @@ pub use tool_names::ToolNameMap;
 use std::collections::{HashMap, HashSet};
 
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
-    InputContent, InputImageContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
-    InputTokenDetails, Instructions, Item, LogProb, MessageItem, MessagePhase,
-    NamespaceToolParamTool, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
-    OutputTextContent, OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem,
-    ReasoningItemContent, ReasoningTextContent, RefusalContent, RequestTool,
-    RequestToolChoiceParam, Response, ResponseLogProb, ResponseTextParam, ResponseTopLobProb,
-    ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status, SummaryPart,
-    TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
-    ToolChoiceOptions, ToolSearchExecutionType, TopLogProb, Truncation,
+    AssistantRole, EasyInputContent, EasyInputMessage, FunctionCallOutput, FunctionToolCall,
+    IncludeEnum, IncompleteDetails, InputContent, InputImageContent, InputItem,
+    InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions, Item,
+    LogProb, MessageItem, MessagePhase, MessageType, NamespaceToolParamTool, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
+    RefusalContent, RequestTool, RequestToolChoiceParam, Response, ResponseLogProb,
+    ResponseTextParam, ResponseTopLobProb, ResponseUsage, Role as ResponseRole,
+    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
+    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolSearchExecutionType,
+    TopLogProb, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -1476,6 +1477,10 @@ pub struct ResponseParams {
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub safety_identifier: Option<String>,
+    /// Response id chosen by the handler so routing hints and server-side
+    /// storage can refer to it before generation finishes. `None` lets the
+    /// converter mint one.
+    pub response_id: Option<String>,
 }
 
 /// Map a terminal Chat Completions reason that makes a Responses result non-success-like.
@@ -1598,6 +1603,44 @@ fn make_text_message(id: String, text: String) -> OutputItem {
     })
 }
 
+/// Normalize a request `input` into its item list. A plain string becomes a
+/// single user message, which is how the spec defines the shorthand.
+pub fn input_param_into_items(input: InputParam) -> Vec<InputItem> {
+    match input {
+        InputParam::Items(items) => items,
+        InputParam::Text(text) => vec![InputItem::EasyMessage(EasyInputMessage {
+            r#type: MessageType::Message,
+            role: ResponseRole::User,
+            content: EasyInputContent::Text(text),
+            phase: None,
+        })],
+    }
+}
+
+/// Rebuild request input items from stored Responses API item JSON.
+///
+/// Stored output items (`message` with `role: assistant`, `function_call`,
+/// `reasoning`, ...) share their wire shape with the request-side `Item`
+/// variants, so one deserialization covers both input and output history.
+/// Any item that no longer deserializes is an error: silently dropping part of
+/// a conversation would change what the model sees without telling anyone.
+pub fn replay_stored_items(items: &[serde_json::Value]) -> Result<Vec<InputItem>, anyhow::Error> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            serde_json::from_value::<InputItem>(item.clone()).map_err(|error| {
+                anyhow::anyhow!(
+                    "stored item {index} ({}) cannot be replayed as a request input item: {error}",
+                    item.get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("untyped")
+                )
+            })
+        })
+        .collect()
+}
+
 /// Convert a ChatCompletion response into a Responses API response object,
 /// echoing back the actual request parameters from `params`.
 pub fn chat_completion_to_response(
@@ -1611,7 +1654,10 @@ pub fn chat_completion_to_response(
     let response_events = nv_resp.response_events;
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
-    let response_id = format!("resp_{}", Uuid::new_v4().simple());
+    let response_id = params
+        .response_id
+        .clone()
+        .unwrap_or_else(|| format!("resp_{}", Uuid::new_v4().simple()));
 
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();

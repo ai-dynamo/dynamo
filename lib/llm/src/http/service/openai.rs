@@ -38,6 +38,7 @@ use futures::{StreamExt, stream};
 use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use super::responses_store::{HistoryError, ResponseStore, StoredResponse, resolve_history};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
@@ -96,7 +97,7 @@ use crate::protocols::openai::{
     rerank::{NvCreateRerankRequest, NvCreateRerankResponse},
     responses::{
         NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
-        chat_completion_to_response,
+        chat_completion_to_response, input_param_into_items, replay_stored_items,
     },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
@@ -707,6 +708,24 @@ impl ErrorMessage {
                 details: None,
                 context_length: None,
                 metric_error_type: Some(ErrorType::Cancelled),
+            }),
+        )
+    }
+
+    /// Not found (404) for a named resource such as a stored response.
+    /// Recorded as a `NotFound` local failure.
+    pub fn not_found<T: Display>(msg: T) -> ErrorResponse {
+        let code = StatusCode::NOT_FOUND;
+        record_local_failure(ErrorClass::NotFound);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type: map_error_code_to_error_type(code),
+                code: code.as_u16(),
+                details: None,
+                context_length: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -5075,10 +5094,17 @@ async fn responses(
         request.id(),
     );
 
+    // Server-side storage decides whether `previous_response_id` is a supported
+    // continuation or an unsupported field, and whether `store: true` can be
+    // honored. Without a store the Responses API stays stateless.
+    let response_store = state.responses_store().cloned();
+
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code.
-    if let Some(resp) = validate_response_unsupported_fields(&request) {
+    if let Some(resp) =
+        validate_response_unsupported_fields_with_store(&request, response_store.is_some())
+    {
         inflight_guard.mark_error(ErrorType::NotImplemented);
         return Ok(resp.into_response());
     }
@@ -5094,6 +5120,73 @@ async fn responses(
     })) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
+    }
+
+    // Continuation: replay the stored chain ahead of this turn's input so the
+    // tool-name map, the chat conversion, and the engine all see the full
+    // conversation. The chain root doubles as the routing affinity key when
+    // the client sent none, so every turn of a conversation prefers the same
+    // placement.
+    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let will_store = request.inner.store == Some(true) && response_store.is_some();
+    let previous_response_id = request.inner.previous_response_id.clone();
+    // This turn's own input, kept as JSON so the stored node is engine-neutral.
+    // Captured before any history is spliced in.
+    let turn_input_items: Option<Vec<serde_json::Value>> = if will_store {
+        Some(
+            input_param_into_items(request.inner.input.clone())
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<_, _>>()
+                .map_err(|error| {
+                    let err_response = ErrorMessage::internal_server_error_with_details(
+                        "Failed to serialize request input for storage",
+                        error.to_string(),
+                    );
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut chain_root_id: Option<String> = None;
+    if let (Some(previous_id), Some(store)) = (previous_response_id.as_deref(), &response_store) {
+        let history = resolve_history(
+            store.as_ref(),
+            previous_id,
+            state.responses_max_chain_depth(),
+        )
+        .await
+        .map_err(|error| {
+            let err_response = history_error_response(error);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        let mut items = replay_stored_items(&history.items).map_err(|error| {
+            tracing::error!(
+                request_id = %request.id(),
+                previous_response_id = previous_id,
+                error = %error,
+                "stored response history cannot be replayed",
+            );
+            let err_response =
+                ErrorMessage::internal_server_error("Stored response history cannot be replayed");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        let current_input = std::mem::take(&mut request.inner.input);
+        items.extend(input_param_into_items(current_input));
+        request.inner.input = dynamo_protocols::types::responses::InputParam::Items(items);
+        chain_root_id = Some(history.root_id);
+    }
+    if (will_store || chain_root_id.is_some())
+        && request
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .is_err()
+    {
+        let root = chain_root_id.clone().unwrap_or_else(|| response_id.clone());
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId::new(root));
     }
 
     // Extract request parameters before into_parts() consumes the request.
@@ -5119,7 +5212,9 @@ async fn responses(
         max_output_tokens: request.inner.max_output_tokens,
         metadata: request.inner.metadata.clone(),
         parallel_tool_calls: request.inner.parallel_tool_calls,
-        store: request.inner.store,
+        // Echo what actually happens: `store: true` without a configured
+        // store is not persisted and must not claim to be.
+        store: Some(will_store),
         tools: request
             .inner
             .tools
@@ -5147,7 +5242,18 @@ async fn responses(
         prompt_cache_key: request.inner.prompt_cache_key.clone(),
         prompt_cache_retention: request.inner.prompt_cache_retention,
         safety_identifier: request.inner.safety_identifier.clone(),
+        response_id: Some(response_id.clone()),
     };
+    // Everything the completion path needs to persist this turn, or `None`
+    // when the response is not stored.
+    let persist = turn_input_items.and_then(|input_items| {
+        response_store.clone().map(|store| PendingStoredResponse {
+            store,
+            previous_response_id: previous_response_id.clone(),
+            root_id: chain_root_id.clone().unwrap_or_else(|| response_id.clone()),
+            input_items,
+        })
+    });
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
@@ -5388,6 +5494,27 @@ async fn responses(
                 yield terminal_event.map_err(axum::Error::new);
             } else {
                 converter.append_end_events(&mut events);
+                // Persist before the terminal event leaves, so a client that
+                // continues as soon as it sees `response.completed` finds the node.
+                if let Some(persist) = persist.as_ref()
+                    && let Some(response) = converter.terminal_response()
+                {
+                    let stored = match converter.response_json(response) {
+                        Ok(public) => persist.put(response, public).await,
+                        Err(error) => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                response_id = %response.id,
+                                error = %error,
+                                "failed to serialize response for storage",
+                            );
+                            false
+                        }
+                    };
+                    if !stored {
+                        converter.mark_not_stored(&mut events);
+                    }
+                }
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
@@ -5447,7 +5574,7 @@ async fn responses(
                 })?;
 
         // Convert NvCreateChatCompletionResponse --> NvResponse
-        let response: NvResponse =
+        let mut response: NvResponse =
             chat_completion_to_response(response, &response_params, responses_ctx.as_ref())
                 .map_err(|e| {
                     tracing::error!(
@@ -5461,6 +5588,23 @@ async fn responses(
                     err_response
                 })?;
 
+        if let Some(persist) = persist.as_ref() {
+            let stored = match serde_json::to_value(&response) {
+                Ok(public) => persist.put(&response.inner, public).await,
+                Err(error) => {
+                    tracing::warn!(
+                        request_id,
+                        response_id = %response.inner.id,
+                        error = %error,
+                        "failed to serialize response for storage",
+                    );
+                    false
+                }
+            };
+            // The echoed flag reports what happened, not what was asked.
+            response.store = stored;
+        }
+
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
         // assembled but never delivered. Override to cancelled.
@@ -5472,10 +5616,85 @@ async fn responses(
     }
 }
 
-/// Checks for unsupported fields in the request.
-/// Returns Some(response) if unsupported fields are present.
-pub fn validate_response_unsupported_fields(
+/// What the completion path needs to persist one Responses turn.
+struct PendingStoredResponse {
+    store: Arc<dyn ResponseStore>,
+    previous_response_id: Option<String>,
+    root_id: String,
+    /// This turn's input items as Responses API JSON.
+    input_items: Vec<serde_json::Value>,
+}
+
+impl PendingStoredResponse {
+    /// Store the finished response. Returns whether it was persisted; a
+    /// failure is logged and reported through the response's `store` flag
+    /// rather than failing a generation that already succeeded.
+    async fn put(
+        &self,
+        response: &dynamo_protocols::types::responses::Response,
+        public: serde_json::Value,
+    ) -> bool {
+        let output_items = match serde_json::to_value(&response.output) {
+            Ok(serde_json::Value::Array(items)) => items,
+            Ok(_) => Vec::new(),
+            Err(error) => {
+                tracing::warn!(
+                    response_id = %response.id,
+                    error = %error,
+                    "failed to serialize response output for storage",
+                );
+                return false;
+            }
+        };
+        let record = StoredResponse {
+            id: response.id.clone(),
+            previous_response_id: self.previous_response_id.clone(),
+            root_id: self.root_id.clone(),
+            model: response.model.clone(),
+            created_at: response.created_at,
+            input_items: self.input_items.clone(),
+            output_items,
+            response: public,
+        };
+        match self.store.put(record).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    response_id = %response.id,
+                    backend = self.store.backend_name(),
+                    error = %error,
+                    "failed to store response; returning it with store=false",
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Map a continuation lookup failure onto the client-facing error.
+fn history_error_response(error: HistoryError) -> ErrorResponse {
+    match error {
+        HistoryError::NotFound(id) => {
+            ErrorMessage::not_found(format!("Previous response with id '{id}' not found."))
+        }
+        HistoryError::DepthExceeded { limit } => ErrorMessage::bad_request(format!(
+            "`previous_response_id` chain exceeds the maximum depth of {limit}."
+        )),
+        HistoryError::Store(error) => {
+            tracing::error!(error = %error, "response store lookup failed");
+            ErrorMessage::service_unavailable_with_body(
+                "Response store is unavailable; retry later.".to_string(),
+            )
+        }
+    }
+}
+
+/// Checks for unsupported fields on a frontend that may have
+/// server-side Responses storage. With a store, `previous_response_id` is a
+/// supported continuation rather than an unsupported field.
+pub fn validate_response_unsupported_fields_with_store(
     request: &NvCreateResponse,
+    store_enabled: bool,
 ) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
@@ -5499,9 +5718,10 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
         ));
     }
-    if inner.previous_response_id.is_some() {
+    if inner.previous_response_id.is_some() && !store_enabled {
         return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
+            VALIDATION_PREFIX.to_string()
+                + "`previous_response_id` requires server-side storage; set DYN_HTTP_RESPONSES_STORE.",
         ));
     }
     if inner.prompt.is_some() {
@@ -9540,7 +9760,7 @@ mod tests {
     #[test]
     fn test_validate_unsupported_fields_accepts_clean_request() {
         let request = make_base_request();
-        let result = validate_response_unsupported_fields(&request);
+        let result = validate_response_unsupported_fields_with_store(&request, false);
         assert!(result.is_none());
     }
 
@@ -9548,7 +9768,7 @@ mod tests {
     fn test_validate_unsupported_fields_accepts_parallel_tool_calls() {
         let mut request = make_base_request();
         request.inner.parallel_tool_calls = Some(true);
-        let result = validate_response_unsupported_fields(&request);
+        let result = validate_response_unsupported_fields_with_store(&request, false);
         assert!(result.is_none(), "parallel_tool_calls should be supported");
     }
 
@@ -9556,7 +9776,7 @@ mod tests {
     fn test_validate_unsupported_fields_accepts_store() {
         let mut request = make_base_request();
         request.inner.store = Some(true);
-        let result = validate_response_unsupported_fields(&request);
+        let result = validate_response_unsupported_fields_with_store(&request, false);
         assert!(
             result.is_none(),
             "store should be supported for audit opt-in"
@@ -9576,7 +9796,7 @@ mod tests {
                         .unwrap(),
                 );
 
-                let response = validate_response_unsupported_fields(&request)
+                let response = validate_response_unsupported_fields_with_store(&request, false)
                     .expect("RL nvext response field should be rejected")
                     .into_response();
                 assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
@@ -9608,7 +9828,7 @@ mod tests {
                 .unwrap(),
         );
 
-        assert!(validate_response_unsupported_fields(&request).is_some());
+        assert!(validate_response_unsupported_fields_with_store(&request, false).is_some());
     }
 
     #[test]
@@ -9621,7 +9841,7 @@ mod tests {
                 .unwrap(),
         );
 
-        assert!(validate_response_unsupported_fields(&request).is_none());
+        assert!(validate_response_unsupported_fields_with_store(&request, false).is_none());
     }
 
     #[test]
@@ -9748,9 +9968,20 @@ mod tests {
         for (field, set_field) in unsupported_cases {
             let mut req = make_base_request();
             (set_field)(&mut req.inner);
-            let result = validate_response_unsupported_fields(&req);
+            let result = validate_response_unsupported_fields_with_store(&req, false);
             assert!(result.is_some(), "Expected rejection for `{field}`");
         }
+    }
+
+    #[test]
+    fn previous_response_id_is_a_continuation_when_a_store_is_configured() {
+        let mut req = make_base_request();
+        req.inner.previous_response_id = Some("resp_prev".into());
+        assert!(validate_response_unsupported_fields_with_store(&req, false).is_some());
+        assert!(validate_response_unsupported_fields_with_store(&req, true).is_none());
+        // Other unsupported fields stay rejected regardless of storage.
+        req.inner.background = Some(true);
+        assert!(validate_response_unsupported_fields_with_store(&req, true).is_some());
     }
 
     /// Pass-through metadata fields (`prompt_cache_key`,
@@ -9782,7 +10013,7 @@ mod tests {
         for (field, set_field) in passthrough_cases {
             let mut req = make_base_request();
             (set_field)(&mut req.inner);
-            let result = validate_response_unsupported_fields(&req);
+            let result = validate_response_unsupported_fields_with_store(&req, false);
             assert!(
                 result.is_none(),
                 "Expected `{field}` to be accepted as pass-through metadata"
