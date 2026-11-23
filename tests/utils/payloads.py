@@ -1455,10 +1455,14 @@ class StreamingReasoningChatPayload(BasePayload):
                 reasoning_parts.append(delta["reasoning_content"])
             content_parts.append(delta.get("content") or "")
         finish_reasons = [choice.get("finish_reason") for choice in choices]
-        assert finish_reasons[-1:] == ["stop"], f"Incomplete answer: {finish_reasons}"
-        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
         content = "".join(content_parts)
-        _validate_reasoning_split("".join(reasoning_parts), content)
+        reasoning = "".join(reasoning_parts)
+        assert finish_reasons[-1:] == ["stop"], (
+            f"Incomplete answer: finish_reason {finish_reasons[-1:]}; "
+            f"reasoning ends {reasoning[-500:]!r}; content {content[-200:]!r}"
+        )
+        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
+        _validate_reasoning_split(reasoning, content)
         return content
 
 

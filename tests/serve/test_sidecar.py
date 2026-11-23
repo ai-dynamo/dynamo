@@ -272,7 +272,13 @@ sidecar_configs = {
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
-        script_args=["--enable-metrics", "--decode-log-interval", "1"],
+        script_args=[
+            "--enable-metrics",
+            "--decode-log-interval",
+            "1",
+            "--reasoning-parser",
+            "qwen3",
+        ],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -286,11 +292,13 @@ sidecar_configs = {
             "DYN_SGLANG_ENABLE_GENERATE": "1",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "DYN_TOOL_CALL_PARSER": "hermes",
+            "DYN_REASONING_PARSER": "qwen3",
         },
         request_payloads=[
             *_aggregated_payloads(
                 SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
             ),
+            *reasoning_payloads(),
             *sglang_generate_cancellation_payloads(
                 SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
                 max_tokens=CANCELLATION_MAX_TOKENS,

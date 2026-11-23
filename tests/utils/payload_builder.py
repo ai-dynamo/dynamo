@@ -1062,7 +1062,11 @@ def reasoning_payloads() -> list[BasePayload]:
         ],
         # Room to finish thinking: the answer must be complete, not cut off.
         "max_tokens": 2048,
-        "temperature": 0,
+        # Qwen3's recommended thinking-mode sampling: greedy decoding makes
+        # Qwen3-0.6B repeat itself until max_tokens. The seed keeps it repeatable.
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "seed": 0,
         "chat_template_kwargs": {"enable_thinking": True},
     }
     answer_schema = {
@@ -1079,6 +1083,14 @@ def reasoning_payloads() -> list[BasePayload]:
         ReasoningChatPayload(
             body={
                 **body,
+                # Ask for the JSON the grammar enforces: a prompt that wants a bare
+                # number makes the model stall in the grammar's free whitespace.
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": 'What is 17 + 25? Reply as JSON: {"answer": <number>}',
+                    }
+                ],
                 "response_format": _json_schema_format("sum", answer_schema),
             },
             expected_response=["42"],
