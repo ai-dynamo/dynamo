@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use dynamo_runtime::pipeline::SingleIn;
@@ -55,13 +56,13 @@ impl PrefillRouter {
                 .as_ref()
                 .is_some_and(|media| media.values().any(|items| !items.is_empty()));
         if has_raw_media
-            && (self.required.load(std::sync::atomic::Ordering::Acquire)
+            && (self.required.load(Ordering::Acquire)
                 || request
                     .get_optional::<InlineEncoderFallback>(INLINE_ENCODER_FALLBACK)
                     .map_err(anyhow::Error::msg)?
                     .is_some())
         {
-            // A failed Encode does not establish Decode's inline media support.
+            // Keep raw media on Prefill after Encode failure or when Prefill is required.
             return Ok(None);
         }
         let encoder_binding = if request.encoder_result.is_some() || has_raw_media {

@@ -755,6 +755,7 @@ async fn raw_media_bypass_preserves_plain_pd_and_encode_fallback_policy() {
         fixture
             .router
             .set_test_binding(Some(fixture.binding(required)));
+        let dispatches = fixture.dispatch.phases.lock().len();
         let mut request = SingleIn::new(inference_request());
         request.multi_modal_data = Some(HashMap::from([(
             "image".into(),
@@ -772,6 +773,8 @@ async fn raw_media_bypass_preserves_plain_pd_and_encode_fallback_policy() {
             .unwrap();
         assert!(response.next().await.is_some());
         assert!(response.next().await.is_none());
+        assert_eq!(fixture.dispatch.phases.lock().len(), dispatches + 1);
+        assert_eq!(fixture.dispatch.annotations.lock().len(), dispatches + 1);
         assert_eq!(fixture.dispatch.phases.lock().last(), Some(&phase));
         assert_eq!(
             fixture

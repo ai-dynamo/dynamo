@@ -154,7 +154,7 @@ still bypass.
 When a Prefill pool is active, handoffs without producer release support always take remote
 Prefill, including cache-hot requests. Their independent consumption survives caller cancellation;
 paired KV cancellation support does not enable disposal of another producer's encoder allocation.
-vLLM sidecar encoder outputs currently lack producer release support and use this consumption path.
+In E/P/D, vLLM sidecar encoder outputs lack producer release support and use this consumption path.
 This routing change does not add a vLLM release protocol.
 If a binding change invalidates a conditional media plan, the router releases the decode
 booking, aborts its classifier lifecycle, and returns retryable `WorkerUnavailable`.
