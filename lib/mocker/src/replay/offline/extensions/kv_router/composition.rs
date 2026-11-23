@@ -705,12 +705,14 @@ mod tests {
     fn only_prefill_placements_carry_kv_fetch_hints() {
         use super::super::tests::{
             fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+            with_kv_fetch_hints,
         };
+        let hinted = Some(with_kv_fetch_hints(KvRouterConfig::default()));
 
         let args =
             MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
         let mut composition =
-            KvReplayComposition::disaggregated(args.clone(), args, 2, 2, None, None, None);
+            KvReplayComposition::disaggregated(args.clone(), args, 2, 2, hinted, None, None);
         let (mut prefill, mut decode) = composition
             .create_disaggregated_placements(1, topology(2, 1, true), 1, topology(2, 1, true))
             .unwrap();
@@ -742,11 +744,13 @@ mod tests {
     fn aggregated_placements_carry_kv_fetch_hints() {
         use super::super::tests::{
             fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+            with_kv_fetch_hints,
         };
+        let hinted = Some(with_kv_fetch_hints(KvRouterConfig::default()));
 
         let args =
             MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
-        let mut composition = KvReplayComposition::aggregated(args, 2, None, None, None);
+        let mut composition = KvReplayComposition::aggregated(args, 2, hinted, None, None);
         let mut placement = composition
             .create_aggregated_placement(1, topology(2, 1, true))
             .unwrap();

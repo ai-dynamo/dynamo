@@ -13,9 +13,15 @@ use crate::loadgen::ReplayRequestHashes;
 use dynamo_kv_hints::{
     KvHintTransferWorkerMetadata, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
+use dynamo_kv_indexer::host::RouterHintSourceMetadata;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::identity::{
+    CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+    RoutingPartitionRef, RoutingScopeId, StableDpSlotId,
+};
 use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{LocalScheduler, WorkerConfigLike, WorkerKvTransferKeysExt};
@@ -65,6 +71,33 @@ const ROUTER_HINT_WORKER_TYPE: &str = "replay";
 /// Marks a rank as a KV fetch source; replay never dials it.
 const ROUTER_HINT_ENDPOINT: &str = "aisim-replay://worker";
 
+/// The cache owner of a rank's KVCR-owned memory and disk. Replay has one pool, and a rank
+/// keeps its KVCR store for as long as it exists, so the rank itself is the stable slot.
+pub(in crate::replay) fn replay_cache_owner(worker: WorkerWithDpRank) -> CacheOwnerId {
+    let mut slot = [0; 16];
+    slot[..8].copy_from_slice(&worker.worker_id.to_be_bytes());
+    slot[8..12].copy_from_slice(&worker.dp_rank.to_be_bytes());
+    CacheOwnerId::new(
+        PoolId::new(
+            IndexerDomainId::new(
+                CacheSemanticsId::new([0; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([0; 16], IdentitySource::Explicit),
+            ),
+            ClusterId::new(0),
+        ),
+        StableDpSlotId::new(slot, IdentitySource::Explicit),
+    )
+}
+
+/// What a replay cache owner advertises as a KV fetch source.
+pub(super) fn replay_cache_owner_hint_source() -> RouterHintSourceMetadata {
+    RouterHintSourceMetadata {
+        source_control_endpoint: ROUTER_HINT_ENDPOINT.to_string(),
+        worker_type: ROUTER_HINT_WORKER_TYPE.to_string(),
+        topology_domains: HashMap::new(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ReplayWorkerConfig {
     pub(super) max_num_batched_tokens: u64,
@@ -72,19 +105,26 @@ pub(super) struct ReplayWorkerConfig {
     pub(super) data_parallel_start_rank: u32,
     pub(super) data_parallel_size: u32,
     hint_capable: bool,
+    /// Whether each rank's KVCR store (`kvcr.local_g2`) is a cache owner. As a live worker
+    /// behind a KV state agent, the worker then takes hints and publishes no source endpoint.
+    cache_owned: bool,
     /// Derived from the fields above on first use.
     kv_transfer_keys: WorkerKvTransferKeysCache,
 }
 
 impl ReplayWorkerConfig {
-    /// A worker with these limits that does or does not receive KV fetch hints
-    /// and serve as their source.
+    /// A worker with these limits that does or does not take KV fetch hints. One that
+    /// does is also their source, unless its ranks have cache owners.
     pub(super) fn with_router_hint(&self, router_hint: bool) -> Self {
         Self {
             hint_capable: router_hint,
             kv_transfer_keys: WorkerKvTransferKeysCache::default(),
             ..*self
         }
+    }
+
+    pub(super) fn is_cache_owned(&self) -> bool {
+        self.cache_owned
     }
 
     pub(super) fn is_hint_capable(&self) -> bool {
@@ -119,7 +159,7 @@ impl WorkerConfigLike for ReplayWorkerConfig {
         }
         Some(KvHintTransferWorkerMetadata {
             worker_type: ROUTER_HINT_WORKER_TYPE,
-            source_control_endpoint: Some(ROUTER_HINT_ENDPOINT),
+            source_control_endpoint: (!self.cache_owned).then_some(ROUTER_HINT_ENDPOINT),
         })
     }
 
@@ -145,6 +185,8 @@ pub(in crate::replay) fn replay_worker_config(args: &MockerConfig) -> ReplayWork
         data_parallel_start_rank: 0,
         data_parallel_size: args.dp_size.max(1),
         hint_capable: false,
+        // AISim publishes cache-owner events for exactly these ranks.
+        cache_owned: (args.engine.kvcr.as_ref()).is_some_and(|kvcr| kvcr.local_g2.is_some()),
         kv_transfer_keys: WorkerKvTransferKeysCache::default(),
     }
 }
@@ -209,15 +251,7 @@ pub(super) fn replay_selector_with_seed(
         .selected_worker_selection_policy_instance_for(worker_type)?
         .is_some()
     {
-        let registry = match router_plugins {
-            Some(registry) => registry.clone(),
-            None => {
-                let mut registry = dynamo_router_policies::default_registry();
-                dynamo_router_policies::register(&mut registry)?;
-                registry
-            }
-        };
-        let factory = registry
+        let factory = replay_plugins(router_plugins)?
             .resolve_for_worker_type(config, worker_type)?
             .context("no worker-selection policy factory resolved")?;
         return Ok(DefaultWorkerSelector::with_policy_factory(
@@ -232,6 +266,48 @@ pub(super) fn replay_selector_with_seed(
         Some(seed) => DefaultWorkerSelector::new_seeded(Some(selection_config), "replay", seed),
         None => DefaultWorkerSelector::new(Some(selection_config), "replay"),
     })
+}
+
+/// The caller's router plugins, or the ones Dynamo ships.
+fn replay_plugins(
+    router_plugins: Option<&RouterPluginRegistry>,
+) -> anyhow::Result<Cow<'_, RouterPluginRegistry>> {
+    Ok(match router_plugins {
+        Some(registry) => Cow::Borrowed(registry),
+        None => {
+            let mut registry = dynamo_router_policies::default_registry();
+            dynamo_router_policies::register(&mut registry)?;
+            Cow::Owned(registry)
+        }
+    })
+}
+
+/// Whether the router of one replay worker pool computes KV copy sources, by the live
+/// router's rule: the role's worker selection (`selection_inputs`) or one of its hint policies
+/// reads `WorkerInputs::KV_COPY`. `kv_fetch` reads it. It is on by default only under the `kvcr`
+/// worker-selection policy; any other policy runs it when its `worker_selection` entry lists it
+/// in `hints`.
+pub(super) fn replay_sends_kv_fetch_hints(
+    config: &KvRouterConfig,
+    worker_type: WorkerType,
+    router_plugins: Option<&RouterPluginRegistry>,
+    selection_inputs: WorkerInputs,
+) -> anyhow::Result<bool> {
+    if selection_inputs.contains(WorkerInputs::KV_COPY) {
+        return Ok(true);
+    }
+    let hint_policies = replay_plugins(router_plugins)?
+        .resolve_hint_policies(config)?
+        .instances(
+            &SelectionConfig::from(config),
+            worker_type,
+            RoutingPartitionRef::new("replay", "default"),
+        );
+    Ok(hint_policies.policies().iter().any(|(_, policy)| {
+        policy
+            .required_worker_inputs()
+            .contains(WorkerInputs::KV_COPY)
+    }))
 }
 
 pub(crate) fn replay_router_config(
@@ -271,6 +347,14 @@ mod tests {
         // Ranks outside the worker's range get no metadata.
         assert_eq!(endpoint(1), None);
         assert_eq!(endpoint(4), None);
+        // With cache owners the worker still takes hints but is no source.
+        let owned = ReplayWorkerConfig {
+            cache_owned: true,
+            ..template.clone()
+        }
+        .with_router_hint(true);
+        assert!(owned.kv_transfer_keys().target().is_some());
+        assert!(!owned.kv_transfer_keys().is_source(2));
         // The hint config derives its own keys, not the template's cached ones,
         // and selections borrow them.
         let keys = config.kv_transfer_keys();
