@@ -144,10 +144,8 @@ async fn native_error_phase_and_nested_chain_compatibility() {
                 (500, Internal, "internal server error"),
             ],
         ),
-        // A worker overload raised in the HTTP service's process normalizes to
-        // `CapacityExhausted`, so it takes the shared overload status, as on
-        // the OpenAI path. A remote worker's arrives as legacy
-        // `ResourceExhausted` and stays on the 503 row.
+        // An in-process worker overload normalizes to `CapacityExhausted`; a
+        // remote worker's arrives as legacy `ResourceExhausted` and stays at 503.
         (
             vec![Backend::Backend(BackendError::WorkerOverloaded)],
             [
