@@ -188,6 +188,7 @@ expression: "canonicalize(serde_json::to_value(events).unwrap())"
         ],
         "id": "[ID-2]",
         "role": "assistant",
+        "phase": "final_answer",
         "status": "completed"
       }
     }
@@ -225,6 +226,7 @@ expression: "canonicalize(serde_json::to_value(events).unwrap())"
             ],
             "id": "[ID-2]",
             "role": "assistant",
+            "phase": "final_answer",
             "status": "completed"
           }
         ],

@@ -234,8 +234,9 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
         events.extend(converter.emit_end_events());
         let events = stream_json(events).await;
         let completed = &events.last().unwrap()["response"];
-        let output = &completed["output"];
-        assert_eq!(output.as_array().unwrap().len(), 4, "{output}");
+        let output = completed["output"].as_array().unwrap();
+        assert_eq!(output.len(), 4, "{output:?}");
+        assert!(!serde_json::to_string(output).unwrap().contains("Private."));
         assert_eq!(output[0]["phase"], "commentary");
         assert_eq!(output[0]["content"][0]["text"], "Checking.");
         assert_eq!(output[1]["type"], "function_call");
@@ -283,7 +284,6 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
             );
         }
 
-        assert!(!completed.to_string().contains("Private."));
         let unary = DeltaAggregator::apply(
             futures::stream::iter(chunks.into_iter().map(Annotated::from_data)),
             Default::default(),
@@ -295,12 +295,375 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
         )
         .unwrap();
         let unary = unary["output"].as_array().unwrap();
+        assert_eq!(unary.len(), 4);
         for index in [0, 2, 3] {
             assert_eq!(unary[index]["phase"], output[index]["phase"]);
             assert_eq!(unary[index]["content"], output[index]["content"]);
         }
         assert_eq!(unary[1]["type"], "function_call");
     }
+}
+
+async fn matching_stream_and_unary_output(
+    chunks: Vec<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>,
+    params: ResponseParams,
+) -> Value {
+    use crate::protocols::openai::ParsingOptions;
+    use crate::protocols::openai::chat_completions::DeltaAggregator;
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    let mut converter =
+        stream_converter::ResponseStreamConverter::new("/model".into(), params.clone());
+    let mut events = converter.emit_start_events();
+    for chunk in &chunks {
+        events.extend(converter.process_chunk(chunk));
+    }
+    events.extend(converter.emit_end_events());
+    let events = stream_json(events).await;
+    let streaming = &events.last().unwrap()["response"];
+    let aggregated = DeltaAggregator::apply(
+        futures::stream::iter(chunks.into_iter().map(Annotated::from_data)),
+        ParsingOptions::default().with_parallel_tool_calls(params.parallel_tool_calls),
+    )
+    .await
+    .unwrap();
+    assert!(!aggregated.response_events.is_empty());
+    let unary =
+        serde_json::to_value(chat_completion_to_response(aggregated, &params, None).unwrap())
+            .unwrap();
+    let without_ids = |response: &Value| {
+        response["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.as_object_mut().unwrap().remove("id");
+                item
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(without_ids(&unary), without_ids(streaming));
+    assert_eq!(unary["status"], streaming["status"]);
+    assert_eq!(unary["incomplete_details"], streaming["incomplete_details"]);
+    unary["output"].clone()
+}
+
+fn reasoning_chunk(
+    reasoning: &str,
+    finish: Option<&str>,
+) -> crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    let mut chunk = raw_chunk("", finish);
+    chunk.inner.choices[0].delta.content = None;
+    chunk.inner.choices[0].delta.reasoning_content = Some(reasoning.into());
+    chunk
+}
+
+fn scored_chunk(
+    mut chunk: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    token: &str,
+) -> crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    chunk.inner.choices[0].logprobs = Some(
+        serde_json::from_value(json!({
+            "content": [{"token": token, "bytes": token.as_bytes(), "logprob": -0.5, "top_logprobs": []}]
+        }))
+        .unwrap(),
+    );
+    chunk
+}
+
+#[tokio::test]
+async fn undelimited_text_call_text_has_matching_stream_and_unary_order() {
+    let request = request(
+        json!([{"type":"function","name":"lookup"}]),
+        json!("Lookup."),
+    );
+    for finish in ["stop", "length"] {
+        let output = matching_stream_and_unary_output(
+            vec![
+                scored_chunk(raw_chunk("Checking.", None), "Checking."),
+                scored_chunk(tool_chunk(Some("lookup"), Some("call-1"), "{}", None), "{}"),
+                scored_chunk(raw_chunk("Done.", Some(finish)), "Done."),
+            ],
+            ResponseParams {
+                include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+                ..params(&request)
+            },
+        )
+        .await;
+        assert_eq!(output.as_array().unwrap().len(), 3);
+        assert_eq!(output[0]["phase"], "commentary");
+        assert_eq!(output[0]["content"][0]["text"], "Checking.");
+        let commentary_scores = output[0]["content"][0]["logprobs"].as_array().unwrap();
+        assert_eq!(commentary_scores.len(), 1);
+        assert_eq!(commentary_scores[0]["token"], "Checking.");
+        assert_eq!(output[1]["type"], "function_call");
+        assert_eq!(output[1]["status"], "completed");
+        assert_eq!(output[2]["phase"], "final_answer");
+        assert_eq!(output[2]["content"][0]["text"], "Done.");
+        let answer_scores = output[2]["content"][0]["logprobs"].as_array().unwrap();
+        assert_eq!(answer_scores.len(), 1);
+        assert_eq!(answer_scores[0]["token"], "Done.");
+        assert_eq!(
+            output[2]["status"],
+            if finish == "length" {
+                "incomplete"
+            } else {
+                "completed"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn coalesced_tool_continuation_preserves_call_before_text_in_both_modes() {
+    use dynamo_protocols::types::ChatCompletionMessageContent;
+
+    let mut tail = tool_chunk(None, None, "1}", Some("stop"));
+    tail.inner.choices[0].delta.content = Some(ChatCompletionMessageContent::Text("Done.".into()));
+    let output = matching_stream_and_unary_output(
+        vec![
+            tool_chunk(Some("lookup"), Some("call-1"), r#"{"q":"#, None),
+            tail,
+        ],
+        ResponseParams::default(),
+    )
+    .await;
+
+    assert_eq!(output.as_array().unwrap().len(), 2);
+    assert_eq!(output[0]["type"], "function_call");
+    assert_eq!(output[0]["arguments"], r#"{"q":1}"#);
+    assert_eq!(output[1]["phase"], "final_answer");
+    assert_eq!(output[1]["content"][0]["text"], "Done.");
+}
+
+#[rstest::rstest]
+#[case::length("length", "max_output_tokens")]
+#[case::content_filter("content_filter", "content_filter")]
+#[tokio::test]
+async fn omitted_terminal_tool_call_keeps_previous_unary_items_completed(
+    #[case] finish_reason: &str,
+    #[case] expected_reason: &str,
+) {
+    use crate::protocols::openai::chat_completions::{DeltaAggregator, ToolCallCompletion};
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    let mut tail = tool_chunk(
+        Some("lookup"),
+        Some("call-2"),
+        r#"{"q":"#,
+        Some(finish_reason),
+    );
+    tail.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0].index = 1;
+    let mut first = raw_chunk("Checking.", None);
+    if finish_reason == "content_filter" {
+        // An earlier mixed chunk can invalidate replay without obscuring the final call.
+        first.inner.choices[0].delta.reasoning_content = Some("Planning.".into());
+        tail.tool_call_completion.push(ToolCallCompletion {
+            choice_index: 0,
+            tool_index: 1,
+            complete: false,
+        });
+    }
+    let chunks = [
+        first,
+        tool_chunk(Some("lookup"), Some("call-1"), r#"{"q":1}"#, None),
+        tail,
+    ];
+    let aggregated = DeltaAggregator::apply(
+        futures::stream::iter(chunks.into_iter().map(Annotated::from_data)),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let response = serde_json::to_value(
+        chat_completion_to_response(aggregated, &ResponseParams::default(), None).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(response["incomplete_details"]["reason"], expected_reason);
+    let output = response["output"].as_array().unwrap();
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["phase"], "commentary");
+    assert_eq!(output[0]["status"], "completed");
+    assert_eq!(output[1]["call_id"], "call-1");
+    assert_eq!(output[1]["status"], "completed");
+}
+
+#[tokio::test]
+async fn omitted_terminal_tool_call_under_parallel_cap_preserves_status_in_both_modes() {
+    let mut second = tool_chunk(Some("lookup"), Some("call-2"), r#"{"q":2}"#, None);
+    second.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0].index = 1;
+    let output = matching_stream_and_unary_output(
+        vec![
+            raw_chunk("Checking.", None),
+            tool_chunk(Some("lookup"), Some("call-1"), r#"{"q":1}"#, None),
+            second,
+            raw_chunk("", Some("length")),
+        ],
+        ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(output.as_array().unwrap().len(), 2);
+    assert_eq!(output[0]["status"], "completed");
+    assert_eq!(output[1]["call_id"], "call-1");
+    assert_eq!(output[1]["status"], "completed");
+}
+
+#[tokio::test]
+async fn undelimited_reasoning_order_and_terminal_status_match_streaming() {
+    for callable_tools in [false, true] {
+        let request = request(
+            if callable_tools {
+                json!([{"type":"function","name":"lookup"}])
+            } else {
+                json!([])
+            },
+            json!("Answer."),
+        );
+        for final_answer in [false, true] {
+            let mut chunks = vec![
+                reasoning_chunk("Plan.", None),
+                raw_chunk("Progress.", None),
+                reasoning_chunk("Second thought.", Some("length")),
+            ];
+            if final_answer {
+                chunks[2].inner.choices[0].finish_reason = None;
+                chunks.push(raw_chunk("Answer.", Some("length")));
+            }
+            let output = matching_stream_and_unary_output(
+                chunks,
+                ResponseParams {
+                    reasoning: super::requested_reasoning_params().reasoning,
+                    ..params(&request)
+                },
+            )
+            .await;
+            assert_eq!(
+                output.as_array().unwrap().len(),
+                if final_answer { 4 } else { 3 }
+            );
+            assert_eq!(output[0]["content"][0]["text"], "Plan.");
+            assert_eq!(output[0]["status"], "completed");
+            assert_eq!(
+                output[1]["phase"],
+                if callable_tools {
+                    "commentary"
+                } else {
+                    "final_answer"
+                }
+            );
+            assert_eq!(output[1]["status"], "completed");
+            assert_eq!(output[2]["content"][0]["text"], "Second thought.");
+            if final_answer {
+                assert_eq!(output[2]["status"], "completed");
+                assert_eq!(output[3]["phase"], "final_answer");
+                assert_eq!(output[3]["content"][0]["text"], "Answer.");
+                assert_eq!(output[3]["status"], "incomplete");
+            } else {
+                assert_eq!(output[2]["status"], "incomplete");
+            }
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case::no_tools(json!([]))]
+#[case::empty_namespace(json!([{"type":"namespace","name":"empty","description":"Empty","tools":[]}]))]
+#[tokio::test]
+async fn hidden_reasoning_keeps_undelimited_answer_together(#[case] tools: Value) {
+    let request = request(tools, json!("Answer."));
+    for finish_in_reasoning in [false, true] {
+        let mut chunks = vec![
+            raw_chunk("First. ", None),
+            reasoning_chunk("Private.", None),
+            raw_chunk("Second.", (!finish_in_reasoning).then_some("length")),
+        ];
+        if finish_in_reasoning {
+            chunks.push(reasoning_chunk("Truncated thought.", Some("length")));
+        }
+        let output = matching_stream_and_unary_output(chunks, params(&request)).await;
+        assert_eq!(output.as_array().unwrap().len(), 1);
+        assert_eq!(output[0]["phase"], "final_answer");
+        assert_eq!(output[0]["content"][0]["text"], "First. Second.");
+        assert_eq!(
+            output[0]["status"],
+            if finish_in_reasoning {
+                "completed"
+            } else {
+                "incomplete"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn truncating_hidden_reasoning_keeps_prior_message_and_call_completed() {
+    let request = request(
+        json!([{"type":"function","name":"lookup"}]),
+        json!("Lookup."),
+    );
+    let output = matching_stream_and_unary_output(
+        vec![
+            raw_chunk("Checking.", None),
+            tool_chunk(Some("lookup"), Some("call-1"), "{}", None),
+            reasoning_chunk("Truncated thought.", Some("length")),
+        ],
+        params(&request),
+    )
+    .await;
+    assert_eq!(output.as_array().unwrap().len(), 2);
+    assert_eq!(output[0]["phase"], "commentary");
+    assert_eq!(output[0]["status"], "completed");
+    assert_eq!(output[1]["type"], "function_call");
+    assert_eq!(output[1]["status"], "completed");
+}
+
+#[tokio::test]
+async fn mixed_reasoning_delta_does_not_project_unattributed_scores() {
+    let mut chunk = scored_chunk(raw_chunk("Answer.", Some("stop")), "Private.");
+    chunk.inner.choices[0].delta.reasoning_content = Some("Private.".into());
+    let output = matching_stream_and_unary_output(
+        vec![chunk],
+        ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(output.as_array().unwrap().len(), 1);
+    assert_eq!(output[0]["content"][0]["text"], "Answer.");
+    assert_eq!(output[0]["content"][0]["logprobs"], json!([]));
+}
+
+#[tokio::test]
+async fn aggregate_reasoning_rewrite_invalidates_recorded_output_events() {
+    use crate::protocols::openai::chat_completions::DeltaAggregator;
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    let aggregated = DeltaAggregator::apply(
+        futures::stream::iter([Annotated::from_data(reasoning_chunk(
+            "Answer.",
+            Some("stop"),
+        ))]),
+        crate::protocols::openai::ParsingOptions::default()
+            .with_move_reasoning_to_content_when_empty(true),
+    )
+    .await
+    .unwrap();
+    assert!(aggregated.response_events.is_empty());
+    let unary = serde_json::to_value(
+        chat_completion_to_response(aggregated, &Default::default(), None).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(unary["output"].as_array().unwrap().len(), 1);
+    assert_eq!(unary["output"][0]["type"], "message");
+    assert_eq!(unary["output"][0]["phase"], "final_answer");
+    assert_eq!(unary["output"][0]["content"][0]["text"], "Answer.");
 }
 
 fn params(request: &NvCreateResponse) -> ResponseParams {

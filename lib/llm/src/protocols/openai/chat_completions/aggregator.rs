@@ -149,6 +149,8 @@ pub struct DeltaAggregator {
     /// Unique identifier for the chat completion.
     response_events: Vec<ResponseOutputEvent>,
     has_message_phases: bool,
+    has_unordered_deltas: bool,
+    terminal_tool_call_is_known: bool,
     /// Scores from content-less chunks, classified by the next content chunk.
     unclassified_scores: usize,
     /// Whether the last content chunk was reasoning or a tool call.
@@ -428,6 +430,8 @@ impl DeltaAggregator {
         Self {
             response_events: Vec::new(),
             has_message_phases: false,
+            has_unordered_deltas: false,
+            terminal_tool_call_is_known: false,
             unclassified_scores: 0,
             last_scores_hidden: false,
             recorded_calls: std::collections::HashSet::new(),
@@ -441,6 +445,56 @@ impl DeltaAggregator {
             nvext: None,
             prompt_logprobs: None,
         }
+    }
+
+    fn response_events_match_choice(&self, choice: &DeltaChoice) -> bool {
+        if self.has_unordered_deltas || choice.refusal.is_some() || !choice.content_parts.is_empty()
+        {
+            return false;
+        }
+        let text_matches = self
+            .response_events
+            .iter()
+            .filter_map(|event| match event {
+                ResponseOutputEvent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .flat_map(str::bytes)
+            .eq(choice.text.bytes());
+        let reasoning_matches = self
+            .response_events
+            .iter()
+            .filter_map(|event| match event {
+                ResponseOutputEvent::Reasoning(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .flat_map(str::bytes)
+            .eq(choice
+                .reasoning_content
+                .as_deref()
+                .unwrap_or_default()
+                .bytes());
+        let calls = choice.tool_calls.as_deref().unwrap_or_default();
+        text_matches
+            && reasoning_matches
+            && self.recorded_calls.len() == calls.len()
+            && calls
+                .iter()
+                .all(|call| self.recorded_calls.contains(&call.id))
+    }
+
+    fn terminal_tool_call_was_omitted(&self, choice: &DeltaChoice) -> bool {
+        if super::super::responses::responses_incomplete_reason(choice.finish_reason).is_none()
+            || !self.terminal_tool_call_is_known
+        {
+            return false;
+        }
+        let last_item = self.response_events.iter().rfind(|event| {
+            !event.is_score()
+                && !matches!(event, ResponseOutputEvent::Boundary(MessageBoundary::End))
+        });
+        matches!(last_item, Some(ResponseOutputEvent::ToolCall(id))
+            if !id.is_empty() && !choice.tool_calls.iter().flatten().any(|call| call.id == *id))
     }
 
     /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -516,14 +570,16 @@ impl DeltaAggregator {
                         aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary.clone().unwrap()));
                     }
                     for choice in delta.inner.choices.iter().filter(|choice| choice.index == 0) {
-                        if let Some(reasoning) = &choice.delta.reasoning_content {
+                        let has_reasoning = choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty());
+                        let has_text = matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty());
+                        let has_calls = choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
+                        if let Some(reasoning) = &choice.delta.reasoning_content && !reasoning.is_empty() {
                             if let Some(ResponseOutputEvent::Reasoning(previous)) = last_content_event(&mut aggregator.response_events) {
                                 previous.push_str(reasoning);
                             } else {
                                 aggregator.response_events.push(ResponseOutputEvent::Reasoning(reasoning.clone()));
                             }
                         }
-                        let has_text = matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty());
                         if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content
                             && !text.is_empty()
                         {
@@ -533,10 +589,37 @@ impl DeltaAggregator {
                                 aggregator.response_events.push(ResponseOutputEvent::Text(text.clone()));
                             }
                         }
+                        let mut starts_tool_item = false;
+                        let mut starts_unidentified_tool_item = false;
                         for call in choice.delta.tool_calls.iter().flatten() {
+                            let previously_seen = aggregator.choices.get(&0).is_some_and(|choice| choice.tool_call_chunks.contains_key(&call.index));
+                            let missing_id = call.id.as_deref().is_none_or(str::is_empty);
+                            let name = call.function.as_ref().and_then(|function| function.name.as_deref())
+                                .or_else(|| call.custom.as_ref().and_then(|custom| custom.name.as_deref()));
+                            if !previously_seen && (missing_id || name.is_none_or(str::is_empty)) {
+                                aggregator.has_unordered_deltas = true;
+                            }
+                            starts_unidentified_tool_item |= !previously_seen && missing_id;
                             if let Some(id) = &call.id && aggregator.recorded_calls.insert(id.clone()) {
+                                starts_tool_item = true;
                                 aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
                             }
+                        }
+                        // Only a new call introduces an item whose order could
+                        // be ambiguous. Argument deltas continue an earlier item.
+                        aggregator.has_unordered_deltas |= usize::from(has_reasoning)
+                            + usize::from(has_text)
+                            + usize::from(starts_tool_item) > 1;
+                        // Earlier ambiguous chunks can invalidate item replay while
+                        // the final item is still known. Determine these independently.
+                        let has_unrecorded_content = choice.delta.refusal.as_deref().is_some_and(|text| !text.is_empty())
+                            || matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Parts(parts)) if !parts.is_empty());
+                        if starts_tool_item || starts_unidentified_tool_item || has_reasoning || has_text || has_unrecorded_content {
+                            aggregator.terminal_tool_call_is_known = starts_tool_item
+                                && !starts_unidentified_tool_item
+                                && !has_reasoning
+                                && !has_text
+                                && !has_unrecorded_content;
                         }
                         // Record only the count: the entries themselves are appended to
                         // the choice's aggregated logprobs below, in the same order.
@@ -549,9 +632,9 @@ impl DeltaAggregator {
                             .as_ref()
                             .and_then(|lp| lp.content.as_ref())
                             .map_or(0, Vec::len);
-                        let hidden = !has_text
-                            && (choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
-                                || choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()));
+                        // A mixed reasoning/text delta has no reliable assignment of its
+                        // scores to either field. Keep those scores out of Responses text.
+                        let hidden = has_reasoning || (!has_text && has_calls);
                         if has_text || hidden {
                             aggregator.last_scores_hidden = hidden;
                             let count = std::mem::take(&mut aggregator.unclassified_scores) + own;
@@ -982,6 +1065,11 @@ impl DeltaAggregator {
         }
 
         // Extract aggregated choices and sort them by index.
+        let first_choice = aggregator.choices.get(&0);
+        let preserves_recorded_order = aggregator.has_message_phases
+            || first_choice.is_some_and(|choice| aggregator.response_events_match_choice(choice));
+        let omitted_terminal_tool_call =
+            first_choice.is_some_and(|choice| aggregator.terminal_tool_call_was_omitted(choice));
         let mut choices: Vec<_> = aggregator
             .choices
             .into_values()
@@ -1000,19 +1088,20 @@ impl DeltaAggregator {
             );
         }
 
-        // Construct the final response object.
+        // Preserve metadata even when the aggregate no longer matches the recorded items.
+        if !preserves_recorded_order {
+            aggregator
+                .response_events
+                .retain(ResponseOutputEvent::is_score);
+        }
+        if omitted_terminal_tool_call {
+            aggregator
+                .response_events
+                .push(ResponseOutputEvent::OmittedTerminalToolCall);
+        }
+
         let response = NvCreateChatCompletionResponse {
-            // Without message phases only the score bookkeeping is kept, so a
-            // Responses projection can still drop reasoning and tool-call scores.
-            response_events: if aggregator.has_message_phases {
-                aggregator.response_events
-            } else {
-                aggregator
-                    .response_events
-                    .into_iter()
-                    .filter(ResponseOutputEvent::is_score)
-                    .collect()
-            },
+            response_events: aggregator.response_events,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
                 created: aggregator.created,
@@ -1273,16 +1362,17 @@ mod tests {
         assert_eq!(
             resp.response_events,
             vec![
+                ResponseOutputEvent::Text("Let me check.".into()),
                 ResponseOutputEvent::Scores(1),
+                ResponseOutputEvent::ToolCall("test_id".into()),
                 ResponseOutputEvent::HiddenScores(5),
             ]
         );
     }
 
-    /// Without message phases the response still carries the score bookkeeping, and
-    /// nothing else, so hidden scores can be dropped from a Responses projection.
+    /// Undelimited Responses retain reliable item order and their score ownership.
     #[tokio::test]
-    async fn plain_responses_keep_only_score_events() {
+    async fn plain_responses_keep_order_and_score_events() {
         let mut thinking = create_test_delta(0, "", None, None, Some(-0.05), None);
         let choice = &mut thinking.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
@@ -1312,7 +1402,9 @@ mod tests {
         assert_eq!(
             resp.response_events,
             vec![
+                ResponseOutputEvent::Reasoning("Thinking.".into()),
                 ResponseOutputEvent::HiddenScores(1),
+                ResponseOutputEvent::Text("Hello".into()),
                 ResponseOutputEvent::Scores(2),
             ]
         );
@@ -2790,6 +2882,10 @@ mod tests {
             Some(dynamo_protocols::types::FinishReason::ContentFilter)
         );
         assert!(choice.message.tool_calls.is_none());
+        assert!(matches!(
+            response.response_events.last(),
+            Some(ResponseOutputEvent::OmittedTerminalToolCall)
+        ));
         assert!(!serde_json::to_string(choice).unwrap().contains("Par"));
     }
 
