@@ -163,21 +163,48 @@ func TestKVPolicyKeepsComputeOnlyRoleEnvironment(t *testing.T) {
 }
 
 func TestStandaloneTopologySourceDoesNotOwnEnvironment(t *testing.T) {
-	t.Log("A standalone DCD's topology-label projection is not a compiled graph policy")
-	dcd := &v1beta1.DynamoComponentDeployment{Name: "worker", Namespace: "ns",
-		Annotations: map[string]string{commonconsts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone"},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{BackendFramework: "vllm",
-			Env: []corev1.EnvVar{{Name: commonconsts.EnvKvTransferPreferredWeight, Value: "0.75"}},
-			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{ComponentType: v1beta1.ComponentTypeWorker,
-				PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"}}}},
+	for _, test := range []struct {
+		name       string
+		apiVersion string
+		controller bool
+		ownsPolicy bool
+	}{
+		{name: "standalone"},
+		{name: "non-controlling DGD", apiVersion: "nvidia.com/v1beta1"},
+		{name: "foreign DGD controller", apiVersion: "example.com/v1beta1", controller: true},
+		{name: "Dynamo DGD controller", apiVersion: "nvidia.com/v1beta1", controller: true, ownsPolicy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Only a controlling Dynamo DGD can own the persisted topology bindings")
+			dcd := &v1beta1.DynamoComponentDeployment{Name: "worker", Namespace: "ns",
+				Annotations: map[string]string{commonconsts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone", commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{BackendFramework: "vllm",
+					Env: []corev1.EnvVar{{Name: commonconsts.EnvKvTransferPreferredWeight, Value: "0.75"}},
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{ComponentType: v1beta1.ComponentTypeWorker,
+						PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"},
+								Env: []corev1.EnvVar{{Name: commonconsts.EnvTopologyMountPath, Value: "/engine-data"}},
+							}}},
+						},
+					},
 				},
-			},
-		},
+			}
+			if test.apiVersion != "" {
+				dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: test.apiVersion, Kind: "DynamoGraphDeployment", Name: "graph", Controller: new(test.controller)}}
+			}
+			original := dcd.DeepCopy()
+			pod, err := renderStoredEnvironment(dcd, &configv1alpha1.OperatorConfiguration{}, RoleMain)
+			require.NoError(t, err)
+			values := envVarsToMap(pod.Containers[0].Env)
+			if test.ownsPolicy {
+				require.NotContains(t, values, commonconsts.EnvKvTransferPreferredWeight)
+			} else {
+				require.Equal(t, "0.75", values[commonconsts.EnvKvTransferPreferredWeight])
+			}
+			require.Equal(t, "/engine-data", values[commonconsts.EnvTopologyMountPath])
+			require.Equal(t, original, dcd)
+		})
 	}
-	pod, err := renderStoredEnvironment(dcd, &configv1alpha1.OperatorConfiguration{}, RoleMain)
-	require.NoError(t, err)
-	require.Equal(t, "0.75", envVarsToMap(pod.Containers[0].Env)[commonconsts.EnvKvTransferPreferredWeight])
 }
 
 func TestEnvironmentLateGMSBindings(t *testing.T) {

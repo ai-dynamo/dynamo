@@ -138,7 +138,7 @@ func (p *podEnvironment) register(name, source string, defaults, general, author
 // topology-source snapshot, not from standalone DCD topology annotations.
 // dcd must not be nil.
 func DCDHasKVTransferPolicy(dcd *v1beta1.DynamoComponentDeployment) bool {
-	return dcd.GetParentGraphDeploymentName() != "" &&
+	return dcd.GetGraphDeploymentController() != nil &&
 		(dcd.Annotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" ||
 			dcd.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != "")
 }
