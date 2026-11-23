@@ -1021,13 +1021,12 @@ def _write_weka_trace(path, block_size):
 
 
 @pytest.mark.timeout(30)
-def test_agentic_replay_matches_the_engine_stack(tmp_path, monkeypatch):
+def test_agentic_replay_matches_the_engine_stack(tmp_path):
     """An AgentX workload on a state-cache engine replays behind the KV router as on
     the engine stack.
 
-    The engine stack has no router hook. With one worker, the KV router scoring the
-    chat-templated block hashes must leave every per-request record unchanged apart
-    from its own overlap scores.
+    The engine stack has no router hook. With one worker, the KV router must leave
+    every per-request record unchanged apart from its own overlap scores.
     """
 
     block_size = 64
@@ -1095,14 +1094,6 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path, monkeypatch):
             )
         },
     )
-    native_replay = replay_api._run_mocker_trace_replay
-    router_modes = []
-
-    def record_router_mode(*args, **kwargs):
-        router_modes.append(kwargs["router_mode"])
-        return native_replay(*args, **kwargs)
-
-    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", record_router_mode)
     requirements = ReplayOutputRequirements(capture_per_request=True)
     dynamo = (
         simulation.DynamoReplayRunnerFactory()
@@ -1115,7 +1106,6 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path, monkeypatch):
         .run(spec, output_requirements=requirements)
     )
 
-    assert router_modes == ["kv_router"]
     # Only the router's own scores differ: the engine stack routes without
     # scoring, so it reports no overlap.
     router_scores = {
@@ -1142,9 +1132,10 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path, monkeypatch):
         engine.metadata["native_report"]["per_request"]
     )
     assert len(records) > 100
-    # The router matched the templated prompts' shared prefixes.
+    # The router matched shared prefixes. Without the KV router (the hook not
+    # reaching native replay) the score is null and this fails.
     assert any(
-        hop["selected_overlap_blocks"] > 0
+        (hop["selected_overlap_blocks"] or 0) > 0
         for record in records
         for hop in record["routing_history"]
     )

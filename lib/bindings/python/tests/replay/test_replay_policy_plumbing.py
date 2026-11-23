@@ -94,6 +94,39 @@ def test_replay_api_names_an_invalid_weka_import_option(option, message):
         )
 
 
+def test_replay_api_reports_a_misordered_weka_chat_template_at_trace_load(tmp_path):
+    # AISimulate checks the token ordering when it loads the trace, so the
+    # error names its chat_template rather than weka_chat_template.
+    trace = tmp_path / "weka.jsonl"
+    request = {
+        "t": 0.0,
+        "type": "s",
+        "model": "source-model",
+        "in": 4,
+        "out": 1,
+        "api_time": 0.5,
+        "hash_ids": [1],
+    }
+    play = {"id": "play", "block_size": 4, "hash_id_scope": "local"}
+    trace.write_text(json.dumps({**play, "requests": [request]}) + "\n")
+    with pytest.raises(
+        Exception,
+        match="chat_template needs append_tail_tokens <= tail_tokens <= request_tokens",
+    ):
+        replay_api.run_trace_replay(
+            str(trace),
+            trace_format="weka",
+            execution_model="target-model",
+            weka_chat_template={
+                "request_tokens": 2,
+                "user_tokens": 1,
+                "assistant_tokens": 1,
+                "tail_tokens": 5,
+                "append_tail_tokens": 1,
+            },
+        )
+
+
 @pytest.mark.parametrize(
     ("basis", "error"),
     [
