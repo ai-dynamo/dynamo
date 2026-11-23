@@ -165,6 +165,7 @@ impl WorkerPicker for SharedStickyMinLoadPicker {
             ));
         }
         let session_id = request
+            .info()
             .session_context()
             .map(|session| session.session_id());
         self.0

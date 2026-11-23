@@ -31,7 +31,7 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
 use dynamo_worker_selection::host::{
-    WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt, worker_copy_input,
+    WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt, request_info, worker_copy_input,
 };
 use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
@@ -348,14 +348,17 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     /// The policy's view of the request, pinned to what eligibility imposes. It borrows this
     /// source for the resident block counts the host lent, so it lives no longer than the source.
     pub(super) fn selection_request(&self) -> WorkerSelectionRequest<'_> {
-        worker_selection_request(self.request, self.block_size)
-            .with_pinned_worker(self.eligibility.pinned_worker())
-            .with_decode_progress(self.decode_progress)
-            .with_resident_blocks(
-                self.resident_blocks
-                    .is_some()
-                    .then_some(self as &dyn ResidentBlockSource),
-            )
+        worker_selection_request(
+            self.request,
+            self.block_size,
+            self.eligibility.pinned_worker(),
+        )
+        .with_decode_progress(self.decode_progress)
+        .with_resident_blocks(
+            self.resident_blocks
+                .is_some()
+                .then_some(self as &dyn ResidentBlockSource),
+        )
     }
 
     /// The request's fetch sources for the targets in `scope`, built on the
@@ -579,22 +582,27 @@ impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
     }
 }
 
-/// The fields of `request` a policy may read, as [`WorkerSelectionRequest`] exposes them.
+/// The fields of `request` a policy may read, as [`WorkerSelectionRequest`] exposes them,
+/// pinned to the worker eligibility imposes.
 fn worker_selection_request(
     request: &SchedulingRequest,
     block_size: u32,
+    pinned_worker: Option<WorkerWithDpRank>,
 ) -> WorkerSelectionRequest<'_> {
-    WorkerSelectionRequest::new(request.isl_tokens, block_size)
-        .with_request_id(request.mode.request_id())
+    let info = request_info(
+        request.mode.request_id(),
+        request.isl_tokens,
+        request.session_context.as_ref(),
+        pinned_worker,
+    );
+    WorkerSelectionRequest::new(info, block_size)
         .with_prefill_tracking(request.track_prefill_tokens)
-        .with_pinned_worker(request.pinned_worker)
         .with_router_temperature_override(
             request
                 .router_config_override
                 .as_ref()
                 .and_then(|config| config.router_temperature),
         )
-        .with_session_context(request.session_context.as_ref())
         .with_affinity_target(request.affinity_target)
         .with_expected_output_tokens(request.expected_output_tokens)
         .with_priority(request.priority_jump, request.strict_priority)

@@ -392,7 +392,7 @@ present, the flat `session_id` field is ignored.
 }
 ```
 
-Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionRequest::session_context()`.
+Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionRequest::info().session_context()`.
 
 The optional `agent_headers` map carries upstream-captured header names and ordered lists of string values to the policy's `SessionContext.agent_headers()` accessor. Both selection endpoints preserve these values without interpreting them. Supply the map in the request body; the selection API does not extract coding-agent metadata from its own HTTP headers.
 

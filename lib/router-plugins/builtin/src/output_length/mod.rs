@@ -93,20 +93,21 @@ impl OutputLengthClassifier {
     }
 
     fn predict(&mut self, request: &mut ClassifyRequest, now: Instant) {
-        let session = request
+        let info = request.info();
+        let session = info
             .session_context()
             .map(|session| session_key(session.session_id()));
-        let isl = request.isl_tokens();
+        let isl = info.isl_tokens();
         let prediction = self.predictor.predict(session, isl, now);
         tracing::trace!(
             target: "output_length_prediction",
-            request_id = request.request_id(),
+            request_id = info.request_id(),
             predicted_tokens = prediction.tokens,
             source = ?prediction.source,
             "predicted output length"
         );
         request.set_backend_priority(backend_priority(prediction.tokens));
-        if let Some(request_id) = request.request_id()
+        if let Some(request_id) = request.info().request_id()
             && self.pending.len() < MAX_PENDING
         {
             self.pending.insert(

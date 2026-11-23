@@ -19,6 +19,7 @@ impl WorkerPicker for RequestAwarePicker {
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         if request
+            .info()
             .session_context()
             .and_then(|session| session.input_trigger())
             == Some(WorkerSelectionInputTrigger::ToolResult)

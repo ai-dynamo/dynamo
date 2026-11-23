@@ -3227,7 +3227,11 @@ impl RequestClassifier for PausingClassifier {
         _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // Held heads must wait in their own lanes, as ThunderAgent keys them.
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        if let Some(session) = request
+            .info()
+            .session_context()
+            .map(|s| s.session_id().to_owned())
+        {
             request.set_lane_key(&session);
         }
         Ok(request)
@@ -3609,7 +3613,7 @@ impl RequestClassifier for TokenContractClassifier {
         _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.classified
-            .send((request.isl_tokens(), request.progress().clone()))
+            .send((request.info().isl_tokens(), request.progress().clone()))
             .unwrap();
         Ok(request)
     }

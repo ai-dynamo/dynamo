@@ -994,7 +994,7 @@ fn custom_picker_receives_session_metadata() {
             request: &WorkerSelectionRequest<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            let session = request.session_context().expect("session context");
+            let session = request.info().session_context().expect("session context");
             assert_eq!(session.session_id(), "session-1");
             assert_eq!(session.parent_session_id(), Some("root"));
             assert_eq!(session.session_final(), Some(false));

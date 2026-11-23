@@ -8,20 +8,77 @@ use dynamo_session_affinity::WorkerAffinityTarget;
 use super::inputs::{CacheSnapshot, ResidentBlockSource};
 use super::shared_cache::SharedCacheHits;
 
+/// What is true about a request at every stage, read by a request classifier, a dispatch
+/// gate, and a worker-selection policy alike through `info()` on the request each receives.
+///
+/// A value that exists only at one stage stays on that stage's type: a classifier's
+/// overrides and timing on `ClassifyRequest`, the affinity target and the shared-cache hits
+/// on [`WorkerSelectionRequest`].
+#[derive(Clone, Copy, Debug)]
+pub struct RequestInfo<'a> {
+    request_id: Option<&'a str>,
+    isl_tokens: usize,
+    session_context: Option<&'a SessionContext>,
+    pinned_worker: Option<WorkerWithDpRank>,
+}
+
+impl<'a> RequestInfo<'a> {
+    #[inline]
+    pub(crate) fn new(
+        request_id: Option<&'a str>,
+        isl_tokens: usize,
+        session_context: Option<&'a SessionContext>,
+        pinned_worker: Option<WorkerWithDpRank>,
+    ) -> Self {
+        Self {
+            request_id,
+            isl_tokens,
+            session_context,
+            pinned_worker,
+        }
+    }
+
+    /// The request id for tracked requests; `None` for query-only selections.
+    #[inline]
+    pub fn request_id(&self) -> Option<&'a str> {
+        self.request_id
+    }
+
+    /// Input sequence length in tokens, the size the scheduler uses. No rounding or cache
+    /// weighting is applied. Zero when the request carries no prompt token IDs, such as
+    /// embeddings-only input.
+    #[inline]
+    pub fn isl_tokens(&self) -> usize {
+        self.isl_tokens
+    }
+
+    /// Return the session metadata of the request, when it carries any.
+    #[inline]
+    pub fn session_context(&self) -> Option<&'a SessionContext> {
+        self.session_context
+    }
+
+    /// The exact worker/rank imposed on the request, if any: the pin the caller requires
+    /// and, at worker selection, also an eligible exclusive-affinity target. This is
+    /// read-only routing metadata, not permission to change eligibility; a classifier's soft
+    /// selection target and a dispatch gate's `Go` target cannot override it.
+    #[inline]
+    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+        self.pinned_worker
+    }
+}
+
 /// The view of one scheduling request that filters, scorers, and pickers may read.
 ///
 /// Holds values, not the request: the kernel builds it once per selection from the
 /// request it owns, so a policy sees exactly the fields the accessors expose.
 pub struct WorkerSelectionRequest<'a> {
     pub(crate) decode_progress: Option<&'a super::host::DecodeProgressSource<'a>>,
-    pub(crate) request_id: Option<&'a str>,
-    pub(crate) isl_tokens: usize,
+    pub(crate) info: RequestInfo<'a>,
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
-    pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
-    pub(crate) session_context: Option<&'a SessionContext>,
     pub(crate) affinity_target: Option<WorkerAffinityTarget>,
     pub(crate) expected_output_tokens: Option<u32>,
     pub(crate) priority_jump: f64,
@@ -43,30 +100,15 @@ impl<'a> WorkerSelectionRequest<'a> {
         }
     }
 
-    /// The request id for tracked requests; `None` for query-only selections.
+    /// The request facts every stage reads: the request id, the input length, the session,
+    /// and the pinned worker.
     #[inline]
-    pub fn request_id(&self) -> Option<&str> {
-        self.request_id
-    }
-
-    /// The exact worker/rank imposed by the host for this selection, if any.
-    /// Includes explicit pins and eligible exclusive-affinity targets. This is
-    /// read-only routing metadata, not permission to change eligibility.
-    #[inline]
-    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
-        self.pinned_worker
-    }
-
-    /// Input sequence length in tokens, the same value classifiers read as
-    /// `ClassifyRequest::isl_tokens`. No rounding or cache weighting is applied.
-    /// Zero when the request carries no prompt token IDs, such as embeddings-only input.
-    #[inline]
-    pub fn isl_tokens(&self) -> usize {
-        self.isl_tokens
+    pub fn info(&self) -> RequestInfo<'a> {
+        self.info
     }
 
     /// Return the input size in KV blocks. Zero when
-    /// [`isl_tokens`](Self::isl_tokens) is zero.
+    /// [`isl_tokens`](RequestInfo::isl_tokens) is zero.
     #[inline]
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
@@ -82,12 +124,6 @@ impl<'a> WorkerSelectionRequest<'a> {
     #[inline]
     pub fn tracks_prefill_tokens(&self) -> bool {
         self.track_prefill_tokens
-    }
-
-    /// Return the session metadata available to worker selection.
-    #[inline]
-    pub fn session_context(&self) -> Option<&SessionContext> {
-        self.session_context
     }
 
     /// Return the session-affinity target resolved by the request host.
@@ -143,20 +179,17 @@ impl<'a> WorkerSelectionRequest<'a> {
 
 impl<'a> crate::host::WorkerSelectionRequestHostExt<'a> for WorkerSelectionRequest<'a> {
     #[inline]
-    fn new(isl_tokens: usize, block_size: u32) -> Self {
+    fn new(info: RequestInfo<'a>, block_size: u32) -> Self {
         Self {
             decode_progress: None,
-            request_id: None,
-            isl_tokens,
+            info,
             request_blocks: match block_size {
                 0 => 0,
-                block_size => isl_tokens.div_ceil(block_size as usize) as u64,
+                block_size => info.isl_tokens().div_ceil(block_size as usize) as u64,
             },
             block_size,
             track_prefill_tokens: false,
-            pinned_worker: None,
             router_temperature_override: None,
-            session_context: None,
             affinity_target: None,
             expected_output_tokens: None,
             priority_jump: 0.0,
@@ -175,32 +208,14 @@ impl<'a> crate::host::WorkerSelectionRequestHostExt<'a> for WorkerSelectionReque
     }
 
     #[inline]
-    fn with_request_id(mut self, request_id: Option<&'a str>) -> Self {
-        self.request_id = request_id;
-        self
-    }
-
-    #[inline]
     fn with_prefill_tracking(mut self, track_prefill_tokens: bool) -> Self {
         self.track_prefill_tokens = track_prefill_tokens;
         self
     }
 
     #[inline]
-    fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
-        self.pinned_worker = pinned_worker;
-        self
-    }
-
-    #[inline]
     fn with_router_temperature_override(mut self, temperature: Option<f64>) -> Self {
         self.router_temperature_override = temperature;
-        self
-    }
-
-    #[inline]
-    fn with_session_context(mut self, session_context: Option<&'a SessionContext>) -> Self {
-        self.session_context = session_context;
         self
     }
 

@@ -950,7 +950,7 @@ impl dynamo_worker_selection::WorkerPicker for CapturingPicker {
         input: dynamo_worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::types::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
-            session_context: request.session_context().cloned(),
+            session_context: request.info().session_context().cloned(),
             affinity_target: request.affinity_target(),
             shared_beyond_device_blocks: input
                 .cache()

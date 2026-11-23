@@ -188,21 +188,22 @@ impl RequestClassifier for ThunderAgentClassifier {
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-        let Some(session) = request.session_context() else {
+        let info = request.info();
+        let Some(session) = info.session_context() else {
             return Ok(request);
         };
-        let Some(request_id) = request.request_id().map(str::to_owned) else {
+        let Some(request_id) = info.request_id().map(str::to_owned) else {
             return Err(Box::new(ThunderAgentError::MissingRequestId) as Box<ClassifierError>);
         };
         let session_id = session.session_id().to_owned();
         let registration = RequestRegistration::new(
             request_id,
             session_id.clone(),
-            request.isl_tokens(),
+            info.isl_tokens(),
             request.progress().clone(),
             session.session_final() == Some(true),
         )
-        .with_pinned_worker(request.pinned_worker());
+        .with_pinned_worker(info.pinned_worker());
         self.inner
             .state
             .lock()
@@ -233,7 +234,8 @@ impl DispatchGate for ThunderAgentGate {
     fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
         // `classify` registers only requests with a session, so nothing here knows a
         // sessionless head: it goes without the snapshot or the ledger lock.
-        let (Some(request_id), Some(_)) = (head.request_id(), head.session_context()) else {
+        let info = head.info();
+        let (Some(request_id), Some(_)) = (info.request_id(), info.session_context()) else {
             return DispatchDecision::Go { target: None };
         };
         let capacities = self.inner.capacities();
@@ -244,7 +246,8 @@ impl DispatchGate for ThunderAgentGate {
     }
 
     fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
-        let (Some(request_id), Some(_)) = (head.request_id(), head.session_context()) else {
+        let info = head.info();
+        let (Some(request_id), Some(_)) = (info.request_id(), info.session_context()) else {
             return;
         };
         let capacities = self.inner.capacities();

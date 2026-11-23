@@ -33,7 +33,7 @@ impl WorkerFilter for ContractPolicy {
         request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
-        let _: Option<&SessionContext> = request.session_context();
+        let _: Option<&SessionContext> = request.info().session_context();
         let _: Option<u32> = request.expected_output_tokens();
         let _: WorkerWithDpRank = candidate.worker();
         let cache = candidate.cache().expect("requested cache inputs");
@@ -86,8 +86,9 @@ impl RequestClassifier for ContractClassifier {
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-        let _: Option<&str> = request.request_id();
-        let _: usize = request.isl_tokens();
+        let info: RequestInfo<'_> = request.info();
+        let _: Option<&str> = info.request_id();
+        let _: usize = info.isl_tokens();
         let _: Option<&[u64]> = request.sequence_hashes();
         let _: &RequestProgress = request.progress();
         let _: Option<tokio::time::Instant> = request.due_at();
@@ -98,7 +99,7 @@ impl RequestClassifier for ContractClassifier {
         struct Open;
         impl DispatchGate for Open {
             fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
-                let _: Option<&str> = head.request_id();
+                let _: Option<&str> = head.info().request_id();
                 DispatchDecision::Go { target: None }
             }
         }

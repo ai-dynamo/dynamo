@@ -53,7 +53,7 @@ impl InputProbe {
     fn check(&self, request: &WorkerSelectionRequest<'_>) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         // Ordinary request values stay available without CACHE.
-        assert_eq!(request.isl_tokens(), 17);
+        assert_eq!(request.info().isl_tokens(), 17);
     }
 
     fn check_cache(&self, cache: WorkerCacheInput<'_>) {

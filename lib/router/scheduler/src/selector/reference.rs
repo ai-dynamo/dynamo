@@ -210,6 +210,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         formula_name: &'static str,
     ) -> f64 {
         let kv_router_config = self.kv_router_config.borrow();
+        let info = request.info();
         let weights = default_context.weights;
         let worker = row.worker;
         let cache = &row.cache;
@@ -271,7 +272,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
             tracing::debug!(
-                request_id = request.request_id().unwrap_or("-"),
+                request_id = info.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
@@ -287,10 +288,10 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         let raw_prefill_tokens = if request.tracks_prefill_tokens() {
             if load.is_available() {
                 let cached_tokens = cache.estimated_cached_tokens;
-                let uncached_tokens = request.isl_tokens().saturating_sub(cached_tokens);
+                let uncached_tokens = info.isl_tokens().saturating_sub(cached_tokens);
                 (load.active_prefill_tokens() + uncached_tokens).saturating_add(cached_tokens)
             } else {
-                request.isl_tokens()
+                info.isl_tokens()
             }
         } else {
             0
@@ -308,7 +309,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // inside the macro so they cost nothing when DEBUG is disabled.
         if remote_blocks > 0 {
             tracing::debug!(
-                request_id = request.request_id().unwrap_or("-"),
+                request_id = info.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {} shared blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
@@ -325,7 +326,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             );
         } else {
             tracing::debug!(
-                request_id = request.request_id().unwrap_or("-"),
+                request_id = info.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \

@@ -196,13 +196,19 @@ The policy class enables queueing when every eligible worker's active prefill to
 
 ### Request Inputs
 
-`classify` receives a `ClassifyRequest` with these accessors:
+`classify` receives a `ClassifyRequest`. Its `info()` returns a `RequestInfo`, the request facts every stage reads. A [worker-selection](custom-worker-selection.mdx#request) policy reads the same `RequestInfo` from its request, and a dispatch gate from its `DispatchHead`:
 
-| Accessor | Meaning |
+| `RequestInfo` accessor | Meaning |
 |---|---|
 | `request_id()` | Optional request ID, also used in lifecycle events |
 | `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/session-ids.mdx#agent-headers) |
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
+| `pinned_worker()` | Exact worker and rank the caller requires, if any. A classifier's soft selection target cannot override it |
+
+What exists only while a request is classified is on the `ClassifyRequest` itself:
+
+| Accessor | Meaning |
+|---|---|
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
 | `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains |
@@ -314,7 +320,7 @@ impl RequestClassifier for SessionClassifier {
         _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // One lane per session: a held turn waits behind its own session only.
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        if let Some(session) = request.info().session_context().map(|s| s.session_id().to_owned()) {
             request.set_lane_key(&session);
         }
         Ok(request)
@@ -327,7 +333,8 @@ impl RequestClassifier for SessionClassifier {
 
 impl DispatchGate for SessionGate {
     fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
-        match self.room_for(head.session_context(), head.isl_tokens()) {
+        let info = head.info();
+        match self.room_for(info.session_context(), info.isl_tokens()) {
             Some(worker) => DispatchDecision::Go { target: Some(worker) },
             // Held long enough: let it go and leave placement to the selector.
             None if Instant::now() >= head.queued_at() + self.max_hold => {
@@ -338,7 +345,7 @@ impl DispatchGate for SessionGate {
     }
 
     fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
-        self.reserve(head.request_id(), target);
+        self.reserve(head.info().request_id(), target);
     }
 
     fn attach(&self, recheck: DispatchRecheck) {

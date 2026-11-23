@@ -10,7 +10,8 @@ use dynamo_router_protocol::worker::WorkerId;
 
 use crate::{
     ScoredWorkerCandidate, SelectionFailure, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionPolicyError, WorkerSelectionRequest, host::WorkerSelectionRequestHostExt,
+    WorkerSelectionPolicyError, WorkerSelectionRequest,
+    host::{WorkerSelectionRequestHostExt, request_info},
 };
 
 /// Request metadata a routing host without the KV path supplies for one selection.
@@ -45,7 +46,8 @@ impl HostedSelectionRequest {
 
     fn selection_request(&self) -> WorkerSelectionRequest<'_> {
         // The host applies pins and session affinity before selecting.
-        WorkerSelectionRequest::new(self.isl_tokens, 0).with_preview(self.preview)
+        WorkerSelectionRequest::new(request_info(None, self.isl_tokens, None, None), 0)
+            .with_preview(self.preview)
     }
 }
 
@@ -469,17 +471,18 @@ mod tests {
                 request: &WorkerSelectionRequest<'_>,
                 _input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                assert_eq!(request.isl_tokens(), 33);
+                let info = request.info();
+                assert_eq!(info.isl_tokens(), 33);
                 assert_eq!(request.block_size(), 0);
                 assert_eq!(request.request_blocks(), 0);
                 assert_eq!(request.expected_output_tokens(), None);
                 assert_eq!(request.priority_jump(), 0.0);
                 assert_eq!(request.strict_priority(), 0);
                 assert_eq!(request.router_temperature_override(), None);
-                assert!(request.pinned_worker().is_none());
+                assert!(info.pinned_worker().is_none());
                 assert!(request.affinity_target().is_none());
                 assert!(!request.tracks_prefill_tokens());
-                assert!(request.session_context().is_none());
+                assert!(info.session_context().is_none());
                 assert!(!request.is_preview());
                 Ok(0)
             }

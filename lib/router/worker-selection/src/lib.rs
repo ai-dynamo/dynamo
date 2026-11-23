@@ -7,7 +7,8 @@
 //! [`WorkerSelectionPolicy`] pulls each rank's row at the columns its filters, scorers,
 //! and picker declared, and returns a [`RowPick`] or a [`SelectionFailure`]. Everything a
 //! plugin names lives here: the [`WorkerFilter`], [`WorkerScorer`], and [`WorkerPicker`]
-//! traits, the [`WorkerSelectionRequest`] view of the request, the
+//! traits, the [`WorkerSelectionRequest`] view of the request and the [`RequestInfo`] every
+//! stage reads from it, the
 //! [`WorkerSelectionPolicyContext`] a policy factory receives, the candidate rows and
 //! their views, runtime parameter updates, the selection slice of the router config, the
 //! conditional-disaggregation policies, and the LoRA narrowing filter. The kv-transfer source
@@ -57,7 +58,7 @@ pub use policy::{
 };
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference_picker::{DefaultPick, DefaultWorkerPicker};
-pub use request::WorkerSelectionRequest;
+pub use request::{RequestInfo, WorkerSelectionRequest};
 pub use runtime::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };

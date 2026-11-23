@@ -232,7 +232,7 @@ impl SelectionCase {
         }
     }
 
-    /// The request ID `WorkerSelectionRequest::request_id` returns.
+    /// The request ID `RequestInfo::request_id` returns.
     pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request.mode = ScheduleMode::QueryOnly {
             request_id: Some(request_id.into()),
@@ -240,7 +240,7 @@ impl SelectionCase {
         self
     }
 
-    /// The session `WorkerSelectionRequest::session_context` returns.
+    /// The session `RequestInfo::session_context` returns.
     pub fn session_context(mut self, session_context: SessionContext) -> Self {
         self.request.session_context = Some(session_context);
         self
@@ -253,8 +253,8 @@ impl SelectionCase {
         self
     }
 
-    /// The worker the request is pinned to, as `WorkerSelectionRequest::pinned_worker`
-    /// returns it. The router offers the policy only this worker.
+    /// The worker the request is pinned to, as `RequestInfo::pinned_worker` returns it. The
+    /// router offers the policy only this worker.
     pub fn pinned_worker(mut self, worker: WorkerWithDpRank) -> Self {
         self.request.pinned_worker = Some(worker);
         self

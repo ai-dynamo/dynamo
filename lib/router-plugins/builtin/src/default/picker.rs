@@ -99,7 +99,7 @@ impl WorkerPicker for DefaultPicker {
         if candidates.is_empty() {
             return Err(WorkerSelectionPolicyError::failed("no eligible worker"));
         }
-        if request.pinned_worker().is_some() {
+        if request.info().pinned_worker().is_some() {
             return Ok(0);
         }
         if self.temperature == 0.0 && self.rng.is_none() {

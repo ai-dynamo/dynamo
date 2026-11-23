@@ -197,13 +197,13 @@ impl RequestClassifierRuntime {
 
         // Capture the lifecycle before waiting: an id re-registered while we
         // wait belongs to a different request, even before the plugin runs.
-        let generation = if let Some(request_id) = request.request_id() {
+        let generation = if let Some(request_id) = request.info().request_id() {
             let live_requests = self.live_requests.lock();
             let live = live_requests
                 .get(request_id)
                 .ok_or_else(|| ClassificationError::LifecycleEnded(request_id.to_owned()))?;
             live.progress_updater
-                .update_context_tokens(request.isl_tokens());
+                .update_context_tokens(request.info().isl_tokens());
             request.progress = live.progress.clone();
             if let Some(overrides) = live.overrides.clone() {
                 request.overrides = overrides;
@@ -217,12 +217,14 @@ impl RequestClassifierRuntime {
         let classification_id = NEXT_CLASSIFICATION_ID.fetch_add(1, Ordering::Relaxed);
         request.classification_id = classification_id;
         let classified = {
-            let mut classifier = self.lock_classifier_for(request.request_id()).await?;
+            let mut classifier = self
+                .lock_classifier_for(request.info().request_id())
+                .await?;
             // Re-check lifecycle identity under the classifier lock: terminal events
             // are delivered under this same lock after the id leaves the live
             // set, so an id seen live here cannot have had its Aborted
             // delivered yet — the plugin never observes classify-after-abort.
-            if let (Some(request_id), Some(generation)) = (request.request_id(), generation)
+            if let (Some(request_id), Some(generation)) = (request.info().request_id(), generation)
                 && self
                     .live_requests
                     .lock()
@@ -250,7 +252,7 @@ impl RequestClassifierRuntime {
         // waited for the lock. Write the overrides back onto that lifecycle; otherwise reject,
         // so a request whose lifecycle ended can neither reserve capacity nor
         // leak stale overrides onto the id's next lifecycle.
-        if let (Some(generation), Some(request_id)) = (generation, classified.request_id()) {
+        if let (Some(generation), Some(request_id)) = (generation, classified.info().request_id()) {
             match self.live_requests.lock().get_mut(request_id) {
                 Some(live) if live.generation == generation => {
                     live.overrides = Some(classified.overrides.clone());
@@ -683,7 +685,7 @@ mod tests {
             .read(|workers| PassThrough.classify(request, workers))
             .unwrap();
 
-        assert_eq!(result.request_id(), Some("request-1"));
+        assert_eq!(result.info().request_id(), Some("request-1"));
         assert_eq!(result.policy_class(), Some("latency"));
         assert_eq!(result.scheduling_cost_tokens(), 96);
         let inputs = result.into_queue_inputs();
@@ -860,8 +862,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(first.isl_tokens(), 10);
-        assert_eq!(retry.isl_tokens(), 20);
+        assert_eq!(first.info().isl_tokens(), 10);
+        assert_eq!(retry.info().isl_tokens(), 20);
         assert_eq!(retry.scheduling_cost_tokens(), 7);
         assert_eq!(retry.progress().context_tokens(), 25);
         assert_eq!(
@@ -957,7 +959,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(replacement.isl_tokens(), 100);
+        assert_eq!(replacement.info().isl_tokens(), 100);
         assert_eq!(replacement.scheduling_cost_tokens(), 7);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
@@ -1139,9 +1141,10 @@ mod tests {
             request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-            let _ = self
-                .observed
-                .send(format!("classify:{}", request.request_id().unwrap_or("")));
+            let _ = self.observed.send(format!(
+                "classify:{}",
+                request.info().request_id().unwrap_or("")
+            ));
             Ok(request)
         }
 

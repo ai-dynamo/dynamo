@@ -18,7 +18,7 @@ use crate::inputs::{ResidentBlockSource, WorkerCopyInput, WorkerLoadInput};
 use crate::policy::{
     CandidatePreparer, CandidateRowSource, PreparedRows, RowPick, SelectionFailure,
 };
-use crate::request::WorkerSelectionRequest;
+use crate::request::{RequestInfo, WorkerSelectionRequest};
 
 pub use crate::conditional_disagg::{
     ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicyKind,
@@ -53,25 +53,17 @@ impl sealed::Sealed for WorkerSelectionPolicy {}
 /// How the kernel builds the request view a policy reads. A plugin only reads a
 /// [`WorkerSelectionRequest`]; its tests get one through `dynamo_kv_router::plugins::testing`.
 pub trait WorkerSelectionRequestHostExt<'a>: sealed::Sealed + Sized {
-    /// A view of a request of `isl_tokens` routed in blocks of `block_size`, with every other
-    /// field at its default. A `block_size` of 0, as hosted selection without the KV path
-    /// supplies, reads as zero request blocks.
-    fn new(isl_tokens: usize, block_size: u32) -> Self;
+    /// A view of the request `info` describes, routed in blocks of `block_size`, with every
+    /// other field at its default. A `block_size` of 0, as hosted selection without the KV
+    /// path supplies, reads as zero request blocks.
+    fn new(info: RequestInfo<'a>, block_size: u32) -> Self;
 
     /// Whether this selection only previews a worker, as a peek does.
     fn with_preview(self, preview: bool) -> Self;
 
-    fn with_request_id(self, request_id: Option<&'a str>) -> Self;
-
     fn with_prefill_tracking(self, track_prefill_tokens: bool) -> Self;
 
-    /// The exact worker and rank the host imposes: an explicit pin or an eligible
-    /// exclusive-affinity target.
-    fn with_pinned_worker(self, pinned_worker: Option<WorkerWithDpRank>) -> Self;
-
     fn with_router_temperature_override(self, temperature: Option<f64>) -> Self;
-
-    fn with_session_context(self, session_context: Option<&'a SessionContext>) -> Self;
 
     fn with_affinity_target(self, affinity_target: Option<WorkerAffinityTarget>) -> Self;
 
@@ -124,6 +116,21 @@ pub trait WorkerSelectionPolicyHostExt: sealed::Sealed + Sized {
     /// Convert a policy that needs no KV-path input into the picker a host runs without the
     /// KV path, or return the policy unchanged when it needs that path.
     fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self>;
+}
+
+/// The facts about a request that every stage reads. It takes every value, so a place that
+/// builds a [`RequestInfo`] fails to compile until it supplies a fact added later.
+/// `pinned_worker` is the exact worker and rank imposed on the request: the caller's pin, or
+/// at worker selection what eligibility imposes, which includes an eligible
+/// exclusive-affinity target.
+#[inline]
+pub fn request_info<'a>(
+    request_id: Option<&'a str>,
+    isl_tokens: usize,
+    session_context: Option<&'a SessionContext>,
+    pinned_worker: Option<WorkerWithDpRank>,
+) -> RequestInfo<'a> {
+    RequestInfo::new(request_id, isl_tokens, session_context, pinned_worker)
 }
 
 /// The `LOAD` row for one rank from its load projection. `observed` is false for a rank

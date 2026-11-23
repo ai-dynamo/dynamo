@@ -23,12 +23,14 @@
 //! - [`request_classifier`]: the classifier, the request it classifies, the lifecycle events
 //!   it receives, and the worker rows it reads.
 //! - This module: only what both share, which is the registry a plugin registers into, the
-//!   worker input groups a component declares and the rows it reads them from, the session,
-//!   and the identity types. A crate that only registers plugins imports this.
+//!   worker input groups a component declares and the rows it reads them from, the request
+//!   facts every stage reads ([`RequestInfo`]), the session, and the identity types. A crate
+//!   that only registers plugins imports this.
 //!
 //! Both kinds read workers through the same rows: a classifier's `classify` receives the
 //! [`WorkerCandidates`] a filter or scorer reads, with the input groups it declared. A value
-//! added to an input group reaches both.
+//! added to an input group reaches both. Both also read a request through the same
+//! [`RequestInfo`], which `info()` returns on the request each kind receives.
 //!
 //! # Stability
 //!
@@ -64,10 +66,10 @@ pub mod worker_selection;
 pub use registry::RouterPluginRegistry;
 
 // The worker input groups a component declares, the rows it reads them from, and the facts
-// every component reads about a worker without declaring a group.
+// every component reads about a worker and about a request without declaring a group.
 pub use dynamo_worker_selection::{
-    WorkerCacheInput, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput,
-    WorkerInfo, WorkerInputs, WorkerLoadInput,
+    RequestInfo, WorkerCacheInput, WorkerCandidate, WorkerCandidates, WorkerCapacity,
+    WorkerCopyInput, WorkerInfo, WorkerInputs, WorkerLoadInput,
 };
 
 // The router-wide busy thresholds; `has_room` on them is the fullness check the router runs

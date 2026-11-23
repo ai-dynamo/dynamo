@@ -1317,6 +1317,7 @@ mod tests {
         fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
             self.checks.fetch_add(1, Ordering::Relaxed);
             let held = head
+                .info()
                 .session_context()
                 .is_some_and(|session| self.held.lock().contains(session.session_id()));
             if held {
@@ -1333,9 +1334,10 @@ mod tests {
         }
 
         fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
-            self.dispatched
-                .lock()
-                .push((head.request_id().unwrap_or_default().to_owned(), target));
+            self.dispatched.lock().push((
+                head.info().request_id().unwrap_or_default().to_owned(),
+                target,
+            ));
         }
 
         fn attach(&self, recheck: DispatchRecheck) {
@@ -1345,7 +1347,11 @@ mod tests {
 
     /// Keys each request's lane by its session id, as ThunderAgent does.
     fn key_by_session(mut request: ClassifyRequest) -> ClassifyRequest {
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        if let Some(session) = request
+            .info()
+            .session_context()
+            .map(|s| s.session_id().to_owned())
+        {
             request.set_lane_key(&session);
         }
         request

@@ -23,7 +23,8 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::BusyThresholds;
-use dynamo_worker_selection::WorkerCandidates;
+use dynamo_worker_selection::host::request_info;
+use dynamo_worker_selection::{RequestInfo, WorkerCandidates};
 
 use crate::queue::QueueSnapshot;
 
@@ -70,8 +71,15 @@ impl ClassifyRequest {
         self.reject_thresholds.unwrap_or_default()
     }
 
-    pub fn request_id(&self) -> Option<&str> {
-        self.request_id.as_deref()
+    /// The request facts every stage reads: the request id, the input length, the session,
+    /// and the pinned worker. A view over this request's own fields; nothing is copied.
+    pub fn info(&self) -> RequestInfo<'_> {
+        request_info(
+            self.request_id.as_deref(),
+            self.input_tokens,
+            self.session_context.as_ref(),
+            self.pinned_worker,
+        )
     }
 
     pub fn policy_class(&self) -> Option<&str> {
@@ -83,11 +91,6 @@ impl ClassifyRequest {
 
     pub fn set_policy_class(&mut self, policy_class: impl Into<String>) {
         self.overrides.policy_class = Some(policy_class.into());
-    }
-
-    /// Input sequence length in tokens, the size the scheduler uses.
-    pub fn isl_tokens(&self) -> usize {
-        self.input_tokens
     }
 
     /// Return the request's ordered active-tracking sequence hashes.
@@ -165,10 +168,6 @@ impl ClassifyRequest {
         self.overrides.worker_selection_target = Some(None);
     }
 
-    pub fn session_context(&self) -> Option<&SessionContext> {
-        self.session_context.as_ref()
-    }
-
     /// Queue the request in the lane keyed by `key` within its class, rather than in the
     /// class's shared heap or its worker's lane. Requests that share a key share a lane: one
     /// order, and a head that cannot dispatch holds only that lane. A classifier that returns a
@@ -177,12 +176,6 @@ impl ClassifyRequest {
     /// per-process seed, so a client cannot pick a value that lands in another's lane.
     pub fn set_lane_key(&mut self, key: &str) {
         self.overrides.lane_key = Some(LaneKey::new(key));
-    }
-
-    /// Exact worker/rank required by the caller. A classifier's soft selection
-    /// target cannot override this pin.
-    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
-        self.pinned_worker
     }
 }
 
@@ -346,10 +339,7 @@ pub trait RequestClassifier: Send + 'static {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct DispatchHead<'a> {
-    request_id: Option<&'a str>,
-    session_context: Option<&'a SessionContext>,
-    isl_tokens: usize,
-    pinned_worker: Option<WorkerWithDpRank>,
+    info: RequestInfo<'a>,
     policy_class: &'a str,
     queued_at: Instant,
 }
@@ -365,31 +355,16 @@ impl<'a> DispatchHead<'a> {
         queued_at: Instant,
     ) -> Self {
         Self {
-            request_id,
-            session_context,
-            isl_tokens,
-            pinned_worker,
+            info: request_info(request_id, isl_tokens, session_context, pinned_worker),
             policy_class,
             queued_at,
         }
     }
 
-    pub fn request_id(&self) -> Option<&'a str> {
-        self.request_id
-    }
-
-    pub fn session_context(&self) -> Option<&'a SessionContext> {
-        self.session_context
-    }
-
-    /// Input sequence length in tokens, the size the scheduler uses.
-    pub fn isl_tokens(&self) -> usize {
-        self.isl_tokens
-    }
-
-    /// Exact worker/rank required by the caller. A `Go` target cannot override this pin.
-    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
-        self.pinned_worker
+    /// The request facts every stage reads: the request id, the input length, the session,
+    /// and the pinned worker, which a `Go` target cannot override.
+    pub fn info(&self) -> RequestInfo<'a> {
+        self.info
     }
 
     /// Name of the policy class whose queue holds this head.

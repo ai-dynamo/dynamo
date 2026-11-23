@@ -5113,7 +5113,7 @@ mod tests {
                 _workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 assert_eq!(request.sequence_hashes(), self.0.as_deref());
-                assert_eq!(request.pinned_worker(), Some(self.1));
+                assert_eq!(request.info().pinned_worker(), Some(self.1));
                 Ok(request)
             }
         }
@@ -5169,7 +5169,7 @@ mod tests {
         let mut classified = queue
             .build_classify_request(&request, now, WorkerInputs::NONE)
             .0;
-        assert_eq!(classified.pinned_worker(), Some(pin));
+        assert_eq!(classified.info().pinned_worker(), Some(pin));
         classified.set_worker_selection_target(worker);
         queue
             .validate_classification(&mut request, classified, now)
