@@ -503,12 +503,19 @@ impl Dispatch {
                     status,
                     message,
                 } = format.worker_error(error.as_ref(), ErrorPhase::Dispatch);
-                if request_context.is_killed() || status == CANCELLED {
+                // `DYN_HTTP_OVERLOAD_STATUS_CODE` may be 499, so a rejection's
+                // status alone does not mean cancellation.
+                if request_context.is_killed()
+                    || (status == CANCELLED && error_type != ErrorType::Overload)
+                {
                     return cancelled(&mut inflight_guard);
                 }
                 if error_type == ErrorType::Overload {
-                    // Pre-stream rejections count as unavailable, with a rejection metric.
-                    error_type = ErrorType::Unavailable;
+                    // Pre-stream rejections count a rejection metric. A legacy
+                    // 503 rejection also counts as unavailable.
+                    if status == StatusCode::SERVICE_UNAVAILABLE {
+                        error_type = ErrorType::Unavailable;
+                    }
                     state
                         .metrics_clone()
                         .inc_rejection(&model, super::metrics::Endpoint::Generate);

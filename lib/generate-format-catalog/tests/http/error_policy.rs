@@ -115,7 +115,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
         (
             vec![Backend::RateLimited],
             [
-                (429, Unavailable, "Rate limit exceeded"),
+                (429, Overload, "Rate limit exceeded"),
                 (500, Internal, "Internal server error"),
                 (500, Internal, "internal server error"),
             ],
@@ -123,7 +123,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
         (
             vec![Backend::Unknown, Backend::RateLimited],
             [
-                (429, Unavailable, "Rate limit exceeded"),
+                (429, Overload, "Rate limit exceeded"),
                 (500, Internal, "Internal server error"),
                 (500, Internal, "internal server error"),
             ],
@@ -131,7 +131,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
         (
             vec![Backend::CapacityExhausted],
             [
-                (overload, Unavailable, "Service temporarily overloaded"),
+                (overload, Overload, "Service temporarily overloaded"),
                 (500, Internal, "Internal server error"),
                 (500, Internal, "internal server error"),
             ],
@@ -139,7 +139,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
         (
             vec![Backend::Unknown, Backend::CapacityExhausted],
             [
-                (overload, Unavailable, "Service temporarily overloaded"),
+                (overload, Overload, "Service temporarily overloaded"),
                 (500, Internal, "Internal server error"),
                 (500, Internal, "internal server error"),
             ],
@@ -149,7 +149,7 @@ async fn native_error_phase_and_nested_chain_compatibility() {
         (
             vec![Backend::Backend(BackendError::WorkerOverloaded)],
             [
-                (overload, Unavailable, "Service temporarily overloaded"),
+                (overload, Overload, "Service temporarily overloaded"),
                 (500, Internal, "Internal server error"),
                 (500, Internal, "internal server error"),
             ],
