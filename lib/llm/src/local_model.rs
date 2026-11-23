@@ -353,6 +353,7 @@ impl LocalModelBuilder {
             .validate_config()
             .map_err(anyhow::Error::msg)?;
         self.runtime_config.add_topology_taints();
+        self.runtime_config.add_not_ready_taint_from_env();
 
         let template = self
             .template_file

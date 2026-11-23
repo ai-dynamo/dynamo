@@ -401,6 +401,11 @@ impl RoutingHost {
                 Some(pinned_worker),
                 &routing_constraints,
             );
+            let eligibility = if pin_is_affinity_only {
+                eligibility.with_affinity_derived_pin()
+            } else {
+                eligibility
+            };
             if let Err(error) = eligibility.validate_worker_rank(&configs, pinned_worker) {
                 return Err(anyhow::anyhow!(
                     "Pinned worker {} dp_rank {} is not eligible: {error}",

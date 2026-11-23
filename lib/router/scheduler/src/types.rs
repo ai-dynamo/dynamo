@@ -473,12 +473,18 @@ impl SchedulingRequest {
         &'a self,
         overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
     ) -> RoutingEligibility<'a> {
-        RoutingEligibility::new(
+        let eligibility = RoutingEligibility::new(
             self.allowed_worker_ids.as_ref(),
             overloaded_worker_ids,
             self.pinned_worker,
             &self.routing_constraints,
-        )
+        );
+        // A pin that arrives with an affinity target was chosen by the session binding.
+        if self.affinity_target.is_some() {
+            eligibility.with_affinity_derived_pin()
+        } else {
+            eligibility
+        }
     }
 
     pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
@@ -703,6 +709,45 @@ mod tests {
                 expected
             );
         }
+    }
+
+    struct NotReadyWorker(HashSet<String>);
+
+    impl crate::protocols::WorkerConfigLike for NotReadyWorker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+
+        fn taints(&self) -> &HashSet<String> {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn only_a_caller_pin_reaches_a_not_ready_worker() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let config = NotReadyWorker(HashSet::from([crate::NOT_READY_TAINT.to_string()]));
+        let mut request = request_with_decode_load(16, None, 0, 0, worker);
+        assert!(!request.eligibility().allows_worker(1, &config));
+
+        request.pinned_worker = Some(worker);
+        assert!(request.eligibility().allows_worker(1, &config));
+
+        // Session affinity forwards its choice as both the pin and the affinity target.
+        request.affinity_target = Some(worker.into());
+        assert!(!request.eligibility().allows_worker(1, &config));
     }
 
     #[test]

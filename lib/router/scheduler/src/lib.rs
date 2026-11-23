@@ -63,8 +63,8 @@ pub use prefill_load::{
     prefill_load_hint_from_effective_tokens,
 };
 pub use protocols::{
-    PotentialLoad, RouterEventSink, RoutingConstraints, SelectionLogFields, WorkerConfigLike,
-    WorkerSelectionResult,
+    NOT_READY_TAINT, PotentialLoad, RouterEventSink, RoutingConstraints, SelectionLogFields,
+    WorkerConfigLike, WorkerSelectionResult,
 };
 pub use queue::{
     BookingHandle, ClassQueueStats, RequestLifecycleLease, RuntimePolicyControl,

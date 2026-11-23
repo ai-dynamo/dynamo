@@ -75,6 +75,15 @@ pub trait WorkerConfigLike {
     }
 }
 
+/// Taint a worker publishes while it is discovered but not yet ready for ordinary traffic.
+///
+/// Unlike other taints, which only attract requests that require them, this one repels: the
+/// router never selects a worker carrying it. Only a request pinned to that exact worker
+/// reaches it. Frontends can therefore discover the worker, build its pipeline and send it
+/// targeted validation requests, while ordinary requests never land on it. Removing the taint
+/// makes the worker an ordinary member of its set.
+pub const NOT_READY_TAINT: &str = "dynamo.routing/not-ready";
+
 /// Request-level taint constraints evaluated against each worker's published taints.
 ///
 /// Topology-aware routing uses the same fields with canonical taints such as
@@ -96,7 +105,18 @@ impl RoutingConstraints {
         !self.required_taints.is_empty()
     }
 
+    /// Whether the router may select this worker for the request.
     pub fn is_compatible_with_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
+        // A not-ready worker is never selected; only a pin reaches it.
+        (worker_taints.is_empty() || !worker_taints.contains(NOT_READY_TAINT))
+            && self.is_compatible_with_pinned_worker_taints(worker_taints)
+    }
+
+    /// Whether a request pinned to this worker may land on it.
+    ///
+    /// The request's required taints still apply. [`NOT_READY_TAINT`] does not repel a pin:
+    /// naming the worker is already manual routing, so it needs no second opt-in.
+    pub fn is_compatible_with_pinned_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
         if self.required_taints.is_empty() {
             return true;
         }

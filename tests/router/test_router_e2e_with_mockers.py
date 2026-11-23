@@ -255,6 +255,7 @@ class CounterWorkerProcess:
         router_mode: str = "device-aware-weighted",
         initial_taints: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
         system_ports: tuple[int, int] | None = None,
+        worker_env: tuple[dict[str, str], dict[str, str]] | None = None,
     ):
         if initial_taints is not None and len(initial_taints) != 2:
             raise ValueError(
@@ -274,6 +275,7 @@ class CounterWorkerProcess:
         self._router_mode = router_mode
         self._initial_taints = initial_taints or ((), ())
         self._system_ports = system_ports
+        self._worker_env = worker_env or ({}, {})
         self._cpu_count_file: Optional[str] = None
         self._gpu_count_file: Optional[str] = None
         self._cpu_proc: Optional[ManagedProcess] = None
@@ -318,6 +320,7 @@ class CounterWorkerProcess:
         self, worker_index: int
     ) -> tuple[dict[str, str], list[int], list[str]]:
         env = os.environ.copy()
+        env.update(self._worker_env[worker_index])
         if self._system_ports is None:
             return env, [], []
 
@@ -1871,6 +1874,133 @@ def test_update_model_taints_replaces_worker_routing_constraints(
         router_mode="kv",
         initial_taints=(("capacity/fast",), ("capacity/other",)),
         system_ports=system_ports,
+    ) as workers:
+        with FrontendRouterProcess(
+            request=request,
+            block_size=BLOCK_SIZE,
+            frontend_port=dynamo_dynamic_ports.frontend_port,
+            namespace=workers.namespace,
+            store_backend="etcd",
+            request_plane=request_plane,
+            router_mode="kv",
+            min_initial_workers=workers.num_workers,
+        ):
+            asyncio.run(run_test(workers))
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_not_ready_worker_is_held_until_released(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    request_plane,
+    event_plane,
+    num_system_ports,
+):
+    """A worker started not-ready serves only pinned requests until its taint is removed."""
+    assert event_plane == "zmq"
+    assert num_system_ports == 2
+    system_ports = tuple(dynamo_dynamic_ports.system_ports)
+    payload = {**COUNTER_TEST_PAYLOAD, "stream": False}
+
+    def read_count(path: str) -> int:
+        try:
+            value = Path(path).read_text().strip()
+            return int(value) if value else 0
+        except (OSError, ValueError):
+            return 0
+
+    async def run_test(workers: CounterWorkerProcess) -> None:
+        frontend_url = f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        held_count = workers.cpu_count_file
+        ready_count = workers.gpu_count_file
+
+        await wait_for_frontend_ready(
+            frontend_url=frontend_url,
+            expected_num_workers=workers.num_workers,
+            timeout=60,
+            test_payload=payload,
+            engine_workers=workers,
+            store_backend="etcd",
+            request_plane=request_plane,
+        )
+
+        client_timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+
+            async def post_chat(body: dict[str, Any]) -> tuple[int, str]:
+                async with session.post(chat_url, json=body) as response:
+                    return response.status, await response.text()
+
+            # Unpinned traffic never lands on the held worker.
+            baseline_ready = read_count(ready_count)
+            for _ in range(10):
+                status, body = await post_chat(payload)
+                assert status == 200, body
+            assert read_count(held_count) == 0
+            assert read_count(ready_count) == baseline_ready + 10
+
+            # A pin on each discovered instance reaches that instance, held or not.
+            async with session.get(
+                f"{frontend_url}/health", params={"instances": "true"}
+            ) as response:
+                health = await response.json()
+            instance_ids = sorted(
+                {
+                    instance["instance_id"]
+                    for instance in health["instances"]
+                    if instance["namespace"] == workers.namespace
+                    and instance["endpoint"] == "generate"
+                }
+            )
+            assert len(instance_ids) == 2, health
+            before_ready = read_count(ready_count)
+            for instance_id in instance_ids:
+                status, body = await post_chat(
+                    {**payload, "nvext": {"backend_instance_id": instance_id}}
+                )
+                assert status == 200, body
+            assert read_count(held_count) == 1
+            assert read_count(ready_count) == before_ready + 1
+
+            # The pinned request did not release the worker.
+            before_ready = read_count(ready_count)
+            for _ in range(10):
+                status, body = await post_chat(payload)
+                assert status == 200, body
+            assert read_count(held_count) == 1
+            assert read_count(ready_count) == before_ready + 10
+
+            # Removing the taint releases it to ordinary routing.
+            async with session.post(
+                f"http://127.0.0.1:{system_ports[0]}/engine/update/model_taints",
+                json={"taints": []},
+            ) as response:
+                update_body = await response.json(content_type=None)
+                assert response.status == 200, update_body
+
+            deadline = asyncio.get_running_loop().time() + 30
+            while asyncio.get_running_loop().time() < deadline:
+                status, body = await post_chat(payload)
+                assert status == 200, body
+                if read_count(held_count) > 1:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError(
+                    "Released worker received no unpinned request within 30s"
+                )
+
+    with CounterWorkerProcess(
+        request,
+        request_plane=request_plane,
+        router_mode="kv",
+        system_ports=system_ports,
+        worker_env=({"DYN_START_NOT_READY": "true"}, {}),
     ) as workers:
         with FrontendRouterProcess(
             request=request,
