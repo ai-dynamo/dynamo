@@ -47,9 +47,11 @@ use crate::worker::{
 };
 
 /// Delay after the first failed probe, and before the first probe of an engine
-/// that stopped serving; it doubles after each failed probe.
+/// that stopped serving. It doubles after each failed probe and each time the
+/// engine is lost, until the engine has served for `REPROBE_MAX_DELAY`.
 const REPROBE_INITIAL_DELAY: Duration = Duration::from_secs(1);
-/// Upper bound on the delay between probes of an engine that is not serving.
+/// Upper bound on the delay between probes of an engine that is not serving,
+/// and how long an engine must serve before that delay starts over.
 const REPROBE_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// One engine the frontend dials, as the operator listed it.
@@ -323,14 +325,15 @@ impl DirectEngineHost {
 
     /// Probe the engine until it serves, keep it published while it serves, and
     /// when it stops, withdraw it and probe again. Probes back off from
-    /// `REPROBE_INITIAL_DELAY` to `REPROBE_MAX_DELAY`. A probe's start runs to
-    /// completion even on shutdown; the engine is then released. Stops probing,
+    /// `REPROBE_INITIAL_DELAY` to `REPROBE_MAX_DELAY`, and so do the returns of
+    /// an engine that is lost again soon after it registers. A probe's start runs
+    /// to completion even on shutdown; the engine is then released. Stops probing,
     /// with an error, when the engine cannot be built or its configuration is
     /// rejected, since every later probe would fail the same way.
     async fn supervise(self, engine: Arc<dyn LLMEngine>, shutdown: CancellationToken) {
         let mut engine = Some(engine);
+        let mut delay = REPROBE_INITIAL_DELAY;
         loop {
-            let mut delay = REPROBE_INITIAL_DELAY;
             let hosted = loop {
                 let engine = match engine.take().map_or_else(|| (self.factory)(&self.spec), Ok) {
                     Ok(engine) => engine,
@@ -379,6 +382,7 @@ impl DirectEngineHost {
                 delay = (delay * 2).min(REPROBE_MAX_DELAY);
             };
 
+            let serving_since = tokio::time::Instant::now();
             let serving = hosted.engine.clone();
             let lost = tokio::select! {
                 _ = shutdown.cancelled() => None,
@@ -394,10 +398,16 @@ impl DirectEngineHost {
                 "engine stopped serving; removed it from routing"
             );
             self.stop(hosted).await;
+            // An engine that registers and is lost straight away would otherwise
+            // take traffic and be withdrawn once a second, indefinitely.
+            if serving_since.elapsed() >= REPROBE_MAX_DELAY {
+                delay = REPROBE_INITIAL_DELAY;
+            }
             tokio::select! {
                 _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(REPROBE_INITIAL_DELAY) => {}
+                _ = tokio::time::sleep(delay) => {}
             }
+            delay = (delay * 2).min(REPROBE_MAX_DELAY);
         }
     }
 
@@ -566,6 +576,10 @@ mod tests {
         start_released: Notify,
         /// Advertise an in-process KV-event source, which a frontend rejects.
         kv_push: AtomicBool,
+        /// When each `start` was called.
+        started_at: parking_lot::Mutex<Vec<tokio::time::Instant>>,
+        /// Report the engine lost as soon as it registers.
+        flaps: AtomicBool,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
@@ -584,6 +598,10 @@ mod tests {
     impl LLMEngine for FakeEngine {
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             self.state.starts.fetch_add(1, Ordering::SeqCst);
+            self.state
+                .started_at
+                .lock()
+                .push(tokio::time::Instant::now());
             if self.state.start_hangs.load(Ordering::SeqCst) {
                 self.state.start_released.notified().await;
             }
@@ -652,7 +670,9 @@ mod tests {
         }
 
         async fn engine_lost(&self) -> DynamoError {
-            self.state.lost.notified().await;
+            if !self.state.flaps.load(Ordering::SeqCst) {
+                self.state.lost.notified().await;
+            }
             error(
                 ErrorType::Backend(BackendError::EngineShutdown),
                 "engine stopped",
@@ -935,6 +955,74 @@ mod tests {
         a.up.store(true, Ordering::SeqCst);
         frontend.chat_until(|f| f.served(A) > 0).await;
         assert!(frontend.listed(A).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_engine_lost_soon_after_it_registers_keeps_backing_off() {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        // `A` starts and registers, then reports itself lost straight away.
+        let state = Arc::new(EngineState {
+            up: AtomicBool::new(true),
+            flaps: AtomicBool::new(true),
+            ..EngineState::default()
+        });
+        let factory_state = state.clone();
+        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
+            Ok(Arc::new(FakeEngine {
+                state: factory_state.clone(),
+                fail_next: Arc::default(),
+                hold_next: Arc::default(),
+                held: Arc::default(),
+            }) as Arc<dyn LLMEngine>)
+        });
+        let spec = DirectEngineSpec {
+            url: A.to_string(),
+            mode: DisaggregationMode::Aggregated,
+        };
+        serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory)
+            .await
+            .unwrap();
+        let started = |count: usize| {
+            let state = state.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(600), async {
+                    while state.started_at.lock().len() < count {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("the engine must be probed again");
+                state.started_at.lock().clone()
+            }
+        };
+
+        // Each return waits twice as long as the one before.
+        let starts = started(4).await;
+        let waits: Vec<Duration> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        for (wait, at_least) in waits.iter().zip([1, 2, 4]) {
+            assert!(
+                *wait >= Duration::from_secs(at_least),
+                "returns must back off: {waits:?}"
+            );
+        }
+
+        // Once the engine has served for a while, the delay starts over.
+        state.flaps.store(false, Ordering::SeqCst);
+        let serving = started(5).await.len();
+        tokio::time::sleep(REPROBE_MAX_DELAY).await;
+        let lost_at = tokio::time::Instant::now();
+        state.lost.notify_one();
+        let returned_at = started(serving + 1).await[serving];
+        assert!(
+            returned_at - lost_at < REPROBE_INITIAL_DELAY * 2,
+            "an engine that served for {REPROBE_MAX_DELAY:?} must be probed after the initial delay"
+        );
+        drt.shutdown();
     }
 
     #[tokio::test]
