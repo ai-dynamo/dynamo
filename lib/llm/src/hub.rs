@@ -845,7 +845,8 @@ pub(crate) mod tests {
     async fn test_from_hf_at_revision_checks_snapshot_sha_case_insensitively() {
         let temp = TempDir::new().unwrap();
         let model = "test-org/pinned-revision";
-        let original = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+        // No tokenizer, so the cache lookup always misses and each call reaches the SHA check.
+        let original = build_hf_cache(temp.path(), model, &["config.json"]);
         let snapshot = original.with_file_name(SHA);
         fs::rename(original, &snapshot).unwrap();
         let refs = snapshot.parent().unwrap().parent().unwrap().join("refs");
