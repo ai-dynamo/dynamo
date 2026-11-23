@@ -90,11 +90,15 @@ pub struct DirectDispatch {
     /// cleanup releases only this process's client, not the engine, which runs
     /// elsewhere.
     supervisors: TaskTracker,
-    /// Each model's files, fetched and read once per model, as a sidecar reads
-    /// them once per worker process. Engines of a model that start together
-    /// download and hash it once, and every later registration copies the card.
-    models: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<ModelFiles>>>>,
+    /// Each model's files as its last registration found them. One
+    /// registration of a model looks at a time, so engines of a model that
+    /// start or return together download and hash it once, and a registration
+    /// that finds the same files copies the card.
+    models: parking_lot::Mutex<HashMap<String, ModelSlot>>,
 }
+
+/// Where a model's files are kept once read; locked while they are resolved.
+type ModelSlot = Arc<tokio::sync::Mutex<Option<ModelFiles>>>;
 
 /// A model's files on this host and the card read from them.
 #[derive(Clone)]
@@ -104,16 +108,15 @@ struct ModelFiles {
 }
 
 impl ModelFiles {
-    /// Fetch the files of the model `source` names and read its card from
-    /// them. Reading hashes the files, so it runs off the runtime's worker
-    /// threads, which serve requests.
-    async fn read(source: &str, custom_template: Option<&Path>) -> Result<Self, DynamoError> {
-        let directory = fetch_model_files(source).await?;
+    /// Read the card of the model whose files are in `directory`. Reading
+    /// hashes the files, so it runs off the runtime's worker threads, which
+    /// serve requests.
+    async fn read(directory: PathBuf, custom_template: Option<&Path>) -> Result<Self, DynamoError> {
         let (model_path, custom_template) = (directory.clone(), custom_template.map(PathBuf::from));
         let read_error = |cause: String| {
             error(
                 ErrorType::Backend(BackendError::Unknown),
-                format!("read the model card of '{source}': {cause}"),
+                format!("read the model card in '{}': {cause}", directory.display()),
             )
         };
         let card = tokio::task::spawn_blocking(move || {
@@ -127,54 +130,47 @@ impl ModelFiles {
 }
 
 impl DirectDispatch {
-    /// The files of the model `source` names, read on first use. A failed
-    /// read is not kept: the next registration tries again. Nor are fetched
-    /// files whose directory has since gone, as when a model cache is pruned:
-    /// they are fetched and read again. A directory that cannot be checked is
-    /// not taken as gone, and a model given as a path is never fetched. The
-    /// custom template is not part of the key: every engine is hosted with
+    /// The files of the model `source` names.
+    ///
+    /// A model given as a path is read once: the path is where its files are,
+    /// and it is never asked of the hub, so when the path is gone `build`
+    /// reports that. A fetched model is resolved again on every registration,
+    /// as a sidecar resolves it when it starts: since the last one the hub ref
+    /// may have moved to another snapshot, or the cache may have been pruned
+    /// and the model must be downloaded again. Its card is read again only
+    /// when the directory changed.
+    ///
+    /// A failed fetch or read is not kept: the next registration tries again.
+    /// The custom template is not part of the key: every engine is hosted with
     /// the same `WorkerConfig`.
     async fn model_files(
         &self,
         source: &str,
         custom_template: Option<&Path>,
     ) -> Result<ModelFiles, DynamoError> {
-        let kept = self.model_slot(source);
-        let files = kept
-            .get_or_try_init(|| ModelFiles::read(source, custom_template))
-            .await?;
-        // Only fetched files whose directory is known to be gone are read
-        // again. A model given as a path cannot be fetched: asking the hub
-        // for the path would fail on every probe, so `build` reports the
-        // missing path instead. When the check itself fails, as on a mount
-        // that is briefly unreachable, the files are kept and `build` fails
-        // in a way the next probe retries.
-        let is_fetched = files.directory != Path::new(source);
-        if !is_fetched || !matches!(files.directory.try_exists(), Ok(false)) {
+        let slot = self.model_slot(source);
+        let mut kept = slot.lock().await;
+        if let Some(files) = kept.as_ref()
+            && files.directory == Path::new(source)
+        {
             return Ok(files.clone());
         }
+        let directory = fetch_model_files(source).await?;
+        if let Some(files) = kept.as_ref()
+            && files.directory == directory
         {
-            // Engines that return together all find the directory gone; the
-            // first to get here forgets it and the others share its new read.
-            let mut models = self.models.lock();
-            if models
-                .get(source)
-                .is_some_and(|current| Arc::ptr_eq(current, &kept))
-            {
-                models.remove(source);
-            }
+            return Ok(files.clone());
         }
-        self.model_slot(source)
-            .get_or_try_init(|| ModelFiles::read(source, custom_template))
-            .await
-            .cloned()
+        let files = ModelFiles::read(directory, custom_template).await?;
+        *kept = Some(files.clone());
+        Ok(files)
     }
 
     /// Where the files of the model `source` names are kept once read.
-    fn model_slot(&self, source: &str) -> Arc<tokio::sync::OnceCell<ModelFiles>> {
+    fn model_slot(&self, source: &str) -> ModelSlot {
         let mut models = self.models.lock();
         match models.get(source) {
-            Some(kept) => kept.clone(),
+            Some(slot) => slot.clone(),
             None => models.entry(source.to_string()).or_default().clone(),
         }
     }
@@ -1378,6 +1374,27 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn a_fetched_model_follows_its_hub_ref_to_another_snapshot() {
+        let cache = tempfile::tempdir().unwrap();
+        let first = snapshot(cache.path(), "first");
+        with_hub_cache(cache.path(), async {
+            let dispatch = DirectDispatch::default();
+            let files = dispatch.model_files("test-org/model", None).await.unwrap();
+            assert_eq!(files.directory.file_name(), first.file_name());
+
+            // The ref moves to a new snapshot and the old one stays in the
+            // cache, as after a download of a newer revision. A sidecar that
+            // starts now reads the new one, and so does the next registration.
+            let second = snapshot(cache.path(), "second");
+            assert!(first.exists());
+            let files = dispatch.model_files("test-org/model", None).await.unwrap();
+            assert_eq!(files.directory.file_name(), second.file_name());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn a_model_whose_directory_is_gone_is_fetched_again() {
         let cache = tempfile::tempdir().unwrap();
         let first = snapshot(cache.path(), "first");
@@ -1398,24 +1415,23 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn a_model_whose_directory_cannot_be_checked_keeps_its_files() {
+    async fn a_fetched_model_that_cannot_be_resolved_is_retried() {
         let cache = tempfile::tempdir().unwrap();
         let first = snapshot(cache.path(), "first");
         with_hub_cache(cache.path(), async {
             let dispatch = DirectDispatch::default();
             dispatch.model_files("test-org/model", None).await.unwrap();
 
-            // A file where the directory of snapshots was: the snapshot
-            // cannot be looked up, which does not say that it is gone.
+            // A file where the directory of snapshots was: the cache cannot
+            // be read, and there is no hub to download from. That is not a
+            // configuration error, which would end the engine's probing.
             let snapshots = first.parent().unwrap();
             std::fs::remove_dir_all(snapshots).unwrap();
             std::fs::write(snapshots, "").unwrap();
-            assert!(first.try_exists().is_err());
-            let files = dispatch
-                .model_files("test-org/model", None)
-                .await
-                .expect("the files read before must be kept");
-            assert_eq!(files.directory.file_name(), first.file_name());
+            let Err(unresolved) = dispatch.model_files("test-org/model", None).await else {
+                panic!("the model cannot be resolved");
+            };
+            assert!(!is_configuration_error(&unresolved), "{unresolved}");
         })
         .await;
     }
