@@ -12,6 +12,14 @@ pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRe
 use super::*;
 
 impl RoutingHost {
+    /// The name this host's "Selected worker" lines give its policy.
+    fn policy_label(&self) -> &str {
+        match &self.policy {
+            RoutingPolicy::Hosted(hosted) => hosted.label(),
+            _ => self.inner.router_mode().telemetry_label(),
+        }
+    }
+
     pub(super) fn select_hosted_worker(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -379,7 +387,7 @@ impl RoutingHost {
             );
         } else if uses_occupancy {
             tracing::info!(
-                router_mode = self.inner.router_mode().telemetry_label(),
+                router_mode = self.policy_label(),
                 worker_id = target.worker_id,
                 candidate_count,
                 occupancy = ?final_occupancy,
@@ -390,7 +398,7 @@ impl RoutingHost {
             // `dispatch_exact` (session-affinity hits and explicit targets) logs nothing, while
             // the other non-occupancy paths log from `PushRouter`; keep one line per request.
             tracing::info!(
-                router_mode = self.inner.router_mode().telemetry_label(),
+                router_mode = self.policy_label(),
                 worker_id = target.worker_id,
                 dp_rank = ?target.dp_rank,
                 "Selected worker"

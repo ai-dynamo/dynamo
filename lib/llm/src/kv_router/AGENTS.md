@@ -22,7 +22,8 @@ and the booking lifecycle these rules protect.
   leases and releases them on completion or expiry.
 - `role_routing.rs`: the routing settings each worker role runs with: how a serving set's or
   prefill pool's advertised `router_config` combines with the frontend's, and the one function
-  (`role_policy`) that turns a role's router mode into the `RoutingPolicy` its host runs.
+  (`role_policy`) that turns a role's router mode, a fixed mode or a policy type, into the
+  `RoutingPolicy` its host runs.
 - `routing_load.rs`: the load context shared by a worker set's scheduler and its load metrics.
 - `routing_host.rs`: `RoutingHost`, the pipeline's terminal engine. Owns selection, dispatch,
   and response cleanup for one worker set.

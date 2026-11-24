@@ -615,10 +615,12 @@ def test_opaque_reference_in_a_typed_non_router_arg_is_fine(args):
 @pytest.mark.parametrize(
     ("args", "match"),
     [
-        # Router flags whose value is unreadable.
+        # Router flags whose value is unreadable. --router-mode takes any
+        # policy type, so its parser accepts the value and the check on parsed
+        # values rejects it.
         (
             ("-m", "dynamo.frontend", "--router-mode", "$(HTTP_PORT)"),
-            "router arg references $(HTTP_PORT)",
+            "frontend args set router_mode from env the planner cannot read",
         ),
         (
             (*KV_ARGS, "--router-temp", "$(HTTP_PORT)"),
@@ -784,10 +786,11 @@ def test_router_policy_config_is_unparseable():
     [
         ((*KV_ARGS, "--router-kv-overlap-score-credit", "-1"), {}, "invalid"),
         ((*KV_ARGS, "--router-temperature", "hot"), {}, "cannot parse"),
+        (("-m", "dynamo.frontend", "--router-mode", " "), {}, "--router-mode is empty"),
         (
-            ("-m", "dynamo.frontend", "--router-mode", "power-of-two"),
+            ("-m", "dynamo.frontend", "--load-aware", "--router-mode", "kvcr"),
             {},
-            "cannot parse",
+            "--load-aware routes with kv",
         ),
         ((*KV_ARGS,), {"DYN_ROUTER_TEMPERATURE": "hot"}, "invalid frontend env"),
         (
@@ -919,6 +922,11 @@ def test_parse_error_fails_p4_only():
             ("-m", "dynamo.frontend", "--router-mode", "random"),
             {},
             "routes with 'random'",
+        ),
+        (
+            ("-m", "dynamo.frontend", "--router-mode", "dynamo-two-tier-cost-fn"),
+            {},
+            "routes with 'dynamo-two-tier-cost-fn'",
         ),
         ((*KV_ARGS, "--no-router-kv-events"), {}, "use_kv_events=False"),
         (

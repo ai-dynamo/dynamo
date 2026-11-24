@@ -156,7 +156,14 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         router_mode,
         model_manager.lora_enabled(),
         session_affinity_ttl_secs.is_some(),
-    )?;
+    )
+    .map_err(|error| match policy.policy_type() {
+        // The mode the rule names is only the type's stand-in.
+        Some(policy_type) => {
+            anyhow::anyhow!("the {policy_type} policy routes as {router_mode:?}: {error}")
+        }
+        None => error,
+    })?;
     let runtime_lora_enabled = crate::lora::runtime::RuntimeLoraConfig::from_env()?.enabled;
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, &policy);
@@ -257,6 +264,8 @@ pub async fn prepare_engine(
             prefill_load_estimator,
             ..
         } => {
+            // The HTTP and gRPC inputs run this check themselves.
+            crate::kv_router::check_policy_type_mode(local_model.router_config())?;
             let model_manager = Arc::new(ModelManager::new());
             // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
             let metrics = Arc::new(Metrics::new());

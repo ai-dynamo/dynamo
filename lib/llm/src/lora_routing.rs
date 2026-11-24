@@ -131,8 +131,8 @@ impl LoraHostedPolicy {
     ) -> Result<Arc<dyn HostedCandidatePolicy>, Error> {
         let Some(hosted) = policy.hosted_without_occupancy() else {
             anyhow::bail!(
-                "LoRA filtering is unsupported with {:?} routing",
-                policy.transport_mode()
+                "LoRA filtering is unsupported with {} routing",
+                policy.name()
             );
         };
         // A second picker: adapter requests rotate apart from the host's other requests.

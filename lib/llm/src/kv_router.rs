@@ -21,11 +21,9 @@ use dynamo_kv_router::config::{KvRouterConfig, min_initial_workers_from_env};
 use dynamo_kv_router::plugins::check_role;
 use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
 use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
-#[cfg(test)]
-use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
 use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicyFactory,
+    WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
 };
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
 use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionRef};
@@ -47,7 +45,7 @@ use dynamo_scheduler::host::{
     effective_prefill_tokens,
 };
 use dynamo_slot_tracker::host::{PrefillLoadHint, SchedulerBookingDescriptor};
-use dynamo_worker_selection::host::SelectionConfig;
+use dynamo_worker_selection::host::{HostedWorkerPicker, SelectionConfig};
 
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::scheduling;
@@ -80,7 +78,9 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
-pub(crate) use role_routing::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
+pub(crate) use role_routing::{
+    EVERY_ROLE, check_hint_policies_route_on_kv_path, check_policy_type_mode,
+};
 pub use role_routing::{RolePolicy, role_policy};
 pub use routing_host::{
     HostedPolicy, KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
@@ -147,7 +147,9 @@ impl SelectionPolicySource {
         let prepared = match self {
             Self::Prepared(prepared) => prepared,
             source => PreparedSelectionPolicy::prepare(
+                &plugins::router_plugin_registry(),
                 source.resolve(config, worker_type, label)?,
+                None,
                 config,
                 worker_type,
                 model_name,
@@ -184,14 +186,20 @@ impl SelectionPolicySource {
 #[derive(Clone)]
 pub struct PreparedSelectionPolicy {
     factory: WorkerSelectionPolicyFactory,
+    /// The constructed instance, until the router's partition or a hosted picker takes it.
+    parked: Arc<parking_lot::Mutex<Option<WorkerSelectionPolicy>>>,
     inputs: WorkerInputs,
     prepare_inputs: WorkerInputs,
     hint_policies: HintPolicyFactory,
 }
 
 impl PreparedSelectionPolicy {
-    fn prepare(
+    /// `policy_type` is the type the router mode named for every role. The role then runs the
+    /// hints registered as on by default for that type, which `config` does not name.
+    pub(crate) fn prepare(
+        registry: &dynamo_kv_router::plugins::RouterPluginRegistry,
         inner: WorkerSelectionPolicyFactory,
+        policy_type: Option<&str>,
         config: &KvRouterConfig,
         worker_type: WorkerType,
         model_name: Option<&str>,
@@ -202,14 +210,18 @@ impl PreparedSelectionPolicy {
             dynamo_scheduler::host::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
                 &policy,
             );
-        let hint_policies = plugins::router_plugin_registry().resolve_hint_policies(config)?;
+        let hint_policies = match policy_type {
+            Some(policy_type) => registry.resolve_hint_policies_for_type(config, policy_type)?,
+            None => registry.resolve_hint_policies(config)?,
+        };
         let prepare_inputs = check_role(
             worker_type,
             &policy,
             hint_policies.instances(&SelectionConfig::from(config), worker_type, key.as_ref()),
             config,
         )?;
-        let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
+        let parked = Arc::new(parking_lot::Mutex::new(Some(policy)));
+        let slot = Arc::clone(&parked);
         let factory: WorkerSelectionPolicyFactory = Arc::new(
             move |config: &SelectionConfig, worker_type, partition: RoutingPartitionRef<'_>| {
                 if partition == key.as_ref()
@@ -222,6 +234,7 @@ impl PreparedSelectionPolicy {
         );
         Ok(Self {
             factory,
+            parked,
             inputs,
             prepare_inputs,
             hint_policies,
@@ -242,6 +255,19 @@ impl PreparedSelectionPolicy {
     /// The resolved hint policies the router's partitions run.
     pub fn hint_policies(&self) -> &HintPolicyFactory {
         &self.hint_policies
+    }
+
+    /// The prepared instance's picker, when the policy needs no KV state. Otherwise `self`
+    /// comes back with the instance still parked for the router's partition, so probing the
+    /// policy's path costs no second factory call.
+    pub(crate) fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self> {
+        let Some(policy) = self.parked.lock().take() else {
+            return Err(self);
+        };
+        policy.into_hosted_picker().map_err(|policy| {
+            *self.parked.lock() = Some(policy);
+            self
+        })
     }
 }
 
@@ -3347,7 +3373,9 @@ mod tests {
         };
         let config = KvRouterConfig::default();
         let prepared = PreparedSelectionPolicy::prepare(
+            &plugins::router_plugin_registry(),
             counting,
+            None,
             &config,
             WorkerType::Decode,
             Some("named-model"),
