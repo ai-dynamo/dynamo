@@ -146,18 +146,17 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Disaggregated Serving** | — | | | | | | | | | |
-| **KV-Aware Routing** | ✅ | — | | | | | | | | |
-| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
-| **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | 🚧 | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
-| **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
-| **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | 🚧 | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | 🚧 | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | ✅ | — | 🚧 | ✅ | — |
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | ✅ | — | | | | |
+| **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | ✅ | — | | | |
+| **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🚧 | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | — | ✅ | — | 🚧 | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Media-aware routing requires compatible SGLang cache identities. Builds without hash-forwarding support and [wide-token SGLang builds](multimodal.md#wide-token-sglang-builds) use text-prefix routing. Requests still run with this routing fallback. See [SGLang Multimodal KV Routing](multimodal.md#multimodal-kv-routing) for build requirements and supported models.

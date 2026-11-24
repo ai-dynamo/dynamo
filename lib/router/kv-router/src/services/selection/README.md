@@ -31,6 +31,13 @@ and active-sequence accounting. Keep these implementation invariants explicit:
 - The frontend request lease manager owns expiry for embedded partitions.
   Standalone partitions use periodic request expiry.
 - Selector replicas synchronize admission, prefill-complete, and free events.
+- Worker publishers send their own requests' prefill-complete and free events
+  on the replica topic, with `origin: Worker`. A subscribed
+  selector applies them to its booking, local or replicated, and never
+  republishes them. An event that arrives before the replicated booking is held
+  briefly, so the late booking cannot restore finished load.
+- External hosts use `WorkerSequenceEventPublisher` to encode and publish these
+  events without depending on the replica wire format. Delivery is best effort.
 - **NOTE:** Output-block updates remain local. They are deliberately excluded
   from replica sync because their frequency would consume disproportionate
   network bandwidth.

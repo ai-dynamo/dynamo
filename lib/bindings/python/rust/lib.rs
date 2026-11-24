@@ -13,18 +13,13 @@ use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError};
-use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
-use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 use std::thread::sleep;
-use std::{
-    fmt::Display,
-    sync::{Arc, Weak},
-};
+use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
@@ -412,6 +407,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(errors::_raise_routed_http_error, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::WorkerSequenceEventPublisher>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SessionBindingStream>()?;
     #[cfg(feature = "select-service")]
@@ -1148,7 +1145,7 @@ struct Client {
 }
 
 /// A read-only view of an instance's transport, wrapping the runtime
-/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp") and its
+/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp" / "direct") and its
 /// `address`; the address format is transport-specific and not a stable parse
 /// target.
 #[pyclass(eq, hash, frozen)]
@@ -1164,6 +1161,7 @@ impl TransportType {
         match &self.inner {
             rs::component::TransportType::Nats(_) => "nats_tcp",
             rs::component::TransportType::Tcp(_) => "tcp",
+            rs::component::TransportType::Direct(_) => "direct",
         }
     }
 
@@ -1552,6 +1550,13 @@ impl DistributedRuntime {
         self.inner.shutdown();
     }
 
+    /// The response transport this runtime uses ("tcp", "quic" or "velo"),
+    /// after the default and the TLS fallback are applied.
+    #[getter]
+    fn response_plane(&self) -> &'static str {
+        self.inner.response_plane().name()
+    }
+
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }
@@ -1693,21 +1698,6 @@ impl DistributedRuntime {
         };
         self.inner.system_health().lock().set_health_status(status);
         Ok(())
-    }
-
-    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
-    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
-    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
-    // from it and share the same crate path. This will allow PyO3 to automatically
-    // recognize that both bindings use the same PyClass.
-    #[pyo3(name = "to_capsule")]
-    fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
-        let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
-
-        let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
-
-        PyCapsule::new(py, weak, Some(name))
     }
 }
 
