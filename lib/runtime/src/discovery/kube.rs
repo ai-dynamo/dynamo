@@ -1357,7 +1357,6 @@ mod tests {
             registered_loras.push(instance);
         }
 
-        // Update base taints and unregister one LoRA, verifying round-trip consistency.
         let base_id = ModelCardInstanceId {
             namespace: "ns".into(),
             component: "worker".into(),

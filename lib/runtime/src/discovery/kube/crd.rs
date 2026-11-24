@@ -92,9 +92,10 @@ pub(super) fn deserialize_metadata(mut data: serde_json::Value) -> Result<Discov
     Ok(serde_json::from_value(data)?)
 }
 
-fn is_base_model_entry(
-    entry: &serde_json::Value,
-) -> Option<&serde_json::Map<String, serde_json::Value>> {
+fn is_base_model_entry<'a>(
+    entry: &'a serde_json::Value,
+    expected_base_id: &ModelCardInstanceId,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
     let object = entry.as_object()?;
     if object.get("type").and_then(serde_json::Value::as_str) != Some("Model") {
         return None;
@@ -108,28 +109,40 @@ fn is_base_model_entry(
     if object.contains_key(MODEL_CARD_BASE_KEY_FIELD) {
         return None;
     }
+    if object.get("namespace").and_then(serde_json::Value::as_str)
+        != Some(expected_base_id.namespace.as_str())
+        || object.get("component").and_then(serde_json::Value::as_str)
+            != Some(expected_base_id.component.as_str())
+        || object.get("endpoint").and_then(serde_json::Value::as_str)
+            != Some(expected_base_id.endpoint.as_str())
+        || object
+            .get("instance_id")
+            .and_then(serde_json::Value::as_u64)
+            != Some(expected_base_id.instance_id)
+    {
+        return None;
+    }
     object
         .get("card_json")
         .and_then(serde_json::Value::as_object)
 }
 
-fn expected_base_model_key(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+fn expected_base_model_id(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ModelCardInstanceId> {
     if object.get("type").and_then(serde_json::Value::as_str) != Some("Model") {
         return None;
     }
     object
         .get("model_suffix")
         .and_then(serde_json::Value::as_str)?;
-    Some(
-        ModelCardInstanceId {
-            namespace: object.get("namespace")?.as_str()?.to_string(),
-            component: object.get("component")?.as_str()?.to_string(),
-            endpoint: object.get("endpoint")?.as_str()?.to_string(),
-            instance_id: object.get("instance_id")?.as_u64()?,
-            model_suffix: None,
-        }
-        .to_path(),
-    )
+    Some(ModelCardInstanceId {
+        namespace: object.get("namespace")?.as_str()?.to_string(),
+        component: object.get("component")?.as_str()?.to_string(),
+        endpoint: object.get("endpoint")?.as_str()?.to_string(),
+        instance_id: object.get("instance_id")?.as_u64()?,
+        model_suffix: None,
+    })
 }
 
 fn compacted_entry_is_smaller(
@@ -179,14 +192,17 @@ fn compact_model_cards(data: &mut serde_json::Value) {
         .iter()
         .filter_map(|(entry_key, entry)| {
             let object = entry.as_object()?;
-            let base_key = expected_base_model_key(object)?;
+            let expected_base_id = expected_base_model_id(object)?;
+            let base_key = expected_base_id.to_path();
             let derived_card = object
                 .get("card_json")
                 .and_then(serde_json::Value::as_object)?;
             if base_key == *entry_key {
                 return None;
             }
-            let base_card = model_cards.get(&base_key).and_then(is_base_model_entry)?;
+            let base_card = model_cards
+                .get(&base_key)
+                .and_then(|base_entry| is_base_model_entry(base_entry, &expected_base_id))?;
             let (overlay, unset) = diff_json_objects(base_card, derived_card);
             if !compacted_entry_is_smaller(derived_card, &base_key, &overlay, &unset) {
                 return None;
@@ -262,11 +278,12 @@ fn expand_model_cards(data: &mut serde_json::Value) -> Result<()> {
             }
         };
 
-        let Some(expected_base_key) = expected_base_model_key(object) else {
+        let Some(expected_base_id) = expected_base_model_id(object) else {
             anyhow::bail!(
                 "entry '{entry_key}' cannot specify {MODEL_CARD_BASE_KEY_FIELD} without a suffixed Model identity"
             );
         };
+        let expected_base_key = expected_base_id.to_path();
         if base_key != &expected_base_key {
             anyhow::bail!(
                 "model card '{entry_key}' references unexpected base card '{base_key}' (expected '{expected_base_key}')"
@@ -278,7 +295,7 @@ fn expand_model_cards(data: &mut serde_json::Value) -> Result<()> {
         let base_entry = model_cards.get(base_key).ok_or_else(|| {
             anyhow::anyhow!("model card '{entry_key}' references missing base card '{base_key}'")
         })?;
-        let base_card = is_base_model_entry(base_entry).ok_or_else(|| {
+        let base_card = is_base_model_entry(base_entry, &expected_base_id).ok_or_else(|| {
             anyhow::anyhow!("model card '{entry_key}' references invalid base card '{base_key}'")
         })?;
 
@@ -1121,7 +1138,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Without compaction, 250 copies of the base card exceed etcd's 1.5 MiB request limit.
         let uncompacted_bytes = serde_json::to_vec(&metadata).unwrap().len();
         assert!(
             uncompacted_bytes > ETCD_DEFAULT_MAX_REQUEST_BYTES,
@@ -1526,6 +1542,98 @@ mod tests {
                         "instance_id": 2,
                         "card_base_key": "ns/worker/generate/1",
                         "card_json": { "display_name": "not-suffixed" }
+                    }
+                }
+            }),
+            // Base entry stored under the expected key with mismatched embedded namespace.
+            serde_json::json!({
+                "model_cards": {
+                    "ns/worker/generate/1": {
+                        "type": "Model",
+                        "namespace": "other-ns",
+                        "component": "worker",
+                        "endpoint": "generate",
+                        "instance_id": 1,
+                        "card_json": { "display_name": "other-ns-base" }
+                    },
+                    "ns/worker/generate/1/lora": {
+                        "type": "Model",
+                        "namespace": "ns",
+                        "component": "worker",
+                        "endpoint": "generate",
+                        "instance_id": 1,
+                        "model_suffix": "lora",
+                        "card_base_key": "ns/worker/generate/1",
+                        "card_json": { "display_name": "lora" }
+                    }
+                }
+            }),
+            // Base entry stored under the expected key with mismatched embedded component.
+            serde_json::json!({
+                "model_cards": {
+                    "ns/worker/generate/1": {
+                        "type": "Model",
+                        "namespace": "ns",
+                        "component": "other-worker",
+                        "endpoint": "generate",
+                        "instance_id": 1,
+                        "card_json": { "display_name": "other-component-base" }
+                    },
+                    "ns/worker/generate/1/lora": {
+                        "type": "Model",
+                        "namespace": "ns",
+                        "component": "worker",
+                        "endpoint": "generate",
+                        "instance_id": 1,
+                        "model_suffix": "lora",
+                        "card_base_key": "ns/worker/generate/1",
+                        "card_json": { "display_name": "lora" }
+                    }
+                }
+            }),
+            // Base entry stored under the expected key with mismatched embedded endpoint.
+            serde_json::json!({
+                "model_cards": {
+                    "ns/worker/generate/1": {
+                        "type": "Model",
+                        "namespace": "ns",
+                        "component": "worker",
+                        "endpoint": "other_ep",
+                        "instance_id": 1,
+                        "card_json": { "display_name": "other-ep-base" }
+                    },
+                    "ns/worker/generate/1/lora": {
+                        "type": "Model",
+                        "namespace": "ns",
+                        "component": "worker",
+                        "endpoint": "generate",
+                        "instance_id": 1,
+                        "model_suffix": "lora",
+                        "card_base_key": "ns/worker/generate/1",
+                        "card_json": { "display_name": "lora" }
+                    }
+                }
+            }),
+            // Base entry stored under the expected key with mismatched embedded instance_id.
+            serde_json::json!({
+                "model_cards": {
+                    "ns/worker/generate/1": {
+                        "type": "Model",
+                        "namespace": "ns",
+                        "component": "worker",
+                        "endpoint": "generate",
+                        "instance_id": 2,
+                        "card_json": { "display_name": "other-instance-base" }
+                    },
+                    "ns/worker/generate/1/lora": {
+                        "type": "Model",
+                        "namespace": "ns",
+                        "component": "worker",
+                        "endpoint": "generate",
+                        "instance_id": 1,
+                        "model_suffix": "lora",
+                        "card_base_key": "ns/worker/generate/1",
+                        "card_json": { "display_name": "lora" }
                     }
                 }
             }),
