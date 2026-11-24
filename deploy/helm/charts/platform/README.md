@@ -134,10 +134,12 @@ Enable experimental live retune per deployment with `retune.executor: dgdr` in t
 New v1beta1 profiling Jobs use the digest-pinned kubectl image listed under
 [DGDR Output-Copier Image](#dgdr-output-copier-image) instead of `bitnami/kubectl:latest`.
 
+The reference is now fully qualified as `docker.io/bitnami/kubectl`; update registry allowlists
+that previously matched the short name.
+
 If your cluster pulls through a private registry or a tag-based mirror, mirror this image and set
-`dynamo-operator.dgdr.outputCopierImage` before upgrading. Use a production mirror whose retention
-you control. Existing profiling Jobs and explicit operator or per-request image overrides keep
-their selected image.
+`dynamo-operator.dgdr.outputCopierImage` before upgrading. Existing profiling Jobs and explicit
+operator or per-request image overrides keep their selected image.
 
 ##### LPX units-only deployment contract
 
@@ -1053,9 +1055,11 @@ dynamo-operator:
     outputCopierImage: registry.example.com/tools/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d
 ```
 
-Replace the example reference with your image's repository and tag or digest. Copy the full
-manifest list and preserve its bytes to keep a multi-architecture digest; otherwise use the digest
-reported by your registry. With the [standalone operator chart](components/operator/README.md#installation),
+The Bitnami repository has no version tags; use the source digest above when mirroring. Copy the
+full manifest list with `skopeo copy --all --preserve-digests`; otherwise use the digest reported by
+your registry. For the complete image inventory, copy commands and production mirror guidance, see
+[Private Registries and Image Mirroring](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/install-dynamo.md#private-registries-and-image-mirroring).
+With the [standalone operator chart](components/operator/README.md#installation),
 use `dgdr.outputCopierImage`. Both set `OperatorConfiguration.dgdr.outputCopierImage`.
 
 Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash),
