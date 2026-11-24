@@ -76,8 +76,14 @@ fn scan_dir(dir: &Path, offenders: &mut Vec<String>) {
         let path = entry.expect("dir entry").path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if path.is_dir() {
-            // Skip build output and the canonical implementation itself.
-            if name == "target" || name == "node_modules" || path.ends_with("lib/truthy") {
+            // Skip build output, the canonical implementation itself, and the
+            // vendored copy of the published llm-multimodal crate, which must
+            // stay identical to upstream (see lib/vendor/llm-multimodal/VENDORED.md).
+            if name == "target"
+                || name == "node_modules"
+                || path.ends_with("lib/truthy")
+                || path.ends_with("lib/vendor/llm-multimodal")
+            {
                 continue;
             }
             scan_dir(&path, offenders);
