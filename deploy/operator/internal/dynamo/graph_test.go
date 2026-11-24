@@ -7130,8 +7130,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	}
 }
 
-// TestGenerateBasePodSpec_VLLMSystemOneSerialOmitsFPMPort: a --systemone-serial worker gets
-// no operator FPM port; an ordinary worker and a user-set port keep it.
 func TestGenerateBasePodSpec_VLLMSystemOneSerialOmitsFPMPort(t *testing.T) {
 	tests := []struct {
 		name        string

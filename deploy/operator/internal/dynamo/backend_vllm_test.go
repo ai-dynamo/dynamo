@@ -1467,8 +1467,6 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 	}
 }
 
-// TestVLLMBackend_UpdateContainer_SystemOneSerial checks that a --systemone-serial
-// opt-in drops the operator DYN_FORWARDPASS_METRIC_PORT default.
 func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 	operatorDefault := corev1.EnvVar{Name: forwardPassMetricPortEnvVar, Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)}
 	optInEnv := func(value string) corev1.EnvVar { return corev1.EnvVar{Name: systemOneSerialEnvVar, Value: value} }
@@ -1518,6 +1516,25 @@ func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 			command: []string{"sh", "-c"},
 			args:    []string{"python3 -m dynamo.vllm --model m --systemone-serial"},
 			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:    "shell command opt-in with an attached terminator drops the default",
+			command: []string{"sh", "-c"},
+			args:    []string{"python3 -m dynamo.vllm --model m --systemone-serial; echo done"},
+			env:     []corev1.EnvVar{operatorDefault},
+		},
+		{
+			name:        "shell command --no-systemone-serial with an attached terminator wins",
+			command:     []string{"/bin/bash", "-c"},
+			args:        []string{"python3 -m dynamo.vllm --systemone-serial --model m --no-systemone-serial&& echo done"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
+		},
+		{
+			name:        "terminator outside a shell is part of the token",
+			args:        []string{"-m", "dynamo.vllm", "--model", "m", systemOneSerialFlag + ";"},
+			env:         []corev1.EnvVar{operatorDefault},
+			wantFPMPort: operatorDefault.Value,
 		},
 	}
 

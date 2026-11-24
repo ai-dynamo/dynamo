@@ -142,9 +142,14 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 }
 
 // isSystemOneSerialOptIn mirrors dynamo.vllm: the last (--no-)systemone-serial flag wins,
-// else a literal truthy DYN_VLLM_SYSTEMONE_SERIAL; valueFrom does not count.
+// else a literal truthy DYN_VLLM_SYSTEMONE_SERIAL; valueFrom does not count. Under a shell,
+// a control operator glued to the flag ("--systemone-serial;") is not part of it.
 func isSystemOneSerialOptIn(container *corev1.Container) bool {
+	shellRun := len(container.Command) > 0 && isShellCommand(container.Command[0])
 	for _, arg := range slices.Backward(getExpandedCommandLine(container)) {
+		if shellRun {
+			arg = trimShellTerminator(arg)
+		}
 		switch arg {
 		case systemOneSerialFlag:
 			return true
