@@ -170,16 +170,12 @@ async fn sweep(
     }
 }
 
-/// Sorts a registration's lists and drops repeats, so the same lists in
-/// another order are not a change. The DynamoDB backend stores registrations
-/// this way too.
+/// Sorts a registration's frontends and drops repeats, so the same frontends
+/// in another order are not a change. The DynamoDB backend stores
+/// registrations this way too.
 pub(super) fn sorted(mut registration: PoolRegistration) -> PoolRegistration {
-    registration.capabilities.sort_unstable();
-    registration.capabilities.dedup();
     registration.frontends.sort_unstable();
     registration.frontends.dedup();
-    registration.capacity.sort_unstable();
-    registration.capacity.dedup();
     registration
 }
 
@@ -190,9 +186,7 @@ pub(super) fn listing(registration: &PoolRegistration) -> PoolListing {
         key: registration.key.clone(),
         location: registration.location.clone(),
         model: Some(registration.model.clone()),
-        capabilities: registration.capabilities.clone(),
         frontends: registration.frontends.clone(),
-        capacity: registration.capacity.clone(),
         relay_identities: Vec::new(),
     }
 }
@@ -318,7 +312,6 @@ impl Directory<RouterReplica, RouterReplicaId> for StaticReplicaDirectory {
 
 #[cfg(test)]
 mod tests {
-    use crate::pool_discovery::Capacity;
     use dynamo_global_common::PoolLocation;
     use futures::StreamExt;
     use url::Url;
@@ -333,13 +326,6 @@ mod tests {
         PoolKey::new("west", "dynamo", dgd).unwrap()
     }
 
-    fn capacity(sku: &str, workers: u32) -> Capacity {
-        Capacity {
-            sku: sku.to_owned(),
-            workers,
-        }
-    }
-
     fn registration(dgd: &str, model: &str) -> PoolRegistration {
         PoolRegistration {
             key: key(dgd),
@@ -349,12 +335,10 @@ mod tests {
                 datacenter: None,
             },
             model: model.to_owned(),
-            capabilities: vec!["prefill".to_owned(), "decode".to_owned()],
             frontends: vec![
                 Url::parse("http://10.43.1.3:8000/").unwrap(),
                 Url::parse("http://10.43.1.2:8000/").unwrap(),
             ],
-            capacity: vec![capacity("H100", 8), capacity("B200", 4)],
         }
     }
 
@@ -377,7 +361,13 @@ mod tests {
         let Some(Ok(WatchEvent::Upserted(first))) = watch.next().await else {
             panic!("expected the pool");
         };
-        assert_eq!(first.capabilities, ["decode", "prefill"]);
+        assert_eq!(
+            first.frontends,
+            [
+                Url::parse("http://10.43.1.2:8000/").unwrap(),
+                Url::parse("http://10.43.1.3:8000/").unwrap()
+            ]
+        );
         assert!(matches!(
             watch.next().await,
             Some(Ok(WatchEvent::Resync(_)))
@@ -388,9 +378,8 @@ mod tests {
         for _ in 0..3 {
             tokio::time::advance(Duration::from_secs(10)).await;
             let mut heartbeat = registration("mocker", "m1");
-            heartbeat.capabilities.reverse();
             heartbeat.frontends.reverse();
-            heartbeat.capacity.push(capacity("H100", 8));
+            heartbeat.frontends.push(heartbeat.frontends[0].clone());
             let _ = store.register(heartbeat).await.unwrap();
         }
         assert_eq!(find(&store, "mocker").await, Some(first));

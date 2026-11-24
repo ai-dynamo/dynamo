@@ -36,7 +36,7 @@ mod replicas;
 mod watch;
 
 pub use discovery::{
-    Capacity, Lease, LeaseError, PoolListing, PoolRegistration, PoolsResponse, RouterRegistration,
+    Lease, LeaseError, PoolListing, PoolRegistration, PoolsResponse, RouterRegistration,
     RouterRegistrationError, RoutersResponse, address_identity,
 };
 pub use pool::{PoolId, PoolIdDeriver, PoolKey, PoolKeyError, PoolLocation, V1PoolIdDeriver};

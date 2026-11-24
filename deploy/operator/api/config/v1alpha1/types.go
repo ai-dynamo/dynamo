@@ -501,6 +501,13 @@ type MultiClusterConfiguration struct {
 	// DynamoPoolRelays are deleted.
 	// +optional
 	MCSImplementation MCSImplementation `json:"mcsImplementation,omitempty"`
+
+	// ClusterID is this cluster's ID for every DynamoPoolRelay that omits its
+	// clusterId, in every Global Discovery mode: a stable name, unique per cluster.
+	// Empty, such a Relay uses the cluster's ID in its ClusterSet from the About API,
+	// with mcsImplementation mcs.
+	// +optional
+	ClusterID string `json:"clusterId,omitempty"`
 }
 
 // MCSImplementation identifies an implementation of the Multi-Cluster Services API.

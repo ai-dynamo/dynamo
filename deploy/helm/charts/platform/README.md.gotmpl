@@ -171,6 +171,32 @@ workload for that bundle.
 **Existing deployments:** An LPX workload that the old operator created does not continue across
 this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
 
+#### CRD and admission breaking changes
+
+##### `DynamoPoolRelay` `clusterId` rejects `/` and control characters
+
+**Change:** A new or changed `clusterId` must have no `/` or control characters, as the pool's
+registration key requires. Leaving it out is now allowed; see below.
+
+**Affected:** `DynamoPoolRelay`s whose `clusterId` has a `/` or a control character. Kubernetes
+validation ratcheting keeps such a stored value valid until it changes.
+
+**Action:** Rename such a cluster ID when you next change the relay.
+
+#### New behavior
+
+##### A `DynamoPoolRelay` may omit `clusterId`
+
+**Change:** A relay without `clusterId` uses the operator's new `multiCluster.clusterId`
+(`dynamo-operator.dynamo.multiCluster.clusterId`), or, with `multiCluster.mcsImplementation: mcs`,
+the cluster's ID in its ClusterSet from the About API.
+
+**Existing deployments:** Nothing changes. Every existing relay has a `clusterId`, and the chart
+renders the operator configuration as before while the new value is empty.
+
+**Downgrade:** An older operator rejects a relay without `clusterId` and removes its Deployment and
+Service. Before you downgrade, set `clusterId` on every `DynamoPoolRelay`.
+
 ### v1.8.0
 
 #### Operator behavior breaking changes

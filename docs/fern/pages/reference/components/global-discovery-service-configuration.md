@@ -50,8 +50,8 @@ These modes join EndpointSlices that MCS imports with registrations from `POST /
 listed while MCS imports a Ready Pool Relay endpoint for it and its registration lease lasts. While a
 DynamoDB table cannot be read, leases lapse on the service's clock, since no Pool Relay can renew.
 The registration's `cluster_id` must match the MCS cluster ID or Karmada member cluster name.
-MCS supplies relay identities and frontend addresses; the registration supplies the model,
-capabilities, capacity, and location. Export each pool's frontend Service to supply its addresses.
+MCS supplies relay identities and frontend addresses; the registration supplies the model and
+location. Export each pool's frontend Service to supply its addresses.
 The service needs read access to `endpointslices`. `karmada` reads slices named the Karmada way, and `mcs`
 reads slices with the standard `multicluster.kubernetes.io` labels.
 
@@ -101,13 +101,12 @@ Request:
   "key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
   "location": {"region": "us-west-2", "availability_zone": null, "datacenter": null},
   "model": "Qwen/Qwen3-0.6B",
-  "capabilities": ["aggregated"],
-  "frontends": ["http://10.43.1.2:8000/"],
-  "capacity": [{"sku": "H100", "workers": 8}]
+  "frontends": ["http://10.43.1.2:8000/"]
 }
 ```
 
-`capabilities`, `frontends`, and `capacity` default to empty lists. `model` must not be blank. Reply:
+`frontends` defaults to an empty list, and `model` must not be blank. The service ignores fields it
+does not know, such as the `capabilities` and `capacity` that older Pool Relays send. Reply:
 
 ```json
 {"heartbeat_interval_s": 5, "lease_duration_s": 15}
@@ -131,9 +130,7 @@ In `karmada` and `mcs` modes, the listed frontend addresses come from MCS; the r
       "key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
       "location": {"region": "us-west-2", "availability_zone": null, "datacenter": null},
       "model": "Qwen/Qwen3-0.6B",
-      "capabilities": ["aggregated"],
       "frontends": ["http://10.43.1.2:8000/"],
-      "capacity": [{"sku": "H100", "workers": 8}],
       "relay_identities": []
     }
   ],
@@ -193,8 +190,8 @@ the sort key is `sk` (string), and TTL is enabled on `expires_at`.
 | --- | --- | --- |
 | `pk` | S | The constant `pool`. |
 | `sk` | S | `<cluster_id>#<namespace>#<dgd_name>`, with `#` escaped as `\#` and `\` as `\\` in each part. At most 1,024 bytes, DynamoDB's limit for a sort key. |
-| `registration` | S | The registration as JSON, with `capabilities`, `frontends`, and `capacity` sorted and deduplicated. |
-| `hash` | S | blake3 hex digest of `registration`, used to detect changes. |
+| `registration` | S | The registration as JSON, with `frontends` sorted and deduplicated. |
+| `hash` | S | blake3 hex digest of `registration`. Readers detect changes by hashing the registration as they decode it, so a field they do not know is no change. |
 | `renewed_at` | N | Unix milliseconds, on the accepting replica's clock, of the last stored registration. |
 | `lease_s` | N | The lease duration the accepting replica granted, in seconds. |
 | `created_at` | N | Unix milliseconds of the first store of this key since it was last absent. |

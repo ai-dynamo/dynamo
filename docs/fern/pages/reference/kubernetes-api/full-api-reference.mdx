@@ -1412,9 +1412,9 @@ DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and nam
 **Kind:** `type`
 **Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
 
-<ParamField path="clusterId" type="string" required={true}>
-ClusterID is the Relay's stable logical cluster ID across restarts.
-**Validation:** MaxLength: 128  MinLength: 1  Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$`  Required: \&#123;\&#125;
+<ParamField path="clusterId" type="string">
+ClusterID is the Relay's logical cluster ID. Omitted, it is the operator's multiCluster.clusterId, or else, with mcsImplementation mcs, the cluster's ID in its ClusterSet from the About API's ClusterProperty cluster.clusterset.k8s.io. Set it when the main container sets DYN_RELAY_ROUTING_POOL itself. A changed ID restarts the Relay's Pods.
+**Validation:** MaxLength: 128  MinLength: 1  Pattern: `^[^\p\{Cc\}\p\{Z\}/]([^\p\{Cc\}/]*[^\p\{Cc\}\p\{Z\}/])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec" required={true}>
@@ -1452,7 +1452,7 @@ AvailableReplicas is the number of Relay Pods the Deployment reports available.
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
-Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict. With multi-cluster export configured, Conditions also includes Exported: True with reason Exported once the pool's Services are exported, or False with reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong, NoFrontend, ClusterIDMismatch, or ExportFailed.
+Conditions includes Ready for listener availability, not model or KV readiness; its reasons are ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ClusterIDUnavailable, ReconcileFailed and ResourceOwnershipConflict. With multi-cluster export it also includes Exported, whose reasons the "Deploy the Pool Relay" guide lists.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -6275,6 +6275,11 @@ MCSImplementation is set and a DynamoPoolRelay with its DGD's name exists.
 <ParamField path="mcsImplementation" type="MCSImplementation">
 MCSImplementation is the MCS implementation that imports the exports. Empty, the default, exports nothing: Global Router pools are then discovered without Kubernetes. Clearing it leaves earlier exports in place until their DynamoPoolRelays are deleted.
 See [MCSImplementation](#mcsimplementation).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="clusterId" type="string">
+ClusterID is this cluster's ID for every DynamoPoolRelay that omits its clusterId, in every Global Discovery mode: a stable name, unique per cluster. Empty, such a Relay uses the cluster's ID in its ClusterSet from the About API, with mcsImplementation mcs.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

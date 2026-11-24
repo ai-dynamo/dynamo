@@ -18,3 +18,17 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'multiCluster:\n\s+mcsImplementation: "karmada"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "clusterId:"
+
+  - it: passes the cluster ID to the operator without MCS
+    set:
+      dynamo-operator.dynamo.multiCluster.clusterId: aws-east
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'multiCluster:\n\s+clusterId: "aws-east"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "mcsImplementation:"

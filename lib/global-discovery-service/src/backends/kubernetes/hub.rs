@@ -373,9 +373,7 @@ impl PoolIndex {
             key: key.clone(),
             location: location(key.cluster_id()),
             model: None,
-            capabilities: Vec::new(),
             frontends,
-            capacity: Vec::new(),
             relay_identities,
         };
         if state.listing.as_ref() == Some(&listing) {

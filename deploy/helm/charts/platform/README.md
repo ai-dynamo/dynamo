@@ -171,6 +171,32 @@ workload for that bundle.
 **Existing deployments:** An LPX workload that the old operator created does not continue across
 this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
 
+#### CRD and admission breaking changes
+
+##### `DynamoPoolRelay` `clusterId` rejects `/` and control characters
+
+**Change:** A new or changed `clusterId` must have no `/` or control characters, as the pool's
+registration key requires. Leaving it out is now allowed; see below.
+
+**Affected:** `DynamoPoolRelay`s whose `clusterId` has a `/` or a control character. Kubernetes
+validation ratcheting keeps such a stored value valid until it changes.
+
+**Action:** Rename such a cluster ID when you next change the relay.
+
+#### New behavior
+
+##### A `DynamoPoolRelay` may omit `clusterId`
+
+**Change:** A relay without `clusterId` uses the operator's new `multiCluster.clusterId`
+(`dynamo-operator.dynamo.multiCluster.clusterId`), or, with `multiCluster.mcsImplementation: mcs`,
+the cluster's ID in its ClusterSet from the About API.
+
+**Existing deployments:** Nothing changes. Every existing relay has a `clusterId`, and the chart
+renders the operator configuration as before while the new value is empty.
+
+**Downgrade:** An older operator rejects a relay without `clusterId` and removes its Deployment and
+Service. Before you downgrade, set `clusterId` on every `DynamoPoolRelay`.
+
 ### v1.8.0
 
 #### Operator behavior breaking changes
@@ -944,6 +970,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.dynamo.serviceMesh.istio.privateKey | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS private key used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
 | dynamo-operator.dynamo.serviceMesh.istio.caCertificates | string | `""` | Optional path (in the istio-proxy sidecar's filesystem) to CA certificates used to verify the EPP server certificate. Used only when tlsMode is "MUTUAL". |
 | dynamo-operator.dynamo.multiCluster.mcsImplementation | string | `""` | MCS implementation that imports the exports: "mcs" for the SIG Multicluster API or "karmada". For each DGD with a DynamoPoolRelay of the same name, the operator then creates a ServiceExport for `<DGD name>-pool-relay` and for each frontend component's Service. Needs the multicluster.x-k8s.io/v1alpha1 ServiceExport API in this cluster. Empty exports nothing; clearing it leaves earlier exports in place until their DynamoPoolRelays are deleted. |
+| dynamo-operator.dynamo.multiCluster.clusterId | string | `""` | This cluster's ID for every DynamoPoolRelay that omits its clusterId, in every Global Discovery mode: a stable name, unique per cluster. With "karmada", the cluster's member name in Karmada. Empty, with "mcs", such a Relay uses the cluster's ID in its ClusterSet from the About API. |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
 | dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |

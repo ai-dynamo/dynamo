@@ -245,8 +245,8 @@ With a registered Pool Relay, the response lists the pool, even right after a re
 ```json
 {"pools": [{"key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
             "location": {"region": "us-west-2", "availability_zone": null, "datacenter": null},
-            "model": "Qwen/Qwen3-0.6B", "capabilities": ["aggregated"],
-            "frontends": ["http://10.43.1.2:8000/"], "capacity": [], "relay_identities": []}],
+            "model": "Qwen/Qwen3-0.6B", "frontends": ["http://10.43.1.2:8000/"],
+            "relay_identities": []}],
  "complete": true}
 ```
 
@@ -281,8 +281,8 @@ replica out of the Service at once:
   Pool Relay registers again on its next heartbeat. On-demand capacity absorbs the expected write rate,
   roughly `pools x relay replicas / heartbeat interval`, for example 80 writes per second for 200 pools
   with two relay replicas at a 5 second heartbeat.
-- **Several Pool Relays for one pool.** They must send the same registration: model, capabilities,
-  capacity, location, and frontends, in any order. The last write wins, so if they differ, the pool's
+- **Several Pool Relays for one pool.** They must send the same registration: model, location, and
+  frontends, in any order. The last write wins, so if they differ, the pool's
   listing switches between their versions at every heartbeat. The service logs a warning that names
   such a pool.
 - **Corrupt items.** An item that cannot be decoded is logged and skipped. The rest of the list is served.

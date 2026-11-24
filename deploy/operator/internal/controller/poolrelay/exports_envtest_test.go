@@ -116,6 +116,8 @@ type relayControllerOptions struct {
 	restricted string
 	// wrap, when set, wraps the manager's client.
 	wrap func(client.Client) client.Client
+	// clusterID is the operator's multiCluster.clusterId.
+	clusterID string
 }
 
 // startRelayController starts a manager that runs the Relay controller with the
@@ -145,9 +147,11 @@ func startRelayController(t *testing.T, config *rest.Config, options relayContro
 		t.Fatal(err)
 	}
 	if err := Setup(manager, &configv1alpha1.OperatorConfiguration{
-		Discovery:    configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
-		MultiCluster: configv1alpha1.MultiClusterConfiguration{MCSImplementation: configv1alpha1.MCSImplementationStandard},
-		Namespace:    configv1alpha1.NamespaceConfiguration{Restricted: options.restricted},
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		MultiCluster: configv1alpha1.MultiClusterConfiguration{
+			MCSImplementation: configv1alpha1.MCSImplementationStandard, ClusterID: options.clusterID,
+		},
+		Namespace: configv1alpha1.NamespaceConfiguration{Restricted: options.restricted},
 	}, &commoncontroller.RuntimeConfig{
 		Gate: features.Gates{MultiClusterExport: true, ServiceExportVersion: options.version},
 	}); err != nil {
@@ -669,6 +673,104 @@ func TestNamespaceRestrictedRelayControllerFollowsTheClusterID(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually(t, "a ClusterIDMismatch event with the new ID", mismatchWith(relay.Spec.ClusterID+"-west"))
+}
+
+func TestRelayWithoutAClusterIDFollowsTheClusterSetID(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
+	}
+	ctx := context.Background()
+	config := startExportAPIServer(t, exportTestVersion)
+	apiClient, err := client.New(config, client.Options{Scheme: newExportTestScheme(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRelayController(t, config, relayControllerOptions{version: exportTestVersion})
+
+	t.Log("Create a pool whose Relay has no clusterId in a cluster with no ID in its ClusterSet: the API server accepts it, and the Relay is held")
+	relay := readSampleRelay(t)
+	relay.Spec.ClusterID = ""
+	createNamespace(t, apiClient, relay.Namespace)
+	createDGD(t, apiClient, relay, "Frontend")
+	if err := apiClient.Create(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	heldFor := func(cause string) func() (bool, error) {
+		return func() (bool, error) {
+			current := &v1alpha1.DynamoPoolRelay{}
+			if err := apiClient.Get(ctx, client.ObjectKeyFromObject(relay), current); err != nil {
+				return false, err
+			}
+			ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+			return ready != nil && ready.Reason == "ClusterIDUnavailable" && strings.Contains(ready.Message, cause), nil
+		}
+	}
+	eventually(t, "the Relay held for want of a cluster ID", heldFor("does not exist"))
+	deploymentKey := client.ObjectKey{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
+	runsUnder := func(clusterID string) func() (bool, error) {
+		return func() (bool, error) {
+			deployment := &appsv1.Deployment{}
+			if err := apiClient.Get(ctx, deploymentKey, deployment); err != nil {
+				return false, client.IgnoreNotFound(err)
+			}
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			return len(args) > 1 && args[0] == "--cluster-id" && args[1] == clusterID, nil
+		}
+	}
+
+	t.Log("Give the cluster an ID in its ClusterSet: the property's watch requeues the Relay, which runs under that ID")
+	property := newClusterIDProperty("east")
+	if err := apiClient.Create(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay's Deployment under cluster ID east", runsUnder("east"))
+
+	t.Log("Change the cluster's ID: the Relay follows it")
+	property.Object["spec"] = map[string]any{"value": "west"}
+	if err := apiClient.Update(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay's Deployment under cluster ID west", runsUnder("west"))
+
+	t.Log("Delete the property: the Relay is held, and keeps running under cluster ID west")
+	if err := apiClient.Delete(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay held after the property's deletion", heldFor("does not exist"))
+	if running, err := runsUnder("west")(); err != nil || !running {
+		t.Fatalf("the held Relay's Deployment no longer runs under west: %v", err)
+	}
+}
+
+func TestOperatorClusterIDStandsInForAnOmittedClusterID(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
+	}
+	ctx := context.Background()
+	config := startExportAPIServer(t, exportTestVersion)
+	apiClient, err := client.New(config, client.Options{Scheme: newExportTestScheme(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRelayController(t, config, relayControllerOptions{version: exportTestVersion, clusterID: "fleet-east"})
+
+	t.Log("Create a pool whose Relay has no clusterId: Setup passes the operator's multiCluster.clusterId, which it runs under")
+	relay := readSampleRelay(t)
+	relay.Spec.ClusterID = ""
+	createNamespace(t, apiClient, relay.Namespace)
+	createDGD(t, apiClient, relay, "Frontend")
+	if err := apiClient.Create(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	deploymentKey := client.ObjectKey{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
+	eventually(t, "the Relay's Deployment under cluster ID fleet-east", func() (bool, error) {
+		deployment := &appsv1.Deployment{}
+		if err := apiClient.Get(ctx, deploymentKey, deployment); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		args := deployment.Spec.Template.Spec.Containers[0].Args
+		return len(args) > 1 && args[0] == "--cluster-id" && args[1] == "fleet-east", nil
+	})
 }
 
 // relayEventNotes returns the notes of the events with reason that regard relay.

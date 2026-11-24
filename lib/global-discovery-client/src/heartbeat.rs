@@ -251,13 +251,13 @@ fn update(status: &watch::Sender<RegistrationStatus>, new: RegistrationStatus) -
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use dynamo_global_common::{Capacity, PoolKey, PoolLocation};
+    use dynamo_global_common::{PoolKey, PoolLocation};
     use reqwest::StatusCode;
 
     use super::*;
 
     /// A registrar whose answer and call duration the test sets. It records
-    /// the second each call started at and the workers it sent.
+    /// the second each call started at and the version it sent.
     #[derive(Clone)]
     struct FakeRegistrar(Arc<Mutex<Fake>>);
 
@@ -288,10 +288,10 @@ mod tests {
             fake.calls.iter().map(|&(at, _)| at).collect()
         }
 
-        /// The workers each call sent.
-        fn workers(&self) -> Vec<u32> {
+        /// The version each call sent.
+        fn versions(&self) -> Vec<u32> {
             let fake = self.0.lock().unwrap();
-            fake.calls.iter().map(|&(_, workers)| workers).collect()
+            fake.calls.iter().map(|&(_, version)| version).collect()
         }
     }
 
@@ -303,7 +303,7 @@ mod tests {
             let (answer, delay) = {
                 let mut fake = self.0.lock().unwrap();
                 let at = fake.start.elapsed().as_secs();
-                fake.calls.push((at, registration.capacity[0].workers));
+                fake.calls.push((at, version(registration)));
                 (fake.answer, fake.delay)
             };
             tokio::time::sleep(delay).await;
@@ -319,7 +319,8 @@ mod tests {
         Lease::new(heartbeat_interval_s, lease_duration_s).unwrap()
     }
 
-    fn pool(workers: u32) -> PoolRegistration {
+    /// A registration whose model, `m<version>`, tells its versions apart.
+    fn pool(version: u32) -> PoolRegistration {
         PoolRegistration {
             key: PoolKey::new("aws-west", "dynamo", "mocker-west-1").unwrap(),
             location: PoolLocation {
@@ -327,14 +328,13 @@ mod tests {
                 availability_zone: None,
                 datacenter: None,
             },
-            model: "Qwen/Qwen3-0.6B".to_owned(),
-            capabilities: Vec::new(),
+            model: format!("m{version}"),
             frontends: Vec::new(),
-            capacity: vec![Capacity {
-                sku: "H100".to_owned(),
-                workers,
-            }],
         }
+    }
+
+    fn version(registration: &PoolRegistration) -> u32 {
+        registration.model[1..].parse().unwrap()
     }
 
     fn spawn(registrar: &FakeRegistrar, cancel: CancellationToken) -> PoolHeartbeat {
@@ -366,7 +366,7 @@ mod tests {
         registrar.answer(Ok(lease(3, 9)));
         sleep_s(8).await;
         assert_eq!(registrar.calls(), [0, 5, 10, 15, 18]);
-        assert_eq!(registrar.workers(), [8, 8, 8, 16, 16]);
+        assert_eq!(registrar.versions(), [8, 8, 8, 16, 16]);
         assert_eq!(
             heartbeat.status(),
             RegistrationStatus::Registered(lease(3, 9))
@@ -400,7 +400,7 @@ mod tests {
         registration.send_replace(Some(pool(16)));
         sleep_s(1).await;
         assert_eq!(registrar.calls(), [3, 8, 19]);
-        assert_eq!(registrar.workers(), [8, 8, 16]);
+        assert_eq!(registrar.versions(), [8, 8, 16]);
     }
 
     #[tokio::test(start_paused = true)]

@@ -254,9 +254,7 @@ mod tests {
                 "datacenter": null
             },
             "model": "Qwen/Qwen3-0.6B",
-            "capabilities": ["aggregated"],
-            "frontends": ["http://10.43.1.2:8000/"],
-            "capacity": [{"sku": "H100", "workers": 8}]
+            "frontends": ["http://10.43.1.2:8000/"]
         })
     }
 
@@ -329,9 +327,7 @@ mod tests {
                         "datacenter": null
                     },
                     "model": "Qwen/Qwen3-0.6B",
-                    "capabilities": ["aggregated"],
                     "frontends": ["http://10.43.1.2:8000/"],
-                    "capacity": [{"sku": "H100", "workers": 8}],
                     "relay_identities": []
                 }],
                 "complete": false
@@ -446,12 +442,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_registration_over_the_body_limit_is_refused() {
-        // A registration of exactly `size` bytes: a capability fills the rest.
+        // A registration of exactly `size` bytes: a field the service does not
+        // know fills the rest.
         let registration_of = |size: usize| {
             let mut body = registration();
-            body["capabilities"] = json!([""]);
+            body["padding"] = json!("");
             let padding = size - body.to_string().len();
-            body["capabilities"] = json!(["c".repeat(padding)]);
+            body["padding"] = json!("c".repeat(padding));
             body
         };
         let (base, shutdown) = start(registrations_backend()).await;

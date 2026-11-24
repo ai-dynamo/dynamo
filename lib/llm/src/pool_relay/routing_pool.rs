@@ -41,9 +41,7 @@ impl RoutingPoolRegistration {
             key,
             location,
             model: String::new(),
-            capabilities: Vec::new(),
             frontends,
-            capacity: Vec::new(),
         };
         let follow = tokio::spawn(follow_topology(
             template,
@@ -198,9 +196,7 @@ mod tests {
                 datacenter: None,
             },
             model: String::new(),
-            capabilities: Vec::new(),
             frontends: vec![Url::parse("http://blue-frontend:8000/").unwrap()],
-            capacity: Vec::new(),
         }
     }
 

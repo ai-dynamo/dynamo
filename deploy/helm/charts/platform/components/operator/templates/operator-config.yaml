@@ -183,10 +183,17 @@ data:
       {{- end }}
       {{- end }}
     {{- end }}
-    {{- $mcsImplementation := (.Values.dynamo.multiCluster | default dict).mcsImplementation | default "" }}
-    {{- if $mcsImplementation }}
+    {{- $multiCluster := .Values.dynamo.multiCluster | default dict }}
+    {{- $mcsImplementation := $multiCluster.mcsImplementation | default "" }}
+    {{- $clusterID := $multiCluster.clusterId | default "" }}
+    {{- if or $mcsImplementation $clusterID }}
     multiCluster:
+      {{- if $mcsImplementation }}
       mcsImplementation: {{ $mcsImplementation | quote }}
+      {{- end }}
+      {{- if $clusterID }}
+      clusterId: {{ $clusterID | quote }}
+      {{- end }}
     {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}
     rbac:

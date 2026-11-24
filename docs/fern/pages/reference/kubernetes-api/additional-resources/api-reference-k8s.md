@@ -791,7 +791,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$` <br />Required: \{\} <br /> |
+| `clusterId` _string_ | ClusterID is the Relay's logical cluster ID. Omitted, it is the operator's<br />multiCluster.clusterId, or else, with mcsImplementation mcs, the cluster's ID in<br />its ClusterSet from the About API's ClusterProperty cluster.clusterset.k8s.io.<br />Set it when the main container sets DYN_RELAY_ROUTING_POOL itself. A changed ID<br />restarts the Relay's Pods. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^[^\p\{Cc\}\p\{Z\}/]([^\p\{Cc\}/]*[^\p\{Cc\}\p\{Z\}/])?$` <br />Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with<br />dynamo.pool_relay and --sources-file support from the operator's revision.<br />The controller sets the main command, listener probes, source volume,<br />service account, and Relay identity and discovery environment variables.<br />Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND,<br />DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST,<br />DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND,<br />DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,<br />DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.<br />The main container cannot use envFrom because it could override those values. |  | Required: \{\} <br /> |
 | `replicas` _integer_ | Replicas sets the number of active Relay Pods. Each watches the DGD. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |
 
@@ -812,7 +812,7 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the Relay resource generation last reconciled by the operator. |  | Optional: \{\} <br /> |
 | `endpoint` _string_ | Endpoint is the cluster-local `<dgd>-pool-relay.<namespace>.svc:5561` address.<br />It is empty after withdrawal or a failed reconciliation. |  | Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | AvailableReplicas is the number of Relay Pods the Deployment reports available. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes Ready for listener availability, not model or KV readiness.<br />Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,<br />DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,<br />InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.<br />With multi-cluster export configured, Conditions also includes Exported: True<br />with reason Exported once the pool's Services are exported, or False with<br />reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong,<br />NoFrontend, ClusterIDMismatch, or ExportFailed. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes Ready for listener availability, not model or KV readiness;<br />its reasons are ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating,<br />UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration,<br />ClusterIDUnavailable, ReconcileFailed and ResourceOwnershipConflict. With multi-cluster<br />export it also includes Exported, whose reasons the "Deploy the Pool Relay" guide lists. |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig
@@ -4465,6 +4465,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Clearing it leaves earlier exports in place until their<br />DynamoPoolRelays are deleted. |  | Optional: \{\} <br /> |
+| `clusterId` _string_ | ClusterID is this cluster's ID for every DynamoPoolRelay that omits its<br />clusterId, in every Global Discovery mode: a stable name, unique per cluster.<br />Empty, such a Relay uses the cluster's ID in its ClusterSet from the About API,<br />with mcsImplementation mcs. |  | Optional: \{\} <br /> |
 
 
 #### NamespaceConfiguration

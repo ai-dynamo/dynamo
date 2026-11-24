@@ -17,7 +17,9 @@ metadata:
   name: green
   namespace: inference
 spec:
-  # Keep this logical cluster ID stable across Relay restarts.
+  # Keep this logical cluster ID stable across Relay restarts. Omitted, the Relay
+  # uses the operator's multiCluster.clusterId, or with standard MCS the cluster's
+  # ID in its ClusterSet, unless the Relay sets DYN_RELAY_ROUTING_POOL.
   clusterId: example-cluster
   replicas: 2
   podTemplate:

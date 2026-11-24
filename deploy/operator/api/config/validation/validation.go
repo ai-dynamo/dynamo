@@ -18,9 +18,12 @@
 package validation
 
 import (
+	"fmt"
 	"net/url"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -212,15 +215,46 @@ func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath
 }
 
 func validateMultiCluster(multiCluster *configv1alpha1.MultiClusterConfiguration, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
 	switch multiCluster.MCSImplementation {
 	case configv1alpha1.MCSImplementationNone, configv1alpha1.MCSImplementationStandard, configv1alpha1.MCSImplementationKarmada:
-		return nil
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			fldPath.Child("mcsImplementation"),
+			multiCluster.MCSImplementation,
+			[]string{"", "mcs", "karmada"},
+		))
 	}
-	return field.ErrorList{field.NotSupported(
-		fldPath.Child("mcsImplementation"),
-		multiCluster.MCSImplementation,
-		[]string{"", "mcs", "karmada"},
-	)}
+	if multiCluster.ClusterID != "" {
+		if err := CheckClusterID(multiCluster.ClusterID); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("clusterId"), multiCluster.ClusterID, err.Error()))
+		}
+	}
+	return allErrs
+}
+
+// MaxClusterIDLength is the most characters that a DynamoPoolRelay's cluster ID
+// may have: the MaxLength of its clusterId.
+const MaxClusterIDLength = 128
+
+// CheckClusterID returns an error unless value can be the cluster ID of a
+// DynamoPoolRelay that omits its clusterId, from the operator or the About API.
+// The pool's registration key holds it too, so it has no control characters or /.
+func CheckClusterID(value string) error {
+	if value == "" || utf8.RuneCountInString(value) > MaxClusterIDLength || HasSurroundingSpace(value) ||
+		strings.ContainsFunc(value, unicode.IsControl) || strings.Contains(value, "/") {
+		return fmt.Errorf("must have 1 to %d characters, and no surrounding whitespace, control characters or /",
+			MaxClusterIDLength)
+	}
+	return nil
+}
+
+// HasSurroundingSpace reports whether value starts or ends with a character that
+// the PoolRelay's Python CLI rejects there: Unicode white space or U+001C-U+001F.
+func HasSurroundingSpace(value string) bool {
+	return strings.TrimFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
+	}) != value
 }
 
 // validateRBAC is mode-aware: validates RBAC fields based on namespace mode.

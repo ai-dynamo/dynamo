@@ -93,10 +93,17 @@ async fn an_item_has_the_documented_shape() {
     // The TTL is garbage collection only: a week after the last renewal, in
     // unix seconds.
     assert_eq!(number(&item, "expires_at"), first_ms / 1000 + 7 * 24 * 3600);
-    // The registration is JSON with its lists sorted.
+    // The registration is JSON with its frontends sorted.
     let stored: PoolRegistration =
         serde_json::from_str(item["registration"].as_s().unwrap()).unwrap();
-    assert_eq!(stored.capabilities, ["decode", "prefill"]);
+    assert_eq!(
+        stored
+            .frontends
+            .iter()
+            .map(|url| url.as_str())
+            .collect::<Vec<_>>(),
+        ["http://10.43.1.2:8000/", "http://10.43.1.3:8000/"]
+    );
     let hash = item["hash"].as_s().unwrap().clone();
     assert_eq!(hash.len(), 64, "{hash}");
     assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{hash}");

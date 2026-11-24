@@ -43,8 +43,8 @@ One item per `PoolKey`:
 |---|---|---|
 | `pk` | S | `pool` (constant; see "Partitioning") |
 | `sk` | S | `<cluster_id>#<namespace>#<dgd_name>`, each part with `#` escaped as `\#` and `\` as `\\` (see below) |
-| `registration` | S | the `PoolRegistration` as JSON, lists sorted and deduplicated (`capabilities`, `frontends`, `capacity`) |
-| `hash` | S | blake3 hex of `registration`, for change detection |
+| `registration` | S | the `PoolRegistration` as JSON, `frontends` sorted and deduplicated |
+| `hash` | S | blake3 hex of `registration`. Readers detect changes by hashing the registration as they decode it, so a field they do not know is no change |
 | `renewed_at` | N | unix milliseconds on the accepting replica's clock when the last `register` was stored |
 | `lease_s` | N | the lease duration the accepting replica granted, in seconds |
 | `created_at` | N | unix milliseconds of the first store of this key since it was last absent |
@@ -95,7 +95,7 @@ record is last writer wins, like today.
 The PoolRelays of one pool must therefore send the same registration. Lists
 in another order or with repeats are the same registration: `register` sorts
 and deduplicates them before it hashes and stores. If the content differs,
-for example in the frontends each relay sees or in the capacity it counts,
+for example in the frontends each relay sees,
 the item switches between their versions at every heartbeat, and every
 replica's watchers see the pool change at almost every poll. With `karmada`
 or `mcs`, the join takes frontends from MCS, so a difference in frontends

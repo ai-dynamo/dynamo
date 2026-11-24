@@ -388,7 +388,7 @@ impl Watched {
                 "this pool's registration keeps switching between two versions, so watchers \
                  see it change at almost every poll. Its PoolRelays send different registrations, \
                  and each write replaces the other's: every PoolRelay of a pool must send the same \
-                 model, capabilities, capacity, location and frontends."
+                 model, location and frontends."
             );
         }
     }
@@ -924,9 +924,7 @@ mod tests {
                 datacenter: None,
             },
             model: Some(model.to_owned()),
-            capabilities: Vec::new(),
             frontends: Vec::new(),
-            capacity: Vec::new(),
             relay_identities: Vec::new(),
         }
     }
@@ -1122,9 +1120,7 @@ mod tests {
             key: key(dgd),
             location: pool(dgd, "m1").location,
             model: "m1".to_owned(),
-            capabilities: Vec::new(),
             frontends: Vec::new(),
-            capacity: Vec::new(),
         };
         // The sort key is `west#dynamo#` and the name.
         let longest = "d".repeat(keys::MAX_SORT_KEY_BYTES - "west#dynamo#".len());
@@ -1280,9 +1276,7 @@ mod tests {
                 key: key(dgd),
                 location: pool(dgd, "m1").location,
                 model: "m1".to_owned(),
-                capabilities: Vec::new(),
                 frontends: Vec::new(),
-                capacity: Vec::new(),
             },
             hash: "m1".to_owned(),
             renewed_at_ms: 0,
@@ -1346,9 +1340,7 @@ mod tests {
             key: key("a"),
             location: pool("a", "m1").location,
             model: "m1".to_owned(),
-            capabilities: Vec::new(),
             frontends: Vec::new(),
-            capacity: Vec::new(),
         };
         let Err(DiscoveryError::Unavailable(error)) = store.register(registration).await else {
             panic!("expected the table to be unavailable");

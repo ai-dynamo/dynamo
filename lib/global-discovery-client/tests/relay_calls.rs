@@ -10,9 +10,9 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use dynamo_global_discovery_client::{
-    Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolListing,
-    PoolLocation, PoolRegistration, RegistrationStatus, RouterHeartbeat, RouterRegistration,
-    RouterReplica, RouterReplicaId,
+    DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolListing, PoolLocation,
+    PoolRegistration, RegistrationStatus, RouterHeartbeat, RouterRegistration, RouterReplica,
+    RouterReplicaId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -113,12 +113,7 @@ fn registration() -> PoolRegistration {
             datacenter: None,
         },
         model: "Qwen/Qwen3-0.6B".into(),
-        capabilities: vec!["aggregated".into()],
         frontends: vec!["http://10.1.22.20:8000".parse().unwrap()],
-        capacity: vec![Capacity {
-            sku: "H100".into(),
-            workers: 8,
-        }],
     }
 }
 
@@ -233,6 +228,8 @@ async fn a_cut_off_body_is_a_request_error() {
 #[tokio::test]
 async fn lists_pools_and_whether_the_list_is_complete() {
     let fake = FakeService::new(r#"{ "routers": [] }"#);
+    // An older service still lists capabilities and capacity, which the
+    // client ignores.
     fake.0.lock().unwrap().pools_body = r#"{
         "pools": [{
             "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1" },
@@ -258,9 +255,7 @@ async fn lists_pools_and_whether_the_list_is_complete() {
             key: registered.key,
             location: registered.location,
             model: Some(registered.model),
-            capabilities: registered.capabilities,
             frontends: registered.frontends,
-            capacity: registered.capacity,
             relay_identities: vec!["ip:10.1.22.30".into()],
         }]
     );
@@ -301,9 +296,7 @@ async fn registers_a_pool() {
                 "datacenter": null
             },
             "model": "Qwen/Qwen3-0.6B",
-            "capabilities": ["aggregated"],
-            "frontends": ["http://10.1.22.20:8000/"],
-            "capacity": [{ "sku": "H100", "workers": 8 }]
+            "frontends": ["http://10.1.22.20:8000/"]
         })]
     );
 }

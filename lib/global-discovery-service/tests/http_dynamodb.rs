@@ -41,9 +41,7 @@ fn registration() -> Value {
             "datacenter": null
         },
         "model": "Qwen/Qwen3-0.6B",
-        "capabilities": ["aggregated"],
-        "frontends": ["http://10.43.1.2:8000/"],
-        "capacity": [{"sku": "H100", "workers": 8}]
+        "frontends": ["http://10.43.1.2:8000/"]
     })
 }
 
@@ -133,9 +131,7 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
                     "datacenter": null
                 },
                 "model": "Qwen/Qwen3-0.6B",
-                "capabilities": ["aggregated"],
                 "frontends": ["http://10.43.1.2:8000/"],
-                "capacity": [{"sku": "H100", "workers": 8}],
                 "relay_identities": []
             }],
             "complete": complete

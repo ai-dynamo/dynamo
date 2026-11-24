@@ -290,6 +290,11 @@ dynamo-operator:
       # cluster. Empty exports nothing; clearing it leaves earlier exports in
       # place until their DynamoPoolRelays are deleted.
       mcsImplementation: ""
+      # -- This cluster's ID for every DynamoPoolRelay that omits its clusterId,
+      # in every Global Discovery mode: a stable name, unique per cluster. With
+      # "karmada", the cluster's member name in Karmada. Empty, with "mcs", such a
+      # Relay uses the cluster's ID in its ClusterSet from the About API.
+      clusterId: ""
 
     # Metrics configuration
     metrics:

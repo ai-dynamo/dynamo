@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_global_common::PoolKey;
-pub use dynamo_global_common::{Capacity, PoolListing};
+pub use dynamo_global_common::PoolListing;
 
 use super::watch::{Directory, WatchEvent};
 

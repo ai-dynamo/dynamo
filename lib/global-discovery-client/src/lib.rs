@@ -20,8 +20,7 @@ mod heartbeat;
 pub use cache::{Freshness, PoolCache, RouterCache};
 pub use client::{DiscoveryClientError, GlobalDiscoveryClient};
 pub use dynamo_global_common::{
-    Capacity, Lease, LeaseError, PoolKey, PoolKeyError, PoolListing, PoolLocation,
-    PoolRegistration, PoolsResponse, RouterRegistration, RouterReplica, RouterReplicaId,
-    RoutersResponse,
+    Lease, LeaseError, PoolKey, PoolKeyError, PoolListing, PoolLocation, PoolRegistration,
+    PoolsResponse, RouterRegistration, RouterReplica, RouterReplicaId, RoutersResponse,
 };
 pub use heartbeat::{PoolHeartbeat, RegistrationStatus, RouterHeartbeat};

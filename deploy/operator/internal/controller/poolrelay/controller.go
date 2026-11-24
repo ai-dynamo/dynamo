@@ -15,9 +15,9 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -60,6 +60,9 @@ type reconciler struct {
 	client.Client
 	scheme         *runtime.Scheme
 	defaultBackend configv1alpha1.DiscoveryBackend
+	// clusterID is the operator's multiCluster.clusterId: the cluster ID of a Relay
+	// that omits its clusterId, if set.
+	clusterID string
 	// exports configures the pool's ServiceExports, which the controller maintains
 	// when the multiClusterExport gate is on, and is nil otherwise.
 	exports *exportSettings
@@ -68,7 +71,10 @@ type reconciler struct {
 // Setup registers the one-DGD Relay controller and its DGD dependency watch, and,
 // when the multiClusterExport gate is on, the watches of the pool's exports.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
-	r := &reconciler{Client: mgr.GetClient(), scheme: mgr.GetScheme(), defaultBackend: config.Discovery.Backend}
+	r := &reconciler{
+		Client: mgr.GetClient(), scheme: mgr.GetScheme(),
+		defaultBackend: config.Discovery.Backend, clusterID: config.MultiCluster.ClusterID,
+	}
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoPoolRelay{}).
 		WithEventFilter(eventFilter(config, runtimeConfig)).
@@ -149,7 +155,16 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
 	}
 
-	resources, desiredDeployment, err := render(&relay, namespaces)
+	// The Relay runs under its clusterId or the cluster's ID; without either, it stays as it is.
+	clusterID, _, err := r.resolveClusterID(ctx, &relay)
+	if errors.Is(err, errNoClusterID) {
+		return ctrl.Result{}, r.reportHeld(ctx, &relay, "ClusterIDUnavailable", err)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	resources, desiredDeployment, err := render(&relay, clusterID, namespaces)
 	if err != nil {
 		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
 	}
@@ -436,6 +451,28 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 	return observed, nil
 }
 
+// reportHeld reports a Relay that the controller leaves as it is while a setting
+// that it needs is missing. Its resources keep running, so the status shows what
+// the cache holds of its Service and Deployment.
+func (r *reconciler) reportHeld(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
+	// The Service gives the endpoint, and the Deployment the available replicas.
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
+	endpoint, available := "", int32(0)
+	var service corev1.Service
+	if err := r.Get(ctx, key, &service); err == nil && metav1.IsControlledBy(&service, relay) {
+		endpoint = key.Name
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	var deployment appsv1.Deployment
+	if err := r.Get(ctx, key, &deployment); err == nil && metav1.IsControlledBy(&deployment, relay) {
+		available = deployment.Status.AvailableReplicas
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return r.setStatus(ctx, relay, false, reason, truncate(problem.Error(), maxConditionMessage), endpoint, available, false)
+}
+
 // An apply error makes the current Relay condition unready without claiming
 // that this generation's required resources were reconciled.
 func (r *reconciler) reportApplyFailure(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, operationErr error) error {
@@ -513,15 +550,77 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
+// errNoClusterID marks a Relay whose cluster ID the controller cannot settle:
+// its clusterId is omitted, and neither the operator nor the About API stands in.
+var errNoClusterID = errors.New("the Relay has no cluster ID")
+
+// clusterIDSource names where a Relay's cluster ID comes from, in messages.
+type clusterIDSource string
+
+const (
+	clusterIDFromSpec       clusterIDSource = "clusterId"
+	clusterIDFromOperator   clusterIDSource = "the operator's multiCluster.clusterId"
+	clusterIDFromClusterSet clusterIDSource = "the cluster's ID in its ClusterSet"
+)
+
+// resolveClusterID returns the cluster ID that relay runs under and its source,
+// in the same order in every Global Discovery mode: its clusterId, the
+// operator's multiCluster.clusterId, or the cluster's ID in its ClusterSet, from
+// the About API's ClusterProperty that the controller watches with standard MCS.
+// The error wraps errNoClusterID when none gives an ID that the Relay can use.
+func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.DynamoPoolRelay) (string, clusterIDSource, error) {
+	if relay.Spec.ClusterID != "" {
+		return relay.Spec.ClusterID, clusterIDFromSpec, nil
+	}
+
+	// A registration that names its cluster itself cannot follow an ID that can change.
+	if podTemplate := relay.Spec.PodTemplate; podTemplate != nil {
+		for _, container := range podTemplate.Spec.Containers {
+			if container.Name == mainContainer && slices.ContainsFunc(container.Env, func(item corev1.EnvVar) bool {
+				return item.Name == "DYN_RELAY_ROUTING_POOL"
+			}) {
+				return "", "", fmt.Errorf("%w: clusterId is omitted, but the main container sets DYN_RELAY_ROUTING_POOL, "+
+					"whose cluster must equal the Relay's cluster ID; set clusterId", errNoClusterID)
+			}
+		}
+	}
+	if r.clusterID != "" {
+		return r.clusterID, clusterIDFromOperator, nil
+	}
+	if r.exports == nil || !r.exports.clusterPropertyWatched {
+		remedy := "set clusterId or multiCluster.clusterId"
+		if r.exports != nil && multicluster.UsesClusterSetID(r.exports.config.MultiCluster.MCSImplementation) {
+			remedy += ", or install the About API and restart the operator"
+		}
+		return "", "", fmt.Errorf("%w: clusterId is omitted, and the operator has neither multiCluster.clusterId nor "+
+			"the cluster's ID in its ClusterSet; %s", errNoClusterID, remedy)
+	}
+
+	// The watch of the property requeues the Relay when the property changes.
+	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
+	if err != nil {
+		return "", "", err
+	}
+	if property == nil {
+		return "", "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s does not exist; create it, or set clusterId",
+			errNoClusterID, multicluster.ClusterIDProperty)
+	}
+	clusterID := multicluster.ClusterPropertyValue(property)
+	if err := configvalidation.CheckClusterID(clusterID); err != nil {
+		return "", "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s gives %q, which a cluster ID cannot be: it %w",
+			errNoClusterID, multicluster.ClusterIDProperty, clusterID, err)
+	}
+	return clusterID, clusterIDFromClusterSet, nil
+}
+
+// render returns the Relay's resources and its Deployment, which runs under
+// clusterID.
+func render(relay *v1alpha1.DynamoPoolRelay, clusterID string, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
 	name := multicluster.PoolRelayServiceName(relay.Name)
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}
-	clusterID := relay.Spec.ClusterID
-	if clusterID == "" || strings.TrimFunc(clusterID, func(r rune) bool {
-		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
-	}) != clusterID {
+	if clusterID == "" || configvalidation.HasSurroundingSpace(clusterID) {
 		return nil, nil, fmt.Errorf("clusterId must be non-empty and have no surrounding whitespace")
 	}
 	if relay.Spec.PodTemplate == nil {
@@ -570,7 +669,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		ClusterID string
 		Image     string
 		Env       []corev1.EnvVar
-	}{relay.Spec.ClusterID, main.Image, env})
+	}{clusterID, main.Image, env})
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode Relay connection settings: %w", err)
 	}
@@ -603,7 +702,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	probeHandler := corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: relayPort, Service: new("dynamo.kvrelay.v1.KvEventRelay")}}
 	container := *main.DeepCopy()
 	container.Command = []string{"python3", "-m", "dynamo.pool_relay"}
-	container.Args = []string{"--cluster-id", relay.Spec.ClusterID, "--sources-file", sourcesFilePath, "--bind", fmt.Sprintf("0.0.0.0:%d", relayPort)}
+	container.Args = []string{"--cluster-id", clusterID, "--sources-file", sourcesFilePath, "--bind", fmt.Sprintf("0.0.0.0:%d", relayPort)}
 	container.Env = env
 	container.Ports = append(container.Ports, corev1.ContainerPort{Name: "grpc", ContainerPort: relayPort, Protocol: corev1.ProtocolTCP}, corev1.ContainerPort{Name: "system", ContainerPort: systemPort, Protocol: corev1.ProtocolTCP}, corev1.ContainerPort{Name: "recovery", ContainerPort: recoveryPort, Protocol: corev1.ProtocolTCP})
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: "relay-sources", MountPath: "/var/run/dynamo-relay/sources", ReadOnly: true})
