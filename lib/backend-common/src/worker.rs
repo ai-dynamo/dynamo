@@ -2789,7 +2789,7 @@ mod tests {
                 (huggingface::HF_HUB_OFFLINE, None),
                 (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
             ],
-            build_local_model(&config, &EngineConfig::default(), false),
+            build_local_model(&config, &EngineConfig::default(), false, None),
         )
         .await
         .expect("a weights-free cache must be enough to register");
