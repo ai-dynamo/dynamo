@@ -8904,7 +8904,7 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
+        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = match self
             .preprocess_request_with_options(
                 &request,
                 tracker.as_deref(),
@@ -8916,7 +8916,16 @@ impl
                     .map(|name| name.as_ref().clone()),
             )
             .instrument(preprocessing.clone())
-            .await?;
+            .await
+        {
+            Ok(preprocessed) => preprocessed,
+            Err(error) => {
+                if let Some(payload) = payload_handle {
+                    payload.emit(None, Some(error.to_string()));
+                }
+                return Err(error);
+            }
+        };
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }

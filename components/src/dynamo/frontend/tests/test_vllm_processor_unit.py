@@ -1541,7 +1541,6 @@ async def test_generator_cache_salt_survives_multimodal_metadata(
 async def test_generator_does_not_forward_client_uuid_as_mm_hash(
     cache_salt_processor, vllm_processor_module, monkeypatch
 ):
-    """By default a client uuid never becomes the cache identity sent to vLLM."""
     monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
     monkeypatch.setattr(
         vllm_processor_module,
