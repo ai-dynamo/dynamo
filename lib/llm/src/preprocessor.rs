@@ -6305,8 +6305,10 @@ impl OpenAIPreprocessor {
                 },
             );
             let family = *family;
-            let unified: Pin<Box<dyn Stream<Item = _> + Send>> = if family == "glm47"
-                && policy.structured_response
+            let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
+            // Some models emit native tool calls without a separate tool constraint.
+            let unified: Pin<Box<dyn Stream<Item = _> + Send>> = if policy.structured_response
+                && !tool_call_parsing_enabled
                 && matches!(
                     guided_tool_constraint,
                     crate::protocols::openai::GuidedToolConstraint::None
@@ -6374,7 +6376,7 @@ impl OpenAIPreprocessor {
             };
             return Ok(Self::apply_unified_response_policies(
                 unified,
-                Self::tool_call_parsing_enabled(request),
+                tool_call_parsing_enabled,
                 defer_reasoning_for_nonempty_content,
                 reasoning_disabled,
             ));

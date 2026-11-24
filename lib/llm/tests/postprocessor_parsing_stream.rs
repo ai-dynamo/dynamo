@@ -3844,6 +3844,130 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
     }
 }
 
+#[tokio::test]
+async fn immediate_structured_json_streams_before_finish_across_unified_parsers() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::immediate_structured_json_streams_before_finish_across_unified_parsers"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let prefix = r#"{"answer":"#;
+    let suffix = r#""Paris </think>"}"#;
+    let request = streaming_json_object_request(true);
+    let mut buffered = Vec::new();
+    for (reasoning, tool) in [
+        ("qwen3", "qwen3_coder"),
+        ("kimi_k25", "kimi_k2"),
+        ("nemotron_v3", "qwen3_coder"),
+    ] {
+        let preprocessor =
+            build_preprocessor_with_native_reasoning_gate(Some(reasoning), Some(tool), Some(false));
+        let (tx, rx) = mpsc::unbounded();
+        let output = preprocessor
+            .postprocessor_parsing_stream(rx, &request, true, false)
+            .unwrap();
+        tokio::pin!(output);
+
+        // The channel has only this fragment while we poll the response.
+        tx.unbounded_send(Annotated::from_data(mock_content_chunk(prefix)))
+            .unwrap();
+        let first = output.next().now_or_never().flatten();
+        let early = drain_stream(stream::iter(first.clone())).await;
+        if early.content != prefix {
+            buffered.push(reasoning);
+            continue;
+        }
+        assert!(early.reasoning.is_empty());
+        assert!(early.finish_reasons.is_empty());
+
+        tx.unbounded_send(Annotated::from_data(mock_content_chunk(suffix)))
+            .unwrap();
+        tx.unbounded_send(Annotated::from_data(mock_final_chunk()))
+            .unwrap();
+        drop(tx);
+        let chunks = output.collect::<Vec<_>>().await;
+        let rest = drain_stream(stream::iter(chunks.clone())).await;
+        assert_eq!(rest.content, suffix, "{reasoning}");
+        assert!(rest.reasoning.is_empty(), "{reasoning}");
+        assert_eq!(rest.finish_reasons, vec![FinishReason::Stop], "{reasoning}");
+
+        let mut options = ParsingOptions::new(Some(tool.into()), Some(reasoning.into()));
+        options.structured_response = true;
+        let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter(first.into_iter().chain(chunks)),
+            options,
+        )
+        .await
+        .unwrap();
+        let choice = &batch.inner.choices[0];
+        assert_eq!(
+            choice.message.content.as_ref().map(get_text),
+            Some(format!("{prefix}{suffix}").as_str()),
+            "{reasoning}"
+        );
+        assert!(
+            choice
+                .message
+                .reasoning_content
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+    }
+    assert!(
+        buffered.is_empty(),
+        "JSON held before finish for {buffered:?}"
+    );
+}
+
+#[tokio::test]
+async fn structured_response_keeps_native_tool_parsing_when_tools_are_allowed() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::structured_response_keeps_native_tool_parsing_when_tools_are_allowed"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let preprocessor = build_preprocessor_with_native_reasoning_gate(
+        Some("kimi_k25"),
+        Some("kimi_k2"),
+        Some(false),
+    );
+    let native_tool_call = concat!(
+        "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0",
+        "<|tool_call_argument_begin|>{\"location\":\"Paris\"}",
+        "<|tool_call_end|><|tool_calls_section_end|>",
+    );
+    for tool_choice in [
+        ChatCompletionToolChoiceOption::Auto,
+        ChatCompletionToolChoiceOption::Required,
+    ] {
+        let mut request = streaming_tool_request(tool_choice);
+        request.inner.response_format = streaming_json_object_request(false).inner.response_format;
+        let input = stream::iter(
+            [mock_content_chunk(native_tool_call), mock_final_chunk()].map(Annotated::from_data),
+        );
+        let output = preprocessor
+            .postprocessor_parsing_stream(input, &request, false, false)
+            .unwrap();
+        let result = drain_stream(output).await;
+        assert!(result.content.is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.finish_reasons, vec![FinishReason::ToolCalls]);
+    }
+}
+
 /// A correct final aggregate can hide buffering; require progress while the
 /// producer withholds later fragments and the finish chunk.
 #[tokio::test]
