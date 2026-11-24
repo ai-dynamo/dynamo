@@ -961,12 +961,12 @@ impl<T> PolicyClassQueue<T> {
             // The heads of the lanes that leave the group, and of those that may go.
             let mut departed = Vec::new();
             let mut may_go = Vec::new();
-            let mut refused = false;
+            let mut any_refused = false;
             shared_blocked.retain(|&lane, head| {
                 let root = lane_root(ready_by_lane, lane);
                 match is_dispatchable(class_index, config, root.payload()).into() {
                     LaneCheck::Blocked(BlockReason::SharedCapacity) => {
-                        refused = true;
+                        any_refused = true;
                         return true;
                     }
                     // Stays until every lane has answered.
@@ -986,8 +986,8 @@ impl<T> PolicyClassQueue<T> {
             // The group has room when a lane may go and none was refused for the shared reason.
             // Its lanes then stay, and one stand-in dispatches per free slot: moving them all
             // to the candidates would only block all but one of them again on the next pass.
-            let room = !refused && !may_go.is_empty();
-            if refused {
+            let has_room = !any_refused && !may_go.is_empty();
+            if any_refused {
                 // The group has no room, so a lane that may go has room of its own.
                 for head in may_go {
                     shared_blocked.remove(&head.lane);
@@ -1006,7 +1006,7 @@ impl<T> PolicyClassQueue<T> {
                     debug_assert!(removed);
                 }
             }
-            if room {
+            if has_room {
                 self.promote_shared_head();
             }
             return;
