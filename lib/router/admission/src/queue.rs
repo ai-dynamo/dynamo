@@ -535,17 +535,6 @@ struct PolicyClassQueue<T> {
     /// which runs on every worker free, never visits them. Empty without a gate, and every
     /// lookup checks that first: a router without a gate pays nothing for it.
     gate_held: FxHashSet<LaneId>,
-    /// Scratch for a full recheck: lanes asked in place, among the gate's holds or the shared
-    /// group, that were refused for a reason another group files. They are filed once every
-    /// group is asked, so none is asked twice. Kept between rechecks so a full recheck into a
-    /// full fleet does not allocate.
-    refiled: Vec<(LaneHead, BlockReason)>,
-    /// Scratch for a full recheck: the heads of the lanes that left the shared group, until
-    /// they are dropped from its order. Kept between rechecks for the same reason.
-    departed: Vec<LaneHead>,
-    /// Scratch for a full recheck: the heads of the shared lanes that may go, until every lane
-    /// of the group has answered. Kept between rechecks for the same reason.
-    may_go: Vec<LaneHead>,
 }
 
 impl<T> PolicyClassQueue<T> {
@@ -779,16 +768,18 @@ impl<T> PolicyClassQueue<T> {
             // Defer the scan until dispatch, when `is_dispatchable` is meaningful.
             // Re-peeking here also observes head changes from intervening `push_ready` calls.
             let plan = std::mem::take(&mut self.recheck);
+            // Lanes a full recheck asks in place, among the gate's holds or the shared group,
+            // that are refused for a reason another group files. They are filed once every
+            // group is asked, so none is asked twice.
+            let mut refiled = Vec::new();
             // The gate woke the queue or its hold timer fired: every held lane is asked again,
             // in place and before the other groups, so a lane they file as held is not asked
-            // twice. A lane still held stays where it is. One refused for another reason is
-            // filed after the other groups are asked, for the same reason.
+            // twice. A lane still held stays where it is.
             if plan.all && !self.gate_held.is_empty() {
                 let Self {
                     config,
                     ready_by_lane,
                     gate_held,
-                    refiled,
                     candidate_lane_heads,
                     fallback_heads,
                     ..
@@ -810,7 +801,7 @@ impl<T> PolicyClassQueue<T> {
                     }
                 });
             }
-            self.recheck_shared(&plan, class_index, is_dispatchable);
+            self.recheck_shared(&plan, class_index, is_dispatchable, &mut refiled);
             let Self {
                 config,
                 ready_by_lane,
@@ -856,11 +847,9 @@ impl<T> PolicyClassQueue<T> {
                     }
                 }
             });
-            let mut refiled = std::mem::take(&mut self.refiled);
-            for (head, reason) in refiled.drain(..) {
+            for (head, reason) in refiled {
                 self.block_lane(head, reason);
             }
-            self.refiled = refiled;
         }
 
         // Fallback work competes on every pass; healthy targets stay event-driven.
@@ -951,6 +940,7 @@ impl<T> PolicyClassQueue<T> {
         plan: &RecheckPlan,
         class_index: usize,
         is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> V,
+        refiled: &mut Vec<(LaneHead, BlockReason)>,
     ) {
         if self.shared_blocked.is_empty() || !plan.covers_shared() {
             return;
@@ -963,12 +953,12 @@ impl<T> PolicyClassQueue<T> {
                 shared_blocked,
                 shared_heads,
                 gate_held,
-                refiled,
-                departed,
-                may_go,
                 candidate_lane_heads,
                 ..
             } = self;
+            // The heads of the lanes that leave the group, and of those that may go.
+            let mut departed = Vec::new();
+            let mut may_go = Vec::new();
             let mut refused = false;
             shared_blocked.retain(|&lane, head| {
                 let root = lane_root(ready_by_lane, lane);
@@ -997,25 +987,23 @@ impl<T> PolicyClassQueue<T> {
             let room = !refused && !may_go.is_empty();
             if refused {
                 // The group has no room, so a lane that may go has room of its own.
-                for head in may_go.iter() {
+                for head in may_go {
                     shared_blocked.remove(&head.lane);
-                    candidate_lane_heads.insert(*head);
-                    departed.push(*head);
+                    candidate_lane_heads.insert(head);
+                    departed.push(head);
                 }
             }
-            may_go.clear();
             // Drop the lanes that left from the group's order by whichever is less work: one
             // remove each, or the order rebuilt from the lanes that stayed.
             if departed.len() > shared_blocked.len() {
                 shared_heads.clear();
                 shared_heads.extend(shared_blocked.values().copied());
             } else {
-                for head in departed.iter() {
+                for head in &departed {
                     let removed = shared_heads.remove(head);
                     debug_assert!(removed);
                 }
             }
-            departed.clear();
             if room {
                 self.promote_shared_head();
             }
@@ -1223,9 +1211,6 @@ impl<T> PolicyQueue<T> {
                     due_entries: BTreeSet::new(),
                     expiring_roots: BTreeSet::new(),
                     gate_held: FxHashSet::default(),
-                    refiled: Vec::new(),
-                    departed: Vec::new(),
-                    may_go: Vec::new(),
                 })
                 .collect(),
             round_cursor: 0,
