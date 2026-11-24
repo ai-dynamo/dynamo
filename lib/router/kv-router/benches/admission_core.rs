@@ -16,6 +16,13 @@
 //! Every worker holds one request and a request fills its worker, so each cycle admits exactly
 //! one request and the backlog stays at `backlog`.
 //!
+//! Read a time as a floor, and compare two cases by their difference in microseconds, not
+//! their ratio. Every request carries the same four block hashes and the fleet is 64 workers,
+//! so the part of a cycle that does not depend on the backlog (storing and removing the
+//! request's blocks, the overlap walk, the projection of each rank's load) is far below a real
+//! request's. A free also admits exactly one request, so the rechecks per admission are a
+//! lower bound.
+//!
 //! The cases differ in where the backlog waits:
 //!
 //! - `shared`: no classifier; one class, one shared heap.
