@@ -10,13 +10,13 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 220 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 222 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">75 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
 <Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">41 types</Card>
-<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
+<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">30 types</Card>
 </CardGroup>
 
 <div id="nvidia-com-v1alpha1" />
@@ -1399,6 +1399,20 @@ See [DynamoPoolRelayStatus](#dynamopoolrelaystatus).
 </ParamField>
 </Accordion>
 
+<Accordion id="dynamopoolrelayglobaldiscovery" title="DynamoPoolRelayGlobalDiscovery">
+DynamoPoolRelayGlobalDiscovery turns on the pool's registration. The Global
+Discovery Service's URL and the region are the operator's settings.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelaySpec](#dynamopoolrelayspec)
+
+<ParamField path="frontends" type="string array">
+Frontends are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global Discovery Service that takes pools from registrations, rather than from MCS, needs them.
+**Validation:** MaxItems: 16  items:MaxLength: 512  items:Pattern: `^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])|((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.])\{3\}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]\{2\}|6[0-4][0-9]\{3\}|[1-5][0-9]\{4\}|[1-9][0-9]\{0,3\}))?([/?#][^\p\{Cc\}\p\{Z\},]*)?$`  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="dynamopoolrelayspec" title="DynamoPoolRelaySpec">
 DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
 
@@ -1412,7 +1426,7 @@ ClusterID is the Relay's stable logical cluster ID across restarts.
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec" required={true}>
-PodTemplate configures Relay Pods. Its main container needs an image with dynamo.pool_relay and --sources-file support from the operator's revision. The controller sets the main command, listener probes, source volume, service account, and Relay identity and discovery environment variables. Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND, DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST, DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND, DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL, DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID. The main container cannot use envFrom because it could override those values.
+PodTemplate configures Relay Pods. Its main container needs an image with dynamo.pool_relay and --sources-file support from the operator's revision. The controller sets the main command, listener probes, source volume, service account, and Relay env, with registration env only under globalDiscovery. The main container cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
@@ -1420,6 +1434,12 @@ See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-
 <ParamField path="replicas" type="integer" default="2">
 Replicas sets the number of active Relay Pods. Each watches the DGD.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="globalDiscovery" type="DynamoPoolRelayGlobalDiscovery">
+GlobalDiscovery registers the pool as `<clusterId>/<namespace>/<name>` with the operator's Global Discovery Service, so that Global Routers send it requests. Unset, the operator sets no registration env. Set, it reserves the env names that the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery URL and region, the Relay is left as it is and reported unready.
+See [DynamoPoolRelayGlobalDiscovery](#dynamopoolrelayglobaldiscovery).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1446,7 +1466,7 @@ AvailableReplicas is the number of Relay Pods the Deployment reports available.
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
-Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, GlobalDiscoveryNotConfigured, ReconcileFailed, or ResourceOwnershipConflict.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5946,6 +5966,25 @@ DiscoveryEnabled indicates whether GPU discovery is enabled
 </ParamField>
 </Accordion>
 
+<Accordion id="globaldiscoveryconfiguration" title="GlobalDiscoveryConfiguration">
+GlobalDiscoveryConfiguration is where the DynamoPoolRelays with
+spec.globalDiscovery register their pools. Set both fields or neither.
+
+
+**Kind:** `type`
+**Appears in:** [OperatorConfiguration](#operatorconfiguration)
+
+<ParamField path="url" type="string">
+URL is the Global Discovery Service's root, such as `http://global-discovery.global-router.svc:8080/`.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="region" type="string">
+Region is this cluster's region, which the pools register in.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="groveconfiguration" title="GroveConfiguration">
 GroveConfiguration holds Grove orchestrator settings.
 
@@ -6382,6 +6421,12 @@ See [SecurityConfiguration](#securityconfiguration).
 LPX scheduler integration and model-registry configuration.
 See [LPXConfiguration](#lpxconfiguration).
 **Validation:** Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="globalDiscovery" type="GlobalDiscoveryConfiguration">
+GlobalDiscovery is where the DynamoPoolRelays with spec.globalDiscovery register their pools.
+See [GlobalDiscoveryConfiguration](#globaldiscoveryconfiguration).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

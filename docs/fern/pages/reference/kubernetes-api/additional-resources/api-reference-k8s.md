@@ -777,6 +777,23 @@ uses only lowercase letters, digits, and hyphens, and is at most 52 characters.
 | `status` _[DynamoPoolRelayStatus](#dynamopoolrelaystatus)_ |  |  | Optional: \{\} <br /> |
 
 
+#### DynamoPoolRelayGlobalDiscovery
+
+
+
+DynamoPoolRelayGlobalDiscovery turns on the pool's registration. The Global
+Discovery Service's URL and the region are the operator's settings.
+
+
+
+_Appears in:_
+- [DynamoPoolRelaySpec](#dynamopoolrelayspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `frontends` _string array_ | Frontends are the HTTP(S) URLs that Global Routers send the pool's<br />requests to. Only a Global Discovery Service that takes pools from<br />registrations, rather than from MCS, needs them. |  | MaxItems: 16 <br />items:MaxLength: 512 <br />items:Pattern: `^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?\|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])\|((25[0-5]\|2[0-4][0-9]\|1[0-9][0-9]\|[1-9]?[0-9])[.])\{3\}(25[0-5]\|2[0-4][0-9]\|1[0-9][0-9]\|[1-9]?[0-9])\|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]\|655[0-2][0-9]\|65[0-4][0-9]\{2\}\|6[0-4][0-9]\{3\}\|[1-5][0-9]\{4\}\|[1-9][0-9]\{0,3\}))?([/?#][^\p\{Cc\}\p\{Z\},]*)?$` <br />Optional: \{\} <br /> |
+
+
 #### DynamoPoolRelaySpec
 
 
@@ -791,8 +808,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$` <br />Required: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with<br />dynamo.pool_relay and --sources-file support from the operator's revision.<br />The controller sets the main command, listener probes, source volume,<br />service account, and Relay identity and discovery environment variables.<br />Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND,<br />DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST,<br />DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND,<br />DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,<br />DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.<br />The main container cannot use envFrom because it could override those values. |  | Required: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with<br />dynamo.pool_relay and --sources-file support from the operator's revision. The<br />controller sets the main command, listener probes, source volume, service account,<br />and Relay env, with registration env only under globalDiscovery. The main container<br />cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them. |  | Required: \{\} <br /> |
 | `replicas` _integer_ | Replicas sets the number of active Relay Pods. Each watches the DGD. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `globalDiscovery` _[DynamoPoolRelayGlobalDiscovery](#dynamopoolrelayglobaldiscovery)_ | GlobalDiscovery registers the pool as `<clusterId>/<namespace>/<name>` with the<br />operator's Global Discovery Service, so that Global Routers send it requests.<br />Unset, the operator sets no registration env. Set, it reserves the env names that<br />the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery<br />URL and region, the Relay is left as it is and reported unready. |  | Optional: \{\} <br /> |
 
 
 #### DynamoPoolRelayStatus
@@ -811,7 +829,7 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the Relay resource generation last reconciled by the operator. |  | Optional: \{\} <br /> |
 | `endpoint` _string_ | Endpoint is the cluster-local `<dgd>-pool-relay.<namespace>.svc:5561` address.<br />It is empty after withdrawal or a failed reconciliation. |  | Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | AvailableReplicas is the number of Relay Pods the Deployment reports available. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes Ready for listener availability, not model or KV readiness.<br />Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,<br />DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,<br />InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes Ready for listener availability, not model or KV readiness.<br />Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,<br />DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,<br />InvalidConfiguration, GlobalDiscoveryNotConfigured, ReconcileFailed, or<br />ResourceOwnershipConflict. |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig
@@ -4221,6 +4239,24 @@ _Appears in:_
 | `discoveryEnabled` _boolean_ | DiscoveryEnabled indicates whether GPU discovery is enabled | true | Optional: \{\} <br /> |
 
 
+#### GlobalDiscoveryConfiguration
+
+
+
+GlobalDiscoveryConfiguration is where the DynamoPoolRelays with
+spec.globalDiscovery register their pools. Set both fields or neither.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `url` _string_ | URL is the Global Discovery Service's root, such as<br />`http://global-discovery.global-router.svc:8080/`. |  | Optional: \{\} <br /> |
+| `region` _string_ | Region is this cluster's region, which the pools register in. |  | Optional: \{\} <br /> |
+
+
 #### GroveConfiguration
 
 
@@ -4492,6 +4528,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  | Required: \{\} <br /> |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  | Required: \{\} <br /> |
 | `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  | Required: \{\} <br /> |
+| `globalDiscovery` _[GlobalDiscoveryConfiguration](#globaldiscoveryconfiguration)_ | GlobalDiscovery is where the DynamoPoolRelays with spec.globalDiscovery<br />register their pools. |  | Optional: \{\} <br /> |
 
 
 #### OrchestratorConfiguration

@@ -219,3 +219,14 @@ data:
       {{- with .Values.lpx.modelRegistryURL }}
       modelRegistryURL: {{ . | quote }}
       {{- end }}
+    {{- with .Values.dynamo.globalDiscovery }}
+    {{- if or .url .region }}
+    globalDiscovery:
+      {{- with .url }}
+      url: {{ . | quote }}
+      {{- end }}
+      {{- with .region }}
+      region: {{ . | quote }}
+      {{- end }}
+    {{- end }}
+    {{- end }}

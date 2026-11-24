@@ -128,6 +128,21 @@ unchanged. Review API migration notes before future upgrades.
 
 #### Operator behavior breaking changes
 
+##### PoolRelay Deployments drop fields that their spec no longer sets
+
+**Change:** The operator now removes a field from a `DynamoPoolRelay`'s Deployment once the
+relay's spec stops setting it. Earlier operators kept every field that the Deployment was created
+with.
+
+**Affected:** A relay whose spec changed since its Deployment was created, so that the Deployment
+kept a field the spec no longer sets: for example, an env entry removed from `podTemplate`,
+narrowed resources, or an image moved off `:latest`, which kept `imagePullPolicy: Always`. The
+first reconcile after the upgrade removes that field, and the relay's Pods restart once. Relays
+whose Deployments match their spec do not restart.
+
+**Action:** None. To see beforehand which relays restart, compare each relay's `podTemplate` with
+its `<name>-pool-relay` Deployment.
+
 ##### LPX units-only deployment contract
 
 **Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.
@@ -860,6 +875,8 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.dynamo.serviceMesh.istio.clientCertificate | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS certificate used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
 | dynamo-operator.dynamo.serviceMesh.istio.privateKey | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS private key used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
 | dynamo-operator.dynamo.serviceMesh.istio.caCertificates | string | `""` | Optional path (in the istio-proxy sidecar's filesystem) to CA certificates used to verify the EPP server certificate. Used only when tlsMode is "MUTUAL". |
+| dynamo-operator.dynamo.globalDiscovery.url | string | `""` | Root URL of the Global Discovery Service. Format: `http://host:8080/` |
+| dynamo-operator.dynamo.globalDiscovery.region | string | `""` | This cluster's region, which the pools register in. |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
 | dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |

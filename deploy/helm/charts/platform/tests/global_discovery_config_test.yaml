@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Global Discovery settings in the operator configuration
+templates:
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: renders no globalDiscovery block by default
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^globalDiscovery:'
+
+  - it: renders the Global Discovery URL and region
+    set:
+      dynamo-operator.dynamo.globalDiscovery.url: http://discovery.global-router.svc:8080/
+      dynamo-operator.dynamo.globalDiscovery.region: us-east-1
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^globalDiscovery:\n  url: "http://discovery.global-router.svc:8080/"\n  region: "us-east-1"$'

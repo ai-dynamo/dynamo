@@ -64,18 +64,34 @@ spec:
                   minLength: 1
                   pattern: ^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$
                   type: string
+                globalDiscovery:
+                  description: |-
+                    GlobalDiscovery registers the pool as `<clusterId>/<namespace>/<name>` with the
+                    operator's Global Discovery Service, so that Global Routers send it requests.
+                    Unset, the operator sets no registration env. Set, it reserves the env names that
+                    the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery
+                    URL and region, the Relay is left as it is and reported unready.
+                  properties:
+                    frontends:
+                      description: |-
+                        Frontends are the HTTP(S) URLs that Global Routers send the pool's
+                        requests to. Only a Global Discovery Service that takes pools from
+                        registrations, rather than from MCS, needs them.
+                      items:
+                        maxLength: 512
+                        pattern: ^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])|((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?([/?#][^\p{Cc}\p{Z},]*)?$
+                        type: string
+                      maxItems: 16
+                      type: array
+                      x-kubernetes-list-type: set
+                  type: object
                 podTemplate:
                   description: |-
                     PodTemplate configures Relay Pods. Its main container needs an image with
-                    dynamo.pool_relay and --sources-file support from the operator's revision.
-                    The controller sets the main command, listener probes, source volume,
-                    service account, and Relay identity and discovery environment variables.
-                    Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND,
-                    DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST,
-                    DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND,
-                    DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,
-                    DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.
-                    The main container cannot use envFrom because it could override those values.
+                    dynamo.pool_relay and --sources-file support from the operator's revision. The
+                    controller sets the main command, listener probes, source volume, service account,
+                    and Relay env, with registration env only under globalDiscovery. The main container
+                    cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them.
                   properties:
                     metadata:
                       description: |-
@@ -8210,7 +8226,8 @@ spec:
                     Conditions includes Ready for listener availability, not model or KV readiness.
                     Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
                     DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
-                    InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+                    InvalidConfiguration, GlobalDiscoveryNotConfigured, ReconcileFailed, or
+                    ResourceOwnershipConflict.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:

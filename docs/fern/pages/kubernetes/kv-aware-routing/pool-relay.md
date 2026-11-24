@@ -89,11 +89,54 @@ and Relay identity environment variables; leave those out of the template. Reser
 names are `DYN_NAMESPACE`, `DYN_DISCOVERY_BACKEND`, `DYN_KUBE_DISCOVERY_MODE`, `DYN_SYSTEM_PORT`,
 `DYN_TCP_RESPONSE_STREAM_HOST`, `DYN_TCP_RESPONSE_STREAM_PORT`, `DYN_CLUSTER_ID`, `DYN_RELAY_BIND`,
 `DYN_RELAY_CONNECTION_REVISION`, `DYN_RELAY_NAMESPACES`, `DYN_RELAY_WATCH_ALL`,
-`DYN_RELAY_ENDPOINT_PREFIXES`, `POD_NAME`, `POD_NAMESPACE`, and `POD_UID`. The main container
-cannot use `envFrom` because it could override those values.
+`DYN_RELAY_ENDPOINT_PREFIXES`, `POD_NAME`, `POD_NAMESPACE`, and `POD_UID`, plus four registration
+names when `globalDiscovery` is set (see
+[Register the Pool with Global Discovery](#register-the-pool-with-global-discovery)). The main
+container cannot use `envFrom` because it could override those values.
 
 The manual manifest below runs one Relay replica and is not an HA deployment. Use it when the
 operator does not manage your Relay.
+
+### Register the Pool with Global Discovery
+
+To let Global Routers send requests to the pool, set `globalDiscovery` on the `DynamoPoolRelay`.
+The Relay then registers the pool with the Global Discovery Service as
+`<clusterId>/<namespace>/<name>`.
+
+```yaml
+spec:
+  clusterId: example-cluster
+  globalDiscovery:
+    frontends:
+      - http://green.example.com:8000
+```
+
+- The Global Discovery Service's URL and the cluster's region are operator settings, the same for
+  every relay. Set both at install with the Helm values
+  `dynamo-operator.dynamo.globalDiscovery.url` and `dynamo-operator.dynamo.globalDiscovery.region`.
+  The operator does not start with only one of them, or with a URL that breaks the rule for
+  frontends below. Until both are set, the operator leaves an otherwise valid relay with
+  `globalDiscovery` as it is: its Pods keep running, and its `Ready` condition is `False` with
+  reason `GlobalDiscoveryNotConfigured`.
+- `frontends` are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global
+  Discovery Service run with `--pool-discovery registrations` needs them; with MCS, it finds the
+  frontends through the imported frontend Services. The API server accepts only `http` and `https`
+  URLs whose host is a DNS name whose last label is not all digits, an IPv4 address, or an IPv6
+  address in brackets, whose port, if any, is from 1 to 65535, and that hold no white space or
+  comma. It also rejects a frontend that is listed twice.
+- With `globalDiscovery` set, `clusterId` cannot contain `/` or control characters, because it
+  becomes the first part of the pool name. The operator then removes the Relay's Deployment and
+  Service, and the relay's `Ready` condition is `False` with reason `InvalidConfiguration`.
+- With `globalDiscovery` set, `DYN_RELAY_GLOBAL_DISCOVERY_URL`, `DYN_RELAY_ROUTING_POOL`,
+  `DYN_RELAY_ROUTING_POOL_REGION`, and `DYN_RELAY_ROUTING_POOL_FRONTENDS` are reserved. Without it,
+  the operator sets none of them, so a relay that sets them in its `podTemplate` keeps working. To
+  move such a relay to `globalDiscovery`, remove those entries from its `podTemplate` in the same
+  change, or the relay is invalid and its Deployment and Service are removed.
+- Adding, changing, or removing `globalDiscovery`, or changing the operator's URL or region,
+  restarts the Relay Pods that it affects.
+- `Ready` reports the Relay's listeners, not its registration. The Relay's health field
+  `routing_pool_unregistered_reason` says why the pool is not registered; see
+  [Pool Relay Configuration](../../reference/components/pool-relay-configuration.md).
 
 ## Discovery Scope
 
