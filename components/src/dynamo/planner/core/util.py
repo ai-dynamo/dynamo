@@ -15,6 +15,7 @@ _MDC_REFRESH_FIELDS = (
     "max_num_batched_tokens",
     "context_length",
     "speculative_nextn",
+    "sglang_mixed_chunk",
 )
 
 

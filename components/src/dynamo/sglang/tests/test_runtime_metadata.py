@@ -270,6 +270,8 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
         max_prefill_tokens=None,
         page_size=16,
         reasoning_parser="kimi_k3",
+        enable_mixed_chunk=False,
+        chunked_prefill_size=256,
         skip_tokenizer_init=False,
         speculative_algorithm="NONE",
         speculative_num_steps=None,
@@ -324,6 +326,7 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
         TOKEN_BUDGET_RUNTIME_KEY in runtime_config.runtime_data
     ) is runtime_supported
     capability = register.DISAGG_PREFILL_CANCEL_ANYTIME_V1
+    assert json.loads(runtime_config.runtime_data["enable_mixed_chunk"]) is False
     assert (capability in runtime_config.runtime_data) is capability_expected
     if capability_expected:
         assert json.loads(runtime_config.runtime_data[capability]) is True
@@ -408,6 +411,8 @@ async def test_hicache_publish_failure_preserves_core_capacity(
         max_prefill_tokens=None,
         page_size=16,
         speculative_algorithm="NONE",
+        enable_mixed_chunk=True,
+        chunked_prefill_size=256,
         speculative_num_steps=None,
     )
     dynamo_args = register.DynamoConfig()
@@ -453,6 +458,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(
 
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
+    assert json.loads(runtime_config.runtime_data["enable_mixed_chunk"]) is True
     assert json.loads(runtime_config.runtime_data[TOKEN_BUDGET_RUNTIME_KEY]) == {
         "combined_limit": 4092,
         "reject_prompt_overflow": True,

@@ -133,6 +133,13 @@ def worker_info_from_mdc(
     if not isinstance(runtime_cfg, dict):
         runtime_cfg = {}
 
+    runtime_data = runtime_cfg.get("runtime_data")
+    mixed_chunk = (
+        runtime_data.get("enable_mixed_chunk")
+        if backend == "sglang" and isinstance(runtime_data, dict)
+        else None
+    )
+
     component_name = entry.component or defaults.component_name
     endpoint = entry.endpoint or defaults.endpoint
 
@@ -163,4 +170,5 @@ def worker_info_from_mdc(
         max_num_batched_tokens=runtime_cfg.get("max_num_batched_tokens"),
         context_length=context_length,
         speculative_nextn=_parse_speculative_nextn(runtime_cfg),
+        sglang_mixed_chunk=mixed_chunk if isinstance(mixed_chunk, bool) else None,
     )

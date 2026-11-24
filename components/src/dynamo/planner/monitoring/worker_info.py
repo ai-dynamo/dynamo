@@ -44,6 +44,7 @@ class WorkerInfo:
     max_num_batched_tokens: Optional[int] = None
     context_length: Optional[int] = None
     speculative_nextn: Optional[int] = None
+    sglang_mixed_chunk: Optional[bool] = None
 
     @property
     def max_kv_tokens(self) -> Optional[int]:

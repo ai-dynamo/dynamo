@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable, Optional
 
 import pytest
@@ -14,11 +15,20 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.perf_model import engine_query
+from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
     EngineCapacityRequest,
+    EngineLoadStatus,
     EnginePerfLimits,
+)
+from dynamo.planner.core.state_machine import PlannerScalingState
+from dynamo.planner.core.types import (
+    EngineCapabilities,
+    FpmObservations,
+    WorkerCapabilities,
 )
 
 pytestmark = [
@@ -63,6 +73,7 @@ def _model(
     max_num_seqs: int = 16,
     max_kv_tokens: int = 100_000,
     attention_dp_size: int = 1,
+    prefill_shares_decode_budget: Optional[bool] = True,
 ) -> tuple[AISCoreEnginePerfModel, _FakeForwardPassModel]:
     forward_pass_model = _FakeForwardPassModel(estimate)
     model = AISCoreEnginePerfModel(
@@ -72,6 +83,7 @@ def _model(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
+            prefill_shares_decode_budget=prefill_shares_decode_budget,
         ),
         attention_dp_size=attention_dp_size,
         max_observations=16,
@@ -193,8 +205,9 @@ def test_queue_drain_reserves_decode_tokens(
     [
         ((9, 9), (6, 2), 0.05, ((2, 6), (2, 3), (2, 0), (1, 0))),
         ((0, 9), (8, 2), 0.02, ((0, 6), (0, 3))),
-        ((1, 9), (8, 2), None, ()),
+        ((1, 9), (8, 2), EngineLoadStatus.SATURATED, ()),
         ((0, 9), (9, 2), None, ()),
+        ((0, 1), (9, 8), EngineLoadStatus.SATURATED, ()),
         ((0, 0), (8, 8), 0.0, ()),
     ],
 )
@@ -224,8 +237,8 @@ def test_aggregate_queue_drain_uses_each_ranks_remaining_budget(
 
     estimate_s = model.get_queued_prefill_time(snapshots)
 
-    if expected_s is None:
-        assert estimate_s is None
+    if expected_s is None or expected_s is EngineLoadStatus.SATURATED:
+        assert estimate_s is expected_s
     else:
         assert estimate_s == pytest.approx(expected_s)
     assert (
@@ -241,6 +254,145 @@ def test_aggregate_queue_drain_uses_each_ranks_remaining_budget(
             assert (
                 scheduled["sum_prefill_tokens"] + scheduled["num_decode_requests"] <= 8
             )
+
+
+@pytest.mark.parametrize(
+    ("mixed_chunk", "expected"),
+    [(False, [(224, 0)]), (True, [(192, 64), (32, 64)]), (None, [(224, 64)])],
+)
+def test_aggregate_prefill_pricing_uses_the_scheduler_mode(mixed_chunk, expected):
+    model, forward = _model(
+        worker_type="aggregated",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=256,
+        prefill_shares_decode_budget=mixed_chunk,
+    )
+    fpm = ForwardPassMetrics(
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=64, sum_decode_kv_tokens=640
+        ),
+        queued_requests=QueuedRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=224
+        ),
+    )
+    for estimate in (
+        lambda: model.get_queued_prefill_time([fpm]),
+        lambda: model._aggregated_ttft(224, 64, 640),
+    ):
+        forward.estimate_calls.clear()
+        assert estimate() == pytest.approx(len(expected) * 0.01)
+        rows = [call[0]["scheduled_requests"] for call in forward.estimate_calls]
+        assert [
+            (row["sum_prefill_tokens"], row["num_decode_requests"]) for row in rows
+        ] == expected
+
+
+def test_sglang_aggregate_query_rebuilds_on_mixed_chunk_change(monkeypatch):
+    monkeypatch.setattr(
+        engine_query.AISForwardPassPerfModel,
+        "best_available",
+        lambda _: _FakeForwardPassModel(lambda _metrics: 10.0),
+    )
+    config = PlannerConfig.model_construct(mode="agg", backend="sglang")
+    limits = EngineCapabilities(
+        max_num_batched_tokens=256,
+        max_num_seqs=128,
+        max_kv_tokens=100_000,
+        sglang_mixed_chunk=False,
+    )
+    model = PlannerEnginePerfModel(
+        worker_type="aggregated", config=config, capabilities=limits
+    )
+    fpm = ForwardPassMetrics(
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=64, sum_decode_kv_tokens=640
+        ),
+        queued_requests=QueuedRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=224
+        ),
+    )
+
+    def estimate():
+        return model.estimate_queued_prefill_time(
+            [fpm], max_num_batched_tokens=256, add_next_request=False
+        )
+
+    assert estimate() == pytest.approx(0.01)
+    model.update_capabilities(replace(limits, sglang_mixed_chunk=True))
+    assert estimate() == pytest.approx(0.02)
+
+
+def test_separate_prefill_mode_prices_aggregate_capacity_as_separate_steps():
+    model, forward = _model(
+        worker_type="aggregated",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=8,
+        max_num_seqs=16,
+        prefill_shares_decode_budget=False,
+    )
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=2, osl=32))
+
+    assert capacity is not None
+    rows = [call[0]["scheduled_requests"] for call in forward.estimate_calls]
+    assert max(row["num_decode_requests"] for row in rows) == 16
+    assert all(
+        not row["sum_prefill_tokens"] or not row["num_decode_requests"] for row in rows
+    )
+
+
+@pytest.mark.parametrize(
+    ("rank_count", "second_decode", "expected"),
+    [(1, 64, 3), (1, 16, 2), (2, 64, 3), (2, 16, 2)],
+)
+def test_agg_load_scaling_keeps_budget_saturated_prefill_vote(
+    monkeypatch, rank_count, second_decode, expected
+):
+    monkeypatch.setattr(
+        engine_query.AISForwardPassPerfModel,
+        "best_available",
+        lambda _: _FakeForwardPassModel(lambda _metrics: 10.0),
+    )
+    config = PlannerConfig.model_construct(
+        mode="agg",
+        backend="vllm",
+        optimization_target="sla",
+        ttft_ms=30.0,
+        itl_ms=50.0,
+        enable_throughput_scaling=False,
+        min_endpoint=1,
+    )
+    state = PlannerScalingState(
+        config,
+        WorkerCapabilities(
+            decode=EngineCapabilities(
+                max_num_batched_tokens=64, max_num_seqs=128, max_kv_tokens=100_000
+            )
+        ),
+    )
+    state._num_d_workers = 2
+    fpms = {
+        (str(worker), rank): ForwardPassMetrics(
+            worker_id=str(worker),
+            dp_rank=rank,
+            scheduled_requests=ScheduledRequestMetrics(
+                num_decode_requests=decodes, sum_decode_kv_tokens=decodes * 10
+            ),
+            queued_requests=QueuedRequestMetrics(
+                num_prefill_requests=1, sum_prefill_tokens=256 if decodes == 64 else 8
+            ),
+        )
+        for worker, decodes in enumerate((64, second_decode))
+        for rank in range(rank_count)
+    }
+
+    result = state._advance_load_agg(FpmObservations(decode=fpms))
+
+    if expected == 2:
+        assert result is None
+        assert state._diag_load_reason == "scale_down_refused_consolidation"
+    else:
+        assert result is not None
+        assert result.num_decode == expected
 
 
 @pytest.mark.parametrize(
