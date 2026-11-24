@@ -54,6 +54,10 @@ func lpxComponentGateErrors(
 	fldPath *field.Path,
 	source runtimeVersionValidationSource,
 ) field.ErrorList {
+	// Alpha updates compare the complete source spec, including source-only fields.
+	if source == runtimeVersionSourceV1Alpha1 && oldSpec != nil {
+		return nil
+	}
 	if !newSpec.IsLPX() || features.MustGateFrom(ctx).Enabled(features.LPX) ||
 		(oldSpec != nil && apiequality.Semantic.DeepEqual(newSpec, oldSpec)) {
 		return nil
