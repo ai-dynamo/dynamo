@@ -511,6 +511,7 @@ pub(crate) async fn dump_registry(registry: &IndexRegistry) -> serde_json::Value
                 result.insert(
                     map_key,
                     serde_json::json!({
+                        "partition": key,
                         "block_size": block_size,
                         "events": events,
                     }),
