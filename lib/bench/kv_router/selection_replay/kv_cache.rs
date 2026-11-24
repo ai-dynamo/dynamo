@@ -92,11 +92,6 @@ impl CacheStats {
             over_capacity: self.over_capacity - earlier.over_capacity,
         }
     }
-
-    /// Prompt blocks found cached on the booked worker, over all prompt blocks.
-    pub fn prompt_hit_rate(&self) -> f64 {
-        self.prompt_hits as f64 / self.prompt_blocks.max(1) as f64
-    }
 }
 
 pub struct KvCaches {

@@ -166,9 +166,9 @@ pub struct RunResult {
     /// Prompt blocks found cached on the booked worker, over all prompt blocks of
     /// the whole run.
     pub prompt_hit_rate: f64,
-    /// The event and cache counters over the measured window only; none if the
-    /// sampler never saw it open.
-    pub window: Option<WindowCounters>,
+    /// What the counters gained over the measured window, which leaves out the
+    /// warmup; none if the sampler never saw it open.
+    pub window: Option<Counters>,
     /// For window requests: the cached prompt blocks the router predicted on its
     /// pick, those the worker's cache held at first output, and their mean gap: the
     /// index's lag plus any cache changes between the pick and the first output.
@@ -181,20 +181,35 @@ pub struct RunResult {
     pub window_wall_ns: u64,
 }
 
-/// What the run's event and cache counters gained between the sampler opening and
-/// closing the measured window, the interval it brackets for `perf record`. The
-/// whole-run totals also count the warmup, which fills the caches from empty, so
-/// per-admission counts divide these by `admitted`.
+/// The run's event and cache counters: a reading, or what they gained between two.
 #[derive(Clone, Debug, Serialize)]
-pub struct WindowCounters {
+pub struct Counters {
     /// KV events the workers handed to the index.
     pub events_issued: u64,
     /// Events the index applied, by `type/outcome`: fewer than it was handed while
     /// it fell behind.
     pub index_events_applied: BTreeMap<String, u64>,
     pub cache: CacheStats,
-    /// Prompt blocks found cached on the booked worker, over all prompt blocks.
-    pub prompt_hit_rate: f64,
+}
+
+impl Counters {
+    fn read(shared: &Shared) -> Self {
+        Self {
+            events_issued: shared.events_issued.load(Ordering::Relaxed),
+            index_events_applied: shared.host.index_events_applied(),
+            cache: shared.caches.stats(),
+        }
+    }
+
+    /// What the counters gained since `earlier`.
+    fn since(mut self, earlier: &Self) -> Self {
+        self.events_issued -= earlier.events_issued;
+        for (outcome, applied) in &mut self.index_events_applied {
+            *applied -= earlier.index_events_applied.get(outcome).unwrap_or(&0);
+        }
+        self.cache = self.cache.since(&earlier.cache);
+        self
+    }
 }
 
 const UNSET: u64 = u64::MAX;
@@ -935,49 +950,15 @@ struct Sample {
     events_applied: u64,
 }
 
-/// The run's event and cache counters at one moment.
-struct Counters {
-    events_issued: u64,
-    index_events_applied: BTreeMap<String, u64>,
-    cache: CacheStats,
-}
-
-impl Counters {
-    fn read(shared: &Shared) -> Self {
-        Self {
-            events_issued: shared.events_issued.load(Ordering::Relaxed),
-            index_events_applied: shared.host.index_events_applied(),
-            cache: shared.caches.stats(),
-        }
-    }
-
-    /// What the counters gained since `open`, an earlier reading.
-    fn since(self, open: &Self) -> WindowCounters {
-        let cache = self.cache.since(&open.cache);
-        WindowCounters {
-            events_issued: self.events_issued - open.events_issued,
-            index_events_applied: self
-                .index_events_applied
-                .into_iter()
-                .map(|(outcome, applied)| {
-                    let before = open.index_events_applied.get(&outcome).copied();
-                    (outcome, applied - before.unwrap_or(0))
-                })
-                .collect(),
-            cache,
-            prompt_hit_rate: cache.prompt_hit_rate(),
-        }
-    }
-}
-
 /// Samples the run every 100 ms and brackets the measured window for
-/// `perf record --control`. Returns the samples, and what the counters gained over
-/// the window, read while perf records.
-fn sample(shared: &Shared, mut perf: PerfControl) -> Result<(Vec<Sample>, Option<WindowCounters>)> {
+/// `perf record --control`. Returns the samples and what the counters gained over
+/// the window.
+fn sample(shared: &Shared, mut perf: PerfControl) -> Result<(Vec<Sample>, Option<Counters>)> {
     let mut samples = Vec::new();
-    let (mut opened, mut closed) = (None, None);
+    let (mut at_open, mut window) = (None, None);
     let mut next_sample = shared.clock.now_ns();
     loop {
+        let stopped = shared.stopped();
         let now = shared.clock.now_ns();
         let trace_us = match shared.mode {
             Mode::Fixed { scale } => {
@@ -985,14 +966,14 @@ fn sample(shared: &Shared, mut perf: PerfControl) -> Result<(Vec<Sample>, Option
             }
             Mode::Saturation { .. } => shared.virtual_us.load(Ordering::Acquire),
         };
-        if opened.is_none() && trace_us >= shared.window_start_us && trace_us != u64::MAX {
+        if at_open.is_none() && shared.in_window(trace_us) {
             perf.send("enable")?;
-            opened = Some(Counters::read(shared));
+            at_open = Some(Counters::read(shared));
         }
-        if let (Some(open), None) = (&opened, &closed)
-            && trace_us >= shared.window_end_us
+        if let (Some(at_open), None) = (&at_open, &window)
+            && (stopped || trace_us >= shared.window_end_us)
         {
-            closed = Some(Counters::read(shared).since(open));
+            window = Some(Counters::read(shared).since(at_open));
             perf.send("disable")?;
         }
         if now >= next_sample {
@@ -1005,12 +986,8 @@ fn sample(shared: &Shared, mut perf: PerfControl) -> Result<(Vec<Sample>, Option
                 events_applied: shared.host.index_events_applied().values().sum(),
             });
         }
-        if shared.stopped() {
-            if let (Some(open), None) = (&opened, &closed) {
-                closed = Some(Counters::read(shared).since(open));
-                perf.send("disable")?;
-            }
-            return Ok((samples, closed));
+        if stopped {
+            return Ok((samples, window));
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -1188,7 +1165,7 @@ fn analyze(
     engine_lags: Vec<u64>,
     harness_wait_ns: u64,
     samples: Vec<Sample>,
-    window: Option<WindowCounters>,
+    window: Option<Counters>,
 ) -> RunResult {
     let limits = &config.limits;
     let mut admission = Vec::new();
@@ -1327,7 +1304,7 @@ fn analyze(
         max_index_backlog,
         index_backlog_at_window_end: window_samples.last().map_or(0, backlog),
         cache,
-        prompt_hit_rate: cache.prompt_hit_rate(),
+        prompt_hit_rate: cache.prompt_hits as f64 / cache.prompt_blocks.max(1) as f64,
         window,
         mean_predicted_cached_blocks: predicted_sum as f64 / compared.max(1) as f64,
         mean_cached_blocks: cached_sum as f64 / compared.max(1) as f64,
