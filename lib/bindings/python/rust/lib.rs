@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
@@ -11,21 +12,14 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-#[cfg(feature = "custom-policy")]
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
-use pyo3::types::PyCapsule;
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
-use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 use std::thread::sleep;
-use std::{
-    fmt::Display,
-    sync::{Arc, Weak},
-};
+use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
@@ -40,9 +34,10 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
+use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -56,7 +51,6 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 pub enum RouterMode {
     RoundRobin,
     Random,
-    PowerOfTwoChoices,
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
@@ -70,7 +64,6 @@ impl From<RouterMode> for RsRouterMode {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
             RouterMode::Random => Self::Random,
-            RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
             RouterMode::LeastLoaded => Self::LeastLoaded,
@@ -79,6 +72,12 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_env = "musl")
+))]
+mod allocator;
 mod backend;
 mod context;
 mod engine;
@@ -94,7 +93,7 @@ mod python_payload;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
-    ManyOut<python_payload::PythonResponseItem>,
+    ManyOut<python_payload::EncodedPythonResponse>,
     python_payload::PythonIngressPayloadAdapter,
 >;
 
@@ -109,10 +108,13 @@ type PythonPushEgressIngress = Ingress<
     python_payload::PythonIngressPayloadAdapter,
 >;
 
+/// Ingress for bidirectional endpoints, which backend admission never sees:
+/// its own adapter decodes request frames without the rank probe and encodes
+/// responses without classifying them.
 type PythonBidirectionalIngress = Ingress<
     rs::pipeline::ManyIn<python_payload::PythonPayload>,
     ManyOut<python_payload::PythonResponseItem>,
-    python_payload::PythonIngressPayloadAdapter,
+    python_payload::PythonBidirectionalPayloadAdapter,
 >;
 
 static INIT: OnceCell<()> = OnceCell::new();
@@ -145,10 +147,10 @@ fn get_span_for_direct_context(
 }
 
 // Helper to create request context with proper linking and cancellation handling
-fn create_request_context(
-    request: rmpv::Value,
+fn create_request_context<T: rs::pipeline::Data>(
+    request: T,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<rmpv::Value> {
+) -> RsContext<T> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -158,7 +160,9 @@ fn create_request_context(
                 parent_ctx.metadata_snapshot(),
             );
             parent_ctx.inner().link_child(child_ctx.context());
-            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+            if parent_ctx.inner().is_killed() {
+                child_ctx.context().kill();
+            } else if parent_ctx.inner().is_stopped() {
                 // Let the server handle the cancellation for now since not all backends are
                 // properly handling request exceptions
                 // TODO: (DIS-830) Return an error if context is cancelled
@@ -168,6 +172,36 @@ fn create_request_context(
         }
         // Otherwise if there is no parent context, use the request as-is
         _ => request.into(),
+    }
+}
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::*;
+    use rs::pipeline::AsyncEngineContext;
+    use rs::pipeline::context::Controller;
+
+    #[test]
+    fn create_request_context_preserves_killed_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.kill();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_killed());
+    }
+
+    #[test]
+    fn create_request_context_preserves_stopped_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.stop_generating();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_stopped());
+        assert!(!child.context().is_killed());
     }
 }
 
@@ -290,6 +324,15 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rs::logging::init();
     }
 
+    let mut formats = dynamo_llm::generate_format::Registry::default();
+    dynamo_generate_format_catalog::register(&mut formats)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    if !dynamo_llm::generate_format::install(formats) {
+        return Err(PyRuntimeError::new_err(
+            "generate format registry already installed",
+        ));
+    }
+
     // Size the runtime the bridge may build for itself.
     //
     // `DistributedRuntime::new` gives the bridge a configured runtime, but only when it gets
@@ -356,11 +399,18 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
-    m.add_class::<llm::replay::SglangArgs>()?;
-    m.add_class::<llm::replay::TrtllmArgs>()?;
-    m.add_class::<llm::replay::MockEngineArgs>()?;
+    m.add_function(wrap_pyfunction!(llm::replay::_normalize_mocker_config, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        llm::routed_engine::_convert_preprocessed_request,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(errors::_raise_routed_http_error, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::WorkerSequenceEventPublisher>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SessionBindingStream>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionCacheConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
@@ -376,6 +426,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::fpm::FpmEventRelay>()?;
     m.add_class::<llm::fpm::FpmDirectPublisher>()?;
     m.add_class::<llm::fpm::FpmEventSubscriber>()?;
+    m.add_class::<llm::fpm::FpmHealthSnapshot>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -386,7 +437,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
-    m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::pool_relay::PoolRelay>()?;
     m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
     m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
@@ -448,10 +499,10 @@ pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry 
 
 #[cfg(feature = "custom-policy")]
 fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+    let mut registry = dynamo_router_policies::default_registry();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
-    dynamo_custom_policy_builtin::register(&mut registry)
+    dynamo_router_policies::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -506,7 +557,9 @@ fn resolve_event_transport_kind(
     match event_plane {
         Some("nats") => Ok(EventTransportKind::Nats),
         Some("zmq") => Ok(EventTransportKind::Zmq),
-        Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
+        Some("") | None => discovery_backend
+            .resolve_event_transport_kind()
+            .map_err(to_pyerr),
         Some(other) => Err(PyValueError::new_err(format!(
             "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
         ))),
@@ -519,9 +572,10 @@ fn resolve_response_plane_mode(
     match response_plane {
         Some("tcp") => Ok(Some(ResponsePlaneMode::Tcp)),
         Some("quic") => Ok(Some(ResponsePlaneMode::Quic)),
+        Some("velo") => Ok(Some(ResponsePlaneMode::Velo)),
         Some("") | None => Ok(None),
         Some(other) => Err(PyValueError::new_err(format!(
-            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic'"
+            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic', 'velo'"
         ))),
     }
 }
@@ -787,6 +841,16 @@ fn register_model<'p>(
         WorkerType::Encode => rs::telemetry::LifecycleOperationRole::Encode,
         WorkerType::Aggregated => rs::telemetry::LifecycleOperationRole::Worker,
     };
+    // The gate of the worker this endpoint serves for, created by its first
+    // registration with its metrics exposed on the endpoint's component. It
+    // exists before the role is recorded: recording the role, before the card
+    // is built and published, is what makes this endpoint a model backend,
+    // whose requests that gate admits from now on, even if it is already
+    // serving.
+    let admission_gate = endpoint
+        .admission_gate
+        .get_or_create(endpoint.inner.component())
+        .map_err(to_pyerr)?;
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
@@ -845,6 +909,7 @@ fn register_model<'p>(
             register_model_card(&endpoint.inner, &card)
                 .await
                 .map_err(|e| PyException::new_err(format!("{}", e)))?;
+            admission_gate.record_model_card(&card);
 
             return Ok(());
         }
@@ -913,6 +978,7 @@ fn register_model<'p>(
             )
             .await
             .map_err(to_pyerr)?;
+        admission_gate.record_model_card(local_model.card());
 
         if let Some(lora_name) = lora_identifier {
             tracing::info!("Registered LoRA '{}' MDC", lora_name);
@@ -1022,6 +1088,10 @@ fn fetch_model<'p>(
 pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
     event_loop: PyObject,
+    /// The admission gate of the Python worker this runtime serves, shared
+    /// with every endpoint it creates: a Python backend's runtime is its
+    /// worker, so backends sharing one runtime share one gate.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl DistributedRuntime {
@@ -1042,6 +1112,9 @@ struct CancellationToken {
 struct Endpoint {
     inner: rs::component::Endpoint,
     event_loop: PyObject,
+    /// The admission gate of the worker this endpoint serves for: its
+    /// runtime's, or the backend `Worker`'s that handed it to its engine.
+    admission_gate: WorkerAdmissionGate,
 }
 
 #[pyclass(name = "FirstTokenSource")]
@@ -1212,6 +1285,10 @@ impl ModelType {
         inner: llm_rs::model_type::ModelType::Audios,
     };
     #[classattr]
+    const Transcriptions: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Transcriptions,
+    };
+    #[classattr]
     const Videos: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Videos,
     };
@@ -1361,7 +1438,6 @@ impl DistributedRuntime {
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
         let response_plane = resolve_response_plane_mode(response_plane.as_deref())?;
-        let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
@@ -1393,9 +1469,7 @@ impl DistributedRuntime {
             || matches!(
                 event_transport_kind,
                 dynamo_runtime::discovery::EventTransportKind::Nats
-            )
-            || (explicit_event_plane.is_none()
-                && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
+            );
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
@@ -1413,7 +1487,11 @@ impl DistributedRuntime {
             .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
             .map_err(to_pyerr)?;
 
-        Ok(DistributedRuntime { inner, event_loop })
+        Ok(DistributedRuntime {
+            inner,
+            event_loop,
+            admission_gate: WorkerAdmissionGate::default(),
+        })
     }
 
     #[staticmethod]
@@ -1430,6 +1508,7 @@ impl DistributedRuntime {
         Ok(DistributedRuntime {
             inner,
             event_loop: py.None(),
+            admission_gate: WorkerAdmissionGate::default(),
         })
     }
 
@@ -1462,11 +1541,19 @@ impl DistributedRuntime {
         Ok(Endpoint {
             inner: endpoint,
             event_loop: self.event_loop.clone(),
+            admission_gate: self.admission_gate.clone(),
         })
     }
 
     fn shutdown(&self) {
         self.inner.shutdown();
+    }
+
+    /// The response transport this runtime uses ("tcp", "quic" or "velo"),
+    /// after the default and the TLS fallback are applied.
+    #[getter]
+    fn response_plane(&self) -> &'static str {
+        self.inner.response_plane().name()
     }
 
     fn event_loop(&self) -> PyObject {
@@ -1481,6 +1568,46 @@ impl DistributedRuntime {
         self.inner
             .system_status_server_info()
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
+    }
+
+    /// Register a status-aware handler at `/engine/{name}` on the system listener.
+    /// Single-segment names also handle paths below that prefix.
+    /// The callback receives `{method, path, body}` and returns `{status, body}`.
+    fn register_engine_http_handler(
+        &self,
+        py: Python<'_>,
+        name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        if self.inner.system_status_server_info().is_none() {
+            return Err(to_pyerr("control handlers require DYN_SYSTEM_PORT"));
+        }
+        let locals = Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py)?);
+        let callback = Arc::new(callback);
+        let handler: rs::engine_routes::EngineHttpCallback = Arc::new(move |request| {
+            let callback = Arc::clone(&callback);
+            let locals = Arc::clone(&locals);
+            Box::pin(async move {
+                let future = Python::with_gil(|py| {
+                    let request = pythonize::pythonize(py, &request)?;
+                    let coroutine = callback.call1(py, (request,))?;
+                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+                })?;
+                let result = future.await?;
+                Python::with_gil(|py| {
+                    pythonize::depythonize::<rs::engine_routes::EngineHttpResponse>(result.bind(py))
+                        .map_err(anyhow::Error::from)
+                })
+            })
+        });
+        self.inner
+            .engine_routes()
+            .register_http(name, handler)
+            .map_err(to_pyerr)
+    }
+
+    fn unregister_engine_http_handler(&self, name: &str) {
+        self.inner.engine_routes().unregister_http(name);
     }
 
     /// Register an async Python callback for /engine/{route_name}
@@ -1571,21 +1698,6 @@ impl DistributedRuntime {
         self.inner.system_health().lock().set_health_status(status);
         Ok(())
     }
-
-    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
-    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
-    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
-    // from it and share the same crate path. This will allow PyO3 to automatically
-    // recognize that both bindings use the same PyClass.
-    #[pyo3(name = "to_capsule")]
-    fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
-        let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
-
-        let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
-
-        PyCapsule::new(py, weak, Some(name))
-    }
 }
 
 #[pymethods]
@@ -1606,7 +1718,7 @@ impl Endpoint {
         })
     }
 
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, *, track_response_completion = false))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
@@ -1614,7 +1726,14 @@ impl Endpoint {
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
+        track_response_completion: bool,
     ) -> PyResult<Bound<'p, PyAny>> {
+        // The network engines read the role per request, so one recorded later
+        // by `register_model` takes effect from then on, through the gate of
+        // the worker this endpoint serves for.
+        let backend_role = engine::BackendRole::of(&self.inner);
+        let admission = self.admission_gate.clone();
+
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`
         // off its generator on a tokio thread once per response. Selected per
@@ -1660,6 +1779,8 @@ impl Endpoint {
                 Arc::new(push_egress::PythonPushEngine::new(
                     generator,
                     self.event_loop.clone(),
+                    backend_role,
+                    admission,
                 )),
                 python_payload::PythonIngressPayloadAdapter,
             )
@@ -1671,7 +1792,7 @@ impl Endpoint {
                 generator,
                 self.event_loop.clone(),
             )?);
-            let network_engine = Arc::new(engine.network_engine());
+            let network_engine = Arc::new(engine.network_engine(backend_role, admission));
             let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
                 network_engine,
                 python_payload::PythonIngressPayloadAdapter,
@@ -1700,8 +1821,12 @@ impl Endpoint {
             ));
         }
 
-        let mut builder = self
-            .inner
+        let endpoint = if track_response_completion {
+            self.inner.clone().track_response_completion()
+        } else {
+            self.inner.clone()
+        };
+        let mut builder = endpoint
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
@@ -1755,9 +1880,11 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress: Arc<PythonBidirectionalIngress> =
-            Ingress::for_engine_with_adapter(engine, python_payload::PythonIngressPayloadAdapter)
-                .map_err(to_pyerr)?;
+        let ingress: Arc<PythonBidirectionalIngress> = Ingress::for_engine_with_adapter(
+            engine,
+            python_payload::PythonBidirectionalPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
 
         let builder = self
             .inner
@@ -1812,9 +1939,10 @@ impl Endpoint {
         crate::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router =
-                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
+                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client_with_options(
                     client,
                     router_mode.into(),
+                    dynamo_llm::kv_router::plugins::push_router_options(),
                 )
                 .await
                 .map_err(to_pyerr)?;
@@ -1834,6 +1962,11 @@ impl Endpoint {
     #[getter]
     fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
         prometheus_metrics::RuntimeMetrics::from_endpoint(self.inner.clone())
+    }
+
+    /// Active requests on an endpoint configured to track response completion.
+    fn inflight_requests(&self) -> Option<i64> {
+        self.inner.inflight_requests()
     }
 
     /// Unregister this endpoint instance from discovery.
@@ -2250,6 +2383,8 @@ async fn process_stream(
 pub(crate) struct AsyncResponseStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
     annotated: bool,
+    /// The stream of a `RoutedEngine`, whose errors raise `RoutedEngineError`.
+    routed_engine: bool,
 }
 
 impl AsyncResponseStream {
@@ -2260,6 +2395,15 @@ impl AsyncResponseStream {
         Self {
             rx: Arc::new(Mutex::new(rx)),
             annotated,
+            routed_engine: false,
+        }
+    }
+
+    /// The annotated response stream of a `RoutedEngine`.
+    pub(crate) fn routed_engine(rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>) -> Self {
+        Self {
+            routed_engine: true,
+            ..Self::new(rx, true)
         }
     }
 }
@@ -2276,13 +2420,14 @@ impl AsyncResponseStream {
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let rx = self.rx.clone();
         let annotated = self.annotated;
+        let routed_engine = self.routed_engine;
 
         crate::future_into_py(py, async move {
             loop {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        let pyobj = crate::errors::check_response_error(pyobj)?;
+                        let pyobj = crate::errors::check_response_error(pyobj, routed_engine)?;
 
                         if annotated {
                             let object = Annotated { inner: pyobj };

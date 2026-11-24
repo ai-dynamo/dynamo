@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# MicroK8s only. Reference copy of the `default` GpuFractioningConfig that the
+# kai-gpu-fractioning fork chart produces on MicroK8s. Do not apply this file:
+# the chart recreates `default` from its values on every `helm upgrade --install`
+# (a post-install/post-upgrade hook), so a manual `kubectl apply` is overwritten
+# by the next upgrade. Set the socket paths through the chart instead.
+#
+# Why: on MicroK8s the containerd (CRI) and NRI sockets both live in
+# /var/snap/microk8s/common/run. The operator mounts the parent directory of each
+# socket into the fractiond DaemonSet, so two sockets with the same parent produce
+# duplicate volume mounts and the DaemonSet is rejected. Give the CRI socket its own
+# parent directory with a symlink, then pass both paths to the chart:
+#
+#   sudo mkdir -p /opt/kai-runtime
+#   sudo ln -sf /var/snap/microk8s/common/run/containerd.sock /opt/kai-runtime/containerd.sock
+#   helm upgrade --install gpu-fractioning ./operator/charts ... \
+#     --set fractioningAgent.criSocketPath=/opt/kai-runtime/containerd.sock \
+#     --set fractioningAgent.nriSocketPath=/var/snap/microk8s/common/run/nri.sock
+#
+# retroactiveEnforcement: true is the CRD default; the chart does not set it.
+# Other distributions do not need any of this.
+apiVersion: gpu-fractioning.kai.scheduler/v1alpha1
+kind: GpuFractioningConfig
+metadata:
+  name: default
+spec:
+  fractioningAgent:
+    criSocketPath: /opt/kai-runtime/containerd.sock
+    nriSocketPath: /var/snap/microk8s/common/run/nri.sock
+    retroactiveEnforcement: true
+  metricsAgent:
+    enabled: true
+    metricNames: {}
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  runtimeClassName: nvidia

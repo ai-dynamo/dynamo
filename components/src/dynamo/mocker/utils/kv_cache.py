@@ -27,11 +27,6 @@ TORCH_DTYPE_BYTES = {
     "int8": 1,
 }
 
-# Default KV transfer bandwidth in GB/s.
-# 64 GB/s corresponds to inter-node InfiniBand.
-# For intra-node NVLink, typical value is ~450 GB/s.
-DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS = 64.0
-
 
 def _normalize_dtype_str(dtype) -> str:
     """Normalize a dtype to a plain string like 'float16'.

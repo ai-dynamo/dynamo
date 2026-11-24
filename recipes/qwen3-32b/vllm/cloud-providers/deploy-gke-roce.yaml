@@ -58,7 +58,7 @@ spec:
           - -lc
           env:
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           - name: NCCL_SOCKET_IFNAME
             value: eth0
           - name: NCCL_CROSS_NIC
@@ -217,7 +217,7 @@ spec:
           - -lc
           env:
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - name: NCCL_SOCKET_IFNAME
             value: eth0
           - name: NCCL_CROSS_NIC

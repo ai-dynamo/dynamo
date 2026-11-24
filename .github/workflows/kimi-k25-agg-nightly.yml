@@ -12,6 +12,10 @@ on:
       image_tag:
         type: string
         required: true
+      preflight_only:
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
     inputs:
       image_tag:
@@ -29,6 +33,7 @@ permissions:
 concurrency:
   group: kimi-k25-nightly
   cancel-in-progress: false
+  queue: max
 
 jobs:
   perf:

@@ -11,18 +11,24 @@ homepage.workspace = true
 repository.workspace = true
 description = "Dynamo SGLang sidecar for an out-of-process engine exposed through its native gRPC service."
 
-[package.metadata.cargo-machete]
-# Referenced by protobuf code generated into OUT_DIR.
-ignored = ["prost"]
-
 [[bin]]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
+[features]
+# On for the sidecar image's SBOM (its shared build links vLLM's mm-routing here).
+# The Python bindings turn them off so the default wheel stays lean.
+default = ["mm-routing", "jemalloc"]
+mm-routing = ["dynamo-llm/mm-routing"]
+# jemalloc as the binary's global allocator.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
+
 [dependencies]
+dynamo-sglang-generate = { workspace = true }
 dynamo-backend-common = { workspace = true }
+dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
-dynamo-sidecar-common = { workspace = true }
+dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -37,12 +43,9 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
-prost = { workspace = true }
-tonic = { workspace = true }
-
-[build-dependencies]
-tonic-build = { workspace = true }
+sglang-api-types = { workspace = true }
+tonic-v14 = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-tracing-subscriber = { workspace = true }
+dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }

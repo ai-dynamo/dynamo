@@ -152,7 +152,7 @@ spec:
                 - $(KV_TRANSFER_CONFIG)
               env:
                 - name: KV_TRANSFER_CONFIG
-                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
                 - name: MODEL_NAME
                   value: deepseek-ai/DeepSeek-V4-Pro
                 - name: SERVED_MODEL_NAME
@@ -286,7 +286,7 @@ spec:
                 - $(KV_TRANSFER_CONFIG)
               env:
                 - name: KV_TRANSFER_CONFIG
-                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
                 - name: MODEL_NAME
                   value: deepseek-ai/DeepSeek-V4-Pro
                 - name: SERVED_MODEL_NAME

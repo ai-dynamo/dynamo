@@ -21,6 +21,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | Entrypoint | Feature |
 |---|---|
 | `claude_trace_export` | `claude-trace-export` |
+| `codex_trace_export` | `codex-trace-export` |
 | `request_trace_to_mooncake` | `request-trace-to-mooncake` |
 | `request_trace_to_satf` | `satf` |
 | `multiturn_bench` | `multiturn` |
@@ -30,6 +31,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | `approximate_lru_bench` | `approximate-lru` |
 | `dc_ckf_consumer_bench` | `dc-ckf-consumer` |
 | `dc_ckf_relay_bench` | `dc-ckf-relay` |
+| `selection_replay_bench` | `selection-replay` |
 
 The CKF consumer feature contains only the endpoint-scoped consumer and its
 dependency-light protocol metadata. The Relay feature additionally owns its

@@ -3,83 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Sidecar testing
+# Sidecar testkit
 
-Unit tests live beside the production code they exercise. They construct inputs,
-call the real parsing, conversion or state-management functions, and check the
-results without starting an inference engine. Common behavior is tested in the
-common crate; backend behavior is tested in the vLLM or SGLang crate. There is
-no shared unit scenario or backend-adapter layer. Shared CPU integration tests live
-in the testkit crate and connect real sidecars to local Mocker servers, which
-simulate engine responses without loading a model.
-
-## File layout
-
-```text
-lib/sidecar/
-├── common/src/
-│   ├── args.rs                 # Inline tests: argument defaults and validation
-│   ├── endpoint.rs             # Inline tests: endpoint parsing and normalization
-│   ├── error.rs                # Inline tests: transport status mapping
-│   ├── json.rs                 # Inline tests: shared JSON/protobuf conversion
-│   ├── transport.rs            # Production policy and existing socket test
-│   └── transport/tests.rs      # Retry/pool policy using paused time, no sockets
-├── vllm/src/
-│   ├── model.rs                # Inline tests: discovery metadata and configuration
-│   ├── engine.rs               # Inline tests: worker configuration and local lifecycle
-│   ├── lora.rs                 # Inline tests: adapter validation, identity and locking
-│   ├── convert.rs              # Production conversion and child-module declarations
-│   ├── convert/
-│   │   ├── request_tests.rs    # Request fields, validation, routing and handoffs
-│   │   └── response_tests.rs   # Stream conversion, logprobs, stops and usage
-│   ├── test_fixtures.rs        # Native request, response and metadata builders
-│   └── tests.rs                # Broader tests using a local fake gRPC server
-├── sglang/src/
-│   ├── client.rs               # Inline tests: discovery, status mapping and RPC deadlines
-│   ├── engine.rs               # Inline tests: worker metadata, bootstrap and KV sources
-│   ├── native_http.rs          # Inline tests: envelopes, tracing and local HTTP server
-│   ├── protocol.rs             # Production conversion and child-module declarations
-│   └── protocol/
-│       ├── request_tests.rs    # Request fields, public refusals, routing and rendezvous
-│       └── response_tests.rs   # Token/logprob conversion, stops, usage and errors
-└── testkit/
-    ├── src/
-    │   ├── lib.rs              # Bounded waits and public testkit exports
-    │   ├── control.rs          # Per-request controls, observations and controller test
-    │   ├── server.rs           # Local server lifetime, including abrupt shutdown
-    │   ├── fixtures.rs         # Shared request construction and stream collection
-    │   └── assert.rs           # Token, terminal, usage and error assertions
-    ├── tests/
-    │   ├── sidecar_mocker_integration.rs         # Direct sidecar-to-Mocker scenarios over real gRPC
-    │   ├── router_sidecar_mocker_integration.rs  # Sidecar children, discovery, routing and shutdown
-    │   └── support/
-    │       ├── mod.rs         # Fixture contracts and scheduler-state waits
-    │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
-    │       ├── sglang.rs      # SGLang protocol and Mocker adapter
-    │       └── process.rs     # Local discovery, worker processes and TCP routing
-    └── README.md              # This guide
-```
-
-Small suites use an inline `#[cfg(test)] mod tests` in their production module.
-The larger request and response suites are separate files, declared in
-`vllm/src/convert.rs` and `sglang/src/protocol.rs`:
-
-```rust
-#[cfg(test)]
-mod request_tests;
-#[cfg(test)]
-mod response_tests;
-```
-
-These remain child modules of their production module, so `use super::*` gives them access
-to its private functions. A separate test file does not require making
-production functions public.
-
-Common's `transport/tests.rs` is registered once from `common/src/lib.rs` using
-`#[path = "transport/tests.rs"] mod transport_tests`. The production transport
-source is also included for a second Tonic version; registering these policy
-tests at the crate root avoids running them twice. The existing socket test
-inside `transport.rs` remains with each transport implementation.
+The testkit holds the shared CPU integration tests for the sidecars. They connect real sidecars to local Mocker servers, which simulate engine responses without loading a model.
 
 The testkit library owns request controls, bounded waits, stream collection,
 assertions and server lifetime. Concrete sidecars, Mockers and protocol libraries
@@ -90,57 +16,6 @@ and are local to the integration suite, rather than a public fixture API.
 Each top-level Rust file in `testkit/tests/` builds a separate test executable.
 The two CPU files separate direct engine calls from child-process startup,
 discovery and shutdown, making each setup easier to follow and run independently.
-
-## Adding a unit test
-
-Add the test to its production module's `tests` child module, or to the existing
-request/response test file. Use ordinary `#[test]` or `#[tokio::test]`
-attributes. Call the actual production helper and assert the behavior being
-protected. Keep setup local unless several tests need the same builder.
-
-Reusable vLLM inputs belong in `vllm/src/test_fixtures.rs`, which is compiled
-only for tests. It contains plain functions for requests, model/server metadata,
-responses and cache handoffs. Both the isolated units and the broader
-`vllm/src/tests.rs` suite use them. Helpers used by only one suite can stay in
-that suite. Tests for another backend should use that backend's production
-modules and native fixtures.
-
-The broader `vllm/src/tests.rs` exercises connections, RPCs, discovery,
-cancellation and administration against a local fake server. It remains
-separate because these checks cover interactions across modules, while the
-isolated tests call functions directly. Both are compiled into the library's
-test binary.
-
-SGLang keeps discovery and worker fixtures in the owning inline modules and
-request/response fixtures in its protocol child modules. A private
-`from_discovered` helper lets worker tests exercise real construction without
-starting a server. Its retained gRPC and HTTP server tests cover the transport
-boundary; isolated conversion tests do not establish native engine behavior.
-
-## Running tests
-
-From the repository root, run all common, vLLM and SGLang library tests, including
-their local-server tests and the testkit controller regression:
-
-```sh
-cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
-  -p dynamo-sglang-sidecar -p dynamo-sidecar-testkit --lib
-```
-
-Run one request-conversion test by its full name:
-
-```sh
-cargo test --locked -p dynamo-vllm-sidecar --lib \
-  convert::request_tests::canonical_priority_preserves_native_ordering -- --exact
-```
-
-The vLLM dependency enables common's `tonic-v14` feature. To cover that version
-when running common alone, add `--features tonic-v14`. Building requires the
-repository's normal Rust prerequisites; running these suites needs no GPU,
-model download or inference-engine installation.
-
-CI runs them through the ordinary `cargo test --locked --all-targets` step and
-nightly Rust coverage. There are no per-test lane markers or custom unit runner.
 
 ## Integration tests
 
@@ -158,6 +33,25 @@ Each suite exercises a different request path:
 - `router_sidecar_mocker_integration.rs` uses local discovery to find sidecar
   child processes and sends requests to them over TCP. Each sidecar calls a CPU
   Mocker over native gRPC. Handoff scenarios also use the production PrefillRouter.
+  HTTP error scenarios additionally run the real frontend: native invalid-argument
+  errors become HTTP 400, and failures after a token reaches the client become SSE
+  errors without a successful finish. Both paths verify subsequent recovery.
+
+The SGLang fixture is one Rust-server listener. `Fixture::start_node` starts the
+listeners of one node, which share a controller and report one
+`DeploymentInfo.node_listeners` table; each listener has its own Mocker
+scheduler, KV-event publisher, Abort log, request log (`received`), health
+control and optional HTTP peer. A single-listener fixture reports a one-entry
+table.
+
+The SGLang fixture owns its optional HTTP peer, discovery metadata and shutdown.
+The peer imitates SGLang's Rust server: it serves no `/abort_request`, omits
+empty `output_ids`, and its requests are aborted with the `sglang.api.v1` Abort
+RPC, which the gRPC fixture records. The HTTP cancellation regressions use that
+peer and the production sidecar engine. They hold an admitted request before
+headers or during streaming, then check targeted abort before disconnect,
+decode's drain before abort, another request's isolation and recovery. A native
+HTTP endpoint that never becomes ready leaves the engine on gRPC.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -174,46 +68,27 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Four common scenarios registered for both vLLM and SGLang; active cancellation, consumer drop and peer teardown initially enrolled for vLLM; vLLM request/logprob fields, admission rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | Registration and error recovery, readiness, startup failure/interruption, request isolation, SIGTERM withdrawal/drain; vLLM prefill/decode handoff through the real router | CPU, ordinary pre-merge Cargo tests |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks; vLLM engine loss from its health stream; SGLang with one sidecar per node: Abort only on the owning listener, by that dispatch's own rid, for gRPC and native requests, and engine loss naming the lost listener's DP rank | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; all three plus LPX: request migration after engine failure (before or after the first token) and SIGTERM; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery and changed-role startup; vLLM withdrawal and process exit on engine loss; SGLang with one sidecar per node: the prefill rank and port through a real PrefillRouter under round-robin over two nodes (with a pinned rank), and withdrawal and process exit when one listener is lost | CPU, ordinary pre-merge Cargo tests |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
-SGLang currently registers the four baseline scenarios. Its process and active
-work enrollment requires implementing and exercising the additional fixture
-contract. TensorRT-LLM is not enrolled here.
+vLLM, SGLang and TensorRT-LLM register the shared wire and process scenarios. TensorRT-LLM uses the existing OpenEngine Mocker through a controlled inference service. Its process tests supply a local model path and verify the context limit returned by OpenEngine.
 
-CPU handoff checks the routing and opaque metadata contract. A Mocker cannot
-prove that a real engine accepts the serialized request, executes a
-structured-output constraint, releases its real scheduler work, or transfers
-GPU KV cache.
+The alias and health-publication scenarios use `DiscoveryFixture` controls for vLLM and SGLang. TensorRT-LLM is excluded from these scenarios because its sidecar uses a configured model path and does not discover served aliases or gate publication on native health. vLLM keeps Control healthy while the fixture controls Inference readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery, parser settings inherited from engine metadata and changed engine roles remain SGLang-specific because vLLM has different contracts for those values.
 
-Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
-KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
-retain broader media, LoRA, administrative and connection behavior. Python
-serving and fault-tolerance tests remain in place: passing this testkit does not
-establish complete parity with the legacy Python backend.
-
-### Relationship to serving E2E tests
-
-`tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
-and real engines. It checks HTTP serving, distinct prefill/decode workers and
-KV-aware routing. These deployment checks remain separate from the CPU Mocker
-tests.
-
-The legacy Python backend suite is also distributed by behavior, including
-`tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
-`tests/fault_tolerance/migration/test_vllm.py`.
+CPU handoff checks opaque vLLM metadata, SGLang concurrent bootstrap coordination, and TensorRT-LLM OpenEngine KV session forwarding. CPU handoff cancellation holds the peers before Mocker admission; it proves transport cleanup and recovery, not native scheduler or transfer cleanup. A Mocker cannot prove that a real engine accepts the serialized request, executes a structured-output constraint, releases its real scheduler work, or transfers GPU KV cache.
 
 ### Adding an integration test
 
-1. Choose the boundary being protected. Parsing and state transitions without
-   I/O belong beside production code. Direct native RPC behavior belongs in
+1. Choose the suite. Direct native RPC behavior belongs in
    `sidecar_mocker_integration.rs`; Worker/discovery or process lifetime belongs in
    `router_sidecar_mocker_integration.rs`.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
-   sidecar child. Keep protocol messages in the backend's support file.
+   sidecar child. Its alias and readiness controls keep protocol messages in the
+   backend's support file, so another backend can enroll without copying the
+   scenario body.
 3. Register common baseline scenarios once in the small enrollment macro. Both
    backends invoke the same macro, producing a separate ordinary Tokio test for
    every scenario. The macro only declares tests; it does not run or select them
@@ -242,7 +117,9 @@ Build the sidecar binary and run the testkit together from the repository root:
 
 ```sh
 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 \
-  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sidecar-testkit
+  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar \
+    -p dynamo-trtllm-sidecar -p dynamo-lpx-sidecar \
+    -p dynamo-sidecar-testkit
 ```
 
 Use normal test parallelism. These suites need a Linux host with the repository's
@@ -250,11 +127,7 @@ Rust build prerequisites, permission to bind loopback sockets and spawn child
 processes, and writable temporary storage. Running them needs no GPU, engine
 installation, model download or external discovery service.
 
-The workspace's ordinary `cargo test --locked --all-targets` builds the vLLM
-executable through its executable integration target. A testkit-only command
-can instead pick up an older binary from the build directory. Always build the
-vLLM package alongside testkit when validating source changes. After that build,
-you can select a suite or test by name:
+The workspace's ordinary `cargo test --locked --all-targets` builds the sidecar executables through their executable integration targets. A testkit-only command can instead pick up an older binary from the build directory. Always build all four sidecar packages alongside testkit when validating source changes. After that build, you can select a suite or test by name:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-testkit --test sidecar_mocker_integration

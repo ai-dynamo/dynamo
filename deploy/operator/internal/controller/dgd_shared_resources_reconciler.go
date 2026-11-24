@@ -53,11 +53,10 @@ func newDGDSharedResourcesReconciler(
 	restConfig *rest.Config,
 	dockerSecretRetriever DockerSecretRetriever,
 	sshKeyManager *secret.SSHKeyManager,
-	rbacManager rbacManager,
 ) *dgdSharedResourcesReconciler {
 	syncer := newDGDResourceSyncer(kubeClient, recorder)
 	return &dgdSharedResourcesReconciler{
-		rbac:          newDGDRBACReconciler(config, rbacManager),
+		rbac:          newDGDRBACReconciler(config, kubeClient),
 		pvcs:          newDGDPVCReconciler(syncer),
 		discovery:     newDGDDiscoveryReconciler(syncer, config),
 		gmsClaims:     newDGDGMSResourceClaimsReconciler(syncer, runtimeConfig.Gate),

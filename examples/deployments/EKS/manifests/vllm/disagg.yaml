@@ -69,7 +69,7 @@ spec:
             exec python3 -m dynamo.vllm \
              --model Qwen/Qwen3-32B \
              --disaggregation-mode decode \
-             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
           env:
           - name: HF_HOME
             value: /home/dynamo/.cache/huggingface
@@ -132,7 +132,7 @@ spec:
             exec python3 -m dynamo.vllm \
              --model Qwen/Qwen3-32B \
              --disaggregation-mode prefill \
-             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
           env:
           - name: HF_HOME
             value: /home/dynamo/.cache/huggingface

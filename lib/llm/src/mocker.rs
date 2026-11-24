@@ -24,10 +24,12 @@ use crate::protocols::TokenIdType;
 use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, RawKvEventSink,
+    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
+    RawKvEventSink, ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -38,8 +40,10 @@ use dynamo_mocker::services::bootstrap::{
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::{
     component::Endpoint,
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
@@ -59,7 +63,7 @@ use self::handoff::{
     HandoffControl, SourceHandoffManager, SourceRegistration, cancel_destination,
     live_handoff_boundary, order_for_engine, run_destination_session,
 };
-use self::metrics::NativeMockerMetrics;
+use self::metrics::{DynamoLabelValues, NativeMockerMetrics};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -168,6 +172,17 @@ impl ResponseReplayTable {
 struct KvEventSinkAdapter(KvEventPublisher);
 
 impl KvCacheEventSink for KvEventSinkAdapter {
+    fn publish_batch_with_metadata(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        self.0
+            .publish_batch_with_session_ids(
+                events
+                    .into_iter()
+                    .map(|event| (event.event, event.storage_tier, event.session_id))
+                    .collect(),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event batch: {}", e))
+    }
+
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         self.0
             .publish(event)
@@ -212,9 +227,20 @@ fn usage_with_cached_tokens(
         prompt_tokens_details: Some(PromptTokensDetails {
             audio_tokens: None,
             cached_tokens: Some(to_u32(cached_tokens)),
+            ..Default::default()
         }),
         completion_tokens_details: None,
     }
+}
+
+/// Final-chunk `engine_data` in the shape of the router's `WorkerCacheHitReport`.
+fn kv_cache_hit_engine_data(prompt_tokens: usize, cached_tokens: usize) -> serde_json::Value {
+    serde_json::json!({
+        "kv_cache_hit": {
+            "prompt_tokens": prompt_tokens,
+            "reused_tokens": cached_tokens,
+        }
+    })
 }
 
 fn generate_random_token() -> TokenIdType {
@@ -260,7 +286,7 @@ struct MockerExecutionContext {
     engines: OnceCell<Vec<LiveEngine>>,
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
     startup_state: watch::Sender<StartupState>,
-    engine_args: MockEngineArgs,
+    engine_args: MockerConfig,
     response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
@@ -308,11 +334,21 @@ enum StartupState {
 }
 
 impl MockerExecutionContext {
-    fn new(engine_args: MockEngineArgs) -> Self {
+    fn new(engine_args: MockerConfig) -> Self {
         let (startup_state, _) = watch::channel(StartupState::Starting);
-        let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
-            .expect("mocker native metrics collectors should be valid");
+        // SGLang labels its metrics with the worker's disaggregation role.
+        let sglang_engine_type = if engine_args.is_prefill() {
+            "prefill"
+        } else if engine_args.is_decode() {
+            "decode"
+        } else {
+            "unified"
+        };
+        let native_metrics =
+            NativeMockerMetrics::new(engine_args.backend, engine_args.dp_size, sglang_engine_type)
+                .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
+            .runtime
             .response_replay_trace_path
             .as_deref()
             .map(|path| {
@@ -353,6 +389,14 @@ impl MockerExecutionContext {
             return dp_rank;
         }
 
+        // SGLang's default auto policy follows the bootstrap room on prefill workers.
+        if self.engine_args.backend == EngineType::Sglang
+            && self.engine_args.is_prefill()
+            && let Some(bootstrap_info) = request.bootstrap_info.as_ref()
+        {
+            return (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size)) as u32;
+        }
+
         self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
     }
 
@@ -360,7 +404,7 @@ impl MockerExecutionContext {
         if !self.engine_args.is_prefill() {
             return Ok(None);
         }
-        let Some(port) = self.engine_args.bootstrap_port else {
+        let Some(port) = self.engine_args.runtime.bootstrap_port else {
             return Ok(None);
         };
         let max_sessions = self
@@ -396,7 +440,7 @@ impl MockerExecutionContext {
         let manager = SourceHandoffManager::start(
             incoming_rx,
             max_sessions,
-            Duration::from_millis(self.engine_args.handoff_session_timeout_ms),
+            Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms),
             self.handoff_shutdown.clone(),
         );
         assert!(
@@ -413,8 +457,12 @@ impl MockerExecutionContext {
         );
     }
 
-    async fn start(self: Arc<Self>, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
-        let result = Arc::clone(&self).start_inner(endpoint).await;
+    async fn start(
+        self: Arc<Self>,
+        endpoint: dynamo_runtime::component::Endpoint,
+        model_name: String,
+    ) -> Result<()> {
+        let result = Arc::clone(&self).start_inner(endpoint, model_name).await;
         match &result {
             Ok(()) => {
                 self.startup_state.send_replace(StartupState::Ready);
@@ -429,6 +477,7 @@ impl MockerExecutionContext {
     async fn start_inner(
         self: Arc<Self>,
         endpoint: dynamo_runtime::component::Endpoint,
+        model_name: String,
     ) -> Result<()> {
         let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
@@ -436,8 +485,17 @@ impl MockerExecutionContext {
         // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
         // primary_token() is only cancelled in Phase 3, after waiting for inflight requests.
         let primary_token = component.drt().primary_token();
-        self.native_metrics
-            .register(component.get_metrics_registry())?;
+        let dynamo_labels = DynamoLabelValues {
+            namespace: component.namespace().name(),
+            component: component.name().to_string(),
+            endpoint: endpoint.name().to_string(),
+            worker_id: format!("{:x}", component.drt().connection_id()),
+        };
+        self.native_metrics.register(
+            component.get_metrics_registry(),
+            &model_name,
+            &dynamo_labels,
+        )?;
 
         // Simulate engine startup time if configured
         if let Some(startup_time_secs) = self.engine_args.startup_time {
@@ -450,7 +508,7 @@ impl MockerExecutionContext {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
                 self.engine_args.block_size,
-                self.engine_args.enable_local_indexer
+                self.engine_args.runtime.enable_local_indexer
             );
             Some(&endpoint)
         } else {
@@ -630,9 +688,9 @@ impl MockerExecutionContext {
                 KvEventPublishers,
                 Option<KvEventPublisher>,
             ) = match endpoint {
-                Some(endpoint) if args.zmq_kv_events_port.is_some() => {
-                    let zmq_port = args.zmq_kv_events_port.unwrap() + dp_rank as u16;
-                    let replay_port = args.zmq_replay_port.map(|p| p + dp_rank as u16);
+                Some(endpoint) if args.runtime.zmq_kv_events_port.is_some() => {
+                    let zmq_port = args.runtime.zmq_kv_events_port.unwrap() + dp_rank as u16;
+                    let replay_port = args.runtime.zmq_replay_port.map(|p| p + dp_rank as u16);
                     match ZmqKvEventSink::new(
                         zmq_port,
                         replay_port,
@@ -643,16 +701,21 @@ impl MockerExecutionContext {
                     {
                         Ok(sink) => {
                             let source_config = Some(KvEventSourceConfig::Zmq {
+                                liveness: None,
+                                expected_rank: None,
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
                                 topic: String::new(),
                                 image_token_id: None,
                                 video_token_id: None,
+                                engine_owned_mm_identity: false,
+                                idempotent_stores: false,
+                                recovery: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
                                 endpoint.clone(),
                                 args.block_size as u32,
                                 source_config,
-                                args.enable_local_indexer,
+                                args.runtime.enable_local_indexer,
                                 dp_rank,
                                 None,
                             ) {
@@ -684,7 +747,7 @@ impl MockerExecutionContext {
                         endpoint.clone(),
                         args.block_size as u32,
                         None,
-                        args.enable_local_indexer,
+                        args.runtime.enable_local_indexer,
                         dp_rank,
                         None,
                     ) {
@@ -784,6 +847,40 @@ impl MockerExecutionContext {
     }
 }
 
+fn invalid_argument(message: impl Into<String>, public_message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .public_message(public_message)
+        .build()
+}
+
+/// The fewest output tokens after which the SGLang scheduler's own output cap can have ended a
+/// request with `prompt_tokens` prompt tokens.
+///
+/// The scheduler lowers a request's output limit to keep prompt and output inside the context
+/// and the KV pool, and nothing it reports says that it did. Every limit it applies ends the
+/// sequence within two KV blocks of the smaller of the two, so the cap does not explain a
+/// completion with fewer tokens than this. With a block size of 1 this is the cap itself; with
+/// larger blocks it is up to `2 * block_size - 2` tokens below the cap.
+/// `sglang_scheduler_cap_never_fails_a_request` holds the scheduler to that distance.
+fn sglang_capped_output_floor(args: &MockerConfig, prompt_tokens: usize) -> usize {
+    let pool_tokens = args.num_gpu_blocks.saturating_mul(args.block_size);
+    let limit = args
+        .max_model_len
+        .map_or(pool_tokens, |max_model_len| max_model_len.min(pool_tokens));
+    limit.saturating_sub(prompt_tokens.saturating_add(args.block_size.saturating_mul(2)))
+}
+
+/// A stream whose only item is `error`, so the request fails without marking the worker down.
+fn error_stream(
+    ctx: &impl AsyncEngineContextProvider,
+    error: DynamoError,
+) -> ManyOut<Annotated<LLMEngineOutput>> {
+    let stream = futures::stream::iter([Annotated::from_err(error)]);
+    ResponseStream::new(Box::pin(stream), ctx.context())
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for MockerExecutionContext
@@ -794,34 +891,47 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
-        let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
+        // Client-input errors go into the stream, not `Err`: the egress treats every pre-stream
+        // failure as `CannotConnect` and takes the worker out of routing.
+        let native_sglang = match sglang::response_metadata(&request, ctx.id()) {
+            Ok(metadata) => metadata,
+            Err(error) => return Ok(error_stream(&ctx, error)),
+        };
         let native_sglang_terminal = native_sglang.is_some();
 
         let dp_rank = self.resolve_dp_rank(&request);
 
-        // Validate dp_rank
+        // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {
-            return Err(Error::msg(format!(
+            let message = format!(
                 "dp_rank {} is out of bounds for dp_size {}",
                 dp_rank, self.engine_args.dp_size
-            )));
+            );
+            return Ok(error_stream(
+                &ctx,
+                invalid_argument(message.clone(), message),
+            ));
         }
+        let is_prefill = self.engine_args.is_prefill();
+        let requested_max_output_tokens = if is_prefill {
+            1
+        } else {
+            let Some(max_tokens) = request.stop_conditions.max_tokens else {
+                return Ok(error_stream(
+                    &ctx,
+                    invalid_argument(
+                        "max_output_tokens must be specified for mocker",
+                        "`max_output_tokens` (or `max_tokens`) is required by the mocker worker",
+                    ),
+                ));
+            };
+            max_tokens as usize
+        };
         let engine = self
             .engine(dp_rank as usize)
             .await
             .map_err(|error| Error::msg(error.to_string()))?;
 
-        let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
-        let is_prefill = self.engine_args.is_prefill();
-        let requested_max_output_tokens = if is_prefill {
-            1
-        } else {
-            request
-                .stop_conditions
-                .max_tokens
-                .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
-                as usize
-        };
         let replay_key = request
             .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
             .or_else(|| {
@@ -865,10 +975,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .map_or(max_output_tokens, |max_model_len| {
                     max_output_tokens.min(max_model_len.saturating_sub(request.token_ids.len()))
                 });
-        let native_timing = self
-            .native_metrics
-            .request_timing(&request.model, dp_rank, is_prefill, request_start)
-            .await;
+        // A completion before that budget is an error, unless the SGLang scheduler's own cap
+        // on output, by context and KV headroom, can explain it.
+        let capped_output_floor = (self.engine_args.backend == EngineType::Sglang)
+            .then(|| sglang_capped_output_floor(&self.engine_args, request.token_ids.len()));
+        if let Some(metadata) = native_sglang.as_ref()
+            && let Err(message) =
+                metadata.validate_candidate_output_budget(effective_max_output_tokens)
+        {
+            return Ok(error_stream(
+                &ctx,
+                invalid_argument(message.clone(), message),
+            ));
+        }
+        let native_timing = self.native_metrics.request_timing(dp_rank, request_start);
 
         let prompt_tokens_count = request.token_ids.len();
         // Convert PreprocessedRequest to DirectRequest for scheduler
@@ -876,9 +996,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokens: request.token_ids.as_ref().clone(),
             max_output_tokens,
             output_token_ids: planned_output_token_ids,
-            uuid: Some(request_uuid),
+            // A migration retry reuses the logical request ID and can land here while an
+            // earlier attempt is still active, so each invocation gets its own engine ID.
+            uuid: Some(Uuid::new_v4()),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
+            replay_context: request
+                .agent_context
+                .as_ref()
+                .map(|context| context.session_id.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|id| ReplayRequestContext {
+                    session_id: Some(id.to_owned()),
+                    ..Default::default()
+                }),
             ..Default::default()
         };
 
@@ -889,6 +1021,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .as_ref()
             .and_then(|info| info.handoff_id);
         let has_handoff_session = handoff_id.is_some();
+        // A decode leg admits the prompt KV transferred from prefill (by handoff session, or
+        // sequentially with a prefill result) as cached, which is not local reuse, so it does
+        // not report a cache hit. A decode worker with neither prefilled locally and reports.
+        let is_local_prefill = !(self.engine_args.is_decode()
+            && (has_handoff_session || request.prefill_result.is_some()));
         if request.bootstrap_info.is_some()
             && (self.engine_args.is_prefill() || self.engine_args.is_decode())
             && handoff_id.is_none()
@@ -911,9 +1048,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let identity = BootstrapIdentity {
                 handoff_id,
                 bootstrap_room: bootstrap_info.bootstrap_room,
-                request_id: request_uuid,
+                request_id: ctx.id().parse().unwrap_or_else(|_| Uuid::new_v4()),
             };
-            let order = match order_for_engine(self.engine_args.engine_type) {
+            let order = match order_for_engine(self.engine_args.backend) {
                 Ok(order) => order,
                 Err(error) => {
                     return Err(Error::msg(error.to_string()));
@@ -952,7 +1089,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 if let Err(error) = manager.try_register(SourceRegistration {
                     identity,
                     order,
-                    engine_type: self.engine_args.engine_type,
+                    engine_type: self.engine_args.backend,
                     control,
                     lifecycle,
                     completion_tx,
@@ -968,7 +1105,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     role: BootstrapParticipantRole::Destination,
                     dp_rank,
                     order,
-                    engine_type: self.engine_args.engine_type,
+                    engine_type: self.engine_args.backend,
                 };
                 let connection = match connect_to_prefill(
                     &bootstrap_info.bootstrap_host,
@@ -987,7 +1124,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let session_control = control.clone();
                 let session_cancel = handoff_cancel.clone();
                 let session_timeout =
-                    Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
+                    Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms);
                 let global_shutdown = self.handoff_shutdown.clone();
                 self.handoff_tasks.spawn(async move {
                     let _session_permit = session_permit;
@@ -1011,6 +1148,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     "aggregated mocker request cannot carry handoff metadata",
                 ));
             }
+        } else if self.engine_args.is_decode() && request.prefill_result.is_some() {
+            // Sequential handoff (vLLM, TRT-LLM): the prompt KV arrives from prefill, and the
+            // prefill worker already waited out the modeled transfer.
+            live_request = engine
+                .submit_decode(direct_request)
+                .await
+                .map_err(|error| Error::msg(error.to_string()))?;
         } else {
             live_request = engine
                 .submit(direct_request)
@@ -1019,9 +1163,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let async_context = ctx.context();
-        let reasoning = self.engine_args.reasoning.clone();
+        let reasoning = self.engine_args.runtime.reasoning.clone();
         let handoff_session_timeout =
-            Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
+            Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms);
         let mut native_timing = native_timing;
         let response_task_tracker = (source_completion_rx.is_some()
             || destination_cleanup.is_some())
@@ -1122,30 +1266,38 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             cached_prefix_tokens = Some(cached);
                         }
 
-                        // Generate a token (with thinking boundaries if configured)
-                        let token_id = if has_planned_output_tokens {
-                            signal.token_id.unwrap_or_else(generate_random_token)
-                        } else if token_count == 0 && think_len > 0 {
-                            reasoning.as_ref().unwrap().start_thinking_token_id
-                        } else if think_len > 0 && token_count == think_len - 1 {
-                            reasoning.as_ref().unwrap().end_thinking_token_id
+                        let token_ids = if effective_max_output_tokens == 0 {
+                            Vec::new()
                         } else {
-                            generate_random_token()
+                            let token_id = if has_planned_output_tokens {
+                                signal.token_id.unwrap_or_else(generate_random_token)
+                            } else if token_count == 0 && think_len > 0 {
+                                reasoning.as_ref().unwrap().start_thinking_token_id
+                            } else if think_len > 0 && token_count == think_len - 1 {
+                                reasoning.as_ref().unwrap().end_thinking_token_id
+                            } else {
+                                generate_random_token()
+                            };
+                            token_count += 1;
+                            vec![token_id]
                         };
-                        token_count += 1;
+                        let emitted_token_count = token_ids.len();
 
                         // The first chunk carries the admission cache truth; the
                         // final chunk repeats cumulative totals (OpenAI convention).
                         let output = LLMEngineOutput {
-                            token_ids: vec![token_id],
-                            disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                            token_ids,
+                            disaggregated_params: is_prefill.then(|| Box::new(serde_json::json!("dummy"))),
                             completion_usage: signal.cached_tokens.map(|cached| {
                                 usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
                             }),
                             ..Default::default()
                         };
 
-                        if signal.completed && token_count < effective_max_output_tokens {
+                        if signal.completed
+                            && token_count < effective_max_output_tokens
+                            && capped_output_floor.is_none_or(|floor| token_count < floor)
+                        {
                             let _ = send_response(
                                 &stream_tx,
                                 LLMEngineOutput::error(
@@ -1163,7 +1315,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                if emitted_token_count > 0 {
+                                    native_timing.record_token();
+                                }
                                 None
                             };
 
@@ -1223,35 +1377,33 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 }
                             }
 
-                            if native_sglang_terminal {
-                                // Native SGLang carries terminal metadata on the final token.
+                            let mut final_output = if native_sglang_terminal {
+                                // Native SGLang carries terminal metadata on the final chunk.
                                 let mut output = terminal_output
                                     .take()
-                                    .expect("native SGLang request has a terminal token");
+                                    .expect("native SGLang request has a terminal chunk");
                                 output.finish_reason = Some(FinishReason::Length);
-                                if let Some(cached) = cached_prefix_tokens {
-                                    output.completion_usage = Some(usage_with_cached_tokens(
-                                        prompt_tokens_count,
-                                        token_count,
-                                        cached,
-                                    ));
-                                }
-                                if !send_response(&stream_tx, output, &async_context) {
-                                    break;
-                                }
-                                native_timing.record_tokens(1);
+                                output
                             } else {
-                                let mut final_output = LLMEngineOutput::length();
-                                if let Some(cached) = cached_prefix_tokens {
-                                    final_output.completion_usage = Some(usage_with_cached_tokens(
-                                        prompt_tokens_count,
-                                        token_count,
-                                        cached,
+                                LLMEngineOutput::length()
+                            };
+                            if let Some(cached) = cached_prefix_tokens {
+                                final_output.completion_usage = Some(usage_with_cached_tokens(
+                                    prompt_tokens_count,
+                                    token_count,
+                                    cached,
+                                ));
+                                if is_local_prefill {
+                                    final_output.engine_data = Some(Box::new(
+                                        kv_cache_hit_engine_data(prompt_tokens_count, cached),
                                     ));
                                 }
-                                if !send_response(&stream_tx, final_output, &async_context) {
-                                    break;
-                                }
+                            }
+                            if !send_response(&stream_tx, final_output, &async_context) {
+                                break;
+                            }
+                            if native_sglang_terminal && emitted_token_count > 0 {
+                                native_timing.record_token();
                             }
                             native_timing.record_normal_completion();
                             request_completed_normally = true;
@@ -1260,7 +1412,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             if !send_response(&stream_tx, output, &async_context) {
                                 break;
                             }
-                            native_timing.record_tokens(1);
+                            if emitted_token_count > 0 {
+                                native_timing.record_token();
+                            }
                         }
                     }
 
@@ -1292,10 +1446,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let mut completion_tokens = 0_usize;
+        let mut cached_tokens = None;
         let stream = UnboundedReceiverStream::new(stream_rx).map(move |mut output| {
             if let Some(metadata) = native_sglang.as_ref() {
                 completion_tokens = completion_tokens.saturating_add(output.token_ids.len());
-                sglang::adapt(metadata, &mut output, completion_tokens);
+                sglang::adapt(metadata, &mut output, completion_tokens, &mut cached_tokens);
             }
             Annotated::from_data(output)
         });
@@ -1303,11 +1458,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-/// Create a mocker engine as ExecutionContext
+/// Create a mocker engine as ExecutionContext. `model_name` is the served model name its native
+/// engine metrics are labelled with.
 pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint_id: dynamo_runtime::protocols::EndpointId,
-    args: MockEngineArgs,
+    args: MockerConfig,
+    model_name: String,
 ) -> Result<ExecutionContext, Error> {
     tracing::info!("Creating mocker engine with config: {args:?}");
     let engine = Arc::new(MockerExecutionContext::new(args));
@@ -1338,7 +1495,7 @@ pub async fn make_mocker_engine(
 
         tracing::debug!("Component service is now available, starting mocker engine");
         let endpoint = component.endpoint(endpoint_id.name);
-        if let Err(error) = startup_engine.start(endpoint).await {
+        if let Err(error) = startup_engine.start(endpoint, model_name).await {
             tracing::error!("Failed to start mocker engine: {error}");
         }
     });
@@ -1351,7 +1508,7 @@ mod tests {
     use super::*;
     use crate::protocols::common::llm_backend::PreprocessedRequest;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+    use dynamo_mocker::common::protocols::{EngineType, MockerConfig, WorkerType};
     use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
     use futures::StreamExt;
@@ -1422,18 +1579,88 @@ mod tests {
             .unwrap()
     }
 
+    fn dp_rank_engine(
+        backend: EngineType,
+        worker_type: WorkerType,
+        dp_size: u32,
+    ) -> MockerExecutionContext {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": dp_size,
+            "engine": { "backend": backend, "worker_type": worker_type }
+        }))
+        .unwrap();
+        MockerExecutionContext::new(args)
+    }
+
+    fn dp_rank_request(room: Option<u64>, rank: Option<u32>) -> PreprocessedRequest {
+        use crate::protocols::common::preprocessor::{BootstrapInfo, RoutingHints};
+
+        let mut request = prefill_request();
+        request.routing = Some(RoutingHints {
+            dp_rank: rank,
+            ..Default::default()
+        });
+        request.bootstrap_info = room.map(|bootstrap_room| BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 0,
+            bootstrap_room,
+            handoff_id: None,
+        });
+
+        request
+    }
+
+    #[test]
+    fn sglang_prefill_dp_rank_follows_bootstrap_room() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 3);
+        for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
+            assert_eq!(
+                engine.resolve_dp_rank(&dp_rank_request(Some(room), None)),
+                expected,
+                "room={room}"
+            );
+        }
+    }
+
+    #[test]
+    fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
+        assert_eq!(
+            engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
+            3
+        );
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 0);
+    }
+
+    #[test]
+    fn dp_rank_other_backends_and_roles_keep_round_robin() {
+        for (backend, worker_type) in [
+            (EngineType::Sglang, WorkerType::Decode),
+            (EngineType::Vllm, WorkerType::Prefill),
+        ] {
+            let engine = dp_rank_engine(backend, worker_type, 4);
+            let ranks: Vec<_> = [6, 10, 15, 19, 6]
+                .into_iter()
+                .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
+                .collect();
+            assert_eq!(ranks, [0, 1, 2, 3, 0], "{backend:?} {worker_type:?}");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn no_bootstrap_prefill_delays_terminal_finish_once() {
-        let args = MockEngineArgs::builder()
-            .worker_type(WorkerType::Prefill)
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .kv_transfer_bandwidth(Some(1.0))
-            .kv_bytes_per_token(Some(25_000_000))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Prefill,
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0,
+                "kv_transfer_bandwidth": Some(1.0),
+                "kv_transfer_bytes_per_token": Some(25_000_000)
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1458,15 +1685,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sequential_decode_starts_from_transferred_prompt_kv() {
+        use crate::protocols::common::preprocessor::PrefillResult;
+        use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
+        use dynamo_mocker::live::LiveEngineConfig;
+
+        #[derive(Default)]
+        struct Passes(std::sync::Mutex<usize>);
+        impl FpmSink for Passes {
+            fn publish(&self, _: ForwardPassSnapshot) -> anyhow::Result<()> {
+                *self.0.lock().unwrap() += 1;
+                Ok(())
+            }
+        }
+
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Decode,
+                "block_size": 4,
+                "num_gpu_blocks": 256,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let passes = Arc::new(Passes::default());
+        let live = LiveEngine::start_with_config(
+            args.clone(),
+            0,
+            LiveEngineConfig {
+                fpm_publisher: FpmPublisher::new(Some(passes.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(640, 1);
+        request.prefill_result = Some(PrefillResult {
+            disaggregated_params: serde_json::json!({}),
+            prompt_tokens_details: None,
+        });
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let mut last = None;
+        while let Some(item) = stream.next().await {
+            last = item.data;
+        }
+        // Recomputing the prompt would take 640 / 64 = 10 passes before the token.
+        assert_eq!(*passes.0.lock().unwrap(), 1);
+        let last = last.unwrap();
+        assert!(last.finish_reason.is_some());
+        assert!(
+            last.engine_data
+                .as_ref()
+                .and_then(|data| data.get("kv_cache_hit"))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn context_capped_completion_maps_to_length() {
-        let args = MockEngineArgs::builder()
-            .max_model_len(Some(4))
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "max_model_len": Some(4),
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1487,25 +1776,186 @@ mod tests {
                 prompt_tokens_details: Some(PromptTokensDetails {
                     audio_tokens: None,
                     cached_tokens: Some(0),
+                    ..Default::default()
                 }),
                 completion_tokens_details: None,
             })
         );
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
+        expected_finish.engine_data = Some(Box::new(kv_cache_hit_engine_data(3, 0)));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
         assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
-    async fn native_sglang_completion_attaches_length_to_final_token() {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .build()
+    async fn repeated_prompt_reports_kv_cache_hit() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "enable_prefix_caching": true,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut last = None;
+        for _ in 0..2 {
+            let mut stream = engine
+                .generate(SingleIn::new(decode_request(12, 2)))
+                .await
+                .unwrap();
+            while let Some(item) = stream.next().await {
+                last = item.data;
+            }
+        }
+        let report = &last.unwrap().engine_data.unwrap()["kv_cache_hit"];
+        assert_eq!(report["prompt_tokens"], 12);
+        assert!(report["reused_tokens"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn disaggregated_decode_does_not_report_kv_cache_hit() {
+        use crate::protocols::common::preprocessor::BootstrapInfo;
+
+        let start = |worker_type: WorkerType| {
+            let args = MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": worker_type,
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "max_num_batched_tokens": 64,
+                    "enable_prefix_caching": true,
+                    "speedup_ratio": 1000.0,
+                    "decode_speedup_ratio": 1000.0
+                },
+                "dynamo": { "bootstrap_port": Some(0) }
+            }))
             .unwrap();
+            let live = LiveEngine::start(args.clone(), 0).unwrap();
+            let engine = MockerExecutionContext::new(args);
+            assert!(engine.engines.set(vec![live]).is_ok());
+            assert!(
+                engine
+                    .handoff_session_permits
+                    .set(vec![Arc::new(Semaphore::new(4))])
+                    .is_ok()
+            );
+            engine
+        };
+        let prefill = start(WorkerType::Prefill);
+        let prepared = prefill.prepare_bootstrap().await.unwrap().unwrap();
+        prefill.commit_bootstrap(prepared);
+        let decode = start(WorkerType::Decode);
+
+        let prompt_tokens = 12;
+        let mut request = decode_request(prompt_tokens, 2);
+        request.bootstrap_info = Some(BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: prefill.bootstrap_server.get().unwrap().port(),
+            bootstrap_room: 7,
+            handoff_id: Some(Uuid::from_u128(7)),
+        });
+        let request_id = Uuid::from_u128(77).to_string();
+        let input =
+            || SingleIn::with_id_and_metadata(request.clone(), request_id.clone(), BTreeMap::new());
+        async fn last_output(
+            stream: Result<ManyOut<Annotated<LLMEngineOutput>>, Error>,
+        ) -> LLMEngineOutput {
+            let mut stream = stream.unwrap();
+            let mut last = None;
+            while let Some(item) = stream.next().await {
+                last = item.data;
+            }
+            last.unwrap()
+        }
+        let (prefill_last, decode_last) = tokio::time::timeout(Duration::from_secs(10), async {
+            let (prefill_stream, decode_stream) =
+                futures::future::join(prefill.generate(input()), decode.generate(input())).await;
+            futures::future::join(last_output(prefill_stream), last_output(decode_stream)).await
+        })
+        .await
+        .expect("disaggregated request must finish");
+
+        assert!(prefill_last.finish_reason.is_some());
+        assert_eq!(
+            prefill_last.engine_data.unwrap()["kv_cache_hit"],
+            serde_json::json!({ "prompt_tokens": prompt_tokens, "reused_tokens": 0 })
+        );
+        assert!(decode_last.finish_reason.is_some());
+        assert!(
+            decode_last
+                .engine_data
+                .as_ref()
+                .and_then(|data| data.get("kv_cache_hit"))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn client_input_errors_fail_in_stream_without_marking_worker_down() {
+        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_runtime::error::ErrorClass;
+
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut missing_max_tokens = decode_request(3, 1);
+        missing_max_tokens.stop_conditions.max_tokens = None;
+        let mut bad_dp_rank = decode_request(3, 1);
+        bad_dp_rank.routing = Some(RoutingHints {
+            dp_rank: Some(7),
+            ..Default::default()
+        });
+        let mut bad_sglang = decode_request(3, 1);
+        bad_sglang.extra_args = Some(serde_json::json!({"sglang_tito": 7}));
+
+        for (request, expected, public) in [
+            (missing_max_tokens, "max_output_tokens", true),
+            (bad_dp_rank, "dp_rank 7", true),
+            (bad_sglang, "sglang_tito", false),
+        ] {
+            // An `Err` here is what the egress turns into `CannotConnect` and an evicted worker.
+            let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+            let item = stream.next().await.unwrap();
+            assert!(item.data.is_none());
+            let error = item.err().unwrap();
+            assert_eq!(error.class(), ErrorClass::InvalidRequest, "{expected}");
+            assert!(error.to_string().contains(expected), "{error}");
+            if public {
+                assert!(error.public_message().unwrap().contains(expected));
+            }
+            assert!(!crate::migration::is_migratable(&error), "{expected}");
+            assert!(stream.next().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_sglang_completion_attaches_length_to_final_token() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1527,19 +1977,122 @@ mod tests {
             response["meta_info"]["finish_reason"],
             serde_json::json!({"type": "length"})
         );
+        assert_eq!(
+            output.engine_data.as_ref().unwrap()["kv_cache_hit"],
+            serde_json::json!({ "prompt_tokens": 3, "reused_tokens": 0 })
+        );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_stream_retains_cache_usage_on_intermediate_chunks() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": "sglang", "block_size": 4, "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64, "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(3, 3);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {"rid": "stream"}}));
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let mut chunks = 0;
+        while let Some(output) = stream.next().await {
+            let output = output.data.unwrap();
+            let meta = &output.engine_data.as_ref().unwrap()["sglang_response"]["meta_info"];
+            assert_eq!(meta["cached_tokens"], 0, "chunk {chunks}");
+            chunks += 1;
+        }
+        assert_eq!(chunks, 3);
+    }
+
+    #[tokio::test]
+    async fn native_sglang_candidate_budget_uses_short_replay_over_raw_limit() {
+        let file = write_replay_trace(&[serde_json::json!({
+            "request_id": "short-plan", "output_length": 1, "output_token_ids": [42]
+        })]);
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": "sglang", "block_size": 4, "num_gpu_blocks": 128,
+                "max_num_batched_tokens": 64, "speedup_ratio": 1000.0
+            },
+            "dynamo": {"response_replay_trace_path": file.path()}
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(3, 300);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {
+            "rid": "short-plan", "return_logprob": true,
+            "token_ids_logprob": (0..255).collect::<Vec<u32>>()
+        }}));
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert_eq!(output.token_ids, vec![42]);
+        assert_eq!(output.finish_reason, Some(FinishReason::Length));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_zero_output_preserves_prefill_only_scores() {
+        let args: MockerConfig = serde_json::from_value(serde_json::json!({
+            "engine": {
+                "backend": "sglang",
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(3, 0);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {
+            "rid": "score",
+            "return_logprob": true,
+            "token_ids_logprob": [17, 4]
+        }}));
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert!(output.token_ids.is_empty());
+        assert_eq!(output.finish_reason, Some(FinishReason::Length));
+        assert!(
+            output
+                .completion_usage
+                .as_ref()
+                .is_none_or(|usage| usage.completion_tokens == 0)
+        );
+        let response = &output.engine_data.as_ref().unwrap()["sglang_response"];
+        assert_eq!(response["output_ids"], serde_json::json!([]));
+        assert_eq!(response["meta_info"]["completion_tokens"], 0);
+        assert_eq!(response["meta_info"]["cached_tokens"], 0);
+        let scores = response["meta_info"]["output_token_ids_logprobs"]
+            .as_array()
+            .unwrap();
+        assert_eq!(scores.last().unwrap()[0][1], 17);
+        assert_eq!(scores.last().unwrap()[1][1], 4);
         assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
     async fn dropping_response_cancels_live_request_and_allows_id_reuse() {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_seqs(Some(1))
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(0.1)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 1,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 0.1
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live.clone()]).is_ok());
@@ -1588,14 +2141,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_with_same_request_id_runs_beside_active_attempt() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 4096,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        let request_id = Uuid::from_u128(101).to_string();
+        let attempt = |max_tokens| {
+            SingleIn::with_id_and_metadata(
+                decode_request(1, max_tokens),
+                request_id.clone(),
+                BTreeMap::new(),
+            )
+        };
+
+        let mut first = engine.generate(attempt(10_000)).await.unwrap();
+        first.next().await.unwrap().data.unwrap();
+        let mut retry = engine
+            .generate(attempt(2))
+            .await
+            .expect("a retry must not collide with the still-active first attempt");
+        assert_eq!(live.active_request_count(), 2);
+
+        let mut output_tokens = 0;
+        let mut finish = None;
+        while let Some(output) = retry.next().await {
+            let output = output.data.unwrap();
+            output_tokens += output.token_ids.len();
+            if output.finish_reason.is_some() {
+                finish = output.finish_reason;
+            }
+        }
+        assert_eq!(output_tokens, 2);
+        assert_eq!(finish, LLMEngineOutput::length().finish_reason);
+        assert_eq!(live.active_request_count(), 1);
+        first.next().await.unwrap().data.unwrap();
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while live.active_request_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the first attempt must cancel it");
+    }
+
+    #[tokio::test]
     async fn unread_response_completes_without_overflow_cancellation() {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let engines = LiveEngine::start_grouped_with_configs_and_request_output_buffering(
             args.clone(),
             vec![LiveEngineConfig::default()],
@@ -1640,13 +2250,15 @@ mod tests {
 
     #[test]
     fn unbounded_sequence_limit_uses_finite_multi_handoff_capacity() {
-        let args = MockEngineArgs::builder()
-            .num_gpu_blocks(3)
-            .max_num_seqs(None)
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "num_gpu_blocks": 3,
+                "max_num_seqs": usize::MAX
+            }
+        }))
+        .unwrap()
+        .normalized()
+        .unwrap();
 
         assert_eq!(args.effective_handoff_capacity(), 3);
         let permits = tokio::sync::Semaphore::new(args.effective_handoff_capacity());
@@ -1660,7 +2272,7 @@ mod tests {
     #[tokio::test]
     async fn startup_failure_wakes_engine_waiters() {
         let engine = Arc::new(MockerExecutionContext::new(
-            MockEngineArgs::builder().build().unwrap(),
+            MockerConfig::from_value(serde_json::json!({})).unwrap(),
         ));
         let waiting_engine = Arc::clone(&engine);
         let waiter = tokio::spawn(async move { waiting_engine.engine(0).await });
@@ -1681,13 +2293,17 @@ mod tests {
     async fn prepared_bootstrap_shutdown_releases_the_listener() {
         let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = occupied.local_addr().unwrap().port();
-        let args = MockEngineArgs::builder()
-            .worker_type(WorkerType::Prefill)
-            .bootstrap_port(Some(port))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Prefill
+            },
+            "dynamo": {
+                "bootstrap_port": Some(port)
+            }
+        }))
+        .unwrap()
+        .normalized()
+        .unwrap();
         let engine = MockerExecutionContext::new(args);
 
         assert!(engine.prepare_bootstrap().await.is_err());
@@ -1716,6 +2332,293 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_sglang_replay_candidate_budget_uses_effective_output_length() {
+        use dynamo_runtime::error::ErrorClass;
+
+        let file = write_replay_trace(&[serde_json::json!({
+            "request_id": "planned", "output_length": 258, "output_token_ids": vec![7; 258]
+        })]);
+        for (max_model_len, candidates, expected_tokens) in [
+            (None, true, None),
+            // A 3-token prompt does not fit a 4-token context once SGLang
+            // reserves room for the request; with 10 it leaves 5 output tokens.
+            (Some(4), true, Some(0)),
+            (Some(10), true, Some(5)),
+            (None, false, Some(258)),
+        ] {
+            let args = MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "backend": "sglang", "max_model_len": max_model_len,
+                    "block_size": 4, "num_gpu_blocks": 128,
+                    "max_num_batched_tokens": 64, "speedup_ratio": 1000.0
+                },
+                "dynamo": {"response_replay_trace_path": file.path()}
+            }))
+            .unwrap();
+            let live = LiveEngine::start(args.clone(), 0).unwrap();
+            let engine = MockerExecutionContext::new(args);
+            assert!(engine.engines.set(vec![live.clone()]).is_ok());
+            let mut request = decode_request(3, 0);
+            request.extra_args = Some(serde_json::json!({"sglang_tito": {
+                "rid": "planned", "return_logprob": true,
+                "token_ids_logprob": candidates.then(|| (0..255).collect::<Vec<u32>>())
+            }}));
+            let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+            if let Some(expected) = expected_tokens {
+                let mut tokens = Vec::new();
+                let mut finish = None;
+                while let Some(output) = stream.next().await {
+                    let output = output.data.unwrap();
+                    tokens.extend(output.token_ids);
+                    if output.finish_reason.is_some() {
+                        finish = output.finish_reason;
+                    }
+                }
+                assert_eq!(tokens, vec![7; expected]);
+                if expected == 0 {
+                    assert!(matches!(
+                        finish,
+                        Some(FinishReason::Error(message))
+                            if message.contains("request exceeds worker admission limits")
+                    ));
+                } else {
+                    assert_eq!(finish, Some(FinishReason::Length));
+                }
+            } else {
+                let item = stream.next().await.unwrap();
+                assert!(
+                    item.data.is_none(),
+                    "oversized replay must fail before producing scores"
+                );
+                let error = item.err().unwrap();
+                assert_eq!(error.class(), ErrorClass::InvalidRequest);
+                assert!(error.to_string().contains("candidate-entry budget"));
+                assert_eq!(
+                    error.public_message(),
+                    Some(
+                        "token_ids_logprob and output length exceed the 65536 output candidate-entry budget"
+                    )
+                );
+                assert!(!crate::migration::is_migratable(&error));
+                assert!(stream.next().await.is_none());
+                assert_eq!(live.active_request_count(), 0);
+            }
+        }
+    }
+
+    fn sglang_config(
+        worker_type: WorkerType,
+        block_size: usize,
+        num_gpu_blocks: usize,
+        max_model_len: Option<usize>,
+    ) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": "sglang", "worker_type": worker_type,
+                "max_model_len": max_model_len,
+                "block_size": block_size, "num_gpu_blocks": num_gpu_blocks,
+                "max_num_batched_tokens": 64, "speedup_ratio": 1000.0,
+                // These pools are smaller than SGLang's default decode reservation.
+                "sglang": {"num_reserved_decode_tokens": 0}
+            }
+        }))
+        .unwrap()
+    }
+
+    /// Runs one request on a scheduler started from `scheduler` while the mocker computes its
+    /// limits from `mocker`. Returns the output token count and the finish reason, or `None`
+    /// when the scheduler of a decode worker refuses to reserve KV for the prompt.
+    async fn run_to_finish(
+        scheduler: MockerConfig,
+        mocker: MockerConfig,
+        prompt_tokens: usize,
+        max_tokens: u32,
+    ) -> Option<(usize, Option<FinishReason>)> {
+        use crate::protocols::common::preprocessor::PrefillResult;
+
+        let is_decode = mocker.is_decode();
+        let live = LiveEngine::start(scheduler, 0).unwrap();
+        let engine = MockerExecutionContext::new(mocker);
+        assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        let mut request = decode_request(prompt_tokens, max_tokens);
+        if is_decode {
+            // A decode worker takes the prompt KV as transferred. The scheduler gets
+            // `ReserveDestination`, as it does for a bootstrap handoff from a prefill worker.
+            request.prefill_result = Some(PrefillResult {
+                disaggregated_params: serde_json::json!({}),
+                prompt_tokens_details: None,
+            });
+        }
+        let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+            let mut stream = match engine.generate(SingleIn::new(request)).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    // `generate` reports the refusal only as a failed scheduler command.
+                    assert!(
+                        is_decode && error.to_string().contains("applying command"),
+                        "{error}"
+                    );
+                    return None;
+                }
+            };
+            let mut tokens = 0;
+            let mut finish = None;
+            while let Some(output) = stream.next().await {
+                let output = output.data.unwrap();
+                tokens += output.token_ids.len();
+                if output.finish_reason.is_some() {
+                    finish = output.finish_reason;
+                }
+            }
+            Some((tokens, finish))
+        })
+        .await
+        .expect("request must finish");
+        live.shutdown().await.unwrap();
+        outcome
+    }
+
+    #[tokio::test]
+    async fn sglang_completion_before_budget_fails_unless_the_scheduler_cap_explains_it() {
+        // A 3-token prompt asks for 100 tokens, with 4-token blocks. The scheduler ends it after
+        // `scheduled` tokens, and the mocker computes its limits from its own configuration.
+        // Each configuration is a pool in blocks and a context.
+        let aggregated = |(num_gpu_blocks, max_model_len)| {
+            sglang_config(WorkerType::Aggregated, 4, num_gpu_blocks, max_model_len)
+        };
+        for (scheduler, mocker, scheduled, explained) in [
+            // The scheduler has a 64-token pool. The mocker has the same, then a 512-token one.
+            ((16, None), (16, None), 55, true),
+            ((16, None), (128, None), 55, false),
+            // The scheduler has a 20-token context. The mocker has the same, then none.
+            ((128, Some(20)), (128, Some(20)), 15, true),
+            ((128, Some(20)), (128, None), 15, false),
+            // The mocker has a 60-token context, so its floor is 60 - 3 - 2 * 4 = 49 tokens.
+            ((128, Some(54)), (128, Some(60)), 49, true),
+            ((128, Some(53)), (128, Some(60)), 48, false),
+        ] {
+            let (scheduler, mocker) = (aggregated(scheduler), aggregated(mocker));
+            let (tokens, finish) = run_to_finish(scheduler, mocker, 3, 100).await.unwrap();
+            if explained {
+                assert_eq!((tokens, finish), (scheduled, Some(FinishReason::Length)));
+            } else {
+                assert!(
+                    matches!(&finish, Some(FinishReason::Error(message))
+                        if message.contains("before max tokens reached")),
+                    "{tokens} tokens, {finish:?}"
+                );
+                // The error takes the place of the last token.
+                assert_eq!(tokens, scheduled - 1);
+            }
+        }
+    }
+
+    /// The floor must explain every completion the scheduler's cap causes, and the cap must
+    /// reach it: on each worker type and block size, for every prompt length up to the pool,
+    /// with the context below and above the pool.
+    #[tokio::test]
+    async fn sglang_scheduler_cap_never_fails_a_request() {
+        const POOL_TOKENS: usize = 32;
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            for block_size in [1, 4] {
+                let mut finished = 0;
+                // The fewest tokens above the floor among the completions before the budget.
+                let mut closest_to_floor = None;
+                for max_model_len in [None, Some(20), Some(40)] {
+                    for prompt_tokens in 1..=POOL_TOKENS + 1 {
+                        for max_tokens in [2, 1000] {
+                            let config = sglang_config(
+                                worker_type,
+                                block_size,
+                                POOL_TOKENS / block_size,
+                                max_model_len,
+                            );
+                            let floor = sglang_capped_output_floor(&config, prompt_tokens);
+                            let Some((tokens, finish)) =
+                                run_to_finish(config.clone(), config, prompt_tokens, max_tokens)
+                                    .await
+                            else {
+                                continue;
+                            };
+                            // The budget `generate` computes for this request.
+                            let requested = match worker_type {
+                                WorkerType::Prefill => 1,
+                                _ => max_tokens as usize,
+                            };
+                            let budget = max_model_len.map_or(requested, |max_model_len| {
+                                requested.min(max_model_len.saturating_sub(prompt_tokens))
+                            });
+                            let case = format!(
+                                "{worker_type:?} block_size={block_size} \
+                                 max_model_len={max_model_len:?} prompt_tokens={prompt_tokens} \
+                                 max_tokens={max_tokens}: {tokens} tokens, {finish:?}"
+                            );
+                            match finish {
+                                Some(FinishReason::Length) => {
+                                    finished += 1;
+                                    // Skip a floor of zero: it accepts every completion.
+                                    if tokens < budget && floor > 0 {
+                                        let above = tokens.checked_sub(floor).expect(&case);
+                                        closest_to_floor = Some(
+                                            closest_to_floor
+                                                .map_or(above, |closest: usize| closest.min(above)),
+                                        );
+                                    }
+                                }
+                                Some(FinishReason::Error(message)) => {
+                                    assert!(message.contains("request rejected"), "{case}");
+                                }
+                                _ => panic!("{case}"),
+                            }
+                        }
+                    }
+                }
+                let sweep = format!("{worker_type:?} block_size={block_size}");
+                assert!(finished > 0, "{sweep}: no request finished");
+                // A prefill worker generates one token, so no cap can end it early. On the
+                // others some capped completion must end exactly on the floor, or the floor
+                // accepts more than the scheduler needs.
+                let expected = (worker_type != WorkerType::Prefill).then_some(0);
+                assert_eq!(
+                    closest_to_floor, expected,
+                    "{sweep}: tokens above the floor"
+                );
+            }
+        }
+    }
+
+    /// vLLM and TensorRT-LLM get no such floor: a completion one token before the budget is an
+    /// error, although the same completion is inside the two blocks an SGLang worker accepts.
+    #[tokio::test]
+    async fn completion_before_budget_fails_on_backends_without_a_scheduler_cap() {
+        for backend in ["vllm", "trtllm"] {
+            let config = |max_model_len: usize| {
+                MockerConfig::from_value(serde_json::json!({
+                    "engine": {
+                        "backend": backend, "max_model_len": max_model_len,
+                        "block_size": 4, "num_gpu_blocks": 128,
+                        "max_num_batched_tokens": 64, "speedup_ratio": 1000.0
+                    }
+                }))
+                .unwrap()
+            };
+            // The scheduler's context is one token shorter than the mocker's, so it ends the
+            // 3-token prompt after 56 tokens and the mocker's budget is 57.
+            let (tokens, finish) = run_to_finish(config(59), config(60), 3, 100).await.unwrap();
+            assert!(
+                matches!(&finish, Some(FinishReason::Error(message))
+                    if message.contains("before max tokens reached")),
+                "{backend}: {tokens} tokens, {finish:?}"
+            );
+            assert_eq!(tokens, 55, "{backend}");
+        }
+    }
+
+    #[tokio::test]
     async fn response_replay_prefill_uses_only_first_planned_token() {
         let file = write_replay_trace(&[serde_json::json!({
             "request_id": "planned",
@@ -1728,16 +2631,20 @@ mod tests {
                 (WorkerType::Prefill, &[7][..]),
                 (WorkerType::Decode, &[7, 8][..]),
             ] {
-                let args = MockEngineArgs::builder()
-                    .engine_type(engine_type)
-                    .worker_type(worker_type)
-                    .block_size(4)
-                    .num_gpu_blocks(64)
-                    .max_num_batched_tokens(Some(64))
-                    .speedup_ratio(1000.0)
-                    .response_replay_trace_path(Some(file.path().to_path_buf()))
-                    .build()
-                    .unwrap();
+                let args = MockerConfig::from_value(serde_json::json!({
+                    "engine": {
+                        "backend": engine_type,
+                        "worker_type": worker_type,
+                        "block_size": 4,
+                        "num_gpu_blocks": 64,
+                        "max_num_batched_tokens": 64,
+                        "speedup_ratio": 1000.0
+                    },
+                    "dynamo": {
+                        "response_replay_trace_path": Some(file.path().to_path_buf())
+                    }
+                }))
+                .unwrap();
                 let live = LiveEngine::start(args.clone(), 0).unwrap();
                 let engine = MockerExecutionContext::new(args);
                 assert!(engine.engines.set(vec![live]).is_ok());

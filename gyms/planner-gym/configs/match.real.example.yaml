@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+name: live-endpoint-comparison
+description: Compare already-deployed autoscaling stacks with AIPerf.
+
+backend:
+  type: real
+  # This path, and every other relative path, is relative to this YAML file.
+  # Each catalog endpoint declares its AIPerf request model and may include
+  # unverified model/engine deployment provenance.
+  endpoint_catalog: endpoints.example.yaml
+
+  aiperf:
+    executable: aiperf
+    tokenizer: null
+    streaming: true
+    timeout_s: 900
+    extra_args: []
+
+  autoscalers:
+    - name: fast-deployment
+      endpoint: fast-endpoint
+    - name: slow-deployment
+      endpoint: slow-endpoint
+
+evaluations:
+  # User-supplied Mooncake JSONL traces are resolved relative to this file:
+  # traces:
+  #   - name: my-recorded-traffic
+  #     path: ../../../private/traces/my-traffic.jsonl
+  #     block_size: 512
+  #     presorted: true
+  suites:
+    - synthetic
+  exclude:
+    - staircase
+    - square_wave
+    - flash_crowd
+    - diurnal
+    - decode_heavy
+    - shared_prefix
+  defaults:
+    seed: 0
+    max_requests: 100
+    arrival_speedup: 1.0
+
+slo_profiles:
+  # Two TTFT values x two ITL values = four AIPerf goodput profiles.
+  - name: interactive
+    ttft_ms: [300, 500]
+    itl_ms: [50, 100]
+
+metrics:
+  rank_by: goodput_rps
+  include:
+    - goodput_rps
+    - request_throughput_rps
+    - mean_ttft_ms
+    - p99_ttft_ms
+    - mean_itl_ms
+    - p99_itl_ms
+
+execution:
+  repetitions: 1
+  fail_fast: false
+  # 2 endpoints x 1 workload x 4 expanded SLA targets x 1 repetition.
+  max_runs: 8
+
+publish:
+  artifact_root: ../runs/match-real/artifacts
+  destinations:
+    - type: console
+    - type: json
+      path: ../runs/match-real/results.json
+    - type: html
+      path: ../runs/match-real/report.html

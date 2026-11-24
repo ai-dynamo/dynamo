@@ -384,6 +384,15 @@ impl SharedTcpServer {
                     match accept_result {
                         Ok((stream, peer_addr)) => {
                             tracing::trace!("Accepted TCP connection from {peer_addr}");
+                            // The per-request ACK frame is small; with Nagle on it waits for
+                            // the client's delayed ACK of the previous frame (~40 ms).
+                            if let Err(e) = stream.set_nodelay(true) {
+                                tracing::warn!(
+                                    peer_addr = %peer_addr,
+                                    error = %e,
+                                    "Failed to set TCP_NODELAY on request-plane connection"
+                                );
+                            }
 
                             let handlers = self.handlers.clone();
                             let work_tx = self.work_tx.clone();
@@ -617,8 +626,12 @@ impl SharedTcpServer {
                 "Received TCP request"
             );
 
-            // Look up handler (lock-free read with DashMap)
-            let handler = handlers.get(endpoint_path).map(|h| h.clone());
+            // Count admission before releasing the map guard: removal must not
+            // observe zero inflight while this request still holds the handler.
+            let handler = handlers.get(endpoint_path).map(|h| {
+                h.inflight.fetch_add(1, Ordering::SeqCst);
+                h.clone()
+            });
 
             let handler = match handler {
                 Some(h) => h,
@@ -636,8 +649,6 @@ impl SharedTcpServer {
                     continue;
                 }
             };
-
-            handler.inflight.fetch_add(1, Ordering::SeqCst);
 
             // Build work item
             // NOTE: payload is Bytes (Arc-counted), so cloning is extremely cheap
@@ -1391,6 +1402,13 @@ mod tests {
 
     #[tokio::test]
     async fn new_no_tls_env_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::new_no_tls_env_is_plaintext"),
+            &[],
+        ) {
+            return;
+        }
+
         let token = CancellationToken::new();
         temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
             let server =
@@ -1402,6 +1420,13 @@ mod tests {
 
     #[tokio::test]
     async fn new_partial_tls_config_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::new_partial_tls_config_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
@@ -1435,6 +1460,13 @@ mod tests {
 
     #[tokio::test]
     async fn new_both_paths_enables_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::new_both_paths_enables_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let token = CancellationToken::new();
         temp_env::with_vars(

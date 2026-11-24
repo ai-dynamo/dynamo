@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
-from packaging.version import Version
-from vllm import __version__ as _vllm_version
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -21,7 +19,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.request import Request
 
-MINIMUM_VLLM_VERSION = "0.17.0"
 
 # This connector runs inside vLLM's spawned EngineCore process, where Dynamo's
 # logging bridge is unavailable. Use a vLLM child logger so
@@ -167,13 +164,6 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     """
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
-        if Version(_vllm_version) < Version(MINIMUM_VLLM_VERSION):
-            logger.warning(
-                "DynamoMultimodalEmbeddingCacheConnector requires vLLM >= %s, "
-                "but found %s. Some features may not work correctly.",
-                MINIMUM_VLLM_VERSION,
-                _vllm_version,
-            )
         super().__init__(vllm_config=vllm_config, role=role)
         self._device = _get_device(vllm_config)
 
@@ -201,6 +191,12 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             [], dtype=vllm_config.model_config.dtype
         ).element_size()
         self._bytes_per_embed = hidden_size * dtype_bytes
+        # vLLM >= 0.32 measures each modality's encoder output width at startup;
+        # DeepStack models (e.g. Qwen3-VL) emit rows wider than the hidden size.
+        measured_widths = getattr(transfer_config, "mm_encoder_output_widths", {})
+        self._bytes_per_embed_by_modality = {
+            modality: width * dtype_bytes for modality, width in measured_widths.items()
+        }
         self._capacity_bytes = int(capacity_gb * 1024**3)
 
         self._cache_order: OrderedDict[str, int] = OrderedDict()  # hash → size_bytes
@@ -246,10 +242,12 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
-            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d",
+            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d, "
+            "bytes_per_embed_by_modality=%s",
             capacity_gb,
             self._capacity_bytes,
             self._bytes_per_embed,
+            self._bytes_per_embed_by_modality,
         )
 
     # ==============================
@@ -295,9 +293,13 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             then mark for GPU→CPU save so the worker persists the newly
             computed embedding. Silently skips items larger than total capacity.
         """
-        mm_hash: str = request.mm_features[index].identifier
+        feature = request.mm_features[index]
+        mm_hash: str = feature.identifier
         num_embeds: int = request.get_num_encoder_embeds(index)
-        size_bytes: int = num_embeds * self._bytes_per_embed
+        bytes_per_embed = self._bytes_per_embed_by_modality.get(
+            feature.modality, self._bytes_per_embed
+        )
+        size_bytes: int = num_embeds * bytes_per_embed
 
         if mm_hash in self._cache_order:
             self._cache_order.move_to_end(mm_hash)
@@ -322,6 +324,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
             self._num_used_bytes -= evicted_bytes
             self._evicts_this_step.add(evicted_hash)
+            # The worker evicts before it saves, so drop any save planned this step.
+            self._saves_this_step.discard(evicted_hash)
             num_evicted += 1
 
         self._cache_order[mm_hash] = size_bytes

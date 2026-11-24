@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 from test_triton_handlers import (
     _MockModel,
     assert_dynamo_response,
@@ -225,9 +226,11 @@ def _classification_request(*outputs: tuple[str, int | None]) -> dict[str, Any]:
     """A one-input request asking for the given (output name, class count) pairs."""
     request = build_dynamo_request(("IN", "Float32", [1], [0.0]))
     request["outputs"] = [
-        {"name": name}
-        if count is None
-        else {"name": name, "parameters": {"classification": {"int64": count}}}
+        (
+            {"name": name}
+            if count is None
+            else {"name": name, "parameters": {"classification": {"int64": count}}}
+        )
         for name, count in outputs
     ]
     return request
@@ -398,7 +401,9 @@ def test_generate_rejects_an_invalid_classification_parameter_before_infer():
         [{"name": "OUTPUT0", "datatype": "FP32"}],
         [build_triton_response("req-id", "classifier", {})],
     )
-    handler = handlers.RequestHandler(MagicMock(), model)
+    handler = handlers.RequestHandler(
+        MagicMock(), model, TritonModelConfigPb.ModelConfig(max_batch_size=0)
+    )
 
     with pytest.raises(ValueError, match="expected >= 1"):
         asyncio.run(

@@ -1,0 +1,180 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package lpx
+
+import (
+	"testing"
+
+	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+)
+
+func TestApplyLocalPartitionIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		localIDs []int
+		env      []corev1.EnvVar
+		envFrom  []corev1.EnvFromSource
+		wantEnv  []corev1.EnvVar
+	}{
+		{
+			name:    "no local partitions removes authored values",
+			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
+			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}, {Name: "OTHER", Value: "kept"}},
+		},
+		{
+			name:    "no local partitions shadows envFrom sources",
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
+			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}},
+		},
+		{
+			name:     "resolved selection replaces authored values",
+			localIDs: []int{0, 2, 12},
+			env:      []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
+			wantEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "0,2,12"}, {Name: "OTHER", Value: "kept"}},
+		},
+		{
+			name:     "resolved selection precedes dependent values",
+			localIDs: []int{11},
+			env: []corev1.EnvVar{
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+				{Name: localPartitionIDsEnv, Value: "authored"},
+				{Name: "LAST", Value: "kept"},
+			},
+			wantEnv: []corev1.EnvVar{
+				{Name: localPartitionIDsEnv, Value: "11"},
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+				{Name: "LAST", Value: "kept"},
+			},
+		},
+		{
+			name:    "envFrom shadow precedes dependent values",
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
+			env: []corev1.EnvVar{
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+			},
+			wantEnv: []corev1.EnvVar{
+				{Name: localPartitionIDsEnv},
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Publish the resolved local partitions into the Cyborg container")
+			container := &corev1.Container{Env: test.env, EnvFrom: test.envFrom}
+			applyLocalPartitionIDs(container, &ModelProjection{localPartitionIDs: test.localIDs})
+			require.Equal(t, test.wantEnv, container.Env)
+		})
+	}
+}
+
+func TestRenderHybridLocalPartitions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		selection        *dynamov1beta1.LPXLocalPartitions
+		wantAgents       int32
+		wantStartsAfter  []string
+		wantGroupMembers []string
+		wantLocalEnv     string
+	}{
+		{
+			name: "partial selection renders Agents for remote partitions", selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{11}},
+			wantAgents: 9, wantStartsAfter: []string{"agt"}, wantGroupMembers: []string{"agt", "cond"}, wantLocalEnv: "11",
+		},
+		{
+			name: "all-local selection renders only Cyborg", selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
+			wantStartsAfter: []string{}, wantGroupMembers: []string{"cond"}, wantLocalEnv: "7,11",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Project a hybrid build with chain 7-8 and an independent partition 11")
+			normalized, err := acquireTestUnitBundle(t, testUnitBundle{
+				architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: true,
+				partitions: testUnitPartitions(7, 8, 11),
+				units: []testLPUUnit{
+					{Reservations: []testLPUReservation{testNodesReservation(1, 7), testNodesReservation(8, 8)}, Connectors: []testLPUConnector{{}}},
+					{Reservations: []testLPUReservation{testNodesReservation(8, 11)}},
+				},
+			})
+			require.NoError(t, err)
+			projections, err := projectModels(ModelProjectionInput{
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
+				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
+			})
+			require.NoError(t, err)
+
+			t.Log("Render the hybrid workload")
+			rendered, err := renderSelectedForTest(renderTestPCS(true), projections, RenderInput{
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+			})
+			require.NoError(t, err)
+
+			t.Log("Render Agents only for remote partitions and start Cyborg after them")
+			var agentReplicas int32
+			for _, clique := range rendered.Spec.Template.Cliques {
+				if clique.Name == testAgentTemplateName {
+					agentReplicas = clique.Spec.Replicas
+				}
+			}
+			require.Equal(t, test.wantAgents, agentReplicas)
+			cyborg := namedClique(t, rendered, "cond")
+			require.Equal(t, test.wantStartsAfter, cyborg.Spec.StartsAfter)
+			require.ElementsMatch(t, test.wantGroupMembers, rendered.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames)
+
+			t.Log("Publish the resolved local partitions to Cyborg")
+			localEnv := ""
+			for _, variable := range cyborg.Spec.PodSpec.Containers[0].Env {
+				if variable.Name == localPartitionIDsEnv {
+					localEnv = variable.Value
+				}
+			}
+			require.Equal(t, test.wantLocalEnv, localEnv)
+		})
+	}
+}
+
+func TestUnitProjectionBoundsPartitions(t *testing.T) {
+	t.Log("Compile one more single-reservation unit than a projection may carry")
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp30, devicesPerNode: 16, hybrid: true}
+	for id := uint32(0); id <= maxLPXPartitions; id++ {
+		bundle.partitions = append(bundle.partitions, testUnitPartition{id: id})
+		bundle.units = append(bundle.units, testSingleUnits(testHXReservation(1, 1, 1, id))...)
+	}
+	build, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name      string
+		selection *dynamov1beta1.LPXLocalPartitions
+	}{
+		{name: "every unit stays on LPUs"},
+		{name: "every unit runs on the Cyborg GPU", selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Reject the projection whose remote reservations and local units exceed the limit")
+			_, err := projectModels(ModelProjectionInput{
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: build, LocalPartitions: test.selection,
+			})
+			require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")
+		})
+	}
+}

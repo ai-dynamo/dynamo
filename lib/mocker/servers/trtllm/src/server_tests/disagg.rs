@@ -310,17 +310,6 @@ async fn the_first_tokens_logprob_survives_only_if_the_context_phase_computed_it
     );
 }
 
-fn decode_service() -> TrtllmMockerService {
-    TrtllmMockerService::new(
-        MockerServerConfig {
-            mode: ServerMode::Decode,
-            ..config()
-        },
-        admitting_args(),
-    )
-    .unwrap()
-}
-
 /// The handoff's logprob is replayed, not recomputed. Regenerating it from the
 /// token id would agree with the handoff on every honest run and hide a
 /// corrupted one, so overwrite the value in the session and require the decode
@@ -372,6 +361,7 @@ async fn the_replayed_logprob_is_the_one_the_handoff_carried() {
         Some(HANDED_OFF),
         "position 0 must report the handed-off value, not a regenerated one"
     );
+    assert!(!first.tokens[0].token.is_empty());
 }
 
 /// A repeated token must keep its logprob even if the replayed token has none.

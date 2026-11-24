@@ -19,13 +19,15 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+    SPEC_DECODE_RUNTIME_KEY, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
+use dynamo_kv_indexer::host::{ExplicitIdentityMap, IndexerIdentitySpec};
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -33,7 +35,10 @@ use tokenizers::Tokenizer as HfTokenizer;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
-const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const FALLBACK_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DEFAULT_TOKENIZER_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+// Cache RSS measures 1.3-3.3x the token-ID budget once per-entry metadata is included.
+const TOKENIZER_CACHE_MEMORY_FRACTION: u64 = 16;
 static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
 
 fn append_runtime_contract_checksum(
@@ -56,19 +61,6 @@ fn append_runtime_contract_checksum(
     bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
     bytes.extend_from_slice(&value);
-}
-
-fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(canonicalize_json_object_keys);
-        }
-        serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize_json_object_keys);
-            map.sort_keys();
-        }
-        _ => {}
-    }
 }
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
@@ -100,30 +92,107 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
 }
 
-fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    match value {
-        Some(value) => match value.parse::<usize>() {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(
-                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
-                    value,
-                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
-                    %error,
-                    "Failed to parse tokenizer cache byte budget; using default"
-                );
-                DEFAULT_TOKENIZER_CACHE_BYTES
-            }
-        },
-        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+#[cfg(target_os = "linux")]
+fn tokenizer_cache_memory_limit() -> Option<u64> {
+    // sysinfo's first process refresh raises the soft RLIMIT_NOFILE to the hard limit.
+    // Restore it so the frontend's DYN_FRONTEND_FD_LIMIT_TARGET still applies.
+    let mut nofile = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit only writes the current limits into the provided struct.
+    let saved = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) } == 0;
+    let limit = read_cgroup_memory_limit();
+    // SAFETY: restores the limits read above; lowering the soft limit needs no privileges.
+    if saved && unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) } != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "Failed to restore RLIMIT_NOFILE after memory limit detection"
+        );
+    }
+    limit
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tokenizer_cache_memory_limit() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_memory_limit() -> Option<u64> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = sysinfo::System::new();
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().without_tasks(),
+    );
+    // TODO: sysinfo 0.40 adds mountinfo path resolution, hybrid cgroup fixes, and read-failure
+    // propagation (https://github.com/GuillaumeGomez/sysinfo/pull/1723,
+    // https://github.com/GuillaumeGomez/sysinfo/pull/1753). It returns `None` when no finite
+    // limit exists, and `System::new` returns a `Result`.
+    let cgroup_total = system.process(pid)?.cgroup_limits()?.total_memory;
+    finite_memory_limit(cgroup_total, system.total_memory())
+}
+
+/// sysinfo reports host `MemTotal` when no cgroup on the path sets a lower limit. Limits
+/// within 10% of host memory, such as Kubernetes node allocatable on `kubepods.slice`, are
+/// treated as no limit too.
+#[cfg(target_os = "linux")]
+fn finite_memory_limit(cgroup_total: u64, mem_total: u64) -> Option<u64> {
+    (cgroup_total < mem_total - mem_total / 10).then_some(cgroup_total)
+}
+
+fn tokenizer_cache_budget(
+    value: Option<&str>,
+    memory_limit: impl FnOnce() -> Option<u64>,
+) -> (usize, &'static str) {
+    let Some(value) = value else {
+        return match memory_limit() {
+            Some(limit) => (
+                usize::try_from(
+                    (limit / TOKENIZER_CACHE_MEMORY_FRACTION)
+                        .min(MAX_DEFAULT_TOKENIZER_CACHE_BYTES),
+                )
+                .unwrap_or(usize::MAX),
+                "cgroup_limit",
+            ),
+            None => (FALLBACK_TOKENIZER_CACHE_BYTES, "fallback"),
+        };
+    };
+
+    match value.trim().parse::<usize>() {
+        Ok(bytes) => (bytes, "DYN_TOKENIZER_CACHE_BYTES"),
+        Err(error) => {
+            tracing::warn!(
+                env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                value,
+                default = FALLBACK_TOKENIZER_CACHE_BYTES,
+                %error,
+                "Failed to parse tokenizer cache byte budget; using default"
+            );
+            (FALLBACK_TOKENIZER_CACHE_BYTES, "fallback")
+        }
     }
 }
 
 fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
     TOKENIZER_CACHE.get_or_init(|| {
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
-        tracing::info!(cache_bytes, "initializing process-wide tokenizer cache");
+        // Lossy conversion lets non-UTF-8 values reach the parse warning.
+        let value = std::env::var_os("DYN_TOKENIZER_CACHE_BYTES")
+            .map(|value| value.to_string_lossy().into_owned());
+        let mut memory_limit = None;
+        let (cache_bytes, source) = tokenizer_cache_budget(value.as_deref(), || {
+            memory_limit = tokenizer_cache_memory_limit();
+            memory_limit
+        });
+        tracing::info!(
+            cache_bytes,
+            source,
+            memory_limit = ?memory_limit,
+            "initializing process-wide tokenizer cache"
+        );
         crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
     })
 }
@@ -200,6 +269,15 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out
 }
 
+/// Exclusive bound for client token ids: the largest id plus one, added tokens
+/// included. Ids can have gaps, so the token count is not a bound.
+fn hf_token_id_bound(hf: &HfTokenizer) -> Option<usize> {
+    hf.get_vocab(true)
+        .into_values()
+        .max()
+        .map(|id| id as usize + 1)
+}
+
 /// serde `deserialize_with` that maps an explicitly-present value -- *including
 /// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
 /// supplies `None` only when the key is absent), this distinguishes "field
@@ -245,7 +323,9 @@ struct ArchMaxContextTextConfig {
 ///
 /// `config.json` is authoritative when it declares `max_position_embeddings`;
 /// multimodal configs may instead nest it under `text_config`; tokenizer
-/// `model_max_length` is only a last resort. Missing fields fall through to the
+/// `model_max_length` is only a last resort. Mistral-native checkpoints have no
+/// `config.json`, so their `params.json` `max_position_embeddings` is used,
+/// best effort. Missing fields fall through to the
 /// next source, but malformed present fields return an error so bad model
 /// metadata cannot silently resize request validation and planner limits.
 ///
@@ -270,7 +350,13 @@ fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Resu
         }
     };
     let Some(config_json) = config_json else {
-        return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
+        // Mistral-native checkpoints keep the context length in params.json.
+        let params_context_length = || {
+            crate::file_json_field(&local_path.join("params.json"), "max_position_embeddings").ok()
+        };
+        return Ok(params_context_length()
+            .or_else(tokenizer_context_length)
+            .filter(|context_length| *context_length > 0));
     };
     // Parse with the JSON5 parser (a lenient superset of JSON) into a minimal
     // projection, mirroring `HFConfig::from_json_file`. This tolerates non-finite
@@ -330,29 +416,146 @@ impl ModelInfoType {
 pub enum TokenizerKind {
     HfTokenizerJson(CheckedFile),
     TikTokenModel(CheckedFile),
+    /// Mistral `tekken.json` (v13/v15), paired with the native Mistral renderer.
+    TekkenJson(CheckedFile),
+    /// Native tokenizer with the HF artifact retained for Python chat processors: stock
+    /// vLLM's `auto` tokenizer mode loads `tokenizer.json` when the directory has no
+    /// `consolidated*.safetensors`.
+    TekkenJsonWithHfFallback {
+        tekken: CheckedFile,
+        hf: CheckedFile,
+    },
 }
 
 impl TokenizerKind {
-    pub fn checksum(&self) -> String {
+    pub(crate) fn checked_file(&self) -> &CheckedFile {
         match self {
-            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => {
-                c.checksum().to_string()
-            }
+            TokenizerKind::HfTokenizerJson(c)
+            | TokenizerKind::TikTokenModel(c)
+            | TokenizerKind::TekkenJson(c)
+            | TokenizerKind::TekkenJsonWithHfFallback { tekken: c, .. } => c,
         }
+    }
+
+    pub(crate) fn checked_file_mut(&mut self) -> &mut CheckedFile {
+        match self {
+            TokenizerKind::HfTokenizerJson(c)
+            | TokenizerKind::TikTokenModel(c)
+            | TokenizerKind::TekkenJson(c)
+            | TokenizerKind::TekkenJsonWithHfFallback { tekken: c, .. } => c,
+        }
+    }
+
+    pub(crate) fn tekken_file(&self) -> Option<&CheckedFile> {
+        match self {
+            Self::TekkenJson(file) | Self::TekkenJsonWithHfFallback { tekken: file, .. } => {
+                Some(file)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn checksum(&self) -> String {
+        self.checked_file().checksum().to_string()
     }
 
     pub fn is_local(&self) -> bool {
-        match self {
-            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => c.is_local(),
-        }
+        self.checked_file().is_local()
+            && match self {
+                Self::TekkenJsonWithHfFallback { hf, .. } => hf.is_local(),
+                _ => true,
+            }
     }
 
     pub fn update_dir(&mut self, dir: &Path) {
-        match self {
-            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => {
-                c.update_dir(dir)
-            }
+        self.checked_file_mut().update_dir(dir);
+        if let Self::TekkenJsonWithHfFallback { hf, .. } = self {
+            hf.update_dir(dir);
         }
+    }
+}
+
+/// The parts of a Mistral `tekken.json` the card needs without building the BPE.
+#[derive(Deserialize)]
+pub(crate) struct TekkenMetadata {
+    config: TekkenMetadataConfig,
+    special_tokens: Vec<TekkenMetadataSpecialToken>,
+    model_settings_builder: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct TekkenMetadataConfig {
+    default_vocab_size: usize,
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct TekkenMetadataSpecialToken {
+    rank: TokenIdType,
+    token_str: String,
+}
+
+impl TekkenMetadata {
+    /// Parse the tekken file behind a card's tokenizer slot.
+    pub(crate) fn from_checked_file(checked_file: &CheckedFile) -> Result<Self> {
+        let Some(path) = checked_file.path() else {
+            anyhow::bail!("tekken tokenizer is not a local path: {checked_file:?}");
+        };
+        Self::from_file(path)
+    }
+
+    pub(crate) fn from_file(path: &Path) -> Result<Self> {
+        let contents = std::fs::read(path)
+            .with_context(|| format!("Failed to read tekken file {}", path.display()))?;
+        serde_json::from_slice(&contents)
+            .with_context(|| format!("Failed to parse tekken file {}", path.display()))
+    }
+
+    /// The tokenizer version number, such as `15` for `v15`.
+    pub(crate) fn version(&self) -> Option<u32> {
+        self.config.version.strip_prefix('v')?.parse().ok()
+    }
+
+    /// The `[MODEL_SETTINGS]` builder of v15 tokenizers.
+    pub(crate) fn model_settings_builder(&self) -> Option<&serde_json::Value> {
+        self.model_settings_builder.as_ref()
+    }
+
+    fn special_token_id(&self, token: &str) -> Option<TokenIdType> {
+        self.special_tokens
+            .iter()
+            .find(|special| special.token_str == token)
+            .map(|special| special.rank)
+    }
+}
+
+/// Model info for Mistral-native checkpoints, which have no `config.json`:
+/// BOS/EOS and the vocabulary size come from `tekken.json`.
+struct TekkenModelInfo {
+    bos_token_id: Option<TokenIdType>,
+    eos_token_ids: Vec<TokenIdType>,
+    vocab_size: usize,
+}
+
+impl ModelInfo for TekkenModelInfo {
+    fn model_type(&self) -> String {
+        "mistral".to_string()
+    }
+
+    fn bos_token_id(&self) -> Option<TokenIdType> {
+        self.bos_token_id
+    }
+
+    fn eos_token_ids(&self) -> Vec<TokenIdType> {
+        self.eos_token_ids.clone()
+    }
+
+    fn max_position_embeddings(&self) -> Option<usize> {
+        None
+    }
+
+    fn vocab_size(&self) -> Option<usize> {
+        Some(self.vocab_size)
     }
 }
 
@@ -799,12 +1002,14 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+// Some(uri) selects a file location; None asks the caller to resolve the NGC
+// artifact. The file is still required, and its MDC checksum is unchanged.
 fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
     local_model_path: Option<&Path>,
     is_custom: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Option<String>> {
     use std::borrow::Cow;
 
     // Coerce path-only into a synthetic file:// URL up front so the
@@ -824,10 +1029,10 @@ fn checked_file_uri(
     };
 
     match url.scheme() {
-        "http" | "https" | "hf" => Ok(url.to_string()),
+        "http" | "https" | "hf" => Ok(Some(url.to_string())),
         "file" => {
-            // worker location → --model-path → hf://. Basename + checksum preserved.
-            // is_custom slots aren't published on HF, so rung 4 errors instead.
+            // Prefer the worker location, then the frontend's --model-path.
+            // Only model-provided files can fall back to the original HF/NGC source.
             let path = url
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
@@ -836,12 +1041,12 @@ fn checked_file_uri(
                 .and_then(|f| f.to_str())
                 .with_context(|| format!("no filename in file uri: {url}"))?;
             if path.exists() {
-                return Ok(url.to_string());
+                return Ok(Some(url.to_string()));
             }
             if let Some(prefix) = local_model_path {
                 let local = prefix.join(filename);
                 if local.exists() {
-                    return file_uri_for(&local);
+                    return file_uri_for(&local).map(Some);
                 }
             }
             if is_custom {
@@ -854,9 +1059,12 @@ fn checked_file_uri(
                     path.display()
                 );
             }
-            Ok(format!("hf://{source}/{filename}"))
+            if source.starts_with("ngc://") {
+                return Ok(None);
+            }
+            Ok(Some(format!("hf://{source}/{filename}")))
         }
-        _ => Ok(url.to_string()),
+        _ => Ok(Some(url.to_string())),
     }
 }
 
@@ -899,7 +1107,7 @@ pub struct ModelDeploymentCard {
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
 
-    /// Original HuggingFace repository path for downloading model files.
+    /// Original Hugging Face repository, NGC URI, or local model path.
     /// When `display_name` is customized (e.g., via `--served-model-name`),
     /// this field preserves the original repository path needed for downloads.
     /// Falls back to `display_name` if not set.
@@ -1037,18 +1245,13 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+
+    /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
+    #[serde(skip, default)]
+    tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
-/// LoRA adapter information for routing decisions
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct LoraInfo {
-    /// LoRA adapter name (e.g., "customer-123-v2")
-    pub name: String,
-
-    /// Maximum number of LoRA adapters that can be loaded at once on a single GPU
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_gpu_lora_count: Option<u32>,
-}
+pub use crate::lora::LoraInfo;
 
 impl ModelDeploymentCard {
     /// Number of typed metadata slots (`model_info`, `tokenizer`,
@@ -1141,6 +1344,7 @@ impl ModelDeploymentCard {
     pub(crate) fn for_mdc_wire(&self) -> Self {
         let mut card = self.clone();
         card.legacy_context_length = Some(self.effective_context_length());
+        card.runtime_config.normalize_structural_tag_compatibility();
         card
     }
 
@@ -1157,15 +1361,50 @@ impl ModelDeploymentCard {
         mdc_local_path(&self.slug, self.mdcsum())
     }
 
+    pub(crate) fn is_systemone_serial_eligible(&self) -> bool {
+        self.systemone_backend().is_some()
+    }
+
+    pub(crate) fn systemone_backend(&self) -> Option<crate::protocols::systemone::ScoringBackend> {
+        use crate::local_model::runtime_config::{
+            VLLM_CAUSAL_DECISION_V1, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+        use crate::protocols::systemone::ScoringBackend;
+        let sglang = self
+            .runtime_config
+            .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
+            && self
+                .runtime_config
+                .supports_runtime_capability(SGLANG_SYSTEMONE_SERIAL_V1);
+        let vllm = self
+            .runtime_config
+            .supports_runtime_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            && self
+                .runtime_config
+                .supports_runtime_capability(VLLM_CAUSAL_DECISION_V1);
+        let backend = match (sglang, vllm) {
+            (true, false) => ScoringBackend::Sglang,
+            (false, true) => ScoringBackend::Vllm,
+            _ => return None,
+        };
+        (self.runtime_config.max_num_seqs == Some(1)
+            && self.runtime_config.data_parallel_size == 1
+            && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
+            && self.needs.is_empty()
+            && self.lora.is_none()
+            && !self
+                .runtime_config
+                .runtime_data
+                .contains_key(SPEC_DECODE_RUNTIME_KEY))
+        .then_some(backend)
+    }
+
     pub fn mdcsum(&self) -> &str {
         self.checksum
             .get_or_init(|| {
                 // Only include the important fields
                 let mut bytes_to_hash: Vec<u8> = Vec::with_capacity(512);
                 bytes_to_hash.extend(self.display_name.as_bytes());
-                if let Some(source_path) = self.source_path.as_ref() {
-                    bytes_to_hash.extend(source_path.as_bytes());
-                }
 
                 // The files can be either a URL or a local path, so we ignore that and hash their
                 // checksum instead, which won't change wherever they are.
@@ -1290,6 +1529,21 @@ impl ModelDeploymentCard {
                         .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
                 }
 
+                // Preserve legacy checksums when serial scoring is unavailable.
+                if let Some(backend) = self.systemone_backend() {
+                    match backend {
+                        crate::protocols::systemone::ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
+                        crate::protocols::systemone::ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
+                    }
+                }
+
+                // Opaque JSON cannot be dispatched to older workers that ignore it.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0custom_json_v1\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -1297,6 +1551,15 @@ impl ModelDeploymentCard {
                     &self.runtime_config,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
+
+                // Keep workers with different cancellation semantics out of the same
+                // admitted cohort during rolling upgrades. Missing and false stay compatible.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0disagg_prefill_cancel_anytime_v1\0true");
+                }
 
                 // TODO: Do we want any other user_data or runtime_config?
 
@@ -1311,6 +1574,110 @@ impl ModelDeploymentCard {
         self.tokenizer.is_some()
     }
 
+    /// Identify the Mistral parser format even when Rust cannot load the tokenizer.
+    /// Downloaded artifacts take precedence over local-source fallbacks.
+    pub(crate) fn mistral_tokenizer_version(&self) -> Option<u32> {
+        #[derive(Deserialize)]
+        struct Header {
+            config: Version,
+        }
+        #[derive(Deserialize)]
+        struct Version {
+            version: String,
+        }
+        fn sentencepiece_version(path: &Path) -> Option<u32> {
+            let name = path.file_name()?.to_str()?;
+            let version = name
+                .strip_prefix("tokenizer.model.v")
+                .or_else(|| name.strip_prefix("tokenizer.mm.model.v"))?
+                .parse::<u32>()
+                .ok()?;
+            (version < 11).then_some(version)
+        }
+
+        let directories = [self.local_dir(), PathBuf::from(self.source_path())];
+        let tekken = self
+            .tokenizer
+            .as_ref()
+            .and_then(TokenizerKind::tekken_file)
+            .and_then(CheckedFile::path)
+            .or_else(|| {
+                self.extra_files
+                    .iter()
+                    .filter_map(CheckedFile::path)
+                    .find(|path| path.file_name().is_some_and(|name| name == "tekken.json"))
+            })
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                directories
+                    .iter()
+                    .map(|dir| dir.join("tekken.json"))
+                    .find(|path| path.is_file())
+            });
+        if let Some(path) = tekken {
+            let version = (|| -> Result<u32> {
+                let file = std::fs::File::open(&path)?;
+                let header: Header = serde_json::from_reader(std::io::BufReader::new(file))?;
+                header
+                    .config
+                    .version
+                    .strip_prefix('v')
+                    .context("Mistral tokenizer version must start with v")?
+                    .parse()
+                    .context("invalid Mistral tokenizer version")
+            })();
+            return match version {
+                Ok(version) => Some(version),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "Mistral tokenizer version is unknown");
+                    None
+                }
+            };
+        }
+
+        if let Some(version) = self
+            .extra_files
+            .iter()
+            .filter_map(CheckedFile::path)
+            .find_map(sentencepiece_version)
+        {
+            return Some(version);
+        }
+        for dir in directories {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            if let Some(version) = entries
+                .flatten()
+                .find_map(|entry| sentencepiece_version(&entry.path()))
+            {
+                return Some(version);
+            }
+        }
+        None
+    }
+
+    /// Model info from `config.json`, or from `tekken.json` for Mistral-native
+    /// checkpoints, which have no `config.json`.
+    pub fn resolved_model_info(&self) -> Result<Option<Arc<dyn ModelInfo>>> {
+        if let Some(model_info) = &self.model_info {
+            return model_info.get_model_info().map(Some);
+        }
+        let Some(checked_file) = self.tokenizer.as_ref().and_then(TokenizerKind::tekken_file)
+        else {
+            return Ok(None);
+        };
+        let metadata = TekkenMetadata::from_checked_file(checked_file)?;
+        let Some(eos_token_id) = metadata.special_token_id("</s>") else {
+            anyhow::bail!("tekken tokenizer has no </s> token");
+        };
+        Ok(Some(Arc::new(TekkenModelInfo {
+            bos_token_id: metadata.special_token_id("<s>"),
+            eos_token_ids: vec![eos_token_id],
+            vocab_size: metadata.config.default_vocab_size,
+        })))
+    }
+
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
@@ -1323,9 +1690,15 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
-    ///   in this process (default 64 MiB), read once when the first eligible tokenizer
-    ///   creates the shared cache. Models compete for capacity without reserved shares.
-    ///   Cache metadata and tokenizer objects are excluded; eviction is deferred.
+    ///   in this process. On Linux, the default is 1/16 of this process's cgroup memory
+    ///   limit, capped at 8 GiB. Without a cgroup limit below 90% of host memory, or on
+    ///   other platforms, the default is 64 MiB. Valid overrides, including zero, bypass
+    ///   detection; surrounding whitespace is ignored and unparseable values use 64 MiB.
+    ///   The budget is read once when the first eligible tokenizer creates the shared
+    ///   cache and is not resized if the limit changes later. Models compete for
+    ///   capacity without reserved shares.
+    ///   Cache metadata and tokenizer objects are excluded, so resident memory is
+    ///   typically 1.3-3.3x the budget; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -1333,6 +1706,12 @@ impl ModelDeploymentCard {
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         self.tokenizer_with_options(Default::default(), false)
+    }
+
+    /// `None` until this card loads its tokenizer, then `Some` of the
+    /// tokenizer's token id bound. That bound is `None` if unknown (tiktoken).
+    pub(crate) fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
+        self.tokenizer_id_bound.get().copied()
     }
 
     pub(crate) fn embedding_tokenizer_with_options(
@@ -1392,6 +1771,8 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+                self.tokenizer_id_bound
+                    .get_or_init(|| hf_token_id_bound(&hf));
 
                 // Disable any truncation baked into `tokenizer.json`: the HF
                 // `tokenizers` crate honors it on `encode()`, silently clipping every
@@ -1547,6 +1928,8 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
+                // tiktoken does not expose its ids.
+                self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
@@ -1570,6 +1953,29 @@ impl ModelDeploymentCard {
                 } else {
                     raw
                 }
+            }
+            Some(
+                TokenizerKind::TekkenJson(checked_file)
+                | TokenizerKind::TekkenJsonWithHfFallback {
+                    tekken: checked_file,
+                    ..
+                },
+            ) => {
+                let p = checked_file.path().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
+                })?;
+                let path_str = p.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer path contains invalid UTF-8: {}", p.display())
+                })?;
+                let tokenizer = crate::tokenizers::TekkenTokenizer::from_file(path_str)
+                    .with_context(|| {
+                        format!("Failed to load tekken tokenizer from {}", p.display())
+                    })?;
+                self.tokenizer_id_bound
+                    .get_or_init(|| crate::tokenizers::traits::Tokenizer::vocab_size(&tokenizer));
+                // Not wrapped in the L1 prefix cache: it splits text at special-token
+                // strings, which tekken encodes as ordinary text.
+                Arc::new(tokenizer)
             }
             None => {
                 anyhow::bail!(
@@ -1632,10 +2038,11 @@ impl ModelDeploymentCard {
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
             out.push((cf, false));
         }
-        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
-            self.tokenizer.as_ref()
-        {
-            out.push((cf, false));
+        if let Some(tokenizer) = self.tokenizer.as_ref() {
+            out.push((tokenizer.checked_file(), false));
+            if let TokenizerKind::TekkenJsonWithHfFallback { hf, .. } = tokenizer {
+                out.push((hf, false));
+            }
         }
         if let Some(p) = self.prompt_formatter.as_ref() {
             out.push((pf_checked_file(p), p.is_custom()));
@@ -1659,10 +2066,14 @@ impl ModelDeploymentCard {
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_mut() {
             out.push((cf, false));
         }
-        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
-            self.tokenizer.as_mut()
-        {
-            out.push((cf, false));
+        if let Some(tokenizer) = self.tokenizer.as_mut() {
+            match tokenizer {
+                TokenizerKind::TekkenJsonWithHfFallback { tekken, hf } => {
+                    out.push((tekken, false));
+                    out.push((hf, false));
+                }
+                tokenizer => out.push((tokenizer.checked_file_mut(), false)),
+            }
         }
         if let Some(p) = self.prompt_formatter.as_mut() {
             let is_custom = p.is_custom();
@@ -1690,16 +2101,27 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let local_dir = mdc_local_dir(&self.slug, &mdcsum)?;
 
-        let entries: Vec<(String, CheckedFile)> = self
-            .iter_metadata_files()
-            .into_iter()
-            .map(|(cf, is_custom)| {
-                Ok((
-                    checked_file_uri(cf, &source, local_model_path, is_custom)?,
-                    cf.clone(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let mut entries = Vec::new();
+        let mut ngc_snapshot = None;
+        for (cf, is_custom) in self.iter_metadata_files() {
+            let uri = match checked_file_uri(cf, &source, local_model_path, is_custom)? {
+                Some(uri) => uri,
+                None => {
+                    let snapshot = match &ngc_snapshot {
+                        Some(snapshot) => snapshot,
+                        None => ngc_snapshot.insert(
+                            crate::hub::from_hf(&source, /* ignore_weights = */ true).await?,
+                        ),
+                    };
+                    // The MDC supplies the filename and expected checksum. Retry
+                    // in the resolved directory; a still-missing file is an error.
+                    checked_file_uri(cf, &source, Some(snapshot), is_custom)?.with_context(
+                        || format!("NGC metadata file missing after fetching {source}: {cf}"),
+                    )?
+                }
+            };
+            entries.push((uri, cf.clone()));
+        }
 
         // Pre-resolve hf:// repos once per unique repo; otherwise the
         // resolve loop would call hub::from_hf N times for one model.
@@ -1817,9 +2239,24 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::HfTokenizerConfigJson
         );
 
-        // tokenizer.json or tiktoken.model
+        // tokenizer.json, tiktoken.model or tekken.json
         change!(self.tokenizer, TokenizerKind::HfTokenizerJson);
         change!(self.tokenizer, TokenizerKind::TikTokenModel);
+        change!(self.tokenizer, TokenizerKind::TekkenJson);
+        if let Some(TokenizerKind::TekkenJsonWithHfFallback { tekken, hf }) =
+            self.tokenizer.as_mut()
+        {
+            for file in [tekken, hf] {
+                if let Some(filename) = file
+                    .path()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                {
+                    let url = url::Url::parse(base_url)?.join(filename)?;
+                    file.move_to_url(url);
+                }
+            }
+        }
 
         // We only "move" the chat template if it came form the repo. If we have a custom template
         // file we cannot download that from HF.
@@ -1889,48 +2326,67 @@ impl ModelDeploymentCard {
         let architectural_max_context_length =
             architectural_max_context_length_from_repo(local_path)?;
 
-        let is_mistral_model = is_exclusively_mistral_model(local_path);
-
-        let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
-            (
-                Some(ModelInfoType::from_disk(local_path)?),
-                TokenizerKind::from_disk(local_path)?,
-                GenerationConfig::from_disk(local_path).ok(),
-                PromptFormatterArtifact::from_disk(local_path)?,
-            )
-        } else {
-            (None, None, None, None)
-        };
-
-        // Load chat template - either custom or from repo
-        let chat_template_file = if is_mistral_model {
+        let native_only = is_exclusively_mistral_model(local_path);
+        anyhow::ensure!(
+            !native_only || custom_template_path.is_none(),
+            "Custom chat templates require a Hugging Face config.json and tokenizer; \
+             this Mistral checkpoint uses the native Tekken formatter"
+        );
+        let hf_tokenizer = if native_only {
             None
-        } else if let Some(template_path) = custom_template_path {
-            if !template_path.exists() {
-                anyhow::bail!(
-                    "Custom template file does not exist: {}",
-                    template_path.display()
-                );
+        } else {
+            TokenizerKind::from_disk(local_path)?
+        };
+        let native_tokenizer =
+            if local_path.join("params.json").exists() && custom_template_path.is_none() {
+                TokenizerKind::tekken_from_disk(local_path)?
+            } else {
+                None
+            };
+        let tokenizer = match (native_tokenizer, hf_tokenizer) {
+            (Some(TokenizerKind::TekkenJson(tekken)), Some(TokenizerKind::HfTokenizerJson(hf))) => {
+                Some(TokenizerKind::TekkenJsonWithHfFallback { tekken, hf })
             }
-
-            // Verify the file is readable
-            let _template_content = std::fs::read_to_string(template_path).with_context(|| {
+            (Some(native), _) => Some(native),
+            (None, hf) => hf,
+        };
+        // Keep HF metadata on dual-format cards for the Python chat processors.
+        let model_info = if native_only {
+            None
+        } else {
+            Some(ModelInfoType::from_disk(local_path)?)
+        };
+        let gen_config = GenerationConfig::from_disk(local_path).ok();
+        let prompt_formatter = if native_only {
+            None
+        } else {
+            PromptFormatterArtifact::from_disk(local_path)?
+        };
+        let chat_template_file = if let Some(template_path) = custom_template_path {
+            std::fs::read_to_string(template_path).with_context(|| {
                 format!(
                     "Failed to read custom template file: {}",
                     template_path.display()
                 )
             })?;
-
             Some(PromptFormatterArtifact::HfChatTemplateJinja {
-                is_custom: custom_template_path.is_some(),
+                is_custom: true,
                 file: CheckedFile::from_disk(template_path)?,
             })
+        } else if native_only {
+            None
         } else {
             PromptFormatterArtifact::chat_template_from_disk(local_path)?
         };
 
         // This gets replaced when we `set_name`
         let display_name = local_path.display().to_string();
+        // The tokenizer slot's checksum covers only `tekken.json`; listing the HF
+        // fallback here puts it into the card checksum too.
+        let extra_files = match &tokenizer {
+            Some(TokenizerKind::TekkenJsonWithHfFallback { hf, .. }) => vec![hf.clone()],
+            _ => Vec::new(),
+        };
 
         Ok(Self {
             slug: Slug::from_string(&display_name),
@@ -1959,8 +2415,9 @@ impl ModelDeploymentCard {
             media_fetcher: None,
             router_config: None,
             indexer_identity: None,
-            extra_files: Vec::new(),
+            extra_files,
             checksum: OnceLock::new(),
+            tokenizer_id_bound: OnceLock::new(),
         })
     }
 }
@@ -2385,6 +2842,37 @@ impl PromptFormatterArtifact {
 }
 
 impl TokenizerKind {
+    /// Discover a Mistral `tekken.json` the Rust frontend can serve (v13/v15).
+    /// Other versions keep the Python chat processors as their only path.
+    pub fn tekken_from_disk(directory: &Path) -> Result<Option<Self>> {
+        let path = directory.join("tekken.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        // Anything the Rust frontend cannot serve keeps the card loadable for
+        // the Python chat processors, as before tekken support existed.
+        let metadata = match TekkenMetadata::from_file(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::info!(path = %path.display(), %error, "tekken.json not usable by the Rust frontend");
+                return Ok(None);
+            }
+        };
+        let version = metadata.version();
+        if version
+            .and_then(dynamo_renderer::mistral::MistralTokenizerVersion::from_number)
+            .is_none()
+        {
+            tracing::info!(
+                path = %path.display(),
+                ?version,
+                "Rust frontend renders tekken v13 and v15 only; this model needs a Python chat processor"
+            );
+            return Ok(None);
+        }
+        Ok(Some(Self::TekkenJson(CheckedFile::from_disk(path)?)))
+    }
+
     /// Try to discover a tokenizer in the given directory.
     ///
     /// Returns `Ok(Some(..))` when a supported tokenizer is found,
@@ -2473,9 +2961,113 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HFConfig, ModelDeploymentCard};
+    use super::{CheckedFile, HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn mistral_tokenizer_version_reads_sparse_legacy_metadata_from_source() {
+        for version in [3, 7, 11] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("params.json"), "{}").unwrap();
+            std::fs::write(
+                dir.path().join("tekken.json"),
+                serde_json::json!({"config": {"version": format!("v{version}")}}).to_string(),
+            )
+            .unwrap();
+            let card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+            assert!(card.tokenizer.is_none());
+            assert!(card.extra_files.is_empty());
+            assert_eq!(card.mistral_tokenizer_version(), Some(version));
+        }
+    }
+
+    #[test]
+    fn mistral_tokenizer_version_prefers_advertised_metadata_without_bad_file_fallback() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("tekken.json"),
+            r#"{"config":{"version":"v3"}}"#,
+        )
+        .unwrap();
+        let advertised = tempfile::tempdir().unwrap();
+        let path = advertised.path().join("tekken.json");
+        let mut card = ModelDeploymentCard::with_name_only("mistral-advertised-version");
+        card.set_source_path(source.path().to_path_buf());
+        for (contents, expected) in [
+            (r#"{"config":{"version":"v11"}}"#, Some(11)),
+            ("not-json", None),
+            (r#"{"config":{"version":"unknown"}}"#, None),
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            card.extra_files = vec![CheckedFile::from_disk(&path).unwrap()];
+            assert_eq!(card.mistral_tokenizer_version(), expected, "{contents}");
+        }
+    }
+
+    #[test]
+    fn mistral_tokenizer_version_recognizes_legacy_sentencepiece_filenames() {
+        for (filename, expected) in [
+            ("tokenizer.model.v3", Some(3)),
+            ("tokenizer.mm.model.v7", Some(7)),
+            ("tokenizer.model.v11", None),
+            ("other-tokenizer.model.v3", None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(filename);
+            std::fs::write(&path, b"legacy sentencepiece").unwrap();
+            let mut source_card = ModelDeploymentCard::with_name_only(filename);
+            source_card.set_source_path(dir.path().to_path_buf());
+            assert_eq!(
+                source_card.mistral_tokenizer_version(),
+                expected,
+                "{filename}"
+            );
+
+            let mut advertised_card = ModelDeploymentCard::with_name_only(filename);
+            advertised_card
+                .extra_files
+                .push(CheckedFile::from_disk(&path).unwrap());
+            assert_eq!(
+                advertised_card.mistral_tokenizer_version(),
+                expected,
+                "{filename}"
+            );
+        }
+    }
+
+    /// The `tokenizer` field as v1.7 frontends declare it.
+    #[derive(serde::Deserialize)]
+    struct ReleasedTokenizerSlot {
+        #[allow(dead_code)]
+        tokenizer: Option<ReleasedTokenizerKind>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum ReleasedTokenizerKind {
+        HfTokenizerJson(CheckedFile),
+        TikTokenModel(CheckedFile),
+    }
+
+    #[test]
+    fn other_tokenizers_keep_their_wire_form() {
+        let card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let wire = serde_json::to_value(&card).unwrap();
+        assert!(wire["tokenizer"]["hf_tokenizer_json"].is_object());
+        let released: ReleasedTokenizerSlot = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(
+            released.tokenizer,
+            Some(ReleasedTokenizerKind::HfTokenizerJson(_))
+        ));
+        let read: ModelDeploymentCard = serde_json::from_value(wire).unwrap();
+        assert_eq!(read.mdcsum(), card.mdcsum());
+    }
 
     #[test]
     fn tokenizer_cache_token_observer_records_per_model_totals() {
@@ -2530,17 +3122,105 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
+    fn tokenizer_cache_budget_scales_with_memory_limit() {
+        const MIB: usize = 1024 * 1024;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (limit, expected) in [
+            (Some(4 * GIB), (256 * MIB, "cgroup_limit")),
+            (Some(u64::MAX), (8192 * MIB, "cgroup_limit")),
+            (None, (64 * MIB, "fallback")),
+        ] {
+            assert_eq!(
+                super::tokenizer_cache_budget(None, || limit),
+                expected,
+                "limit={limit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tokenizer_cache_budget_overrides_bypass_memory_detection() {
+        const FALLBACK: usize = super::FALLBACK_TOKENIZER_CACHE_BYTES;
+        for (value, expected) in [
+            ("0", (0, "DYN_TOKENIZER_CACHE_BYTES")),
+            (" 1024\n", (1024, "DYN_TOKENIZER_CACHE_BYTES")),
+            ("512MiB", (FALLBACK, "fallback")),
+            ("", (FALLBACK, "fallback")),
+        ] {
+            assert_eq!(
+                super::tokenizer_cache_budget(Some(value), || panic!("unexpected detection")),
+                expected,
+                "value={value:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tokenizer_cache_finite_memory_limit_ignores_host_memory_total() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (limit, mem_total, expected) in [
+            (89 * GIB, 100 * GIB, Some(89 * GIB)),
+            (90 * GIB, 100 * GIB, None),
+            (100 * GIB, 100 * GIB, None),
+        ] {
+            assert_eq!(
+                super::finite_memory_limit(limit, mem_total),
+                expected,
+                "limit={limit}, mem_total={mem_total}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tokenizer_cache_memory_limit_preserves_nofile_soft_limit() {
+        const CHILD: &str = "DYNAMO_TOKENIZER_CACHE_NOFILE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // sysinfo changes RLIMIT_NOFILE only on its first process refresh, so detect
+            // in a fresh process.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "model_card::tests::tokenizer_cache_memory_limit_preserves_nofile_soft_limit",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        // Stays below the hard limit even when a container sets it to 1024.
+        const SOFT: libc::rlim_t = 64;
+        let mut nofile = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only writes the current limits into the provided struct.
         assert_eq!(
-            super::tokenizer_cache_bytes(None),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) },
+            0
         );
-        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
-        assert_eq!(super::tokenizer_cache_bytes(Some("0")), 0);
+        assert!(nofile.rlim_max > SOFT);
+        nofile.rlim_cur = SOFT;
+        // SAFETY: lowering the soft limit below the hard limit needs no privileges.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) }, 0);
+
+        super::tokenizer_cache_memory_limit();
+
+        // SAFETY: getrlimit only writes the current limits into the provided struct.
         assert_eq!(
-            super::tokenizer_cache_bytes(Some("invalid")),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) },
+            0
         );
+        assert_eq!(nofile.rlim_cur, SOFT);
     }
 
     #[test]
@@ -2848,6 +3528,70 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ngc_identity_survives_cache_relocation() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let source = "ngc://example/team/model:1";
+        let worker_a = hf_cache_fixture(&workspace.path().join("worker-a"))?;
+        let worker_b = hf_cache_fixture(&workspace.path().join("worker-b"))?;
+        let cache_root = workspace.path().join("ngc-cache");
+        let snapshot = cache_root.join("ngc/example/team/models/model/1");
+        std::fs::create_dir_all(&snapshot)?;
+        for entry in std::fs::read_dir(&worker_a)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), snapshot.join(entry.file_name()))?;
+        }
+
+        let overlay = workspace.path().join("overlay");
+        std::fs::create_dir(&overlay)?;
+        std::fs::copy(worker_a.join("config.json"), overlay.join("config.json"))?;
+        // The explicit overlay must win even when another file needs the NGC cache.
+        std::fs::write(snapshot.join("config.json"), b"{}")?;
+
+        temp_env::async_with_vars(
+            [
+                ("HOME", Some(workspace.path())),
+                ("MODEL_EXPRESS_CACHE_DIRECTORY", Some(cache_root.as_path())),
+            ],
+            async {
+                let mut cards = Vec::new();
+                for path in [&worker_a, &worker_b] {
+                    let model = crate::local_model::LocalModelBuilder::default()
+                        .model_path(path.clone())
+                        .source_path(source.into())
+                        .model_name(Some("public-model".to_string()))
+                        .build()
+                        .await?;
+                    cards.push(model.into_card());
+                }
+                assert_eq!(cards[0].source_path(), source);
+                assert_eq!(cards[0].mdcsum(), cards[1].mdcsum());
+                let expected_sum = cards[1].mdcsum().to_string();
+                std::fs::remove_dir_all(workspace.path().join("worker-a"))?;
+
+                cards[0].download_config(Some(&overlay)).await?;
+                // Deserialization clears the cached mdcsum so the next check recomputes it.
+                let resolved: ModelDeploymentCard = serde_json::from_str(&cards[0].to_json()?)?;
+                assert_eq!(resolved.source_path(), source);
+                assert_eq!(resolved.mdcsum(), expected_sum);
+                assert_eq!(
+                    std::fs::read(resolved.local_dir().join("config.json"))?,
+                    std::fs::read(overlay.join("config.json"))?
+                );
+                assert!(resolved.local_dir().join("tokenizer.json").exists());
+                assert!(
+                    resolved
+                        .local_dir()
+                        .join("special_tokens_map.json")
+                        .exists()
+                );
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
+    }
+
     /// Build a `CheckedFile` whose wire `path` field is `repr` — parses
     /// as a URL when `repr` has a scheme, otherwise as a `PathBuf`.
     fn cf_for(repr: &str) -> super::CheckedFile {
@@ -2890,6 +3634,18 @@ mod tests {
     }
 
     #[test]
+    fn mdcsum_ignores_source_path() {
+        let baseline = super::ModelDeploymentCard::with_name_only("model");
+        let mut a = super::ModelDeploymentCard::with_name_only("model");
+        let mut b = super::ModelDeploymentCard::with_name_only("model");
+        a.source_path = Some("/models/model".to_string());
+        b.source_path = Some("/mnt/model-cache/model".to_string());
+
+        assert_eq!(baseline.mdcsum(), a.mdcsum());
+        assert_eq!(a.mdcsum(), b.mdcsum());
+    }
+
+    #[test]
     fn checked_file_uri_passes_through_remote_urls() {
         let tmp = tempfile::tempdir().unwrap();
         for url in [
@@ -2899,7 +3655,7 @@ mod tests {
             let got =
                 super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
                     .unwrap();
-            assert_eq!(got, url);
+            assert_eq!(got.as_deref(), Some(url));
         }
     }
 
@@ -2913,7 +3669,7 @@ mod tests {
             super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
         assert_eq!(
             got,
-            url::Url::from_file_path(&local_cfg).unwrap().to_string()
+            Some(url::Url::from_file_path(&local_cfg).unwrap().to_string())
         );
     }
 
@@ -2938,7 +3694,7 @@ mod tests {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
 
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/template.jinja");
+        assert_eq!(got.as_deref(), Some("hf://Qwen/Qwen3-0.6B/template.jinja"));
 
         let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
             .expect_err("custom slot must error instead of falling back to HF");
@@ -2949,6 +3705,14 @@ mod tests {
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
         );
+
+        let source = "ngc://example/team/model:1";
+        assert!(
+            super::checked_file_uri(&cf, source, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::checked_file_uri(&cf, source, None, true).is_err());
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
@@ -3069,6 +3833,9 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use crate::local_model::runtime_config::{
+        StructuralTagConfig, StructuralTagSchemaMode, StructuralTagScope,
+    };
 
     #[test]
     fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
@@ -3213,8 +3980,8 @@ mod ownership_tests {
     #[test]
     fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
         use crate::entrypoint::RouterConfig;
-        use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel;
         use dynamo_runtime::pipeline::RouterMode;
+        use dynamo_scheduler::host::RouterPrefillLoadModel;
 
         for mode in [RouterMode::KV, RouterMode::RoundRobin] {
             let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
@@ -3272,6 +4039,24 @@ mod ownership_tests {
         let wire_value: serde_json::Value =
             serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
         assert_eq!(wire_value["context_length"], 8_192);
+    }
+
+    #[test]
+    fn structural_tag_wire_includes_fields_for_older_frontends() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.structural_tag = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            schema: StructuralTagSchemaMode::Strict,
+            ..Default::default()
+        });
+
+        let wire: serde_json::Value = serde_json::from_str(&card.to_json().unwrap()).unwrap();
+        let runtime = &wire["runtime_config"];
+        assert_eq!(runtime["structural_tag_mode"], "on");
+        assert_eq!(runtime["structural_tag_scope"], "always");
+        assert_eq!(runtime["structural_tag_schema"], "strict");
+        assert_eq!(runtime["structural_tag"]["scope"], "always");
+        assert_eq!(runtime["structural_tag"]["schema"], "strict");
     }
 
     #[test]
@@ -3339,6 +4124,25 @@ mod ownership_tests {
     }
 
     #[test]
+    fn json_capability_isolates_opted_in_workers_only() {
+        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
+        let capability = JSON_MULTIMODAL_CAPABILITY;
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(capability.into(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(capability.into(), true.into());
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
     fn vllm_generate_capability_isolates_worker_sets() {
         use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
@@ -3356,6 +4160,95 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn systemone_serial_contract_isolates_worker_sets() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+        };
+
+        fn card(configure: impl FnOnce(&mut ModelDeploymentCard)) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.max_num_seqs = Some(1);
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_GENERATE_CAPABILITY.to_string(), true.into());
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_SYSTEMONE_SERIAL_V1.to_string(), true.into());
+            configure(&mut card);
+            card
+        }
+
+        let enabled = card(|_| {});
+        assert!(enabled.is_systemone_serial_eligible());
+        assert!(card(|card| card.migration_limit = 1).is_systemone_serial_eligible());
+        let unsupported: [fn(&mut ModelDeploymentCard); 10] = [
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_SYSTEMONE_SERIAL_V1);
+            },
+            |card| card.runtime_config.max_num_seqs = None,
+            |card| card.runtime_config.max_num_seqs = Some(2),
+            |card| card.runtime_config.data_parallel_size = 0,
+            |card| card.runtime_config.data_parallel_size = 2,
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_GENERATE_CAPABILITY);
+            },
+            |card| card.worker_type = Some(crate::worker_type::WorkerType::Prefill),
+            |card| card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]],
+            |card| {
+                card.lora = Some(LoraInfo {
+                    name: "adapter".to_string(),
+                    max_gpu_lora_count: None,
+                });
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".to_string(), serde_json::json!({}));
+            },
+        ];
+        for configure in unsupported {
+            let unsupported = card(configure);
+            assert!(!unsupported.is_systemone_serial_eligible());
+            assert_ne!(enabled.mdcsum(), unsupported.mdcsum());
+            let feature_off = card(|card| {
+                configure(card);
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_SYSTEMONE_SERIAL_V1);
+            });
+            assert_eq!(feature_off.mdcsum(), unsupported.mdcsum());
+        }
+    }
+
+    #[test]
+    fn vllm_causal_scoring_requires_native_serial_capability() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.runtime_config.max_num_seqs = Some(1);
+        card.runtime_config
+            .runtime_data
+            .insert("vllm_inference_v1_generate".into(), true.into());
+        card.runtime_config
+            .runtime_data
+            .insert("vllm_causal_decision_v1".into(), true.into());
+        assert!(card.is_systemone_serial_eligible());
+        let checksum = card.mdcsum().to_string();
+        for key in ["vllm_inference_v1_generate", "vllm_causal_decision_v1"] {
+            let mut unsupported = ModelDeploymentCard::with_name_only("model");
+            unsupported.worker_type = card.worker_type;
+            unsupported.runtime_config = card.runtime_config.clone();
+            unsupported.runtime_config.runtime_data.remove(key);
+            assert!(!unsupported.is_systemone_serial_eligible());
+            assert_ne!(checksum, unsupported.mdcsum());
+        }
     }
 
     #[test]
@@ -3465,12 +4358,32 @@ mod ownership_tests {
         );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.5}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 2}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
+        );
+        let same_nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "note": null,
+                "enabled": true,
+                "sampling": {"frames": [{"a": 2, "z": 1}, {"y": [3, 1, 2]}], "fps": 2.0, "max_frames": 64},
+                "video_pruning_rate": 0.5,
+            }),
         );
         let different_nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.25}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 3}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
         );
+
         let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
@@ -3482,6 +4395,32 @@ mod ownership_tests {
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
+        assert_eq!(nemotron.mdcsum(), same_nemotron.mdcsum());
+        // Pins the separator, length framing, and canonical bytes of the contract.
+        assert_eq!(
+            nemotron.mdcsum(),
+            "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
+        );
+    }
+
+    #[test]
+    fn disagg_prefill_cancel_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), true.into());
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
 }
 

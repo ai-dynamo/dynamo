@@ -14,25 +14,46 @@ from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams, merge_kwargs
+from vllm.reasoning.glm47_moe_reasoning_parser import Glm47MoeParserReasoningAdapter
+from vllm.renderers import ChatParams
+from vllm.renderers.chat_utils import make_tool_call_id
+from vllm.renderers.hf import resolve_chat_template
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.structural_tag_registry import (
+    get_model_structural_tag,
+    limit_to_single_tool_call,
+)
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
+from xgrammar import StructuralTag
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
-from dynamo.frontend.vllm_protocol import DeltaFunctionCall, DeltaMessage, DeltaToolCall
 from dynamo.llm.exceptions import InvalidArgument
 
-from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .responses_history import responses_history_template, responses_tools_request
+from .structural_tag_policy import (
+    ToolChoiceKind,
+    effective_tool_strict,
+    should_attempt_structural_tag,
+)
+from .thinking import (
+    apply_default_thinking_mode_to_template_kwargs,
+    glm_prompt_reasoning_open,
+)
 from .utils import legacy_guided_decoding
 
 if TYPE_CHECKING:
@@ -204,21 +225,32 @@ def _should_build_tool_call_guidance(
     # enforced guarantee. sglang_prepost.py has the same gap.
     if tool_choice == "none":
         return False
-    if _is_forced_tool_choice(tool_choice):
-        return True
-    if structural_tag_mode != "on":
-        return False
-    if tool_choice != "auto":
-        return False
-    if structural_tag_scope == "always":
-        return True
     # An explicit single-call request is enough to attempt structural-tag
     # guidance. Forced-choice JSON guidance also bounds its array schema below.
     explicit_single_call = (
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
     )
-    return explicit_single_call or any(_tool_is_strict(tool) for tool in request.tools)
+    tool_choice_kind: ToolChoiceKind = (
+        "required"
+        if tool_choice == "required"
+        else "named"
+        if _is_named_tool_choice(tool_choice)
+        else "auto"
+        if tool_choice == "auto"
+        else "other"
+    )
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=True,
+        any_explicit_strict=any(_tool_is_strict(tool) for tool in request.tools),
+        parallel_tool_calls_explicitly_false=explicit_single_call,
+    )
+    # Forced choices retain the generic JSON fallback when structural tags are
+    # disabled or unavailable.
+    return attempt_structural_tag or _is_forced_tool_choice(tool_choice)
 
 
 def _request_for_vllm_structural_tag(
@@ -226,13 +258,14 @@ def _request_for_vllm_structural_tag(
     *,
     structural_tag_schema: str,
 ) -> ChatCompletionRequest:
-    strict_schema = structural_tag_schema == "strict"
     tools = [
         tool.model_copy(
             update={
                 "function": tool.function.model_copy(
                     update={
-                        "strict": True if strict_schema else tool.function.strict,
+                        "strict": effective_tool_strict(
+                            tool.function.strict, structural_tag_schema
+                        ),
                     }
                 )
             }
@@ -240,6 +273,27 @@ def _request_for_vllm_structural_tag(
         for tool in request.tools or []
     ]
     return request.model_copy(update={"tools": tools})
+
+
+def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
+    """Limit serialized tags from out-of-tree parser hooks that return a dict.
+
+    Only format children are visited, so argument schemas are left unchanged.
+    These three list formats repeat tool calls in vLLM's registered tags.
+    """
+    if tag.get("type") in (
+        "triggered_tags",
+        "token_triggered_tags",
+        "tags_with_separator",
+    ):
+        tag["stop_after_first"] = True
+    for key in ("format", "content"):
+        child = tag.get(key)
+        if isinstance(child, dict):
+            _limit_structural_tag_to_single_call(child)
+    for key in ("elements", "tags"):
+        for child in tag.get(key, []):
+            _limit_structural_tag_to_single_call(child)
 
 
 def build_tool_call_guided_decoding(
@@ -250,8 +304,15 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    starts_in_reasoning: bool = False,
 ) -> dict[str, Any] | None:
-    """Build tool-call guidance through vLLM's configured tool parser."""
+    """Build tool-call guidance through vLLM's configured tool parser.
+
+    ``starts_in_reasoning`` is true when generation begins inside a reasoning
+    block the prompt opened and the engine does not hold the grammar back until
+    that block ends. The structural tag must then accept the reasoning text and
+    its end marker before the tool-call section.
+    """
     if not _should_build_tool_call_guidance(
         request,
         structural_tag_mode=structural_tag_mode,
@@ -264,13 +325,54 @@ def build_tool_call_guided_decoding(
             request,
             structural_tag_schema=structural_tag_schema,
         )
-        structural_tag = tool_parser.get_structural_tag(request_for_tag)
+        try:
+            structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
+            structural_tag_kwargs = {}
+            if structural_tag_model == "hy_v4":
+                # HYV4's parser detects checkpoint-specific tokens at construction.
+                # Keep its suffix while Dynamo owns activation of the registry path.
+                structural_tag_kwargs["token_suffix"] = getattr(
+                    tool_parser, "_extractor"
+                ).token_suffix
+            structural_tag = (
+                get_model_structural_tag(
+                    model=structural_tag_model,
+                    tools=request_for_tag.tools,
+                    tool_choice=request_for_tag.tool_choice,
+                    reasoning=starts_in_reasoning,
+                    **structural_tag_kwargs,
+                )
+                if structural_tag_model is not None
+                # Out-of-tree parser hooks may not take ``reasoning``; keep their
+                # call unchanged unless the reasoning prefix is needed.
+                else tool_parser.get_structural_tag(request_for_tag, reasoning=True)
+                if starts_in_reasoning
+                else tool_parser.get_structural_tag(request_for_tag)
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            # Parser implementations are third-party capability providers. A
+            # failed structural-tag build must preserve the pre-existing JSON
+            # or unconstrained compatibility path for the request.
+            structural_tag = None
         if structural_tag is not None:
+            single_call = request.parallel_tool_calls is False
+            use_typed_limiter = isinstance(structural_tag, StructuralTag)
+            if single_call and use_typed_limiter:
+                limit_to_single_tool_call(structural_tag)
             tag_value = (
                 structural_tag.model_dump()
                 if hasattr(structural_tag, "model_dump")
                 else structural_tag
             )
+            if single_call and not use_typed_limiter:
+                _limit_structural_tag_to_single_call(tag_value)
             return {"structural_tag": tag_value}
 
     if parser_guided_decoding is not None:
@@ -456,10 +558,85 @@ def _reasoning_parser_enabled(
     See https://github.com/ai-dynamo/dynamo/issues/8636 for the enable_thinking
     half: when the chat template runs with enable_thinking=False the reasoning
     tags live in the prompt and the generated output carries none.
+
+    GLM is exempt from that half: its template may still open ``<think>`` with
+    the flag false, which is only known after render. The gate stays open and
+    the rendered prompt decides (see _glm_prompt_reasoning_open).
     """
     return reasoning_parser_class is not None and (
         chat_template_kwargs.get("enable_thinking") is not False
+        or issubclass(reasoning_parser_class, Glm47MoeParserReasoningAdapter)
     )
+
+
+def _glm_prompt_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    request_for_sampling: ChatCompletionRequest,
+) -> bool | None:
+    """The rendered GLM prompt's reasoning state, or None if unknown or not GLM.
+
+    vLLM maps both ``glm45`` and ``glm47`` to Glm47MoeParserReasoningAdapter.
+    """
+    if reasoning_parser_class is None or not issubclass(
+        reasoning_parser_class, Glm47MoeParserReasoningAdapter
+    ):
+        return None
+    return glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer,
+        add_generation_prompt=request_for_sampling.add_generation_prompt,
+        continue_final_message=request_for_sampling.continue_final_message,
+    )
+
+
+# Enough trailing prompt tokens to contain any reasoning opener.
+_REASONING_START_TAIL_TOKENS = 16
+
+
+def _prompt_leaves_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+    request_for_sampling: ChatCompletionRequest,
+) -> bool:
+    """Whether the rendered prompt ends with an opened reasoning block.
+
+    Mirrors ``prompt_injected_reasoning_start`` in the Rust preprocessor: the
+    prompt (trailing whitespace ignored) must end with the reasoning parser's
+    opening marker. A prompt without that marker, e.g. for models that emit
+    their own opener, does not start in reasoning.
+    """
+    glm_open = _glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
+        request_for_sampling=request_for_sampling,
+    )
+    if glm_open is not None:
+        return glm_open
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
+        return False
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = getattr(parser, "reasoning_start_str", None)
+    if not isinstance(start, str) or not start:
+        return False
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    return tail.rstrip().endswith(start)
 
 
 def _prepare_request(
@@ -471,7 +648,6 @@ def _prepare_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
     guidance_snapshots: dict[str, Any] | None = None,
@@ -492,11 +668,35 @@ def _prepare_request(
         messages_for_render: Messages to pass as first arg to render_messages.
         chat_params: ChatParams for render_messages / render_messages_async.
     """
+    resolved_responses_template = None
+    if (
+        isinstance(request, dict)
+        and request.get("responses_native_tools")
+        and not (
+            exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+        )
+    ):
+        # Resolve using the legacy function view so variant/override precedence
+        # is unchanged, then switch the whole in-process view together.
+        resolved_responses_template = resolve_chat_template(
+            tokenizer,
+            request.get("chat_template"),
+            request.get("tools"),
+            model_config=model_config,
+        )
+        selected_request = responses_tools_request(request, resolved_responses_template)
+        if selected_request is not request:
+            request = selected_request
+            validated_request = None
+
     request_for_sampling = (
         validated_request
         if validated_request is not None
         else _validate_chat_completion_request(request)
     )
+    # vLLM renders from the unadjusted request, and parsers that compile
+    # response_format into a grammar clear it; the prompt needs the caller's value.
+    render_response_format = request_for_sampling.response_format
 
     tool_parser: ToolParser | None = None
     # With enable_auto_tool_choice the model may emit tool calls even when the
@@ -524,14 +724,9 @@ def _prepare_request(
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
-    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
-    # default; copy the result since the default dict is shared across requests
-    # and we mutate reasoning_effort below.
+    # A copy, because reasoning_effort is written into it below.
     chat_template_kwargs = dict(
-        merge_kwargs(
-            default_chat_template_kwargs,
-            request_for_sampling.chat_template_kwargs or raw_template_args or {},
-        )
+        request_for_sampling.chat_template_kwargs or raw_template_args or {}
     )
     # reasoning_effort is a request-level thinking control. Put an explicit
     # value into the kwargs before applying the deployment default so the two
@@ -602,8 +797,28 @@ def _prepare_request(
         else request_for_sampling.messages
     )
 
+    if tool_dicts and isinstance(request, dict):
+        if catalog := request.get("chat_template_tools"):
+            tool_dicts = [
+                ChatCompletionToolsParam.model_validate(tool).model_dump()
+                for tool in catalog
+            ]
+        else:
+            tool_dicts = request.get("responses_template_tools", tool_dicts)
+
+    chat_template = responses_history_template(
+        resolved_responses_template or request_for_sampling.chat_template,
+        request.get("responses_history_phases") if isinstance(request, dict) else None,
+        lambda: resolved_responses_template
+        or resolve_chat_template(
+            tokenizer,
+            request_for_sampling.chat_template,
+            tool_dicts,
+            model_config=model_config,
+        ),
+    )
     chat_params = ChatParams(
-        chat_template=request_for_sampling.chat_template,
+        chat_template=chat_template,
         chat_template_content_format="auto",
         # Renderer-managed keys last so a nested duplicate can't raise TypeError.
         chat_template_kwargs={
@@ -614,6 +829,7 @@ def _prepare_request(
             "documents": request_for_sampling.documents,
             "tokenize": tokenize_in_template,
         },
+        response_format=render_response_format,
     )
 
     return (
@@ -635,12 +851,13 @@ async def preprocess_chat_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    structural_tag_excludes_reasoning: bool = False,
 ) -> PreprocessResult:
+    """Render a validated chat request and select its engine guidance and parsers."""
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
     client_structured_guidance = deepcopy(
@@ -669,7 +886,6 @@ async def preprocess_chat_request(
         model_config=model_config,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
-        default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
         guidance_snapshots=guidance_snapshots,
@@ -693,6 +909,21 @@ async def preprocess_chat_request(
         and adjusted_structured_guidance != client_structured_guidance
         else None
     )
+    # Render first: whether generation starts inside a reasoning block depends
+    # on the rendered prompt (e.g. a template that ends the generation prompt
+    # with an open think tag), and the tool-call grammar must match it.
+    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+
+    if "prompt_token_ids" in engine_prompt:
+        tokens = list(engine_prompt["prompt_token_ids"])
+    else:
+        async_tokenizer = _get_async_tokenizer(tokenizer)
+        encoded = await async_tokenizer(
+            engine_prompt["prompt"],
+            add_special_tokens=request_for_sampling.add_special_tokens,
+        )
+        tokens = list(encoded.input_ids)
+
     tool_guided_decoding = build_tool_call_guided_decoding(
         request_for_sampling,
         tool_parser,
@@ -700,6 +931,20 @@ async def preprocess_chat_request(
         structural_tag_mode=structural_tag_mode,
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
+        starts_in_reasoning=(
+            structural_tag_mode == "on"
+            and tool_parser is not None
+            and bool(request_for_sampling.tools)
+            and not structural_tag_excludes_reasoning
+            and _prompt_leaves_reasoning_open(
+                tokens,
+                tokenizer=tokenizer,
+                reasoning_parser_class=reasoning_parser_class,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
+                request_for_sampling=request_for_sampling,
+            )
+        ),
     )
     # A forced tool choice already claims the decoder's single grammar slot, so a
     # caller-set guided_*/structured_outputs constraint over the same token stream
@@ -771,18 +1016,6 @@ async def preprocess_chat_request(
         and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
     )
 
-    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
-
-    if "prompt_token_ids" in engine_prompt:
-        tokens = list(engine_prompt["prompt_token_ids"])
-    else:
-        async_tokenizer = _get_async_tokenizer(tokenizer)
-        encoded = await async_tokenizer(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
-        tokens = list(encoded.input_ids)
-
     return PreprocessResult(
         request_for_sampling=request_for_sampling,
         tool_parser=tool_parser,
@@ -825,6 +1058,7 @@ class StreamingPostProcessor:
         response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
+        tool_catalog_names: frozenset[str] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
@@ -833,6 +1067,7 @@ class StreamingPostProcessor:
         self.stream_response = stream_response
         self.reasoning_is_done = bool(response_reasoning_ended)
         self._uses_dynamo_json_tool_call_fallback = uses_dynamo_json_tool_call_fallback
+        self._tool_catalog_names = tool_catalog_names
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
         # the reasoning open/close tags live in the prompt and the generated
@@ -925,6 +1160,7 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        self._pending_tool_opener = ""
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
 
     @property
@@ -945,9 +1181,13 @@ class StreamingPostProcessor:
                 "Dynamo JSON tool-call fallback was not valid JSON"
             ) from exc
 
-        available_tool_names = {
-            tool.function.name for tool in self.request_for_sampling.tools or []
-        }
+        # Keep catalogued calls visible to the HTTP allowlist, even when
+        # the generation constraint only permits a subset.
+        known_tool_names = self._tool_catalog_names
+        if known_tool_names is None:
+            known_tool_names = frozenset(
+                tool.function.name for tool in self.request_for_sampling.tools or []
+            )
         tool_choice = self.request_for_sampling.tool_choice
         required_tool_name = None
         if _is_named_tool_choice(tool_choice):
@@ -987,7 +1227,7 @@ class StreamingPostProcessor:
                     "Dynamo JSON tool-call fallback entries must include parameters"
                 )
             parameters = tool_call["parameters"]
-            if not isinstance(name, str) or name not in available_tool_names:
+            if not isinstance(name, str) or name not in known_tool_names:
                 raise ValueError(
                     "Dynamo JSON tool-call fallback named an unavailable tool"
                 )
@@ -1009,26 +1249,27 @@ class StreamingPostProcessor:
         return parsed_tool_calls
 
     def _process_dynamo_json_fallback_tool_calls(
-        self, output: Any
+        self, output: Any, *, content: str | None, reasoning: str | None = None
     ) -> dict[str, Any] | None:
+        """Buffer answer text for tool JSON while forwarding requested reasoning."""
         chunks = self._dynamo_json_fallback_chunks.setdefault(output.index, [])
-        if output.text:
-            chunks.append(output.text)
+        if content:
+            chunks.append(content)
+        delta: dict[str, Any] = {}
+        if reasoning and not self._suppress_reasoning_output:
+            delta = {"role": "assistant", "reasoning_content": reasoning}
         if not output.finish_reason:
-            return None
+            return self._build_choice(output, delta) if delta else None
 
         text = "".join(self._dynamo_json_fallback_chunks.pop(output.index))
-        delta: dict[str, Any]
         try:
             tool_calls = self._decode_dynamo_json_fallback_tool_calls(text)
         except (TypeError, ValueError):
-            delta = {"role": "assistant", "content": text} if text else {}
+            if text:
+                delta.update(role="assistant", content=text)
             return self._build_choice(output, delta)
 
-        delta = {
-            "role": "assistant",
-            "tool_calls": tool_calls,
-        }
+        delta.update(role="assistant", tool_calls=tool_calls)
         return self._build_choice(output, delta)
 
     def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
@@ -1331,11 +1572,20 @@ class StreamingPostProcessor:
     def process_output(self, output: Any) -> dict[str, Any] | None:
         # BEFORE any branch below: every path must feed the ledger, including
         # the ones that emit nothing for this chunk.
+        """Parse one engine chunk into a response choice, or wait for buffered output."""
         if self.reasoning_parser is not None:
             self._reasoning_token_ids.extend(output.token_ids or [])
-        if self._uses_dynamo_json_tool_call_fallback:
-            return self._process_dynamo_json_fallback_tool_calls(output)
-        if self._should_buffer_for_non_streaming_tool_parse():
+        if self._uses_dynamo_json_tool_call_fallback and (
+            not isinstance(self.reasoning_parser, Glm47MoeParserReasoningAdapter)
+            or self.reasoning_is_done
+        ):
+            return self._process_dynamo_json_fallback_tool_calls(
+                output, content=output.text
+            )
+        if (
+            not self._uses_dynamo_json_tool_call_fallback
+            and self._should_buffer_for_non_streaming_tool_parse()
+        ):
             return self._process_non_streaming_tool_output(output)
 
         # TODO: Emit the role only once per choice here instead of relying on
@@ -1357,6 +1607,20 @@ class StreamingPostProcessor:
                 return None
             return self._build_choice(output, delta)
 
+        if self._pending_tool_opener:
+            delta_text = self._pending_tool_opener + delta_text
+            self._pending_tool_opener = ""
+            markers = self._tool_start_markers()
+            if any(delta_text.startswith(marker) for marker in markers):
+                self._tool_text_buffer = ""
+            elif any(marker.startswith(delta_text) for marker in markers):
+                if not output.finish_reason:
+                    self._pending_tool_opener = delta_text
+                    return None
+                return self._build_choice(
+                    output, {"role": "assistant", "content": delta_text}
+                )
+
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids
 
@@ -1370,13 +1634,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            buffer_complete = (
-                any(
-                    marker in self._tool_text_buffer
-                    for marker in self._tool_end_markers()
-                )
-            ) or output.finish_reason
-            if buffer_complete:
+            # Parse once at the end: with multi-token steps (e.g. MTP) a chunk
+            # can close one call and open the next, and splitting the response
+            # between this parse and the streaming parser drops or re-indexes
+            # the later calls.
+            if output.finish_reason:
                 buffered_text = self._tool_text_buffer
                 self._tool_text_buffer = None
                 delta_message = self._extract_tool_calls_from_text(buffered_text)
@@ -1399,9 +1661,10 @@ class StreamingPostProcessor:
 
             # When reasoning ends in this chunk, reset accumulated state.
             # If there is post-reasoning content (e.g. <tool_call> markup),
-            # buffer it for non-streaming extraction rather than feeding it
-            # to the streaming tool parser which cannot handle the combined
-            # reasoning-end + tool-start in a single chunk.
+            # an engine-based tool parser streams it; otherwise buffer it for
+            # non-streaming extraction rather than feeding it to a streaming
+            # tool parser that cannot handle the combined reasoning-end +
+            # tool-start in a single chunk.
             if self.reasoning_parser.engine_based_streaming:
                 reasoning_ended = (
                     self.reasoning_parser.has_engine_confirmed_reasoning_end()
@@ -1427,7 +1690,34 @@ class StreamingPostProcessor:
                 current_token_ids = []
 
                 tool_start_markers = self._tool_start_markers()
-                if post_content and any(
+                if self._uses_dynamo_json_tool_call_fallback:
+                    delta_message = self._compose_delta_message(
+                        saved_reasoning, post_content or None
+                    )
+                elif (
+                    post_content
+                    and self._should_parse_tools()
+                    and self.tool_parser is not None
+                    and self.tool_parser.engine_based_streaming
+                ):
+                    # An engine-based tool parser holds back an opener split
+                    # across steps, so the text after the reasoning end goes to
+                    # it with its token IDs. Emitting that text as content here
+                    # leaked a partial opener and lost the tool call.
+                    current_text = post_content
+                    current_token_ids = self.reasoning_parser.extract_content_ids(
+                        delta_token_ids
+                    )
+                    delta_message = self._merge_delta_messages(
+                        self._compose_delta_message(saved_reasoning, None),
+                        self._extract_tool_calls_streaming(
+                            current_text=current_text,
+                            delta_text=current_text,
+                            current_token_ids=current_token_ids,
+                            delta_token_ids=current_token_ids,
+                        ),
+                    )
+                elif post_content and any(
                     marker in post_content for marker in tool_start_markers
                 ):
                     # Tool call markup present — buffer for non-streaming
@@ -1450,7 +1740,21 @@ class StreamingPostProcessor:
                             None,
                         )
                 else:
-                    # Plain content (or no content) after reasoning end.
+                    if post_content and not output.finish_reason:
+                        # Hold only the trailing text that can complete a tool opener.
+                        # The preceding text can still be streamed immediately.
+                        prefix_length = max(
+                            (
+                                size
+                                for marker in tool_start_markers
+                                for size in range(1, len(marker))
+                                if post_content.endswith(marker[:size])
+                            ),
+                            default=0,
+                        )
+                        if prefix_length:
+                            self._pending_tool_opener = post_content[-prefix_length:]
+                            post_content = post_content[:-prefix_length]
                     delta_message = self._compose_delta_message(
                         reasoning=saved_reasoning,
                         content=post_content if post_content else None,
@@ -1460,6 +1764,7 @@ class StreamingPostProcessor:
                 and delta_message.content
                 and not delta_message.reasoning
                 and self._should_parse_tools()
+                and not self._uses_dynamo_json_tool_call_fallback
             ):
                 # Reasoning parser returned content (not reasoning).
                 # The model may have skipped reasoning and gone straight
@@ -1499,6 +1804,15 @@ class StreamingPostProcessor:
                     self._finish_engine_parser(self.tool_parser),
                 )
                 self._tool_parser_streaming_started = False
+
+        if self._uses_dynamo_json_tool_call_fallback:
+            self.previous_text = current_text
+            self.previous_token_ids = current_token_ids
+            return self._process_dynamo_json_fallback_tool_calls(
+                output,
+                content=delta_message.content if delta_message else None,
+                reasoning=delta_message.reasoning if delta_message else None,
+            )
 
         choice = None
         if delta_message is None:

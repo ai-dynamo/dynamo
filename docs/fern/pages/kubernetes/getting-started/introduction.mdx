@@ -109,7 +109,7 @@ This page covers the **Kubernetes** path. To run Dynamo directly on a workstatio
       <Card title="Model Deployment Overview" icon="regular circle-info" href="../model-deployment/introduction.mdx">
         Choose a deployment workflow and learn the core Kubernetes resources.
       </Card>
-      <Card title="Sidecar Backends (Experimental)" icon="regular server" href="../model-deployment/sidecar-backends.md">
+      <Card title="Sidecar Backends (Experimental)" icon="regular server" href="../../developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md">
         Run Dynamo beside a stock inference engine and find backend-specific deployment examples.
       </Card>
       <Card title="Deploy with DGD" icon="regular cloud-arrow-up" href="../model-deployment/deploy-with-dgd.md">

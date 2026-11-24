@@ -16,14 +16,13 @@ import importlib
 import inspect
 
 import pytest
-from packaging.version import Version
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 _vllm = importlib.import_module("vllm")
 _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
-_engine_protocol = importlib.import_module("dynamo.frontend.vllm_protocol")
+_engine_protocol = importlib.import_module("vllm.entrypoints.generate.base.protocol")
 _inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
@@ -360,7 +359,6 @@ class TestVllmRendererApi:
         and reads EngineCoreRequest fields by name, but the request still
         crosses vLLM boundaries using array-like serialization.
         """
-        # vLLM 0.29 and 0.30 share the same core request and output schemas.
         expected_request_fields = (
             "request_id",
             "prompt_token_ids",
@@ -383,6 +381,7 @@ class TestVllmRendererApi:
             "reasoning_parser_kwargs",
             "abort_immediately",
             "session_id",
+            "kv_hints",
         )
         expected_output_fields = (
             "request_id",
@@ -402,33 +401,26 @@ class TestVllmRendererApi:
             "mm_cache_miss_hashes",
             "new_sampling_mask",
             "spec_decode_metrics",
+            "prompt_token_id_logprobs",
+            "error",
         )
 
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
-            omni = importlib.import_module("vllm_omni")
-            omni_version = Version(omni.__version__).release[:2]
-            expected_request_fields += {
-                (0, 29): ("additional_information", "model_intermediate_buffer"),
-                (0, 30): (
-                    "additional_information",
-                    "model_intermediate_buffer",
-                    "payload_sender_info",
-                ),
-            }[omni_version]
-            expected_output_fields += {
-                (0, 29): (
-                    "multimodal_output",
-                    "is_segment_finished",
-                    "new_prompt_len_snapshot",
-                ),
-                (0, 30): (
-                    "multimodal_output",
-                    "pooling_output_payload",
-                    "is_segment_finished",
-                    "new_prompt_len_snapshot",
-                    "num_generation_tokens",
-                ),
-            }[omni_version]
+            expected_request_fields += (
+                "additional_information",
+                "model_intermediate_buffer",
+                "payload_sender_info",
+            )
+            expected_output_fields += (
+                "multimodal_output",
+                "pooling_output_payload",
+                "is_segment_finished",
+                "new_prompt_len_snapshot",
+                "num_generation_tokens",
+                "is_coalesced",
+                "stage_payload",
+                "stage_work",
+            )
 
         actual_request_fields = EngineCoreRequest.__struct_fields__
         assert actual_request_fields == expected_request_fields, (
@@ -479,12 +471,9 @@ class TestVllmRendererApi:
         )
         assert output.request_id == "test-123"
         assert output.new_token_ids == [1, 2, 3]
-        if "mm_cache_miss_hashes" in EngineCoreOutput.__struct_fields__:
-            assert output.mm_cache_miss_hashes is None
-        if "new_sampling_mask" in EngineCoreOutput.__struct_fields__:
-            assert output.new_sampling_mask is None
-        if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
-            assert output.spec_decode_metrics is None
+        assert output.mm_cache_miss_hashes is None
+        assert output.new_sampling_mask is None
+        assert output.spec_decode_metrics is None
         if "pooling_output_payload" in EngineCoreOutput.__struct_fields__:
             assert output.pooling_output_payload is None
         if "num_generation_tokens" in EngineCoreOutput.__struct_fields__:

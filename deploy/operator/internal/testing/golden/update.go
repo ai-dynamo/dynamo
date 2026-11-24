@@ -36,8 +36,8 @@ func writeAdapted(path string, comparison comparison) error {
 }
 
 func restoreVariableDirectives(node *yaml.Node) {
-	if strings.HasPrefix(node.Tag, variableValueTagPrefix) {
-		node.Value = "$var:" + strings.TrimPrefix(node.Tag, variableValueTagPrefix)
+	if after, ok := strings.CutPrefix(node.Tag, variableValueTagPrefix); ok {
+		node.Value = "$var:" + after
 		node.Tag = yamlStringTag
 	}
 	for i := range node.Content {
@@ -125,7 +125,7 @@ func adaptNode(expected, actual *yaml.Node) *yaml.Node {
 		return adaptMapping(expected, actual)
 	case yaml.SequenceNode:
 		common := min(len(expected.Content), len(actual.Content))
-		for i := 0; i < common; i++ {
+		for i := range common {
 			expected.Content[i] = adaptNode(expected.Content[i], actual.Content[i])
 		}
 		if len(expected.Content) > len(actual.Content) {
@@ -236,11 +236,4 @@ func cloneNode(node *yaml.Node) *yaml.Node {
 		clone.Alias = cloneNode(node.Alias)
 	}
 	return &clone
-}
-
-func min(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }

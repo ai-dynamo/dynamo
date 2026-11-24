@@ -11,11 +11,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::common::handoff::{HandoffId, HandoffTransferTiming};
+use crate::common::protocols::DirectRequest;
 use crate::scheduler::{SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent};
 
 use super::request::{Routes, shutdown_routes};
 use super::{
-    LiveEngine, LiveEngineInner, LiveRequestRegistration, PreparedSubmission, send_command,
+    LiveEngine, LiveEngineInner, LiveRequest, LiveRequestRegistration, PreparedSubmission,
+    send_command,
 };
 
 const HANDOFF_EVENT_CAPACITY: usize = 8;
@@ -110,6 +112,49 @@ pub enum LiveHandoffEvent {
 }
 
 impl LiveEngine {
+    /// Reserve transferred prompt KV and submit decode without recomputing the prompt.
+    pub async fn submit_decode(&self, request: DirectRequest) -> anyhow::Result<LiveRequest> {
+        let (registration, live) = self.prepare_request(request)?;
+        self.submit_decode_prepared(registration).await?;
+        Ok(live)
+    }
+
+    /// Admit an already registered request with transferred prompt KV.
+    pub async fn submit_decode_prepared(
+        &self,
+        registration: LiveRequestRegistration,
+    ) -> anyhow::Result<()> {
+        let mut lifecycle = registration
+            .prepared
+            .as_ref()
+            .ok_or_else(|| anyhow!("prepared request was already consumed"))?
+            .route
+            .lifecycle_receiver();
+        let (control, mut events) = self.register_handoff(HandoffId::new())?;
+        control.reserve_destination(registration).await?;
+        tokio::select! {
+            biased;
+            _ = self.inner.cancel.cancelled() => {
+                bail!("live Mocker engine stopped during decode admission");
+            }
+            _ = lifecycle.wait_for(|state| state.is_aborted) => return Ok(()),
+            event = events.recv() => {
+                anyhow::ensure!(
+                    matches!(event, Some(LiveHandoffEvent::DestinationReserved { .. })),
+                    "decode admission closed without reserving prompt KV"
+                );
+            }
+        }
+        let is_aborted = || lifecycle.borrow().is_aborted;
+        if !is_aborted()
+            && let Err(error) = control.activate_destination().await
+            && !is_aborted()
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Register one disaggregated handoff and its normalized lifecycle stream.
     pub fn register_handoff(
         &self,

@@ -74,7 +74,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     itl_ms = 50.0
 
     # for load predictor
-    load_predictor = "arima"  # ["constant", "arima", "kalman", "prophet"]
+    load_predictor: Literal["constant", "arima", "kalman", "prophet"] = "arima"
     prophet_window_size = 50
     load_predictor_log1p = False
     kalman_q_level = 1.0

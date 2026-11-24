@@ -23,6 +23,7 @@ const DEFAULT_LEGACY_AUDIT_NATS_SUBJECT: &str = "dynamo.audit.v1";
 const DEFAULT_OTEL_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_S3_ROLL_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_S3_FLUSH_INTERVAL_MS: u64 = 10_000;
+const DEFAULT_ROUTER_SELECTION_TOP_K: usize = 16;
 
 const CAPTURE_UNINITIALIZED: u8 = 0;
 const CAPTURE_ACTIVE: u8 = 1;
@@ -54,6 +55,7 @@ pub enum RequestTraceRecordKind {
     RequestEnd,
     RequestPayload,
     Tool,
+    RouterSelection,
 }
 
 impl RequestTraceRecordKind {
@@ -62,6 +64,7 @@ impl RequestTraceRecordKind {
             Self::RequestEnd => "request_end",
             Self::RequestPayload => "request_payload",
             Self::Tool => "tool",
+            Self::RouterSelection => "router_selection",
         }
     }
 }
@@ -103,6 +106,8 @@ pub struct RequestTracePolicy {
     pub s3_prefix: Option<String>,
     pub s3_roll_uncompressed_bytes: u64,
     pub s3_flush_interval_ms: u64,
+    /// Lowest-cost candidates retained per `router_selection` record; `0` keeps all.
+    pub router_selection_top_k: usize,
 }
 
 impl RequestTracePolicy {
@@ -125,6 +130,11 @@ impl RequestTracePolicy {
 
     pub fn emit_tool_records(&self) -> bool {
         self.records.contains(&RequestTraceRecordKind::Tool)
+    }
+
+    pub fn emit_router_selection_records(&self) -> bool {
+        self.records
+            .contains(&RequestTraceRecordKind::RouterSelection)
     }
 }
 
@@ -234,6 +244,9 @@ fn load_from_env() -> RequestTracePolicy {
         env_u64(&[env_request_trace::DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS])
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_S3_FLUSH_INTERVAL_MS);
+    let router_selection_top_k =
+        env_usize(&[env_request_trace::DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K])
+            .unwrap_or(DEFAULT_ROUTER_SELECTION_TOP_K);
 
     RequestTracePolicy {
         enabled,
@@ -256,6 +269,7 @@ fn load_from_env() -> RequestTracePolicy {
         s3_prefix,
         s3_roll_uncompressed_bytes,
         s3_flush_interval_ms,
+        router_selection_top_k,
     }
 }
 
@@ -288,6 +302,9 @@ fn parse_record_kind_names(value: &str) -> Vec<RequestTraceRecordKind> {
         match name.as_str() {
             "request_end" => push_record(&mut records, RequestTraceRecordKind::RequestEnd),
             "request_payload" => push_record(&mut records, RequestTraceRecordKind::RequestPayload),
+            "router_selection" => {
+                push_record(&mut records, RequestTraceRecordKind::RouterSelection)
+            }
             "tool" | "tools" | "tool_start" | "tool_end" | "tool_error" => {
                 push_record(&mut records, RequestTraceRecordKind::Tool)
             }
@@ -455,6 +472,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
         env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+        env_request_trace::DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K,
         env_audit::DYN_AUDIT_SINKS,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
         env_audit::DYN_AUDIT_CAPACITY,
@@ -536,6 +554,45 @@ mod tests {
                 assert!(policy.emit_tool_records());
                 assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
                 assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn router_selection_records_are_opt_in_with_default_knobs() {
+        with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
+            let policy = load_from_env();
+            assert!(!policy.emit_router_selection_records());
+            assert_eq!(
+                policy.router_selection_top_k,
+                DEFAULT_ROUTER_SELECTION_TOP_K
+            );
+        });
+
+        with_request_trace_env(
+            &[
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_RECORDS,
+                    "request_end,router_selection",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K,
+                    "0",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert!(policy.enabled);
+                assert_eq!(
+                    policy.records,
+                    vec![
+                        RequestTraceRecordKind::RequestEnd,
+                        RequestTraceRecordKind::RouterSelection,
+                    ]
+                );
+                assert!(policy.emit_router_selection_records());
+                assert_eq!(policy.router_selection_top_k, 0);
             },
         );
     }

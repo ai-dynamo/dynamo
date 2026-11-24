@@ -7,11 +7,13 @@
 ########## Runtime Image #########
 ##################################
 
-{% if device == "xpu" %}
-FROM framework AS runtime
-{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
-{% endif %}
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 ARG MODELEXPRESS_VERSION
 {% if device == "cuda" %}
@@ -30,13 +32,15 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 # Install the TurboJPEG runtime used by frontend JPEG decoding and bring
 # base-image OS packages up to the current patch releases. --only-upgrade skips
 # anything not already installed while keeping both operations in one layer.
-# libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
+# libjemalloc2 lets CPython and C code opt into jemalloc via
+# LD_PRELOAD; it is not preloaded by default.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libturbojpeg \
         libjemalloc2 && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -47,15 +51,28 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
+        libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/* && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
 {% else %}
 # Install the TurboJPEG runtime used by frontend JPEG decoding.
-# libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
+# libjemalloc2 lets CPython and C code opt into jemalloc via
+# LD_PRELOAD; it is not preloaded by default.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libturbojpeg \
@@ -99,6 +116,18 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linu
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
+# Install RDMA libraries required for UCX to find RDMA devices
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libibverbs1 \
+        rdma-core \
+        ibverbs-utils \
+        libibumad3 \
+        libnuma1 \
+        librdmacm1 \
+        ibverbs-providers && \
+    rm -rf /var/lib/apt/lists/*
+
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV LD_LIBRARY_PATH=\
@@ -120,7 +149,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl \
+        /opt/dynamo/wheelhouse/aisim-*.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         "distro==1.9.0"
 {% else %}
@@ -129,7 +158,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
@@ -180,6 +209,30 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
+{% if device == "xpu" %}
+# The upstream SGLang XPU base installs uv to /root/.local/bin, outside any Python
+# distribution, so requirements.sglang.txt cannot refresh it. Replace every uv on
+# PATH with the pinned release.
+{%- else %}
+# The upstream SGLang base copies a uv binary into /usr/local/bin, outside any
+# Python distribution, so requirements.sglang.txt cannot refresh it. Replace it
+# with the release carrying the current fix line where the base ships one.
+{%- endif %}
+# Nothing on the runtime path runs uv.
+RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }},source=/,target=/tmp/uv-image \
+{%- if device == "xpu" %}
+    for u in $(which -a uv uvx); do \
+        install -m 0755 "/tmp/uv-image/$(basename "$u")" "$u"; \
+    done && \
+{%- else %}
+    if [ -e /usr/local/bin/uv ]; then \
+        install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/; \
+    fi && \
+{%- endif %}
+    for u in $(which -a uv uvx); do \
+        "$u" --version | grep -q '^uvx\{0,1\} {{ context.dynamo.uv_version | replace(".", "\\.") }} ' || { echo "unexpected uv at $u" >&2; exit 1; }; \
+    done
+
 # Install SGLang-specific runtime dependencies without changing the upstream
 # dependency solution. imageio-ffmpeg is installed from source (no bundled
 # binary) for the VP9 video-encode path; see requirements.sglang.txt.
@@ -191,97 +244,16 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
-# Assert what the install left. The upstream SGLang image ships no
-# PyNvVideoCodec, so nothing is removed first -- but that is a property of the
-# current base rather than a guarantee, and checking the result is what keeps it
-# honest. PINNED is duplicated from the requirements file deliberately: this stage
-# must not parse the file it is checking; a test asserts the two agree.
-RUN python3 - <<'PYEOF'
-import csv
-import glob
-import os
-import re
-import sys
-from importlib.metadata import distributions
-
-PINNED = "2.2.3"
-NAME = "pynvvideocodec"
-# Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
-# families rather than the four this package happens to have shed, so a future
-# release vendoring libpostproc or libx264 is caught here -- beside the install
-# that introduced it -- instead of as an unattributed scan violation later.
-DENIED = (
-    "libavcodec",
-    "libavdevice",
-    "libavfilter",
-    "libswscale",
-    "libswresample",
-    "libpostproc",
-    "libx264",
-    "libx265",
-    "libfdk-aac",
-)
-
-
-def canonical(name):
-    return re.sub(r"[-_.]+", "-", name or "").lower()
-
-
-# Enumerated over sys.path rather than one scheme directory: these images carry
-# both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
-# and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
-# alone is guaranteed to be the install target or the only place a copy can hide.
-# A surviving base copy beside the new one is the failure being looked for, which
-# is also why this counts distributions instead of asking for one version.
-installed = [d for d in distributions() if canonical(d.metadata["Name"]) == NAME]
-versions = sorted(d.version for d in installed)
-print("PyNvVideoCodec distributions on sys.path:", versions)
-if len(installed) != 1:
-    sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
-if versions[0] != PINNED:
-    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
-             f"pins {PINNED}")
-
-site = os.path.normpath(str(installed[0].locate_file("")))
-pkg = os.path.join(site, "PyNvVideoCodec")
-bundled = sorted(
-    os.path.relpath(p, pkg)
-    for p in glob.glob(os.path.join(pkg, "**", "lib*.so*"), recursive=True)
-)
-print("PyNvVideoCodec bundles:", bundled)
-# Positive first, and on both libraries: an empty package directory satisfies
-# every negative check below while shipping no demuxer at all.
-for required in ("libavformat", "libavutil"):
-    if not any(os.path.basename(n).startswith(required) for n in bundled):
-        sys.exit(
-            f"ERROR: PyNvVideoCodec bundles no {required}, so the checks below "
-            f"would pass vacuously; found {bundled}"
-        )
-denied = [n for n in bundled if os.path.basename(n).startswith(DENIED)]
-if denied:
-    sys.exit(f"ERROR: PyNvVideoCodec bundles libraries the codec gate denies: {denied}")
-
-# The FFmpeg source tarball lands outside site-packages, so its directory is read
-# from the wheel's own RECORD rather than guessed from a sysconfig path -- the
-# RECORD is what the installer actually wrote, and it moves if the layout does.
-record = installed[0].read_text("RECORD") or ""
-declared = [
-    row[0]
-    for row in csv.reader(record.splitlines())
-    if row and row[0].endswith((".tar.xz", ".tar.gz", ".tar.bz2"))
-]
-if len(declared) != 1:
-    sys.exit(f"ERROR: expected one source tarball in the RECORD, found {declared}")
-external = os.path.dirname(os.path.normpath(os.path.join(site, declared[0])))
-tarballs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(external, "ffmpeg-*.tar.*")))
-print("bundled FFmpeg source tarballs in", external, "->", tarballs)
-if len(tarballs) != 1:
-    sys.exit(f"ERROR: expected exactly one bundled FFmpeg source tarball, found {tarballs}")
-PYEOF
+# Assert what the install left. The pin is repeated from the requirements file
+# on purpose; a test asserts the two agree.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 {% else %}
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
-# are inert on the XPU image and neither is present in its base. The patterns are
+# are inert on the XPU image and neither is present in its base. The diffusers pin
+# is stripped too: the published XPU base installs its own diffusion extra, and
+# this pin is tested on CUDA only. The patterns are
 # anchored to the line start so they cannot match inside another requirement, and
 # the checks fail the build if either package arrives by another route -- a filter
 # that silently stopped matching would otherwise look like success. Both checks
@@ -294,7 +266,7 @@ PYEOF
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
-    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' -e '^diffusers' \
         /tmp/requirements.sglang.txt > /tmp/requirements.sglang.nonvidia.txt && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.nonvidia.txt && \
@@ -317,15 +289,23 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # tests/dependencies/test_no_software_video_codecs.py -- when this purge
 # becomes redundant, delete it and keep those assertions.
 #
-# CUDA only, and it has to be: the replacement ffmpeg is copied in under
-# `device == "cuda"` just below. Running the purge on XPU strips the base image's
-# media stack and puts nothing back, leaving that image with no ffmpeg at all and
-# an empty IMAGEIO_FFMPEG_EXE -- worse than either leaving it alone or replacing
-# it properly. The XPU image is not published, so there is nothing to remove from
-# it in the first place; the codec gate skips it for the same reason. Matches the
+# CUDA only. On XPU the codec-bearing wheels from the SGLang install are not
+# purged yet; both devices get the in-tree VP9 ffmpeg below. Matches the
 # equivalent purge in vllm_runtime.Dockerfile.
 {% if device == "cuda" %}
 RUN set -eux; \
+    # The upstream runtime image installs Ubuntu's full GPL/LGPL ffmpeg
+    # dependency closure. Remove the packages (and their dpkg metadata) before
+    # copying Dynamo's separately built VP9-only ffmpeg below. File deletion
+    # alone is insufficient because the compliance generator inventories dpkg.
+    purge="$(dpkg-query -W -f='${Package}\n' \
+        ffmpeg \
+        libwayland-server0 \
+        2>/dev/null || true)"; \
+    if [ -n "$purge" ]; then \
+        apt-get purge -y --auto-remove $purge; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
     python3 -m pip uninstall --yes \
         av \
         decord \
@@ -361,6 +341,12 @@ RUN set -eux; \
         /usr/local/lib/pkgconfig/libsw*.pc \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
+    find /usr /opt /workspace /sgl-workspace -xdev \
+        \( -type f -o -type l \) \
+        \( -name 'libx264*.so*' -o -name 'libx265*.so*' \
+        -o -name 'libopenh264*.so*' -o -name 'libfdk-aac*.so*' \
+        -o -name 'libfaac*.so*' -o -name 'libvo-aacenc*.so*' \
+        -o -name 'libaacplus*.so*' \) -delete; \
     ldconfig
 {% endif %}
 
@@ -376,13 +362,14 @@ RUN rm -rf \
         /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
     [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
 
-{% if device == "cuda" %}
+{% if device in ("cuda", "xpu") %}
 # Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
 # (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
-# via IMAGEIO_FFMPEG_EXE. The upstream ffmpeg was purged above, so this
-# VP9-only build is the only ffmpeg present; the video-generation
-# handler (CUDA DiffGenerator) encodes libvpx-vp9 with it. Same pattern as
-# vllm_runtime.Dockerfile.
+# via IMAGEIO_FFMPEG_EXE. On CUDA the upstream ffmpeg was purged above; the XPU
+# base ships none. Either way this is the only ffmpeg CLI in the image; the
+# video-generation handler (DiffGenerator) encodes libvpx-vp9 with it, and the
+# media-ffmpeg runtime wheel links its libav* for frontend video decoding. Same
+# pattern as vllm_runtime.Dockerfile.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -398,18 +385,10 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
 # or a codec regression fails the build here rather than at runtime — closing the
 # gap where SGLang shipping no encoder passed every PR gate.
-RUN set -eu; \
-    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
-    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
-      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
-    if "$ff" -hide_banner -encoders 2>/dev/null \
-         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
-        exit 1; \
-    fi
+{% include "templates/ffmpeg_encoder_guard.Dockerfile" %}
 
-# Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
-# image build if the runtime wheel was accidentally compiled without it.
+# Frontend video decoding is part of the shipped SGLang CUDA and XPU contract.
+# Fail the image build if the runtime wheel was accidentally compiled without it.
 {% if target not in ("dev", "local-dev") %}
 RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder(), "enable_video")'
 {% endif %}
@@ -456,12 +435,12 @@ ENV SGLANG_FORCE_SHUTDOWN=1
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
+{# oneAPI and /opt/venv come through Docker ENV (SETVARS_COMPLETED=1), which every
+   process inherits -- do not move this into a bashrc, which only interactive
+   shells read. #}
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
 {%- if device == "xpu" %}
-    echo '. /opt/miniforge3/bin/activate sglang' >> /etc/bash.bashrc && \
-    echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
-    mkdir -p /sgl-workspace && \
     ln -sf /workspace /sgl-workspace/dynamo
 {%- else %}
     ln -s /workspace /sgl-workspace/dynamo && \
@@ -517,14 +496,13 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 {% if device == "xpu" %}
-CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+CMD ["bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}
 
 
-{% if device != "xpu" %}
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
    ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
    already skips them, and their pre_runtime carries no dynamo venv to scan. #}
@@ -538,13 +516,16 @@ CMD []
 #######################################
 
 FROM pre_runtime AS runtime
+{%- if device == "cuda" %}
 # NVDEC (PyNvVideoCodec, added in requirements.sglang.txt) needs the driver
 # "video" capability at runtime so libnvcuvid is exposed; without it
 # PyNvVideoCodec cannot import. Ensure the K8s pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 {% if target not in ("dev", "local-dev") %}
 COPY --from=licenses /legal /legal
 {% endif %}
+{% if device != "xpu" %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}

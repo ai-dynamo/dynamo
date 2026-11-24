@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "claude-trace-export")]
+#[cfg(feature = "coding-trace-export")]
 pub mod coding;
 #[cfg(feature = "kv-router-stress-support")]
 pub mod common;
@@ -11,7 +11,8 @@ pub mod common;
     feature = "dc-ckf-consumer",
     feature = "dc-ckf-relay",
     feature = "mooncake",
-    feature = "router-test-support"
+    feature = "router-test-support",
+    feature = "selection-replay"
 ))]
 #[path = "../kv_router/common/mod.rs"]
 pub mod kv_router_common;

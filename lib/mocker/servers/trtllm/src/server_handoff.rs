@@ -28,13 +28,13 @@ pub(super) const SESSION_PREFIX: &str = "mocker-prefill-";
 pub(super) const ATTR_REQUEST_ID: &str = "mocker_request_id";
 pub(super) const ATTR_PROMPT_TOKENS: &str = "mocker_prompt_tokens";
 pub(super) const ATTR_TTFT_MS: &str = "mocker_ttft_ms";
-pub(super) const ATTR_FIRST_GEN_TOKENS: &str = "mocker_first_gen_tokens";
+pub(super) const ATTR_FIRST_GEN_TOKENS: &str = "first_gen_tokens";
 /// Present only when the context request asked for logprobs, mirroring the real
 /// server's `first_gen_log_probs`. The decode leg replays the context phase's
 /// first token, so that token's logprob exists only if the context phase
 /// computed it; a client that asks the decode leg for logprobs after a context
 /// leg that did not gets a token with none.
-pub(super) const ATTR_FIRST_GEN_LOG_PROBS: &str = "mocker_first_gen_log_probs";
+pub(super) const ATTR_FIRST_GEN_LOG_PROBS: &str = "first_gen_log_probs";
 
 /// Deliberately fractional: a codec that rounded Struct numbers to integers
 /// would round-trip every other numeric attribute unnoticed.
@@ -53,8 +53,7 @@ pub(super) fn build_session(
     session_id: String,
     request_id: &str,
     prompt_tokens: usize,
-    first_gen_token: u32,
-    first_gen_logprob: Option<f64>,
+    first_token: &pb::TokenInfo,
 ) -> pb::KvSessionRef {
     let mut attributes = vec![
         (ATTR_REQUEST_ID, string_value(request_id)),
@@ -64,19 +63,42 @@ pub(super) fn build_session(
             ATTR_FIRST_GEN_TOKENS,
             Value {
                 kind: Some(Kind::ListValue(ListValue {
-                    values: vec![number_value(f64::from(first_gen_token))],
+                    values: vec![number_value(f64::from(first_token.token_id))],
                 })),
             },
         ),
     ];
-    if let Some(logprob) = first_gen_logprob {
+    if let Some(logprob) = first_token.logprob {
+        let selected = pb::LogProb {
+            token_id: first_token.token_id,
+            logprob,
+            rank: first_token.rank,
+            token: String::new(),
+        };
+        let entries = std::iter::once(&selected)
+            .chain(
+                first_token
+                    .candidates
+                    .iter()
+                    .filter(|candidate| candidate.token_id != selected.token_id),
+            )
+            .map(|candidate| {
+                list_value(vec![
+                    number_value(f64::from(candidate.token_id)),
+                    number_value(candidate.logprob),
+                    candidate
+                        .rank
+                        .map(|rank| number_value(f64::from(rank)))
+                        .unwrap_or(Value {
+                            kind: Some(Kind::NullValue(0)),
+                        }),
+                ])
+            })
+            .collect();
+        // TensorRT-LLM disagg.py serializes each position as [token_id, logprob, rank] triples.
         attributes.push((
             ATTR_FIRST_GEN_LOG_PROBS,
-            Value {
-                kind: Some(Kind::ListValue(ListValue {
-                    values: vec![number_value(logprob)],
-                })),
-            },
+            list_value(vec![list_value(entries)]),
         ));
     }
 
@@ -98,20 +120,77 @@ pub(super) fn build_session(
     }
 }
 
-/// The logprob the context phase computed for its first generated token, if it
-/// computed one at all.
-pub(super) fn first_gen_logprob(session: &pb::KvSessionRef) -> Option<f64> {
-    let attributes = session.attributes_struct.as_ref()?;
-    let Some(Kind::ListValue(list)) = attributes
-        .fields
-        .get(ATTR_FIRST_GEN_LOG_PROBS)?
-        .kind
+pub(super) fn first_gen_logprobs(
+    session: &pb::KvSessionRef,
+) -> BoxedStatusResult<Option<Vec<pb::LogProb>>> {
+    let Some(value) = session
+        .attributes_struct
         .as_ref()
+        .and_then(|attributes| attributes.fields.get(ATTR_FIRST_GEN_LOG_PROBS))
     else {
-        return None;
+        return Ok(None);
     };
-    match list.values.first()?.kind.as_ref()? {
-        Kind::NumberValue(value) if value.is_finite() => Some(*value),
+    let malformed = || {
+        Box::new(Status::invalid_argument(
+            "first_gen_log_probs must contain positions of [token_id, logprob, rank] triples",
+        ))
+    };
+    let Some(Kind::ListValue(positions)) = &value.kind else {
+        return Err(malformed());
+    };
+    let Some(position) = positions.values.first() else {
+        return Err(malformed());
+    };
+    if let Some(Kind::NumberValue(logprob)) = position.kind {
+        if !logprob.is_finite() {
+            return Err(malformed());
+        }
+        return Ok(Some(vec![pb::LogProb {
+            token_id: first_gen_token(session).ok_or_else(malformed)?,
+            logprob,
+            rank: None,
+            token: String::new(),
+        }]));
+    }
+    let Some(Kind::ListValue(entries)) = &position.kind else {
+        return Err(malformed());
+    };
+    let mut logprobs = Vec::with_capacity(entries.values.len());
+    for entry in &entries.values {
+        let Some(Kind::ListValue(triple)) = &entry.kind else {
+            return Err(malformed());
+        };
+        let [token_id, logprob, rank] = triple.values.as_slice() else {
+            return Err(malformed());
+        };
+        let token_id = whole_number(token_id).ok_or_else(malformed)?;
+        let Some(Kind::NumberValue(logprob)) = logprob.kind else {
+            return Err(malformed());
+        };
+        if !logprob.is_finite() {
+            return Err(malformed());
+        }
+        let rank = match rank.kind {
+            Some(Kind::NullValue(_)) => None,
+            _ => Some(whole_number(rank).ok_or_else(malformed)?),
+        };
+        logprobs.push(pb::LogProb {
+            token_id,
+            logprob,
+            rank,
+            token: String::new(),
+        });
+    }
+    Ok(Some(logprobs))
+}
+
+fn whole_number(value: &Value) -> Option<u32> {
+    match value.kind {
+        Some(Kind::NumberValue(number))
+            if number.fract() == 0.0 && number >= 0.0 && number <= f64::from(u32::MAX) =>
+        {
+            Some(number as u32)
+        }
         _ => None,
     }
 }
@@ -124,14 +203,7 @@ pub(super) fn first_gen_token(session: &pb::KvSessionRef) -> Option<u32> {
     else {
         return None;
     };
-    match list.values.first()?.kind.as_ref()? {
-        Kind::NumberValue(value)
-            if value.fract() == 0.0 && *value >= 0.0 && *value <= f64::from(u32::MAX) =>
-        {
-            Some(*value as u32)
-        }
-        _ => None,
-    }
+    whole_number(list.values.first()?)
 }
 
 pub(super) fn validate_session(session: &pb::KvSessionRef) -> BoxedStatusResult<()> {
@@ -214,9 +286,9 @@ pub(super) fn validate_session(session: &pb::KvSessionRef) -> BoxedStatusResult<
     Ok(())
 }
 
-fn attribute_string(attributes: &Struct, key: &str) -> BoxedStatusResult<String> {
+fn attribute_string<'a>(attributes: &'a Struct, key: &str) -> BoxedStatusResult<&'a str> {
     match attributes.fields.get(key).map(|value| &value.kind) {
-        Some(Some(Kind::StringValue(value))) => Ok(value.clone()),
+        Some(Some(Kind::StringValue(value))) => Ok(value),
         Some(_) => invalid(format!("kv_session attribute '{key}' must be a string")),
         None => invalid(format!("kv_session is missing attribute '{key}'")),
     }
@@ -239,5 +311,11 @@ fn string_value(value: &str) -> Value {
 fn number_value(value: f64) -> Value {
     Value {
         kind: Some(Kind::NumberValue(value)),
+    }
+}
+
+fn list_value(values: Vec<Value>) -> Value {
+    Value {
+        kind: Some(Kind::ListValue(ListValue { values })),
     }
 }

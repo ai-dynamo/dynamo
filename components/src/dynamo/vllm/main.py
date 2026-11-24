@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
+import gc
 import json
 import logging
 import os
@@ -19,13 +21,15 @@ from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.transformers_utils.repo_utils import any_pattern_in_repo_files
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
-from dynamo.common.model_fetch import fetch_model
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -36,10 +40,15 @@ from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
+    get_extra_metric_prefixes,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.topology import (
+    TopologyConfig,
+    apply_topology_config,
+    read_topology_config,
+)
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -50,11 +59,13 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
+from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
+from .args import Config, configure_rl_logprobs_mode, parse_args_with_model_fetch
+from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
@@ -63,6 +74,10 @@ from .capacity import (
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
+from .decision_execution import (
+    publish_vllm_decision_capability,
+    qualify_vllm_decision_runtime,
+)
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -70,7 +85,10 @@ from .embedding_worker_processes import (
     is_embedding_process_child,
     start_embedding_parent_watchdog,
 )
-from .engine_generate import publish_engine_generate_capability
+from .engine_generate import (
+    publish_engine_generate_capability,
+    publish_json_multimodal_capability,
+)
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -86,7 +104,7 @@ from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine
+from .snapshot import apply_restore_served_model_name, prepare_snapshot_engine
 from .state_agent import (
     StateAgentLifecycle,
     start_attachment_owner,
@@ -100,6 +118,27 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
+LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY = "llguidance_lark_grammar"
+
+
+async def close_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import close_configured_artifact_runtime as close
+
+    await close()
+
+
+async def initialize_configured_artifact_runtime() -> None:
+    from dynamo.artifacts.runtime import (
+        initialize_configured_artifact_runtime as initialize,
+    )
+
+    await initialize()
+
+
+async def _close_worker_resources(
+    state_agent_lifecycle: StateAgentLifecycle,
+) -> None:
+    await state_agent_lifecycle.close()
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -133,6 +172,68 @@ def publish_vllm_structural_tag_reasoning_policy(
     )
 
 
+def configure_muse_structural_tag_reasoning(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Activate Muse's native grammar before the model chooses a recipient.
+
+    Muse's engine reasoner leaves reasoning only after a tool channel opens.
+    Deferring a required/named grammar until then cannot force a call. The
+    Dynamo ATEM grammar includes the reasoning channel, so it owns that boundary.
+    Unguided requests are unaffected by this structured-output setting.
+    """
+    spark = ("muse_spark_open", "muse_spark")
+    # Match the frontend's effective parser selection for reasoning-only Spark.
+    if config.dyn_tool_call_parser in spark or (
+        config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
+    ):
+        vllm_config.structured_outputs_config.enable_in_reasoning = True
+
+
+def pin_guidance_for_tekken_checkpoints(vllm_config: VllmConfig) -> None:
+    """Send every structured-output request of a Tekken checkpoint to llguidance.
+
+    dynamo.frontend constrains Mistral tool calls and replies with a lark grammar
+    that only llguidance accepts. Under `auto`, vLLM sends that grammar to
+    `guidance` but a regex to `xgrammar`, and an engine keeps the backend of its
+    first structured-output request, so the other kind is rejected. llguidance
+    serves every constraint kind for Tekken tokenizers. An explicit backend is
+    left as configured.
+    """
+    structured_outputs_config = vllm_config.structured_outputs_config
+    if structured_outputs_config.backend != "auto":
+        return
+    model_config = vllm_config.model_config
+    if not any_pattern_in_repo_files(
+        model_name_or_path=str(model_config.tokenizer),
+        allow_patterns=["tekken.json"],
+        revision=model_config.tokenizer_revision,
+    ):
+        return
+    structured_outputs_config.backend = "guidance"
+    logger.info(
+        "Using the guidance structured-output backend for this Tekken checkpoint, "
+        "so Mistral grammars and other constraints share one backend"
+    )
+
+
+def publish_vllm_llguidance_lark_grammar(
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
+) -> None:
+    """Tell the frontend whether every lark `guided_decoding.grammar` reaches llguidance.
+
+    Only an explicit `guidance` backend guarantees that: `auto` picks a backend
+    per request, and the engine rejects a request whose backend differs from the
+    first one. `pin_guidance_for_tekken_checkpoints` selects `guidance` for the
+    Tekken checkpoints whose grammars need it.
+    """
+    backend = vllm_config.structured_outputs_config.backend
+    runtime_config.set_engine_specific(
+        LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY,
+        json.dumps(backend == "guidance"),
+    )
+
+
 def should_register_model_ignore_weights(config: Config) -> bool:
     return uses_modelexpress_load_format(config)
 
@@ -152,8 +253,8 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     local dir lets `register_model` take its `fs::exists` shortcut.
 
     Temporary vLLM-only workaround until `hub.rs` learns object-storage routing.
-    Falls back to `config.model` whenever vLLM did not pull (HF id, local path,
-    or older vLLM without `model_weights`).
+    Otherwise preserve the original source so NGC identity is independent of
+    each worker's local cache directory.
     """
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
@@ -163,7 +264,9 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
 async def worker(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
-    config = parse_args(argv)
+    config = await parse_args_with_model_fetch(argv)
+    if config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(config.artifact_router_profile)
 
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(
@@ -192,13 +295,15 @@ async def worker(argv: list[str] | None = None) -> None:
     # When vLLM uses the ModelExpress plugin, the plugin owns acquisition through
     # P2P, ModelStreamer, GDS, or vLLM's native fallback.
     #
-    # We don't set `config.engine_args.model` to the local path fetch_model returns
-    # because vllm will send that name to its Ray pipeline-parallel workers, which
-    # may not have the local path.
+    # For HF names we don't set `config.engine_args.model` to the local path
+    # fetch_model returns, because vllm will send that name to its Ray
+    # pipeline-parallel workers, which may not have the local path.
     # vllm will attempt to download the model again, but find it in the HF cache.
-    # For non-HF models use a path instead of an HF name, and ensure all workers have
-    # that path (ideally via a shared folder).
-    if not embedding_process_child and should_prefetch_model(config):
+    # NGC metadata was resolved before constructing engine_args; fetch weights
+    # after validation even with ModelExpress so its native fallback can load them.
+    if needs_local_model_path(config.model):
+        config.engine_args.model = await fetch_model(config.model)
+    elif not embedding_process_child and should_prefetch_model(config):
         await fetch_model(config.model)
 
     # Snapshot mode: load engine before runtime creation so there are no
@@ -216,6 +321,7 @@ async def worker(argv: list[str] | None = None) -> None:
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
         config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        apply_restore_served_model_name(config)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -223,8 +329,15 @@ async def worker(argv: list[str] | None = None) -> None:
         run_dynamo_headless(config)
         return
 
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        await initialize_configured_artifact_runtime()
+
     shutdown_event = asyncio.Event()
     state_agent_lifecycle = StateAgentLifecycle()
+
+    async def close_worker_resources() -> None:
+        await _close_worker_resources(state_agent_lifecycle)
+
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
@@ -244,26 +357,34 @@ async def worker(argv: list[str] | None = None) -> None:
         runtime,
         shutdown_endpoints,
         shutdown_event,
-        pre_shutdown_callback=state_agent_lifecycle.close,
+        pre_shutdown_callback=close_worker_resources,
     )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
-    factory = WorkerFactory(
-        setup_vllm_engine_fn=setup_vllm_engine,
-        setup_kv_event_publisher_fn=setup_kv_event_publisher,
-        setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
-        register_vllm_model_fn=register_vllm_model,
-        setup_fpm_relay_fn=setup_fpm_relay,
-        setup_metrics_collection_fn=setup_metrics_collection,
-        state_agent_lifecycle=state_agent_lifecycle,
-    )
-    await factory.create(
-        runtime,
-        config,
-        shutdown_event,
-        shutdown_endpoints,
-        snapshot_engine=snapshot_engine,
-    )
+    try:
+        factory = WorkerFactory(
+            setup_vllm_engine_fn=setup_vllm_engine,
+            setup_kv_event_publisher_fn=setup_kv_event_publisher,
+            setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
+            register_vllm_model_fn=register_vllm_model,
+            setup_fpm_relay_fn=setup_fpm_relay,
+            setup_metrics_collection_fn=setup_metrics_collection,
+            state_agent_lifecycle=state_agent_lifecycle,
+        )
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+    finally:
+        try:
+            await close_worker_resources()
+        finally:
+            # Accepted generations can finalize after the pre-shutdown hook.
+            if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+                await close_configured_artifact_runtime()
 
     logger.debug("Worker function completed, exiting...")
 
@@ -304,6 +425,7 @@ def setup_metrics_collection(
         == "DynamoMultimodalEmbeddingCacheConnector"
     ):
         engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+    engine_metric_prefixes.extend(get_extra_metric_prefixes())
 
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
@@ -447,8 +569,6 @@ def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
-    consolidator_enabled: bool = False,
-    consolidator_port: Optional[int] = 5558,
 ) -> Optional[list[KvEventPublisher]]:
     """
     list[KvEventPublisher] | None
@@ -458,8 +578,6 @@ def setup_kv_event_publisher(
         config: Worker configuration
         generate_endpoint: Endpoint for worker ID
         vllm_config: vLLM configuration
-        consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
-        consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
         List of KvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
@@ -490,21 +608,14 @@ def setup_kv_event_publisher(
     video_token_id = _resolve_video_token_id(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
-        if consolidator_enabled:
-            # TODO: Use different port for each dp_rank once KVBM supports DP
-            zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
-            )
-        else:
-            # Each dp_rank publishes to a different port
-            zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-                config.engine_args.kv_events_config.endpoint,
-                data_parallel_rank=dp_rank,
-            ).replace("*", "127.0.0.1")
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
-            )
+        # Each dp_rank publishes to a different port
+        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+            config.engine_args.kv_events_config.endpoint,
+            data_parallel_rank=dp_rank,
+        ).replace("*", "127.0.0.1")
+        logger.info(
+            f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
+        )
 
         kv_publisher = KvEventPublisher(
             endpoint=generate_endpoint,
@@ -526,6 +637,16 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
+@functools.cache
+def _worker_topology_config() -> TopologyConfig:
+    """Read this worker's topology once.
+
+    The KV state-agent attachment and every model registration then publish the
+    same island, and a later read cannot wait on or exit for a changed file.
+    """
+    return read_topology_config()
+
+
 async def setup_kv_state_attachment_owner(
     config: Config,
     generate_endpoint: Endpoint,
@@ -536,6 +657,7 @@ async def setup_kv_state_attachment_owner(
         generate_endpoint,
         vllm_config,
         _resolve_image_token_id(config, vllm_config),
+        topology_domains=_worker_topology_config().topology_domains,
     )
 
 
@@ -635,6 +757,8 @@ def setup_vllm_engine(
 
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    # Before EngineCore spawns: a false NIXL_TELEMETRY_ENABLE vetoes capture.
+    allow_nixl_telemetry_capture()
 
     engine_args = config.engine_args
 
@@ -675,27 +799,10 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    configure_muse_structural_tag_reasoning(config, vllm_config)
+    pin_guidance_for_tekken_checkpoints(vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
-
-    # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
-    consolidator_endpoints = None
-    if _uses_dynamo_connector(config.engine_args):
-        try:
-            from kvbm.vllm_integration.consolidator_config import (
-                get_consolidator_endpoints,
-            )
-
-            consolidator_endpoints = get_consolidator_endpoints(vllm_config)
-        except Exception as e:
-            logger.warning(
-                f"KVBM connector is enabled but failed to get consolidator endpoints: {e}. "
-                "Continuing without KV event consolidation. "
-                "Ensure 'kvbm' package is installed if this feature is needed."
-            )
-    # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
-    # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
-    vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
     # Pass runtime-only worker identity to InstrumentedScheduler via the
     # environment so it does not perturb vLLM's config hash.
@@ -729,6 +836,8 @@ def setup_vllm_engine(
     factory = []
     if stat_logger:
         factory.append(stat_logger)
+
+    qualify_vllm_decision_runtime(vllm_config, config)
 
     # Time engine initialization
     start_time = time.time()
@@ -807,6 +916,32 @@ def setup_vllm_engine(
     )
 
 
+_gc_frozen_after_init = False
+
+
+def maybe_freeze_gc_after_init(enabled: bool) -> None:
+    """Freeze this process's GC heap once, before the model is registered.
+
+    vLLM calls ``freeze_gc_heap()`` in EngineCore, each GPU worker and its own
+    API server. Dynamo replaces the API server with this process, which holds
+    the engine client, tokenizer and config (~1M tracked objects), so without
+    a freeze every gen2 collection re-walks them on the request loop. Runs at
+    most once per process: the collect blocks, and the frontend only routes
+    here after ``register_model`` returns.
+    """
+    global _gc_frozen_after_init
+    if not enabled or _gc_frozen_after_init:
+        return
+    start = time.perf_counter()
+    freeze_gc_heap()
+    _gc_frozen_after_init = True
+    logger.info(
+        "Froze %d GC-tracked objects in the worker process after init (%.0f ms)",
+        gc.get_freeze_count(),
+        (time.perf_counter() - start) * 1000,
+    )
+
+
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -838,7 +973,11 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_json_multimodal_capability(
+        runtime_config, model_input, worker_type, config.enable_multimodal
+    )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+    publish_vllm_llguidance_lark_grammar(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
@@ -856,14 +995,23 @@ async def register_vllm_model(
         vllm_config.lora_config
         and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
     )
-    if publish_engine_generate_capability(
+    native_generate_supported = publish_engine_generate_capability(
         runtime_config,
         model_input,
         model_type,
         worker_type,
         tower_connector_lora_enabled,
-    ):
+    )
+    if native_generate_supported:
         logging.info("Published vLLM engine-native generate capability")
+    publish_vllm_decision_capability(
+        runtime_config,
+        model_input,
+        worker_type,
+        config,
+        native_generate_supported=native_generate_supported,
+        needs=needs,
+    )
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len
@@ -889,6 +1037,11 @@ async def register_vllm_model(
         )
         num_gpu_blocks = 0
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
+    runtime_config.cache_owner_capacity_blocks = kvcr_host_capacity_blocks(
+        config.engine_args,
+        runtime_values["block_size"],
+        runtime_values["kv_event_block_size"],
+    )
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     runtime_config.enable_local_indexer = config.enable_local_indexer
@@ -911,11 +1064,7 @@ async def register_vllm_model(
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
-    runtime_config.set_structural_tag_mode(
-        "on" if config.dyn_enable_structural_tag else "off"
-    )
-    runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
-    runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
+    runtime_config.set_structural_tag(config.structural_tag)
 
     # Propagate stream_interval so the frontend can respect --stream-interval.
     # set_engine_specific requires a JSON-encoded string (the Rust binding
@@ -932,12 +1081,14 @@ async def register_vllm_model(
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
 
     # Set topology and KV transfer policy for topology-aware routing
-    apply_topology_config(runtime_config)
+    apply_topology_config(runtime_config, _worker_topology_config())
 
     # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )
+
+    maybe_freeze_gc_after_init(config.freeze_gc_after_init)
 
     await register_model(
         model_input,

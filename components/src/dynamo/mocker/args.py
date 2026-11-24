@@ -5,13 +5,22 @@ import argparse
 import logging
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
+from dynamo.common.ais_perf_model import (
+    AIS_OLD_INPUTS_REMOVE_IN,
+    AIS_PERF_MODEL_ENV,
+    env_value,
+)
+from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
 from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     add_worker_router_arguments,
 )
+from dynamo.common.configuration.utils import ArgEnv, Deprecated, join_names
 from dynamo.common.utils.namespace import get_worker_namespace
+from dynamo.mocker.config import normalize_mocker_config, old_ais_perf_inputs
 
 from . import __version__
 
@@ -20,25 +29,24 @@ DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
-
-
-def positive_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
-    return parsed
+_SGLANG_ALIAS_REMOVAL = "Dynamo 1.8.0 (two releases after 1.6.0)"
 
 
 class ProfileDataResult:
-    """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion."""
+    """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion.
+
+    ``npz_path`` is the lookup-table file, ``ais_perf_model`` the AIS perf model
+    file written for a profiler results directory; at most one is set.
+    """
 
     def __init__(
-        self, npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None
+        self,
+        npz_path: Path | None,
+        tmpdir: tempfile.TemporaryDirectory | None,
+        ais_perf_model: Path | None = None,
     ):
         self.npz_path = npz_path
+        self.ais_perf_model = ais_perf_model
         self._tmpdir = tmpdir
 
     def __del__(self):
@@ -52,48 +60,68 @@ class ProfileDataResult:
 
 def resolve_planner_profile_data(
     planner_profile_data: Path | None,
+    *,
+    model: str | None = None,
+    backend: str = "vllm",
+    nextn: int = 0,
 ) -> ProfileDataResult:
     """
-    Resolve --planner-profile-data to an NPZ file path.
+    Resolve --planner-profile-data to a timing source.
 
-    Handles backward compatibility by accepting either:
-    1. A mocker-format NPZ file (returned as-is)
-    2. A profiler-style results directory (converted to mocker-format NPZ)
+    Accepts either:
+    1. A mocker-format NPZ file with lookup tables (returned as-is)
+    2. A profiler-style results directory. An AIS perf model is tuned with
+       its measured points and written to a temporary directory.
 
     Args:
         planner_profile_data: Path from --planner-profile-data argument.
+        model: Model name recorded in the AIS perf model of a directory; the
+            name of the directory when ``None``.
+        backend: Engine backend recorded in that AIS perf model.
+        nextn: Speculative decoding depth recorded in that AIS perf model.
 
     Returns:
-        ProfileDataResult with npz_path and optional tmpdir for cleanup.
+        ProfileDataResult with npz_path or ais_perf_model, and the tmpdir for cleanup.
 
     Raises:
         FileNotFoundError: If path doesn't contain valid profile data in any supported format.
+        ValueError: If the points of a directory do not allow a fit.
     """
     if planner_profile_data is None:
         return ProfileDataResult(npz_path=None, tmpdir=None)
 
     from .utils.planner_profiler_perf_data_converter import (
-        convert_profile_results_to_npz,
         is_mocker_format_npz,
         is_profile_results_dir,
+        write_ais_perf_model,
     )
 
-    # Case 1: Already a mocker-format NPZ file
     if is_mocker_format_npz(planner_profile_data):
         logger.info(f"Using mocker-format NPZ file: {planner_profile_data}")
         return ProfileDataResult(npz_path=planner_profile_data, tmpdir=None)
 
-    # Case 2: Profiler-style results directory - needs conversion
     if is_profile_results_dir(planner_profile_data):
         logger.info(
-            f"Detected profiler-style results directory at {planner_profile_data}, converting to NPZ..."
+            "Detected profiler-style results directory at %s, tuning an AIS perf "
+            "model with it...",
+            planner_profile_data,
         )
         tmpdir = tempfile.TemporaryDirectory(prefix="mocker_perf_data_")
-        npz_path = Path(tmpdir.name) / "perf_data.npz"
-        convert_profile_results_to_npz(planner_profile_data, npz_path)
-        return ProfileDataResult(npz_path=npz_path, tmpdir=tmpdir)
+        try:
+            ais_perf_model = write_ais_perf_model(
+                planner_profile_data,
+                Path(tmpdir.name) / "ais_perf_model",
+                model=model or planner_profile_data.resolve().name,
+                backend=backend,
+                nextn=nextn,
+            )
+        except Exception:
+            tmpdir.cleanup()
+            raise
+        return ProfileDataResult(
+            npz_path=None, tmpdir=tmpdir, ais_perf_model=ais_perf_model
+        )
 
-    # Case 3: Invalid path - neither mocker-format NPZ nor profiler-style directory
     raise FileNotFoundError(
         f"Path '{planner_profile_data}' is neither a mocker-format NPZ file nor a valid profiler results directory.\n"
         f"Expected either:\n"
@@ -101,6 +129,33 @@ def resolve_planner_profile_data(
         f"  - A directory containing selected_prefill_interpolation/raw_data.npz and selected_decode_interpolation/raw_data.npz\n"
         f"  - A directory containing prefill_raw_data.json and decode_raw_data.json"
     )
+
+
+def use_planner_profile_data(args: argparse.Namespace) -> ProfileDataResult:
+    """Resolve ``--planner-profile-data`` and make it the timing input of ``args``.
+
+    A lookup-table file stays in ``args.planner_profile_data``. A profiler
+    results directory becomes the AIS perf model value of ``args``, tuned for
+    ``--model-path``, ``--engine-type`` and ``--ais-nextn``; together with an
+    old AIS input it is a ``ValueError``. With ``--extra-engine-args`` the
+    profile data is not used for timing, as before.
+
+    The result owns the temporary directory of that AIS perf model: keep it
+    until the workers have stopped.
+    """
+    result = resolve_planner_profile_data(
+        args.planner_profile_data,
+        model=args.model_path,
+        backend=args.engine_type,
+        nextn=args.ais_nextn or 0,
+    )
+    args.planner_profile_data = result.npz_path
+    if result.ais_perf_model is not None and args.extra_engine_args is None:
+        if old_ais_perf_inputs(args):
+            raise ValueError("choose one timing provider: AIS or planner_profile_data")
+        args.ais_perf_model_value = str(result.ais_perf_model)
+        args.ais_perf_model_source = "--planner-profile-data"
+    return result
 
 
 def validate_worker_type_args(args: argparse.Namespace) -> None:
@@ -156,19 +211,69 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for the Dynamo mocker engine.
+class _AisPerfModelOccurrence(argparse.Action):
+    """Record every use of ``--ais-perf-model`` as ``(option string, value)``.
 
-    Returns:
-        argparse.Namespace: Parsed command-line arguments.
+    The value is ``None`` when none was given.
     """
-    parser = argparse.ArgumentParser(
-        description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        occurrences = getattr(namespace, self.dest, None) or []
+        setattr(namespace, self.dest, [*occurrences, (option_string, values)])
+
+
+def set_ais_perf_model_attributes(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, env: str | None
+) -> None:
+    """Replace the recorded uses of ``--ais-perf-model`` by three attributes.
+
+    ``env`` is ``DYN_AIS_PERF_MODEL`` of the mocker ``args`` was parsed for;
+    ``None`` or empty is unset. Sets ``ais_perf_model_without_value``,
+    ``ais_perf_model_value`` (the value typed last, else ``env``) and
+    ``ais_perf_model_source`` (the name of what gave the value). A
+    combination with no single meaning is an error of ``parser``.
+    """
+    env = env or None
+    occurrences = args.ais_perf_model_occurrences or []
+    del args.ais_perf_model_occurrences
+    bare = [flag for flag, value in occurrences if value is None]
+    valued = [(flag, value) for flag, value in occurrences if value is not None]
+    if any(flag == "--aic-perf-model" for flag, _ in valued):
+        parser.error("--aic-perf-model takes no value; write --ais-perf-model VALUE")
+    if bare and valued:
+        parser.error(
+            "--ais-perf-model is given with and without a value; write it once, "
+            "with the value"
+        )
+    if bare and env is not None:
+        parser.error(
+            f"--ais-perf-model without a value cannot be combined with {AIS_PERF_MODEL_ENV}"
+        )
+    args.ais_perf_model_without_value = bool(bare)
+    if valued:
+        # As for every other option with a value, the last one typed is used.
+        args.ais_perf_model_value = valued[-1][1]
+        args.ais_perf_model_source = "--ais-perf-model"
+    else:
+        args.ais_perf_model_value = env
+        args.ais_perf_model_source = None if env is None else AIS_PERF_MODEL_ENV
+
+
+def _old_ais_help(flag: str, text: str) -> str:
+    """Return the help of an old AIS input: the deprecation sentence, then ``text``."""
+    deprecated = Deprecated(
+        "--ais-perf-model VALUE", remove_in=AIS_OLD_INPUTS_REMOVE_IN
     )
-    parser.add_argument(
-        "--version", action="version", version=f"Dynamo Mocker {__version__}"
-    )
+    return deprecated.message(flag) + " " + text
+
+
+def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -> None:
+    """Register every mocker argument but ``--version`` on ``parser``.
+
+    When ``env`` is ``None`` the env defaults come from ``os.environ``.
+    """
+    environ = os.environ if env is None else env.environ
+    engine_defaults = normalize_mocker_config()["engine"]
 
     # Basic configuration
     parser.add_argument(
@@ -189,11 +294,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Model name for API responses (default: derived from model-path)",
     )
 
-    # MockEngineArgs parameters (similar to vLLM style)
+    # Engine CLI options (lowered to the AISimulate configuration)
     parser.add_argument(
         "--num-gpu-blocks-override",
         type=int,
-        dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
+        dest="num_gpu_blocks",
         default=None,
         help="Explicit usable GPU-block capacity per data-parallel rank for the mock "
         "KV cache. When unset, AIS-backed mocker estimates the value; non-AIS "
@@ -208,28 +313,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-model-len",
-        type=positive_int,
+        type=int,
         default=None,
-        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        help="Maximum sequence length, including prompt and generated tokens. "
         "When omitted, no model-length limit is enforced.",
     )
     parser.add_argument(
         "--max-num-seqs",
         type=int,
-        default=256,
+        default=engine_defaults["max_num_seqs"],
         help="Maximum number of sequences per iteration (default: 256)",
     )
     parser.add_argument(
         "--max-num-batched-tokens",
         type=int,
-        default=8192,
+        default=engine_defaults["max_num_batched_tokens"],
         help="Maximum number of batched tokens per iteration (default: 8192)",
     )
     parser.add_argument(
         "--enable-prefix-caching",
         action="store_true",
         dest="enable_prefix_caching",
-        default=True,
+        default=engine_defaults["enable_prefix_caching"],
         help="Enable automatic prefix caching (default: True)",
     )
     parser.add_argument(
@@ -243,7 +348,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--enable-chunked-prefill",
         action="store_true",
         dest="enable_chunked_prefill",
-        default=True,
+        default=engine_defaults["enable_chunked_prefill"],
         help="Enable chunked prefill (default: True)",
     )
     parser.add_argument(
@@ -256,8 +361,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--preemption-mode",
         type=str,
-        default="lifo",
-        choices=["lifo", "fifo"],
+        default=engine_defaults["preemption_mode"],
         help="Preemption mode for decode eviction under memory pressure. "
         "'lifo' (default) evicts the newest request (matches vLLM v1), "
         "'fifo' evicts the oldest request.",
@@ -265,13 +369,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--speedup-ratio",
         type=float,
-        default=1.0,
+        default=engine_defaults["speedup_ratio"],
         help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--decode-speedup-ratio",
         type=float,
-        default=1.0,
+        default=engine_defaults["decode_speedup_ratio"],
         help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
         "Models speculative decoding (e.g. Eagle) where decode throughput improves "
         "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
@@ -280,7 +384,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-parallel-size",
         type=int,
         dest="dp_size",
-        default=1,
+        default=None,
         help="Number of data parallel replicas (default: 1)",
     )
     parser.add_argument(
@@ -293,17 +397,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--planner-profile-data",
         type=Path,
         default=None,
-        help="Path to profile results directory containing selected_prefill_interpolation/ and "
-        "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
+        help="Path to a mocker-format .npz file with timing lookup tables, or to a "
+        "profiler results directory containing selected_prefill_interpolation/ and "
+        "selected_decode_interpolation/ subdirectories, which tunes an AIS perf model "
+        "(default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
         "--ais-perf-model",
         "--aic-perf-model",
-        dest="ais_perf_model",
-        action="store_true",
-        default=False,
-        help="Use AISimulate's perf model directly for latency prediction. "
-        "Requires aisimulate installed.",
+        dest="ais_perf_model_occurrences",
+        action=_AisPerfModelOccurrence,
+        nargs="?",
+        default=None,
+        metavar="VALUE",
+        help="Use AISimulate's perf model for latency prediction. VALUE is a "
+        "JSON/YAML file or inline JSON: one perf model config, or a list of "
+        f"configs with one worker_type each (env: {AIS_PERF_MODEL_ENV}). The config of "
+        "this worker's type is used. Requires aisim installed. Without "
+        "VALUE (deprecated) the perf model is built from --model-path, "
+        "--engine-type and the flat --ais-* flags.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -332,7 +444,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_system",
         type=str,
         default=None,
-        help="AIS system name (e.g., 'h200_sxm'). Used with --ais-perf-model.",
+        help=_old_ais_help(
+            "--ais-system",
+            "AIS system name (e.g., 'h200_sxm'). Used with --ais-perf-model without a value.",
+        ),
     )
     parser.add_argument(
         "--ais-backend",
@@ -340,11 +455,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_backend",
         type=str,
         default=None,
-        choices=["vllm", "sglang", "trtllm"],
-        help="AIS backend name used for perf database lookups. When unset, "
-        "falls back to --engine-type. Set this to decouple the AIS perf model "
-        "from the simulated engine type (e.g. simulate with vllm while using "
-        "trtllm AIS data).",
+        help=_old_ais_help(
+            "--ais-backend",
+            "AIS backend name used for perf database lookups. When unset, "
+            "falls back to --engine-type. Set this to decouple the AIS perf model "
+            "from the simulated engine type (e.g. simulate with vllm while using "
+            "trtllm AIS data).",
+        ),
     )
     parser.add_argument(
         "--ais-backend-version",
@@ -352,9 +469,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_backend_version",
         type=str,
         default=None,
-        help="AIS performance-database version: 'current', 'previous', or 'next' "
-        "when available, or a version assigned to one of those slots. "
-        "Defaults to the release database's 'current' slot.",
+        help=_old_ais_help(
+            "--ais-backend-version",
+            "AIS performance-database version: 'current', 'previous', or 'next' "
+            "when available, or a version assigned to one of those slots. "
+            "Defaults to the release database's 'current' slot.",
+        ),
     )
     parser.add_argument(
         "--ais-tp-size",
@@ -362,8 +482,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_tp_size",
         type=int,
         default=None,
-        help="Tensor parallel size for AIS latency prediction (default: 1). "
-        "Only affects AIS performance model lookups, not mocker scheduling.",
+        help=_old_ais_help(
+            "--ais-tp-size",
+            "Tensor parallel size for AIS latency prediction (default: 1). "
+            "Only affects AIS performance model lookups, not mocker scheduling.",
+        ),
     )
     parser.add_argument(
         "--ais-moe-tp-size",
@@ -371,8 +494,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_moe_tp_size",
         type=int,
         default=None,
-        help="MoE tensor-parallel size for AIS latency prediction. "
-        "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        help=_old_ais_help(
+            "--ais-moe-tp-size",
+            "MoE tensor-parallel size for AIS latency prediction. "
+            "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        ),
     )
     parser.add_argument(
         "--ais-moe-ep-size",
@@ -380,8 +506,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_moe_ep_size",
         type=int,
         default=None,
-        help="MoE expert-parallel size for AIS latency prediction. "
-        "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        help=_old_ais_help(
+            "--ais-moe-ep-size",
+            "MoE expert-parallel size for AIS latency prediction. "
+            "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        ),
     )
     parser.add_argument(
         "--ais-attention-dp-size",
@@ -389,8 +518,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_attention_dp_size",
         type=int,
         default=None,
-        help="Attention data-parallel size for AIS latency prediction (default: 1). "
-        "Corresponds to the 'dp' dimension in AIS CLI output.",
+        help=_old_ais_help(
+            "--ais-attention-dp-size",
+            "Attention data-parallel size for AIS latency prediction (default: 1). "
+            "Corresponds to the 'dp' dimension in AIS CLI output.",
+        ),
     )
     parser.add_argument(
         "--ais-nextn",
@@ -416,7 +548,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-mtp-seed",
         dest="ais_mtp_seed",
         type=int,
-        default=42,
+        default=engine_defaults["aic_mtp_seed"],
         help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
     )
     parser.add_argument(
@@ -426,14 +558,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of mocker workers to launch in the same process (default: 1). "
         "All workers share the same tokio runtime and thread pool.",
     )
-
-    from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
-
     parser.add_argument(
         "--ais-perf-config",
         type=parse_ais_perf_config,
         default=None,
-        help="Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML file.",
+        help=_old_ais_help(
+            "--ais-perf-config",
+            "Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML file.",
+        ),
     )
 
     # Reasoning token output
@@ -459,8 +591,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--engine-type",
         type=str,
-        default="vllm",
-        choices=["vllm", "sglang", "trtllm"],
+        default=engine_defaults["backend"],
         help="Engine simulation type: 'vllm' (default), 'sglang', or 'trtllm'.",
     )
 
@@ -469,14 +600,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sglang-schedule-policy",
         type=str,
         default=None,
-        choices=["fifo", "fcfs", "lpm"],
-        help="SGLang scheduling policy: 'fifo'/'fcfs' (default) or 'lpm' (longest prefix match).",
+        help="SGLang scheduling policy: 'fifo' (default) or 'lpm' (longest prefix match). "
+        "The 'fcfs' alias is deprecated and will be removed in Dynamo 1.8.0.",
     )
     parser.add_argument(
         "--sglang-page-size",
         type=int,
         default=None,
-        help="SGLang radix cache page size in tokens (default: 1).",
+        help="Deprecated SGLang alias for --block-size; removed in Dynamo 1.8.0. "
+        "Ignored for other backends.",
     )
     parser.add_argument(
         "--sglang-max-prefill-tokens",
@@ -508,13 +640,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Serve native streaming SGLang /generate requests (default: disabled).",
     )
+    parser.add_argument(
+        "--systemone-serial",
+        action="store_true",
+        help="Enable the serial SystemOne profile: native SGLang, aggregated, DP1, "
+        "with scheduler max_num_seqs=1 (default: disabled).",
+    )
 
     # TensorRT-LLM-specific configuration
     parser.add_argument(
         "--trtllm-capacity-scheduler-policy",
         type=str,
         default=None,
-        choices=["guaranteed_no_evict"],
         help="TRT-LLM capacity scheduler policy. v1 supports only "
         "'guaranteed_no_evict' (default).",
     )
@@ -582,15 +719,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--kv-transfer-bandwidth",
         type=float,
-        default=_default_kv_transfer_bandwidth_gbps(),
+        default=engine_defaults["kv_transfer_bandwidth"],
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
-        "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
+        "When unset, uses the AISimulate engine default. Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
         "--kv-transfer-timing-mode",
-        choices=("full_prompt", "destination_missing"),
-        default="full_prompt",
+        default=engine_defaults["kv_transfer_timing_mode"],
         help="Physical KV footprint used for coordinated disaggregated transfer timing.",
     )
     parser.add_argument(
@@ -617,6 +753,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
     parser.add_argument(
+        "--num-host-blocks",
+        type=int,
+        default=None,
+        help="Enable native vLLM G2 (host) KV offload with this per-DP-rank host cache "
+        "capacity in blocks. Host blocks are sized by --kv-bytes-per-token. Requires "
+        "prefix caching.",
+    )
+    for direction in ("d2h", "h2d"):
+        parser.add_argument(
+            f"--host-offload-{direction}-bandwidth-gbps",
+            type=float,
+            default=None,
+            help=f"Per-DP-rank native G2 {direction.upper()} bandwidth in decimal GB/s "
+            "(AISimulate default when unset; 0 is unlimited). Requires --num-host-blocks.",
+        )
+    parser.add_argument(
         "--stagger-delay",
         type=float,
         default=0.0,
@@ -630,28 +782,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--discovery-backend",
         type=str,
         choices=["kubernetes", "etcd", "file", "mem"],
-        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        default=environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
         help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
         type=str,
         choices=["nats", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
+        default=environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
     )
     parser.add_argument(
         "--response-plane",
         type=str,
-        choices=["tcp", "quic"],
-        default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        choices=["tcp", "quic", "velo"],
+        default=environ.get("DYN_RESPONSE_PLANE"),
         help="Select the response transport. Frontend and workers must match.",
     )
     parser.add_argument(
         "--event-plane",
         type=str,
         choices=["nats", "zmq"],
-        default=os.environ.get("DYN_EVENT_PLANE"),
+        default=environ.get("DYN_EVENT_PLANE"),
         help="Determines how events are published [nats|zmq]. If unset, "
         "auto-detected from --discovery-backend (zmq for file/mem, nats "
         "for etcd/kubernetes).",
@@ -659,7 +811,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # Same flags the frontend and engine backends expose, so a mocker can stand
     # in for a real worker set when exercising per-role routing.
-    add_worker_router_arguments(parser)
+    add_worker_router_arguments(parser, env=env)
+
+
+def build_mocker_parser(
+    env: Mapping[str, str],
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    """The argument parser of a mocker that runs with ``env``.
+
+    Env defaults come from ``env`` only, never ``os.environ``. Registers what
+    ``parse_args`` registers, without ``--help`` and ``--version``. Parsing
+    ``--ais-perf-config`` reads its file; to read no local file, give a
+    ``parser`` that keeps values as typed. Nothing ``parse_args`` does after
+    parsing is done here: call ``set_ais_perf_model_attributes`` on the parsed
+    namespace before ``old_ais_perf_inputs`` reads it.
+    """
+    if parser is None:
+        parser = argparse.ArgumentParser(add_help=False)
+    _add_mocker_arguments(parser, ArgEnv(environ=dict(env)))
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the Dynamo mocker engine.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Mocker {__version__}"
+    )
+    _add_mocker_arguments(parser, None)
 
     import sys
 
@@ -675,10 +862,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 )
             spellings[canonical] = flag
     args = parser.parse_args(argv)
+    set_ais_perf_model_attributes(parser, args, env_value(AIS_PERF_MODEL_ENV))
+    old_ais_perf = old_ais_perf_inputs(args)
+    if args.ais_perf_model_value is not None and old_ais_perf:
+        parser.error(
+            f"{args.ais_perf_model_source} cannot be combined with "
+            f"{join_names(old_ais_perf)}"
+        )
+    if (
+        args.ais_perf_model_value is not None
+        and args.planner_profile_data is not None
+        # With an engine args file the profile data is not read.
+        and args.extra_engine_args is None
+    ):
+        parser.error(
+            f"{args.ais_perf_model_source} cannot be combined with "
+            "--planner-profile-data"
+        )
+    if args.sglang_schedule_policy == "fcfs":
+        Deprecated(
+            "--sglang-schedule-policy fifo", remove_in=_SGLANG_ALIAS_REMOVAL
+        ).warn("--sglang-schedule-policy fcfs")
+        args.sglang_schedule_policy = "fifo"
+    if args.sglang_page_size is not None:
+        Deprecated("--block-size", remove_in=_SGLANG_ALIAS_REMOVAL).warn(
+            "--sglang-page-size"
+        )
+        if args.engine_type == "sglang":
+            if args.block_size is not None and args.block_size != args.sglang_page_size:
+                parser.error("--sglang-page-size and --block-size must match")
+            args.block_size = args.sglang_page_size
     # Collect them into their own config object, matching the backends.
     args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
 
     validate_worker_type_args(args)
+    if args.systemone_serial:
+        explicit_max_num_seqs = any(
+            token.startswith("--")
+            and token != "--"
+            and "--max-num-seqs".startswith(token.split("=", 1)[0])
+            for token in argv
+        )
+        if explicit_max_num_seqs and args.max_num_seqs != 1:
+            parser.error("--systemone-serial requires --max-num-seqs=1")
+        args.max_num_seqs = 1
 
     # Validate num_workers
     if args.num_workers < 1:
@@ -721,10 +948,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         else:
             args.endpoint = DEFAULT_ENDPOINT
             logger.debug(f"Using default endpoint: {args.endpoint}")
+    # Last, so that an error above is reported without a warning before it.
+    if old_ais_perf:
+        Deprecated("--ais-perf-model VALUE", remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
+            old_ais_perf, stacklevel=2
+        )
     return args
-
-
-def _default_kv_transfer_bandwidth_gbps() -> float:
-    from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
-
-    return DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS

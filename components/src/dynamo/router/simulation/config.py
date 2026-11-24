@@ -7,11 +7,27 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, NumericRange
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from aisim.config.common import Choices, NumericRange
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
+
+from dynamo.aisimulate.domains import (
+    CHOICE_FORM,
+    CHOICES,
+    KNOB_FORM,
+    RANGE,
+    SCALAR,
+    stepped_numeric_values,
+)
+from dynamo.common.ais_perf_model import has_relative_paths
 
 MODES = frozenset({"kv_router", "round_robin"})
 OVERLAP_SCORE_CREDIT_DEFAULTS = (0.0, 0.5, 1.0)
@@ -25,19 +41,52 @@ StrictFiniteFloat = Annotated[float, Field(strict=True, ge=0.0, allow_inf_nan=Fa
 Policy = Literal["round_robin", "kv_router"]
 LoadModelType = Literal["none", "ais"]
 
-
-def _stepped_numeric_values(
-    minimum: int | float,
-    maximum: int | float,
-    step: int | float,
-) -> list[float]:
-    """Expand a decimal-facing YAML range without cumulative float drift."""
-
-    start = Decimal(str(minimum))
-    stop = Decimal(str(maximum))
-    increment = Decimal(str(step))
-    step_count = int((stop - start) // increment)
-    return [float(start + increment * index) for index in range(step_count + 1)]
+RouterKnobDomain: TypeAlias = Annotated[
+    Annotated[StrictFiniteFloat, SCALAR]
+    | Annotated[Choices[StrictFiniteFloat], CHOICES]
+    | Annotated[NumericRange, RANGE],
+    KNOB_FORM,
+]
+PolicyDomain: TypeAlias = Annotated[
+    Annotated[Policy, SCALAR] | Annotated[Choices[Policy], CHOICES], CHOICE_FORM
+]
+LoadModelTypeDomain: TypeAlias = Annotated[
+    Annotated[LoadModelType, SCALAR] | Annotated[Choices[LoadModelType], CHOICES],
+    CHOICE_FORM,
+]
+# Public numeric knob -> AISimulate default domain, in plan dimension order.
+ROUTER_KNOB_DEFAULTS: dict[str, tuple[float, ...]] = {
+    "overlap_score_credit": OVERLAP_SCORE_CREDIT_DEFAULTS,
+    "prefill_load_scale": PREFILL_LOAD_SCALE_DEFAULTS,
+    "temperature": TEMPERATURE_DEFAULTS,
+}
+# Public numeric knob -> KV router ``PolicyParameters`` name (the replay hook's
+# ``router_config`` key and the live PATCH ``/router_policy`` key).
+ROUTER_PUBLIC_TO_LIVE: dict[str, str] = {
+    "overlap_score_credit": "overlap_score_credit",
+    "prefill_load_scale": "prefill_load_scale",
+    "temperature": "router_temperature",
+}
+# ``PolicyParameters`` without an AISimulate public name. Retune accepts them
+# under their live names; recommend and predict do not search them.
+ROUTER_RETUNE_EXTENSIONS: tuple[str, ...] = (
+    "overlap_score_credit_decay",
+    "decode_active_request_weight",
+)
+_STARTUP_OVERLAP_ACCOUNTING = (
+    "the startup KvRouterConfig also feeds it to the router's overlap "
+    "accounting (effective cached tokens), which a runtime update does not "
+    "change, so a candidate replay would score a router no update can produce"
+)
+# ``PolicyParameters`` retune rejects, mapped to the reason its error gives.
+ROUTER_NOT_RETUNABLE: dict[str, str] = {
+    "host_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
+    "disk_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
+    "shared_cache_multiplier": (
+        "a router started with it at 0 builds no KV fetch inputs and a runtime "
+        "update cannot add them, so retune keeps it at its startup value"
+    ),
+}
 
 
 class PrefillLoadModel(BaseModel):
@@ -49,9 +98,53 @@ class PrefillLoadModel(BaseModel):
 class PrefillLoadRecommendationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: LoadModelType | Choices[LoadModelType] = Field(
+    type: LoadModelTypeDomain = Field(
         default_factory=lambda: Choices[LoadModelType](choices=["none", "ais"])
     )
+
+
+class ConversationAffinityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["session", "sibling_group"] = "session"
+    ttl_seconds: float = Field(
+        default=300.0, ge=1.0, le=31_536_000, allow_inf_nan=False
+    )
+
+
+# ``router.ais_perf_model`` written this way: the router reads the perf model
+# of the engine it routes to.
+USE_ENGINE_PERF_MODEL = {"use": "engine"}
+
+
+def _check_ais_perf_model(value: Any) -> Any:
+    """Check the value written at ``router.ais_perf_model``; return it as written."""
+    if value is None:
+        return value
+    if isinstance(value, str):
+        raise ValueError(
+            "router.ais_perf_model must be {use: engine}, a perf model config or "
+            "a list of configs, not a string"
+        )
+    if isinstance(value, Mapping) and value == USE_ENGINE_PERF_MODEL:
+        return value
+    # {use: engine} is a value of its own: the key use is wrong in a config and
+    # in an entry of a list, where it would fail only once a deployment mode
+    # selects that entry.
+    entries = value if isinstance(value, list) else [value]
+    if any(isinstance(entry, Mapping) and "use" in entry for entry in entries):
+        raise ValueError(
+            "router.ais_perf_model: write {use: engine} alone, or a perf model "
+            "config without the key use"
+        )
+    # The adapter does not know the folder of the config file, so a relative
+    # path has no folder to start at.
+    if has_relative_paths(value):
+        raise ValueError(
+            "router.ais_perf_model: relative paths are not allowed here; write "
+            "absolute paths"
+        )
+    return value
 
 
 class RouterPredictionConfig(BaseModel):
@@ -59,29 +152,45 @@ class RouterPredictionConfig(BaseModel):
 
     policy: Policy = "round_robin"
     prefill_load_model: PrefillLoadModel = Field(default_factory=PrefillLoadModel)
+    ais_perf_model: dict[str, Any] | list[dict[str, Any]] | None = None
     overlap_score_credit: StrictFiniteFloat | None = None
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
+    # --no-router-kv-events: the router indexes its own routing decisions instead.
+    use_kv_events: StrictBool | None = None
+    conversation_affinity: ConversationAffinityConfig | None = None
+    # Router policy YAML, the file the live router takes as ``--router-policy-config``.
+    # A worker-selection policy it selects replaces the default cost function.
+    policy_config: str | None = None
+
+    @field_validator("ais_perf_model", mode="before")
+    @classmethod
+    def _validate_ais_perf_model(cls, value: Any) -> Any:
+        return _check_ais_perf_model(value)
 
     @field_validator(
         "overlap_score_credit",
         "prefill_load_scale",
         "temperature",
+        "use_kv_events",
         mode="before",
     )
     @classmethod
     def _reject_explicit_null(cls, value: Any) -> Any:
         if value is None:
-            raise ValueError("Router numeric knobs do not accept null")
+            raise ValueError("Router knobs do not accept null")
         return value
 
     @model_validator(mode="after")
     def _validate_policy(self) -> RouterPredictionConfig:
         if self.policy == "round_robin":
             conflicts = {
+                "conversation_affinity",
                 "overlap_score_credit",
+                "policy_config",
                 "prefill_load_scale",
                 "temperature",
+                "use_kv_events",
             }.intersection(self.model_fields_set)
             if self.prefill_load_model.type != "none" or conflicts:
                 raise ValueError(
@@ -95,27 +204,31 @@ class RouterPredictionConfig(BaseModel):
                 self.prefill_load_scale = 1.0
             if self.temperature is None:
                 self.temperature = 0.0
+        if self.ais_perf_model is not None and self.prefill_load_model.type != "ais":
+            raise ValueError(
+                "router.ais_perf_model requires router.prefill_load_model.type: ais"
+            )
         return self
 
 
 class RouterRecommendationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    policy: Policy | Choices[Policy] = Field(
+    policy: PolicyDomain = Field(
         default_factory=lambda: Choices[Policy](choices=["round_robin", "kv_router"])
     )
     prefill_load_model: PrefillLoadRecommendationModel = Field(
         default_factory=PrefillLoadRecommendationModel
     )
-    overlap_score_credit: (
-        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
-    ) = None
-    prefill_load_scale: (
-        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
-    ) = None
-    temperature: (
-        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
-    ) = None
+    ais_perf_model: dict[str, Any] | list[dict[str, Any]] | None = None
+    overlap_score_credit: RouterKnobDomain | None = None
+    prefill_load_scale: RouterKnobDomain | None = None
+    temperature: RouterKnobDomain | None = None
+
+    @field_validator("ais_perf_model", mode="before")
+    @classmethod
+    def _validate_ais_perf_model(cls, value: Any) -> Any:
+        return _check_ais_perf_model(value)
 
     @field_validator(
         "overlap_score_credit",
@@ -190,6 +303,88 @@ class RouterRecommendationConfig(BaseModel):
             "prefill_load_scale",
             "temperature",
         ):
+            domain = getattr(self, name)
+            if isinstance(domain, NumericRange) and domain.range.min < 0:
+                raise ValueError(f"router.{name} range requires min >= 0")
+        if self.ais_perf_model is not None:
+            load_types = (
+                set(self.prefill_load_model.type.choices)
+                if isinstance(self.prefill_load_model.type, Choices)
+                else {self.prefill_load_model.type}
+            )
+            if "ais" not in load_types:
+                raise ValueError(
+                    "router.ais_perf_model requires ais among the "
+                    "router.prefill_load_model.type choices"
+                )
+        return self
+
+
+# Live names a retune domain might be written with -> the public name to use.
+_ROUTER_LIVE_NAME_HINTS = {
+    **{
+        live: public for public, live in ROUTER_PUBLIC_TO_LIVE.items() if live != public
+    },
+    "router_mode": "policy",
+    "router_prefill_load_model": "prefill_load_model.type",
+}
+
+
+class RouterRetuneConfig(RouterRecommendationConfig):
+    """``retune.router``: the recommendation schema plus retune extension knobs.
+
+    Syntax, validation and default domains are the recommendation ones. Two
+    differences follow from retuning a running KV router:
+
+    - ``policy`` is fixed at startup and retune requires ``kv_router``, so it
+      defaults to ``kv_router`` and rejects any other domain.
+      ``prefill_load_model.type`` is fixed at startup too; the caller checks
+      an explicit value against the startup one.
+    - The ``ROUTER_RETUNE_EXTENSIONS`` knobs have no AISimulate default
+      domain: omitted, they keep their current value.
+    """
+
+    policy: PolicyDomain = "kv_router"
+    overlap_score_credit_decay: RouterKnobDomain | None = None
+    decode_active_request_weight: RouterKnobDomain | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_live_names_and_other_policies(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        for live, public in _ROUTER_LIVE_NAME_HINTS.items():
+            if live in value:
+                raise ValueError(
+                    f"retune.router.{live} is not a public router name; "
+                    f"write {public} instead"
+                )
+        for name, reason in ROUTER_NOT_RETUNABLE.items():
+            if name in value:
+                raise ValueError(f"retune.router.{name} is not retunable: {reason}")
+        if "ais_perf_model" in value:
+            raise ValueError(
+                "retune.router.ais_perf_model is not supported: a running router "
+                "keeps the perf model it started with"
+            )
+        policy = value.get("policy", "kv_router")
+        if policy != "kv_router" and policy != {"choices": ["kv_router"]}:
+            raise ValueError(
+                "retune.router.policy is fixed at startup and retune requires "
+                f"kv_router; got {policy!r}"
+            )
+        return value
+
+    @field_validator(*ROUTER_RETUNE_EXTENSIONS, mode="before")
+    @classmethod
+    def _reject_explicit_null_extension(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("Router numeric knobs do not accept null")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_extension_ranges(self) -> RouterRetuneConfig:
+        for name in ROUTER_RETUNE_EXTENSIONS:
             domain = getattr(self, name)
             if isinstance(domain, NumericRange) and domain.range.min < 0:
                 raise ValueError(f"router.{name} range requires min >= 0")
@@ -343,7 +538,7 @@ def domain_choices(value: Any, default: list[Any]) -> list[Any]:
             or raw.get("scale", "linear") != "linear"
         ):
             raise ValueError("Router numeric ranges require a stepped linear range")
-        return _stepped_numeric_values(minimum, maximum, step)
+        return stepped_numeric_values(minimum, maximum, step)
     if isinstance(value, Mapping):
         raise ValueError("Router domains must contain exactly choices or range")
     return [value]

@@ -69,13 +69,9 @@ CHECKS: list[tuple[str, str, str]] = [
     ("community", ".dynamo-community-page", "LandingStyles"),
     ("digest", ".dynamo-blog-art__grid", "BlogStyles"),
     ("reference/compatibility", ".dynref-panel", "ReferenceStyles"),
-    # URL from the nav's explicit slugs (section `benchmarks`, page
-    # `llama-3-70b-topology`), not the page's file path.
-    (
-        "recipes/benchmarks/llama-3-70b-topology",
-        ".dynamo-benchmark-grid",
-        "RecipeStyles",
-    ),
+    # The Feature Benchmarks section landing (nav slug `benchmarks`, served
+    # from browse-all-benchmarks.mdx), not a detail page that can be retired.
+    ("recipes/benchmarks", ".dynamo-benchmark-grid", "RecipeStyles"),
 ]
 
 # Minified CSS keeps only mandatory whitespace, so match `.foo{` and `.foo,`

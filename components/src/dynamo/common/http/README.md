@@ -33,6 +33,10 @@ only a resolver it created.
 > fetch that goes direct is never refused. It does not apply when
 > `DYN_MM_ALLOW_INTERNAL=1`, which already permits private destinations.
 >
+> A fetch through a trusted proxy runs on its own session. Only that session
+> resolves the configured proxy unfiltered. A direct fetch to the proxy's host
+> gets the same check as any other origin.
+>
 > Note aiohttp never calls a resolver for an IP literal, so literal blocked
 > addresses are `validate_url`'s job rather than the backstop's.
 

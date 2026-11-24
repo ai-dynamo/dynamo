@@ -20,16 +20,23 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
+
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type groveProgram struct {
+	reader             client.Reader
 	sharedResources    *dgdSharedResourcesReconciler
 	rollout            *dgdWorkerRolloutReconciler
 	restart            *dgdRestartReconciler
@@ -81,6 +88,7 @@ func (r groveReconcileRequest) DelegatedComponents() []nvidiacomv1beta1.DynamoCo
 func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	return &groveProgram{
+		reader: r.Client,
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
 			r.Recorder,
@@ -89,7 +97,6 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 			r.RestConfig,
 			r.DockerSecretRetriever,
 			r.SSHKeyManager,
-			r.RBACManager,
 		),
 		rollout:            rollout,
 		restart:            newDGDRestartReconciler(),
@@ -177,23 +184,42 @@ func (p *groveProgram) Reconcile(
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
+	restartChanged := !apiequality.Semantic.DeepEqual(req.DGD.Status.Restart, restart.Status)
 
-	result, err := p.workloads.Reconcile(
+	groveResult, err := p.workloads.Reconcile(
 		ctx,
 		req,
 		restart.State,
 		checkpoints.Infos,
 	)
 
+	result := groveResult.ReconcileResult
+
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
-		if result.ComponentStatus != nil {
+		if programResult.Status.Components == nil {
 			programResult.Status.Components = result.ComponentStatus
+		} else {
+			maps.Copy(programResult.Status.Components, result.ComponentStatus)
 		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
 
-	if req.DGD.HasLPXComponent() && !apiequality.Semantic.DeepEqual(req.DGD.Status.Restart, restart.Status) {
+	// Publish scaling deferral without discarding observed component status or readiness.
+	condition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: req.DGD.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
+	if groveResult.ScalingDeferred {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "GroveUpdatePending"
+		condition.Message = "Replica changes are deferred until Grove observes the desired PodCliqueSet and any coherent update completes"
+		result.State = nvidiacomv1beta1.DGDStatePending
+		result.Reason = "scaling_deferred"
+		result.Message = Message(condition.Message)
+	}
+	if groveResult.ScalingDeferred || meta.FindStatusCondition(programResult.Status.Conditions, "ScalingDeferred") != nil {
+		meta.SetStatusCondition(&programResult.Status.Conditions, condition)
+	}
+
+	if req.DGD.HasLPXComponent() && restartChanged {
 		// Persist the selected restart before delivering its token to the child.
 		programResult.RequeueAfter = time.Nanosecond
 		return programResult, nil
@@ -206,7 +232,32 @@ func (p *groveProgram) Reconcile(
 			return programResult, fmt.Errorf("reconcile LPX child: %w", err)
 		}
 		result = mergeLPXChildStatus(req.DGD, child, result)
+		// A current LPX capacity wait contributes to the graph-level scaling diagnostic.
+		if child != nil && child.Status.ObservedGeneration == child.Generation {
+			if deferred := meta.FindStatusCondition(child.Status.Conditions, "ScalingDeferred"); deferred != nil && deferred.Status == metav1.ConditionTrue && deferred.ObservedGeneration == child.Generation {
+				condition.Status = metav1.ConditionTrue
+				condition.Reason = deferred.Reason
+				condition.Message = deferred.Message
+				meta.SetStatusCondition(&programResult.Status.Conditions, condition)
+			}
+		}
 	}
+
+	// Grove readiness reports a crash-looping component only as not ready.
+	managed := req.ManagedComponents()
+	componentNames := make([]string, 0, len(managed))
+	for i := range managed {
+		componentNames = append(componentNames, managed[i].ComponentName)
+	}
+	crashLoops, err := podcontroller.ComponentCrashLoops(ctx, p.reader, req.DGD.Namespace, req.DGD.Name, componentNames)
+	if err != nil {
+		return programResult, fmt.Errorf("find crash-looping Grove Pods: %w", err)
+	}
+	diagnoses := make(map[string]string, len(crashLoops))
+	for component, crashLoop := range crashLoops {
+		diagnoses[component] = crashLoop.String()
+	}
+	result = failCrashLoopingComponents(result, diagnoses)
 
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 
@@ -216,7 +267,11 @@ func (p *groveProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
-
 	programResult.applyReconcileResult(req.DGD.Generation, result)
+
+	// A status-only DGD update does not pass the primary predicate, so advance restart progress by requeueing.
+	if restartChanged {
+		programResult.RequeueAfter = time.Nanosecond
+	}
 	return programResult, nil
 }

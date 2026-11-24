@@ -22,101 +22,87 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-10-05";
+export const GENERATED_ON = "2026-11-23";
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [
-  {
-    "title": "UNTERGRUND, An evening for the people building the next generation of open source.",
-    "start": "2026-10-21T17:00:00.000Z",
-    "month": "Oct",
-    "day": "21",
-    "year": "2026",
-    "dateLabel": "Wed, Oct 21, 2026",
-    "timeLabel": "10:00 AM",
-    "isPast": false,
-    "location": "Hallesches Ufer 70",
-    "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=UNTERGRUND%2C+An+evening+for+the+people+building+the+next+generation+of+open+source.&dates=20261021T170000Z%2F20261021T200000Z&location=The+Feuerle+Collection%2C+Hallesches+Ufer+70%2C+10963+Berlin-Bezirk+Friedrichshain-Kreuzberg%2C+Germany&details=Get+up-to-date+information+at%3A+https%3A%2F%2Fluma.com%2Funtergrund-berlin%3Fpk%3Dg-MPMdmMSC9xexAXN%0A%0AAddress%3A%0AThe+Feuerle+Collection%0ABerlin%2C+Germany%0A%0AAn+evening+for+the+people+building+the+next+generation+of+open+source.+Come+for+the+kind+of+conversations+with+AI+leaders+that+only+happen+off+the+record.%0A%0AFor+one+night%2C+a+WWII+bunker+in+Berlin+belongs+to+us.+Deep+inside+this+historical+bunker%2C+its+walls+hold+a+private+art+collection+you+won%E2%80%99t+see+anywhere+else.+Concrete+and+shadow%2C+museum+light%2C+a+DJ%2C+and+cocktails+worth+savoring.+One+of+Berlin%E2%80%99s+best-known+EDM+violinists+and+an+incredibly+talented+beat+boxer+will+emerge+into+the+night+at+moments+no+one+announces.%0A%0ALeave+your+phone+behind.+It%E2%80%99s+the+Berlin+way.%0A%0AYou%E2%80%99ll+take+home+a+piece+of%E2%80%A6%0A%0AHosted+by+Together+AI%0A%0AJoin+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhxr-ssrp-daf%0AOr+dial%3A+%28US%29+%2B1+470-839-8177+PIN%3A+247554242%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhxr-ssrp-daf%3Fpin%3D6735962442102%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  }
-];
+export const UPCOMING_EVENTS: DynamoEvent[] = [];
 
 export const PAST_EVENTS: DynamoEvent[] = [
   {
-    "title": "Dynamo community meeting",
-    "start": "2026-09-23T17:30:00.000Z",
-    "month": "Sep",
-    "day": "23",
+    "title": "SIG Frontend — Biweekly Sync",
+    "start": "2026-11-19T21:00:00.000Z",
+    "month": "Nov",
+    "day": "19",
     "year": "2026",
-    "dateLabel": "Wed, Sep 23, 2026",
-    "timeLabel": "10:30 AM",
+    "dateLabel": "Thu, Nov 19, 2026",
+    "timeLabel": "1:00 PM",
     "isPast": true,
-    "location": "Online",
-    "locationUrl": "https://meet.google.com/heb-demu-qok",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261119T210000Z%2F20261119T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   },
   {
-    "title": "Baseten x Dynamo x SGLang RL post training meetup",
-    "start": "2026-09-11T01:00:00.000Z",
-    "month": "Sep",
-    "day": "10",
+    "title": "SIG Router",
+    "start": "2026-11-19T16:30:00.000Z",
+    "month": "Nov",
+    "day": "19",
     "year": "2026",
-    "dateLabel": "Thu, Sep 10, 2026",
+    "dateLabel": "Thu, Nov 19, 2026",
+    "timeLabel": "8:30 AM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "SIG Engines — Biweekly Sync",
+    "start": "2026-11-13T01:00:00.000Z",
+    "month": "Nov",
+    "day": "12",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 12, 2026",
+    "timeLabel": "5:00 PM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Engines+%E2%80%94+Biweekly+Sync&dates=20261113T010000Z%2F20261113T020000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhha-vzes-szx%0AOr+dial%3A+%28US%29+%2B1+724-505-2767+PIN%3A+501573420%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhha-vzes-szx%3Fpin%3D9222789232381%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "Dynamo SIG RL",
+    "start": "2026-11-06T02:00:00.000Z",
+    "month": "Nov",
+    "day": "5",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 5, 2026",
     "timeLabel": "6:00 PM",
     "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/BaseDynSGL",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL"
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+RL&dates=20261106T020000Z%2F20261106T023000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzcd-qdkb-jvg%0AOr+dial%3A+%28US%29+%2B1+216-755-4682+PIN%3A+144011069%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzcd-qdkb-jvg%3Fpin%3D7388412058326%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   },
   {
-    "title": "vLLM x Dynamo meetup",
-    "start": "2026-08-25T01:00:00.000Z",
-    "month": "Aug",
-    "day": "24",
+    "title": "SIG Router",
+    "start": "2026-11-05T16:30:00.000Z",
+    "month": "Nov",
+    "day": "5",
     "year": "2026",
-    "dateLabel": "Mon, Aug 24, 2026",
-    "timeLabel": "6:00 PM",
+    "dateLabel": "Thu, Nov 5, 2026",
+    "timeLabel": "8:30 AM",
     "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/r8o604o0",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0"
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261105T163000Z%2F20261105T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   },
   {
-    "title": "Dynamo Afterhours",
-    "start": "2026-07-31T01:00:00.000Z",
-    "month": "Jul",
-    "day": "30",
+    "title": "Dynamo SIG Deploy",
+    "start": "2026-11-03T16:00:00.000Z",
+    "month": "Nov",
+    "day": "3",
     "year": "2026",
-    "dateLabel": "Thu, Jul 30, 2026",
-    "timeLabel": "6:00 PM",
+    "dateLabel": "Tue, Nov 3, 2026",
+    "timeLabel": "8:00 AM",
     "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/JulyDynamoAfterHours",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours"
-  },
-  {
-    "title": "Dynamo community meeting",
-    "start": "2026-07-29T17:30:00.000Z",
-    "month": "Jul",
-    "day": "29",
-    "year": "2026",
-    "dateLabel": "Wed, Jul 29, 2026",
-    "timeLabel": "10:30 AM",
-    "isPast": true,
-    "location": "Online",
-    "locationUrl": "https://meet.google.com/heb-demu-qok",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260729T173000Z%2F20260729T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
-  },
-  {
-    "title": "AI Infra Builders Meetup with dstack, Crusoe, and SGLang",
-    "start": "2026-07-24T00:30:00.000Z",
-    "month": "Jul",
-    "day": "23",
-    "year": "2026",
-    "dateLabel": "Thu, Jul 23, 2026",
-    "timeLabel": "5:30 PM",
-    "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/rxsn0u0h",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=AI+Infra+Builders+Meetup+with+dstack%2C+Crusoe%2C+and+SGLang&dates=20260724T003000Z%2F20260724T043000Z&location=https%3A%2F%2Fluma.com%2Frxsn0u0h"
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+Deploy&dates=20261103T160000Z%2F20261103T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fmer-jrnu-mry%0AOr+dial%3A+%28DE%29+%2B49+40+8081618610+PIN%3A+612378808%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fmer-jrnu-mry%3Fpin%3D2635519655187%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   }
 ];

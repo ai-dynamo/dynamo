@@ -5,15 +5,33 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import warnings
+
+PERF_MODEL = {
+    "model": "Qwen/Qwen3-32B",
+    "system": "h200_sxm",
+    "backend": "vllm",
+    "backend_version": "current",
+    "worker_type": "aggregated",
+}
 
 
 def main() -> None:
     # Keep this smoke offline: the selected model config and perf database are
-    # shipped in the AISimulate wheel's aisimulate_core package.
+    # shipped in the AISimulate wheel's aisim_core package.
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    # An old AIS input only warns; here it fails, so the smoke stays on the
+    # input that reads the value with the AISimulate loader in the image.
+    # The pattern is Dynamo's sentence: a library's notice must not fail it.
+    warnings.filterwarnings(
+        "error",
+        message=r".* deprecated and will be removed in v\d+\.\d+; use ",
+        category=FutureWarning,
+    )
 
     # Parse the same frontend flags users enable for the live KV-router path.
     sys.argv = [
@@ -24,34 +42,30 @@ def main() -> None:
         "ais",
         "--dyn-chat-processor",
         "dynamo",
-        "--ais-backend",
-        "vllm",
-        "--ais-system",
-        "h200_sxm",
-        "--ais-model-path",
-        "Qwen/Qwen3-32B",
-        "--ais-backend-version",
-        "current",
+        "--ais-perf-model",
+        json.dumps(PERF_MODEL),
     ]
-
-    import json
 
     from dynamo.frontend.main import parse_args
     from dynamo.llm import AisPerfConfig, KvRouterConfig
-    from dynamo.mocker import MockEngineArgs
+    from dynamo.mocker.config import normalize_mocker_config
     from dynamo.replay import run_synthetic_trace_replay
 
-    config, _, _ = parse_args()
+    config, _, _, _ = parse_args()
     assert config.router_mode == "kv"
     assert config.router_prefill_load_model == "ais"
     perf = AisPerfConfig(**config.ais_perf_kwargs())
-    engine_args = MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "ais_perf_config": perf.to_dict(),
+    engine_args = normalize_mocker_config(
+        {
+            "engine": {
                 "num_gpu_blocks": 1024,
+                "timing_model": {
+                    "type": "external",
+                    "provider": "ais",
+                    "config": perf.to_dict(),
+                },
             }
-        )
+        }
     )
     # Exercise Dynamo's actual embedded Rust callback and Replay engine together.
     # This catches a wheel/crate EngineSpec mismatch that an SDK-only query misses.
@@ -61,7 +75,7 @@ def main() -> None:
         request_count=2,
         num_workers=2,
         extra_engine_args=engine_args,
-        ais_perf_config=perf,
+        router_ais_perf_model=PERF_MODEL,
         router_mode="kv_router",
         router_config=KvRouterConfig(router_prefill_load_model="ais"),
         replay_concurrency=1,

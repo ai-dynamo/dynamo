@@ -15,6 +15,12 @@ tests:
         documentSelector:
           path: kind
           value: Deployment
+      - notContains:
+          path: spec.template.spec.initContainers[0].args
+          content: --dgdr-v1beta2-enabled=false
+        documentSelector:
+          path: kind
+          value: Deployment
 
   - it: rejects CRD upgrades in namespace-restricted mode
     template: charts/dynamo-operator/templates/deployment.yaml
@@ -75,3 +81,13 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "webhook.namespaceSelector must be empty"
+
+  - it: starts the manager without a DGDR v1beta2 opt-in
+    template: charts/dynamo-operator/templates/deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --dgdr-v1beta2-enabled=false
+        documentSelector:
+          path: kind
+          value: Deployment

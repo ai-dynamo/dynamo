@@ -183,6 +183,10 @@ data: {"choice_index":0,"tool_call":{"index":0,"id":"call-...","type":"function"
 
 That event tells the harness, in one shot, that the tool call is ready to execute. No harness-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness. This makes Dynamo more easily compatible with custom harnesses.
 
+Producers can fragment a single tool call across several deltas: one delta opens the call with `id`, `type`, and `function.name`, and later deltas carry `function.arguments` a piece at a time. Dynamo assembles those deltas per request, keyed by the choice index and the tool call's own `index`. Objects and arrays dispatch once the accumulated arguments form valid JSON and the ID and name are known. The incremental scanner keeps a `}` inside a string literal from ending the call early. Scalar arguments wait for `finish_reason: "tool_calls"` or `"stop"`. Absent or empty arguments also resolve at either terminal reason for parameterless tools.
+
+Each tool call dispatches at most once per request. Malformed arguments and conflicting identity fields detected before dispatch suppress the call. An event already emitted cannot be retracted; later continuations are suppressed. The ordinary tool-call deltas still reach the harness, and the side channel never replaces them.
+
 ![Tool dispatch timing on a single turn. Standard servers surface the tool call only after the entire stream finishes; Dynamo emits a typed tool_call_dispatch event the moment the call is parsed, so the tool can run in parallel with the rest of the stream. Δt is the time saved per tool call.](../_assets/agentic-inference/images/fig-3-streaming-dispatch-timeline.svg)
 
 ## Anthropic API Fidelity for Claude Code and OpenClaw

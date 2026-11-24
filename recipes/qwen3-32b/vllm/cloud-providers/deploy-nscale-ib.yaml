@@ -67,7 +67,7 @@ spec:
           - name: SERVED_MODEL_NAME
             value: Qwen/Qwen3-32B
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["UCX"]}}'
           - name: TENSOR_PARALLEL_SIZE
             value: "4"
           - name: BLOCK_SIZE
@@ -199,7 +199,7 @@ spec:
           - name: SERVED_MODEL_NAME
             value: Qwen/Qwen3-32B
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["UCX"]}}'
           - name: TENSOR_PARALLEL_SIZE
             value: "4"
           - name: BLOCK_SIZE

@@ -7,6 +7,12 @@ use dynamo_backend_common::DynamoError;
 
 use crate::invalid_argument;
 
+/// The host a Unix-socket engine is reached at for any other port it serves.
+/// The socket is on this host, and the engine shares this pod's network, so
+/// loopback reaches it. IPv4, because an engine listening on `0.0.0.0` does not
+/// accept on `::1`.
+const UNIX_SOCKET_HOST: &str = "127.0.0.1";
+
 /// Validated plaintext HTTP endpoint derived from a sidecar's gRPC host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpEndpoint {
@@ -52,11 +58,13 @@ impl HttpEndpoint {
     }
 
     /// Reuse the host from a validated gRPC endpoint with a discovered HTTP port.
+    /// A Unix-socket endpoint's host is loopback; see [`GrpcEndpoint::authority_host`].
     pub fn from_grpc(grpc_endpoint: &GrpcEndpoint, port: u16) -> Result<Self, DynamoError> {
         if port == 0 {
             return Err(invalid_argument("HTTP endpoint port must not be zero"));
         }
-        let mut endpoint = url::Url::parse(grpc_endpoint.as_str()).map_err(|error| {
+        let host = format!("http://{}", grpc_endpoint.authority_host());
+        let mut endpoint = url::Url::parse(&host).map_err(|error| {
             invalid_argument(format!(
                 "could not derive HTTP endpoint from `{grpc_endpoint}`: {error}"
             ))
@@ -87,9 +95,11 @@ impl fmt::Display for HttpEndpoint {
     }
 }
 
-/// Validated plaintext gRPC endpoint containing only a scheme and authority.
+/// Validated plaintext gRPC endpoint: a scheme and authority, or a Unix socket
+/// named by absolute path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrpcEndpoint {
+    /// `http://HOST:PORT`, or `unix:///PATH` for a Unix socket.
     endpoint: String,
     authority_host: String,
 }
@@ -103,6 +113,9 @@ impl GrpcEndpoint {
             )));
         }
 
+        if let Some(target) = endpoint.strip_prefix("unix:") {
+            return Self::parse_unix_socket(target, argument);
+        }
         let normalized = if let Some(authority) = endpoint.strip_prefix("grpc://") {
             format!("http://{authority}")
         } else if endpoint.starts_with("http://") {
@@ -150,13 +163,43 @@ impl GrpcEndpoint {
         })
     }
 
+    /// `target` is what follows `unix:`. Only `unix:///ABSOLUTE/PATH` is
+    /// accepted: `unix:///run/engine.sock` names `/run/engine.sock`.
+    fn parse_unix_socket(target: &str, argument: &str) -> Result<Self, DynamoError> {
+        let path = target
+            .strip_prefix("//")
+            .filter(|path| path.starts_with('/') && !path.ends_with('/'))
+            .ok_or_else(|| {
+                invalid_argument(format!(
+                    "`{argument}` must name a Unix socket file by absolute path, as \
+                     `unix:///ABSOLUTE/PATH`, got `unix:{target}`"
+                ))
+            })?;
+        // The socket need not exist yet, but a path no socket address can hold
+        // would otherwise fail every connection attempt until the deadline.
+        std::os::unix::net::SocketAddr::from_pathname(path).map_err(|error| {
+            invalid_argument(format!(
+                "`{argument}` names an unusable Unix socket path `{path}`: {error}"
+            ))
+        })?;
+        Ok(Self {
+            endpoint: format!("unix://{path}"),
+            authority_host: UNIX_SOCKET_HOST.to_string(),
+        })
+    }
+
     pub fn as_str(&self) -> &str {
         &self.endpoint
     }
 
-    /// Host formatted for use in a URI authority, including IPv6 brackets.
+    /// Host formatted for use in a URI authority, including IPv6 brackets. For
+    /// a Unix socket, the loopback address that reaches the engine's other ports.
     pub fn authority_host(&self) -> &str {
         &self.authority_host
+    }
+
+    pub(crate) fn is_unix_socket(&self) -> bool {
+        self.endpoint.starts_with("unix:")
     }
 }
 
@@ -195,10 +238,17 @@ mod tests {
         let ipv6 = GrpcEndpoint::parse("http://[2001:db8::1]:50051", ARGUMENT).unwrap();
         assert_eq!(ipv6.as_str(), "http://[2001:db8::1]:50051");
         assert_eq!(ipv6.authority_host(), "[2001:db8::1]");
+        assert_eq!(
+            GrpcEndpoint::parse(" unix:///run/engine/engine.sock ", ARGUMENT)
+                .unwrap()
+                .as_str(),
+            "unix:///run/engine/engine.sock"
+        );
     }
 
     #[test]
     fn rejects_unsupported_or_ambiguous_endpoints() {
+        let too_long = format!("unix:///{}", "a".repeat(200));
         for endpoint in [
             "",
             " ",
@@ -210,6 +260,10 @@ mod tests {
             "http://server:50051/path",
             "http://server:50051?token=secret",
             "http://server:50051#fragment",
+            "unix:/run/engine.sock",
+            "unix://localhost/run/engine.sock",
+            "unix:///run/engine/",
+            too_long.as_str(),
         ] {
             assert!(GrpcEndpoint::parse(endpoint, ARGUMENT).is_err());
         }
@@ -229,6 +283,10 @@ mod tests {
         let http = HttpEndpoint::from_grpc(&grpc, 30000).unwrap();
         assert_eq!(http.as_str(), "http://[2001:db8::1]:30000/");
         assert!(HttpEndpoint::from_grpc(&grpc, 0).is_err());
+
+        let grpc = GrpcEndpoint::parse("unix:///run/engine/engine.sock", ARGUMENT).unwrap();
+        let http = HttpEndpoint::from_grpc(&grpc, 30000).unwrap();
+        assert_eq!(http.as_str(), "http://127.0.0.1:30000/");
     }
 
     #[test]

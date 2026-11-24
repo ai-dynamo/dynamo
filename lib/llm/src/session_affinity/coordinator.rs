@@ -3,30 +3,16 @@
 
 //! The frontend's view of session affinity: the shared `dynamo_kv_router`
 //! [`SessionAffinity`] table plus what only the frontend knows about, namely
-//! request contexts (to abandon a wait when the client cancels), pipeline
-//! response streams (a lease lives until the stream ends), and the runtime
-//! event plane that replicates bindings between frontends.
+//! request contexts (to abandon a wait when the client cancels), request
+//! guards (a committed lease lives exactly as long as the request's response
+//! stream), and the runtime event plane that replicates bindings between
+//! frontends.
 
-use std::{
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::Duration,
-};
-
-use dynamo_kv_router::services::selection::affinity::{
-    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
-};
-use dynamo_runtime::{
-    engine::{AsyncEngineContext, AsyncEngineContextProvider},
-    error::{DynamoError, ErrorType},
-    pipeline::{Error, ManyOut, ResponseStream},
-};
-use futures::Stream;
+use std::{sync::Arc, time::Duration};
 
 #[cfg(test)]
 use super::replica_sync::SessionAffinityUpdate;
-use super::{LlmResponse, SessionAffinityMode, replica_sync::ReplicaSyncRuntime};
+use super::{SessionAffinityMode, replica_sync::ReplicaSyncRuntime};
 use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -34,15 +20,23 @@ use crate::{
         timing::RequestPhase,
     },
 };
+use dynamo_runtime::{
+    engine::AsyncEngineContext,
+    error::{DynamoError, ErrorType},
+    pipeline::Error,
+};
+use dynamo_session_affinity::host::{
+    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity,
+};
 
 #[cfg(test)]
-pub(super) use dynamo_kv_router::services::selection::affinity::ReplicaApplyOutcome;
+pub(super) use dynamo_session_affinity::host::ReplicaApplyOutcome;
 
 /// The pipeline's routing target; the table's `AffinityTarget` has the same
 /// shape and the two convert at this boundary.
 pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
 
-type TableTarget = dynamo_kv_router::services::selection::affinity::AffinityTarget;
+type TableTarget = dynamo_session_affinity::host::AffinityTarget;
 
 pub(crate) fn to_table(target: AffinityTarget) -> TableTarget {
     TableTarget::new(target.worker_id, target.dp_rank)
@@ -65,7 +59,7 @@ pub struct AffinityCoordinator {
 impl AffinityCoordinator {
     pub fn new(ttl: Duration, mode: SessionAffinityMode) -> Result<Self, Error> {
         Ok(Self::wrap(
-            SessionAffinity::with_config(SessionAffinityConfig::new(ttl).with_mode(mode))
+            SessionAffinity::with_config(super::affinity_config(ttl, mode)?)
                 .map_err(affinity_error)?,
         ))
     }
@@ -165,19 +159,18 @@ impl AffinityCoordinator {
         self.inner.table.mode()
     }
 
-    /// `SessionAffinity::commit`, holding the lease until `stream` ends.
-    pub(crate) fn commit_to_stream(
+    /// `SessionAffinity::commit`: bind the held session to the worker the
+    /// request was sent to. The caller owns the lease for as long as the
+    /// request lives; dropping it releases the binding.
+    pub(crate) fn commit(
         &self,
         hold: Hold,
         dispatched_target: AffinityTarget,
-        stream: ManyOut<LlmResponse>,
-    ) -> Result<ManyOut<LlmResponse>, Error> {
-        let lease = self
-            .inner
+    ) -> Result<AffinityLease, Error> {
+        self.inner
             .table
             .commit(hold, to_table(dispatched_target))
-            .map_err(affinity_error)?;
-        Ok(tracked_stream(lease, stream))
+            .map_err(affinity_error)
     }
 
     #[cfg(test)]
@@ -207,6 +200,8 @@ impl AffinityCoordinator {
 
     #[cfg(test)]
     pub(super) fn with_test_limits(max_entries: usize, max_session_id_bytes: usize) -> Self {
+        use dynamo_session_affinity::host::SessionAffinityConfig;
+
         Self::wrap(
             SessionAffinity::with_config(SessionAffinityConfig {
                 max_entries,
@@ -238,16 +233,12 @@ impl AffinityCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) fn next_version_for_test(
-        &self,
-    ) -> dynamo_kv_router::services::selection::affinity::AffinityVersion {
+    pub(super) fn next_version_for_test(&self) -> dynamo_session_affinity::host::AffinityVersion {
         self.inner.table.next_version()
     }
 
     #[cfg(test)]
-    pub(super) fn table_for_test(
-        &self,
-    ) -> dynamo_kv_router::services::selection::affinity::WeakSessionAffinity {
+    pub(super) fn table_for_test(&self) -> dynamo_session_affinity::host::WeakSessionAffinity {
         self.inner.table.downgrade()
     }
 
@@ -268,7 +259,7 @@ impl AffinityCoordinator {
         sequence: u64,
         writer_id: u64,
     ) -> ReplicaApplyOutcome {
-        use dynamo_kv_router::services::selection::affinity::AffinityVersion;
+        use dynamo_session_affinity::host::AffinityVersion;
         self.inner.table.apply_replica_update(
             session_id.into(),
             to_table(target),
@@ -277,40 +268,6 @@ impl AffinityCoordinator {
                 writer_id,
             },
         )
-    }
-}
-
-pub(super) fn tracked_stream(
-    lease: AffinityLease,
-    stream: ManyOut<LlmResponse>,
-) -> ManyOut<LlmResponse> {
-    let context = stream.context();
-    ResponseStream::new(
-        Box::pin(AffinityTrackedStream {
-            stream,
-            lease: Some(lease),
-        }),
-        context,
-    )
-}
-
-struct AffinityTrackedStream {
-    stream: ManyOut<LlmResponse>,
-    lease: Option<AffinityLease>,
-}
-
-impl Stream for AffinityTrackedStream {
-    type Item = LlmResponse;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(None) => {
-                drop(self.lease.take());
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
-            poll => poll,
-        }
     }
 }
 

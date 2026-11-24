@@ -218,7 +218,7 @@ const DUPLICATE_MODELS = new Set<string>();
    suffix from the tag, runtime display names from the runtimes list, and a
    Blackwell/B200 qualifier only when statusLine already says so. */
 function buildSubtitle(build: ModelEaBuild): string | null {
-  const dev = /dev\.\d+$/.exec(build.tag);
+  const dev = /(?:dev\.\d+-)?(?:dev|post)\.\d+$/.exec(build.tag);
   if (!dev) return null;
   const parts = [dev[0], build.runtimes.map((r) => RUNTIME_LABELS[r] ?? r).join(" + ")];
   if (build.statusLine.includes("Blackwell")) {

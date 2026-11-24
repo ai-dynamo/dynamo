@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -45,11 +46,12 @@ type ExpectedAgent struct {
 type MaterializationPlan struct {
 	// ScalingGroupTemplate is unique within the shared PCS.
 	ScalingGroupTemplate string
-	// ResourcePrefix scopes runtime ConfigMaps and discovery Services to this workload.
+	// ResourcePrefix scopes discovery Services to this workload.
 	ResourcePrefix string
 	// PodCliqueSetName is the actual PCS used for every generated child address.
 	PodCliqueSetName string
 	// ConductorTemplate is the conductor PodClique template name, if present.
+	// It is empty for hybrid builds and when the serving component declares no conductor role.
 	ConductorTemplate string
 	// Agents contains the expected materialized Agent identities.
 	Agents []ExpectedAgent
@@ -66,8 +68,9 @@ type MaterializationPlan struct {
 }
 
 // PlanNodeLocalMaterialization derives template and scaling-group identities.
-// Concrete child names are supplied by ForReplica; the workload is not mutated.
-func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*MaterializationPlan, error) {
+// serving must be the workload's non-nil serving component.
+// Concrete child names are supplied by ForReplica; inputs are not mutated.
+func (w *Workload) PlanNodeLocalMaterialization(pcsName string, serving *v1beta1.DynamoComponentDeploymentSharedSpec) (*MaterializationPlan, error) {
 	// Leave room for the fixed scaling group and every LPX role in Grove's name budget.
 	if strings.TrimSpace(pcsName) == "" {
 		return nil, fmt.Errorf("PodCliqueSet name is required")
@@ -76,10 +79,12 @@ func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*Materializatio
 		return nil, fmt.Errorf("PodCliqueSet name %q exceeds the LPX maximum of %d characters", pcsName, MaxPodCliqueSetNameLength)
 	}
 
-	// Nova and Cyborg both implement the authored conductor role.
-	conductorTemplate, cyborgTemplate := conductorTemplateName, ""
-	if w.Pipeline() == PipelineLPX {
-		conductorTemplate, cyborgTemplate = "", conductorTemplateName
+	// Nova and Cyborg use the same identity for the authored conductor role.
+	conductorTemplate, cyborgTemplate := "", ""
+	if w.Pipeline() == PipelineHybrid {
+		cyborgTemplate = conductorTemplateName
+	} else if serving.ComponentRole(v1beta1.ComponentRoleLPXConductor) != nil {
+		conductorTemplate = conductorTemplateName
 	}
 	agents := make([]ExpectedAgent, 0, len(w.modelProjections))
 	for index, projection := range w.modelProjections {
@@ -118,6 +123,9 @@ func (p *MaterializationPlan) ValidateReplicaCount() error {
 		}
 	}
 	for _, agent := range p.Agents {
+		if agent.Replicas == 0 {
+			continue
+		}
 		if err := p.validatePodHostname("Agent", agent.TemplateName, agent.Replicas-1); err != nil {
 			return err
 		}
@@ -157,7 +165,7 @@ func materializedCliqueNameForReplica(pcsName, templateName string, replica int3
 func (p *MaterializationPlan) validatePodHostname(role, templateName string, podIndex int) error {
 	// Validate the longest replica name without copying the full materialization plan.
 	cliqueName := materializedCliqueNameForReplica(p.LPXScalingGroup, templateName, max(0, p.Replicas-1))
-	hostname := materializedPodHostname(cliqueName, podIndex)
+	hostname := fmt.Sprintf("%s-%d", cliqueName, podIndex)
 	if problems := validation.IsDNS1123Label(hostname); len(problems) != 0 {
 		return fmt.Errorf(
 			"materialized %s Pod hostname %q is invalid: %s",
@@ -169,14 +177,10 @@ func (p *MaterializationPlan) validatePodHostname(role, templateName string, pod
 	return nil
 }
 
-func materializedPodHostname(cliqueName string, podIndex int) string {
-	return fmt.Sprintf("%s-%d", cliqueName, podIndex)
-}
-
 // WithGroup scopes a workload's resource names within a multi-workload PCS.
 // Sole workloads retain the unscoped plan's established names.
 // The receiver is a validated non-nil base plan and groupName is an admitted,
-// non-empty conductor component name from ComponentGroups.
+// non-empty serving component name from ComponentGroups.
 // The receiver is not mutated; names that cannot fit Grove's budget are rejected.
 func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan, error) {
 	// Reserve the group prefix in both the scaling group and its longest role.
@@ -190,7 +194,7 @@ func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan,
 		return nil, fmt.Errorf("naming group %q in PCS %q: %w", groupName, p.PodCliqueSetName, err)
 	}
 
-	// ConfigMaps and Services retain more of the group name than Grove allows.
+	// Services retain more of the group name than Grove allows.
 	const maxResourcePrefixLength = validation.DNS1123LabelMaxLength - len("-serve")
 	resourceName, err := boundedGroupName(groupName, maxResourcePrefixLength-len(p.PodCliqueSetName)-1)
 	if err != nil {

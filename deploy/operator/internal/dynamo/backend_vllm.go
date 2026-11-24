@@ -10,7 +10,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -123,30 +122,6 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
 			)
 		}
-	}
-
-	// Set compilation cache environment variables for VLLM
-	cacheDir := ""
-	if component.CompilationCache != nil {
-		cacheDir = component.CompilationCache.MountPath
-	}
-
-	if cacheDir != "" {
-		// Set VLLM cache directory using the environment variable
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  "VLLM_CACHE_ROOT",
-			Value: cacheDir,
-		})
-
-		// Log confirmation that compilation cache is configured for VLLM
-		logger := log.Log.WithName("vllm-backend")
-		logger.Info("Compilation cache configured and enabled for VLLM backend",
-			"backend", "vllm",
-			"status", "fully-supported",
-			"cache-dir", cacheDir,
-			"use-as-compilation-cache", true,
-			"env-vars-set", true,
-			"env-vars", "VLLM_CACHE_ROOT")
 	}
 
 	return nil
@@ -314,12 +289,10 @@ func GetWaitLeaderConfigMapName(dgdName string) string {
 // Python script. One ConfigMap is created per DGD and owned by the DGD.
 func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      GetWaitLeaderConfigMapName(dgdName),
-			Namespace: namespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
-			},
+		Name:      GetWaitLeaderConfigMapName(dgdName),
+		Namespace: namespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
 		},
 		Data: map[string]string{
 			waitLeaderScriptKey: WaitLeaderScript,
@@ -339,12 +312,8 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: waitLeaderVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: cmName,
-				},
-			},
+		ConfigMap: &corev1.ConfigMapVolumeSource{
+			Name: cmName,
 		},
 	})
 
@@ -421,7 +390,7 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 // getExpandedArgs will expand the containers args in the case where
 // the args are joined together with spaces as an individual string (i.e. "python3 -m dynamo.vllm")
 func getExpandedArgs(container *corev1.Container) []string {
-	expandedArgs := []string{}
+	expandedArgs := make([]string, 0, len(container.Args))
 	for _, arg := range container.Args {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}

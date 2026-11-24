@@ -94,6 +94,7 @@ mod tests {
                 trace_block_size: 2,
                 input_length: sequence_hashes.len() * 2,
                 input_sequence_hashes: sequence_hashes,
+                dependencies: Vec::new(),
             },
         }
     }

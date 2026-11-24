@@ -1,0 +1,58 @@
+name: SIG Roadmap
+description: Goals for one SIG for the next quarter
+title: "[Roadmap]: sig-<name> [Q<N> <YYYY>]"
+labels: ["roadmap"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One roadmap issue per SIG per quarter. Replace `sig-<name>` and `Q<N> <YYYY>` in the title with your SIG and the quarter, for example `[Roadmap]: sig-router [Q1 2027]`. After you create it, add the SIG's `sig-<name>` label.
+
+  - type: dropdown
+    id: sig
+    attributes:
+      label: SIG
+      options:
+        - sig-router
+        - sig-engines
+        - sig-frontend
+        - sig-deploy
+        - sig-agents
+        - sig-rl
+    validations:
+      required: true
+
+  - type: input
+    id: coleads
+    attributes:
+      label: Co-Leads
+      description: GitHub handles of both co-leads
+    validations:
+      required: true
+
+  - type: textarea
+    id: goals
+    attributes:
+      label: Goals
+      description: Two or three outcomes for the quarter. One per line, with owner and target date.
+      placeholder: "- Goal - @owner - 2027-01-15"
+    validations:
+      required: true
+
+  - type: textarea
+    id: deps
+    attributes:
+      label: Related DEPs and Issues
+      description: Links to the DEPs and issues each goal depends on
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of Scope
+      description: What the SIG is not taking on this quarter
+
+  - type: input
+    id: links
+    attributes:
+      label: Charter and Notes
+      description: Links to the SIG charter and meeting notes docs

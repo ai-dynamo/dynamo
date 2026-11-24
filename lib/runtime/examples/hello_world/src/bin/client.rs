@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    DistributedRuntime, Runtime, Worker, logging, pipeline::PushRouter,
-    protocols::annotated::Annotated, stream::StreamExt,
+    DistributedRuntime, Runtime, Worker, logging,
+    pipeline::{PushRouter, RouterMode},
+    protocols::annotated::Annotated,
+    stream::StreamExt,
 };
 use hello_world::DEFAULT_NAMESPACE;
 
@@ -23,10 +25,13 @@ async fn app(runtime: Runtime) -> anyhow::Result<()> {
         .client()
         .await?;
     client.wait_for_instances().await?;
+    let instance_id = client.instance_ids()[0];
     let router =
-        PushRouter::<String, Annotated<String>>::from_client(client, Default::default()).await?;
+        PushRouter::<String, Annotated<String>>::from_client(client, RouterMode::Direct).await?;
 
-    let mut stream = router.random("hello world".to_string().into()).await?;
+    let mut stream = router
+        .direct("hello world".to_string().into(), instance_id)
+        .await?;
 
     while let Some(resp) = stream.next().await {
         println!("{:?}", resp);

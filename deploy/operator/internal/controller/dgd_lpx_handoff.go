@@ -48,7 +48,7 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 	}
 	if !exists {
 		child = &v1alpha1.LPXGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace},
+			Name: source.Name, Namespace: source.Namespace,
 		}
 		if err := ctrl.SetControllerReference(source, child, r.client.Scheme()); err != nil {
 			return nil, err

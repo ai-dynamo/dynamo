@@ -37,7 +37,7 @@ Dynamo 通过将服务、控制和状态传播拆分为明确的平面与控制�
 
 ## 架构概览
 
-![Dynamo 架构，展示 request、control、storage 和 event planes](../../../../../assets/img/dynamo-architecture.svg "Dynamo Architecture")
+![Dynamo 架构，展示 request、control、storage 和 event planes](../../../assets/img/dynamo-architecture.svg "Dynamo Architecture")
 
 ## 系统模型
 
@@ -147,7 +147,7 @@ Fault tolerance 嵌入在各层中：
 结合缓存重叠和负载信号的路由可以减少 prefill 重新计算并改善延迟。
 有关外部生产案例研究，请参阅 [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#how-baseten-uses-nvidia-dynamo)。
 
-![两个柱状图，对比 Random routing 和带 KV aware routing 的 Dynamo 在 Time To First Token（Dynamo 快 3 倍）与 Avg request latency（Dynamo 快 2 倍）上的表现。](../../../../../assets/img/kv-routing.png)
+![两个柱状图，对比 Random routing 和带 KV aware routing 的 Dynamo 在 Time To First Token（Dynamo 快 3 倍）与 Avg request latency（Dynamo 快 2 倍）上的表现。](../../../assets/img/kv-routing.png)
 
 *使用 2 个 H100 节点上的 R1 Distilled Llama 70B FP8，对 R1 发起 100K 个请求进行测试。平均 4K ISL / 800 OSL。*
 

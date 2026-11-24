@@ -26,26 +26,24 @@ func TestProjectConsumerContract(t *testing.T) {
 	now := metav1.Now()
 	mode := int32(0440)
 	pod := &corev1.Pod{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "worker-0",
-			Namespace:         "inference",
-			UID:               types.UID("pod-uid"),
-			ResourceVersion:   "42",
-			Generation:        3,
-			Labels:            map[string]string{"dynamo": "worker", "dcd": "old-worker"},
-			Annotations:       map[string]string{"topology-label": "topology.kubernetes.io/zone"},
-			OwnerReferences:   []metav1.OwnerReference{{Name: "worker", UID: types.UID("owner-uid"), Controller: ptr.To(true)}},
-			Finalizers:        []string{"test.example/finalizer"},
-			DeletionTimestamp: &now,
-			ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
-		},
+		APIVersion: "v1", Kind: "Pod",
+		Name:              "worker-0",
+		Namespace:         "inference",
+		UID:               types.UID("pod-uid"),
+		ResourceVersion:   "42",
+		Generation:        3,
+		Labels:            map[string]string{"dynamo": "worker", "dcd": "old-worker"},
+		Annotations:       map[string]string{"topology-label": "topology.kubernetes.io/zone"},
+		OwnerReferences:   []metav1.OwnerReference{{Name: "worker", UID: types.UID("owner-uid"), Controller: new(true)}},
+		Finalizers:        []string{"test.example/finalizer"},
+		DeletionTimestamp: &now,
+		ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
 		Spec: corev1.PodSpec{
 			NodeName:      "node-a",
 			SchedulerName: "lpx-scheduler",
 			ResourceClaims: []corev1.PodResourceClaim{{
 				Name:              "lpu-partition",
-				ResourceClaimName: ptr.To("lpu-partition-0"),
+				ResourceClaimName: new("lpu-partition-0"),
 			}},
 			Containers: []corev1.Container{{
 				Name:    "main",
@@ -74,8 +72,8 @@ func TestProjectConsumerContract(t *testing.T) {
 			Volumes: []corev1.Volume{
 				{
 					Name: "pod-labels",
-					VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{
-						DefaultMode: ptr.To(int32(0644)),
+					DownwardAPI: &corev1.DownwardAPIVolumeSource{
+						DefaultMode: new(int32(0644)),
 						Items: []corev1.DownwardAPIVolumeFile{
 							{
 								Path: "zone",
@@ -90,10 +88,10 @@ func TestProjectConsumerContract(t *testing.T) {
 								ResourceFieldRef: &corev1.ResourceFieldSelector{Resource: "limits.memory"},
 							},
 						},
-					}},
+					},
 				},
-				{Name: "discarded-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "large"}}},
-				{Name: "discarded-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "config"}}}},
+				{Name: "discarded-secret", Secret: &corev1.SecretVolumeSource{SecretName: "large"}},
+				{Name: "discarded-config", ConfigMap: &corev1.ConfigMapVolumeSource{Name: "config"}},
 			},
 		},
 		Status: corev1.PodStatus{
@@ -121,9 +119,13 @@ func TestProjectConsumerContract(t *testing.T) {
 					}},
 				},
 				{
-					Name: "worker",
+					Name:         "worker",
+					RestartCount: 2,
 					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 						ExitCode: 17, Signal: 9, Reason: "Error", Message: "worker failed", ContainerID: "discard-me",
+					}},
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 1, Reason: "Error", Message: "discard-me", ContainerID: "discard-me",
 					}},
 				},
 			},
@@ -178,14 +180,21 @@ func TestProjectConsumerContract(t *testing.T) {
 		assert.Equal(t, corev1.PodRunning, got.Status.Phase)
 		require.Len(t, got.Status.ContainerStatuses, 2)
 		assert.Equal(t, "ImagePullBackOff", got.Status.ContainerStatuses[0].State.Waiting.Reason)
-		assert.Zero(t, got.Status.ContainerStatuses[0].RestartCount)
 		assert.Equal(t, int32(17), got.Status.ContainerStatuses[1].State.Terminated.ExitCode)
 		assert.Equal(t, "worker failed", got.Status.ContainerStatuses[1].State.Terminated.Message)
 		require.Len(t, got.Status.InitContainerStatuses, 2)
 		assert.Equal(t, "ErrImagePull", got.Status.InitContainerStatuses[0].State.Waiting.Reason)
-		assert.Zero(t, got.Status.InitContainerStatuses[0].RestartCount)
 		assert.Equal(t, "GMS failed", got.Status.InitContainerStatuses[1].State.Terminated.Message)
 		assert.Equal(t, int32(5), got.Status.InitContainerStatuses[1].RestartCount)
+	})
+	t.Run("crash-loop detection retains restart counts and last exit", func(t *testing.T) {
+		assert.Equal(t, int32(7), got.Status.ContainerStatuses[0].RestartCount)
+		assert.Equal(t, int32(2), got.Status.ContainerStatuses[1].RestartCount)
+		assert.Equal(t, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 1, Reason: "Error",
+		}}, got.Status.ContainerStatuses[1].LastTerminationState)
+		assert.Nil(t, got.Status.ContainerStatuses[0].LastTerminationState.Terminated)
+		assert.Equal(t, int32(3), got.Status.InitContainerStatuses[0].RestartCount)
 	})
 	t.Run("GMS replacement retains only native init-sidecar identity", func(t *testing.T) {
 		assert.Equal(t, []corev1.Container{{
@@ -211,7 +220,7 @@ func TestProjectConsumerContract(t *testing.T) {
 }
 
 func TestTransformLeavesOtherObjectsUnchanged(t *testing.T) {
-	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "config"}}
+	configMap := &corev1.ConfigMap{Name: "config"}
 	got, err := Transform(configMap)
 	require.NoError(t, err)
 	assert.Same(t, configMap, got)
@@ -219,11 +228,9 @@ func TestTransformLeavesOtherObjectsUnchanged(t *testing.T) {
 
 func TestProjectedPodSupportsNarrowMetadataPatch(t *testing.T) {
 	before := Project(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-0",
-			Namespace: "inference",
-			Labels:    map[string]string{"existing": "value"},
-		},
+		Name:      "worker-0",
+		Namespace: "inference",
+		Labels:    map[string]string{"existing": "value"},
 		Spec: corev1.PodSpec{
 			NodeName: "node-a",
 			Containers: []corev1.Container{{

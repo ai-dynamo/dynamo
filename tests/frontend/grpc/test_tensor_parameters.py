@@ -158,10 +158,12 @@ class TestDependencyGuards:
             "protobuf==6.33.5",
             "protobuf==7.0.0",
             "protobuf==7.0.0rc1",
-            "protobuf==6.33.*",
-            "protobuf>=6.33.6",
-            "protobuf==6.33.6; python_version >= '3.12'",
-            "protobuf==6.33.6\nprotobuf==6.33.7",
+            pytest.param("protobuf==6.33.*", id="wildcard"),
+            pytest.param("protobuf>=6.33.6", id="range"),
+            pytest.param(
+                "protobuf==6.33.6; python_version >= '3.12'", id="conditional"
+            ),
+            pytest.param("protobuf==6.33.6\nprotobuf==6.33.7", id="duplicate"),
         ],
     )
     def test_unsafe_or_nonexact_protobuf_pins(self, pin: str) -> None:
