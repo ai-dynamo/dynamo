@@ -40,6 +40,35 @@ use tokio_util::sync::CancellationToken;
 
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
+/// A registered direct dispatch without its request and response types. A
+/// lookup downcasts it to its [`TypedDirectDispatch`]. The instance hooks need
+/// no types: an endpoint's one instance watcher runs through a router of one
+/// type pair and calls the dispatches of every pair. The registry holds each
+/// entry in an `Arc` so the hooks run after its lock is released.
+#[async_trait::async_trait]
+pub(crate) trait DirectDispatchEntry: std::any::Any + Send + Sync {
+    async fn on_instance_removed(&self, id: &discovery::EndpointInstanceId);
+    async fn on_instance_added(&self, id: &discovery::EndpointInstanceId);
+}
+
+struct TypedDirectDispatch<T, U>(Arc<dyn crate::pipeline::StreamingDispatch<T, U>>);
+
+#[async_trait::async_trait]
+impl<T, U> DirectDispatchEntry for TypedDirectDispatch<T, U>
+where
+    T: crate::engine::Data + serde::Serialize,
+    U: crate::engine::Data
+        + for<'de> serde::Deserialize<'de>
+        + crate::protocols::maybe_error::MaybeError,
+{
+    async fn on_instance_removed(&self, id: &discovery::EndpointInstanceId) {
+        self.0.on_instance_removed(id).await;
+    }
+
+    async fn on_instance_added(&self, id: &discovery::EndpointInstanceId) {
+        self.0.on_instance_added(id).await;
+    }
+}
 
 fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
     let Some(port) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -166,6 +195,10 @@ pub struct DistributedRuntime {
 
     endpoint_discovery_sources: Arc<tokio::sync::Mutex<EndpointDiscoverySourceMap>>,
     routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
+    /// Final hops for `TransportType::Direct` instances, one per request and response
+    /// type; see [`Self::register_direct_dispatch`].
+    direct_dispatches:
+        Arc<parking_lot::Mutex<HashMap<std::any::TypeId, Arc<dyn DirectDispatchEntry>>>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
@@ -336,6 +369,7 @@ impl DistributedRuntime {
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
             routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
+            direct_dispatches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
@@ -357,6 +391,10 @@ impl DistributedRuntime {
                 distributed_runtime.get_metrics_registry(),
             );
         }
+
+        crate::metrics::register_merge_conflicts_counter(
+            distributed_runtime.get_metrics_registry(),
+        );
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -717,6 +755,77 @@ impl DistributedRuntime {
     /// the task has finished.
     pub fn register_graceful_task(&self) -> crate::utils::GracefulTaskGuard {
         self.runtime.graceful_shutdown_tracker().register_task()
+    }
+
+    /// Reach every `TransportType::Direct` instance of this runtime's routers with
+    /// request type `T` and response type `U` through `dispatch`.
+    ///
+    /// Engines this process dials itself, rather than reaching them over the
+    /// request plane, register as `Direct` instances. A router built without an
+    /// explicit dispatch sends their requests here and every other instance's
+    /// over the request plane. Fails if a dispatch for `T` and `U` is already
+    /// registered.
+    ///
+    /// The dispatch's `on_instance_added` and `on_instance_removed` hooks see the
+    /// instances of every endpoint whose first router was built without an
+    /// explicit dispatch: all of them, not only `Direct` ones, and whatever that
+    /// router's request and response types. An endpoint has one instance
+    /// watcher, which runs through the first router built for it, so an endpoint
+    /// whose first router has an explicit dispatch sends its events to that
+    /// dispatch only. So a dispatch should open per-instance connections on its
+    /// first request, not in those hooks, and key per-instance state on the
+    /// whole `EndpointInstanceId`: a worker's `instance_id` is the same under
+    /// each of its endpoints.
+    /// Register before publishing `Direct` workers: a router still finds a
+    /// dispatch registered later, but events from before then are not replayed.
+    pub fn register_direct_dispatch<T, U>(
+        &self,
+        dispatch: Arc<dyn crate::pipeline::StreamingDispatch<T, U>>,
+    ) -> Result<()>
+    where
+        T: crate::engine::Data + serde::Serialize,
+        U: crate::engine::Data
+            + for<'de> serde::Deserialize<'de>
+            + crate::protocols::maybe_error::MaybeError,
+    {
+        let mut dispatches = self.direct_dispatches.lock();
+        let key = std::any::TypeId::of::<(T, U)>();
+        anyhow::ensure!(
+            !dispatches.contains_key(&key),
+            "a direct dispatch for these request and response types is already registered"
+        );
+        dispatches.insert(key, Arc::new(TypedDirectDispatch(dispatch)));
+        Ok(())
+    }
+
+    /// The dispatch registered for `TransportType::Direct` instances with request
+    /// type `T` and response type `U`. A component that reads per-worker state
+    /// differently for engines this process dials itself, such as a router
+    /// choosing where KV events come from, checks this once when it is built,
+    /// so the dispatch must be registered before those workers are published.
+    pub fn direct_dispatch<T, U>(&self) -> Option<Arc<dyn crate::pipeline::StreamingDispatch<T, U>>>
+    where
+        T: crate::engine::Data + serde::Serialize,
+        U: crate::engine::Data
+            + for<'de> serde::Deserialize<'de>
+            + crate::protocols::maybe_error::MaybeError,
+    {
+        let dispatches = self.direct_dispatches.lock();
+        // Name the trait object before the upcast. The `Arc<_>` is itself `Any`,
+        // so a `&Arc<_>` would coerce to `&dyn Any` directly and the downcast
+        // would always miss.
+        let entry: &dyn DirectDispatchEntry =
+            dispatches.get(&std::any::TypeId::of::<(T, U)>())?.as_ref();
+        (entry as &dyn std::any::Any)
+            .downcast_ref::<TypedDirectDispatch<T, U>>()
+            .map(|typed| typed.0.clone())
+    }
+
+    /// Every registered direct dispatch, to deliver an instance event to: the
+    /// endpoint's watcher runs through a router of one request and response
+    /// type, and routers of other types reach the same endpoint.
+    pub(crate) fn direct_dispatch_entries(&self) -> Vec<Arc<dyn DirectDispatchEntry>> {
+        self.direct_dispatches.lock().values().cloned().collect()
     }
 
     pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
