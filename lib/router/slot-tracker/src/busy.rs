@@ -6,6 +6,7 @@
 //! passes the result into admission's gate and its own reuse key; admission and worker
 //! selection depend on this crate for the rule.
 
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 
 use rustc_hash::FxHashMap;
@@ -154,6 +155,30 @@ impl FullRankCounts {
     ) {
         if !self.limits.has_room(projection, capacity) {
             *self.full_ranks.entry(worker.worker_id).or_insert(0) += 1;
+        }
+    }
+
+    /// Replace one rank's judgement: the pass recorded it with the projection `before`, and
+    /// it now holds `after`. A worker left without a full rank loses its entry.
+    pub fn rejudge(
+        &mut self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        before: &WorkerLoadProjection,
+        after: &WorkerLoadProjection,
+    ) {
+        let was_full = !self.limits.has_room(before, capacity);
+        let is_full = !self.limits.has_room(after, capacity);
+        if is_full && !was_full {
+            *self.full_ranks.entry(worker.worker_id).or_insert(0) += 1;
+        } else if was_full
+            && !is_full
+            && let Entry::Occupied(mut full) = self.full_ranks.entry(worker.worker_id)
+        {
+            *full.get_mut() -= 1;
+            if *full.get() == 0 {
+                full.remove();
+            }
         }
     }
 

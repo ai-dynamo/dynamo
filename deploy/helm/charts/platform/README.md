@@ -171,6 +171,89 @@ workload for that bundle.
 **Existing deployments:** An LPX workload that the old operator created does not continue across
 this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
 
+### v1.8.0
+
+#### Operator behavior breaking changes
+
+##### Environment variable order in newly created DGDs
+
+**Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.8.0 or later,
+the operator preserves source-list order and topologically orders references between environment
+layers. Precedence is operator defaults, DGD-level `spec.env`, then the selected component or role
+PodTemplate's container `env`. A specific definition replaces the entire general definition,
+including `valueFrom`, without emitting duplicate names for a cross-layer override. Existing
+operator-owned topology, GMS, and per-engine failover bindings remain authoritative.
+
+Layers may be interleaved: a general variable referencing a component override follows that
+override. Independent entries use their original input order, not alphabetical name order.
+Cycles and conflicts with local list order fail rendering with a source-path diagnostic.
+Generated DCDs now retain graph defaults in a separate `spec.env`, supported natively in both
+served DCD API versions. Previously these defaults were flattened into each PodTemplate.
+
+**Affected:** Newly created DGDs whose environment lists depend on alphabetical sorting or contain
+cross-layer overrides or references. Within one input list, Kubernetes still leaves a forward
+reference literal unless an external value is available; those entries are not reordered.
+The operator does not fetch ConfigMaps or Secrets for sorting.
+
+Order-only environment edits propagate to workloads for these origins. The NIXL exporter-port lookup
+replays known references without rewriting the manifest or requiring runtime inputs to be
+resolvable. SGLang keeps existing port declarations when the NIXL exporter base port is unknown;
+automatic scrape-port alignment is not guaranteed in that case. Known invalid ports still fail.
+
+**Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
+variable before dependent variables within the same list. Use component entries to override graph
+defaults; dependent entries in other layers will reference the effective override. Do not depend
+on retaining a lower-layer definition to expand a same-named self-reference. For example:
+
+```yaml
+spec:
+  env:
+    - name: MODEL_ROOT
+      value: /models
+    - name: MODEL_PATH
+      value: "$(MODEL_ROOT)/model"
+  components:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: MODEL_ROOT
+                  value: /fast/models
+```
+
+The effective `MODEL_ROOT` precedes `MODEL_PATH`, which expands to `/fast/models/model`.
+
+**Root-list validation:** DGD `spec.env` (`spec.envs` in `v1alpha1`) requires unique names on
+create and whenever that list changes, regardless of origin. DCD root `spec.env` applies this
+rule only when its effective operator origin is 1.8.0 or later. **For origins 1.8.0 and later,
+both resources reject duplicates even on updates that leave the list unchanged.** Repair stored
+duplicates before unrelated updates; the operator does not silently de-duplicate them. Earlier
+or missing DGD origins retain a pre-existing duplicate list only when the complete ordered list
+is unchanged; changing a value, source, order, or member requires unique names throughout.
+Overrides between layers remain allowed. The root OpenAPI list schema is unchanged so it does
+not reject unchanged legacy-origin duplicates before webhook ratcheting runs.
+
+New or changed root entries must not combine a non-empty `value` with `valueFrom`. Alpha
+component `envs` lists also require unique names and valid value/source combinations on create
+or list changes. Only earlier or missing origins can retain an unchanged existing list with
+duplicates; origins 1.8.0 and later reject it. Cross-layer overrides remain valid.
+
+**Existing deployments:** DGDs created by an operator older than 1.8.0, or without the origin
+annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not
+reorder their rendered environment lists or roll their workloads for this change. Deleting and
+recreating a DGD under 1.8.0 or later opts it into the new behavior and causes workload downtime.
+To preserve availability, create a new DGD under a different name and migrate traffic before
+deleting the old DGD.
+
+**Before downgrading to 1.7:** Standalone DCD root `spec.env` is new in 1.8 in both served API
+versions; 1.7 cannot retain this field. While 1.8 is still running, move required defaults into
+each consuming `main` and `runtime` container's `env`, including role templates, preserving
+container-specific overrides. Remove root `spec.env` and verify the resulting workloads before
+downgrading. Also remove dependencies on the new ordering contract: 1.7 sorts and de-duplicates
+environment lists. Do not edit graph-generated child DCDs; configure their parent DGD instead.
+
 ### v1.7.0
 
 #### Deployment Tool Compatibility
