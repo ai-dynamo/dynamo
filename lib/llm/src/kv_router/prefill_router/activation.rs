@@ -1452,7 +1452,7 @@ mod tests {
             1,
             None,
             "test-model".into(),
-            Arc::new(crate::http::service::metrics::Metrics::new()),
+            Arc::new(dynamo_http_server::metrics::Metrics::new()),
         );
         let next: dynamo_runtime::pipeline::ServerStreamingEngine<
             PreprocessedRequest,

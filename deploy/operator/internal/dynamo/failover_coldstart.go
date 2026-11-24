@@ -22,23 +22,23 @@ const (
 // vLLM with GMS V0. Engines initialize concurrently in shadow mode and need
 // separate collective/KV ports, unlike the restored snapshot engine pair.
 // Mutates podSpec, which must not be nil and must already have GMS resources.
-func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework, environment *podEnvironment) error {
 	// Reject other backends before changing the pod.
 	if backendFramework != BackendFrameworkVLLM {
 		return fmt.Errorf("cold-start failover is currently supported only for vLLM (detected: %s)", backendFramework)
 	}
-	if err := buildFailoverEnginePair(podSpec); err != nil {
+	if err := buildFailoverEnginePair(podSpec, environment); err != nil {
 		return err
 	}
 
 	// Only the two cloned engines receive legacy shadow initialization settings.
 	for engineID := range failoverEngineCount {
 		c := &podSpec.Containers[engineID]
-		c.Env = append(c.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
-		c.Env = append(c.Env,
-			corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
-			corev1.EnvVar{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
-		)
+		bindings := []corev1.EnvVar{
+			{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
+			{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
+			{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
+		}
 
 		// Stagger --master-port for TP so each engine group uses a distinct
 		// torch.distributed TCP store. engine-0 keeps the default (29500),
@@ -52,10 +52,13 @@ func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, bac
 		}
 
 		if numberOfNodes > 1 {
-			c.Env = append(c.Env,
+			bindings = append(bindings,
 				corev1.EnvVar{Name: "NNODES", Value: strconv.Itoa(int(numberOfNodes))},
 			)
 		}
+
+		// Per-engine bindings remain operator-owned, irrespective of user overrides.
+		environment.bind(c, "operator.failover.vllm", bindings)
 	}
 	return nil
 }

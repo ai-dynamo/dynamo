@@ -2163,6 +2163,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-http-server"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dynamo-runtime",
+ "futures",
+ "http-body 1.0.1",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-kv-events"
 version = "1.8.0"
 dependencies = [
@@ -2296,6 +2317,7 @@ dependencies = [
  "dynamo-global-common",
  "dynamo-global-discovery-client",
  "dynamo-global-view-broadcaster",
+ "dynamo-http-server",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-kv-hints",
@@ -2327,9 +2349,7 @@ dependencies = [
  "galil-seiferas",
  "half",
  "hf-hub 0.4.3",
- "http-body 1.0.1",
  "http-body-util",
- "hyper-util",
  "image",
  "ipnet",
  "json-five",
@@ -2836,6 +2856,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dynamo-error",
+ "dynamo-http-server",
  "dynamo-llm",
  "dynamo-protocols 10.0.1",
  "dynamo-runtime",
@@ -2858,14 +2879,13 @@ dependencies = [
  "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
- "prost 0.13.5",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "serde_json",
+ "sglang-api-types",
  "tokio",
  "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic 0.14.6",
  "tracing",
  "url",
 ]
@@ -3008,6 +3028,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dynamo-error",
+ "dynamo-http-server",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-llm",
@@ -8405,6 +8426,20 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sglang-api-types"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "445ae1031a16227c066c3e9dfb338407bed4d62994d0637c8b2fae05fa993344"
+dependencies = [
+ "bytes",
+ "prost 0.14.4",
+ "serde",
+ "serde_json",
+ "tonic 0.14.6",
+ "tonic-prost",
 ]
 
 [[package]]

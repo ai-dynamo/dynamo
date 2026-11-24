@@ -168,7 +168,22 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <ParamField path="env" type="[]core/v1.EnvVar">
-  Environment variables prepended to each component's `main` container environment and, in Dynamo sidecar mode, its `runtime` init container environment. A container-specific `env` entry with the same name takes precedence and may reference values from this list.
+  General environment defaults for each component's regular `main` container and declared `runtime`
+  init container. Container-specific definitions take precedence. For operator origins 1.8.0 and
+  later, list order is preserved within each source and references between sources are
+  topologically ordered; cycles fail rendering. Generated DCDs preserve this list separately in
+  their own `spec.env`. Older or missing origins retain legacy sorted composition.
+  Admission requires unique names within this root list, regardless of origin. An existing
+  duplicate list can remain unchanged on update only for earlier or missing origins. Origins
+  1.8.0 and later reject duplicates even when the list is unchanged; repair a stored list before
+  making unrelated updates. Changing any value, source, position, or member requires unique names
+  throughout. Names in different layers may still override one another.
+  New or changed entries must not combine a non-empty `value` with `valueFrom`. Alpha component
+  `spec.services.<name>.envs` lists follow the same uniqueness and value/source rules, with
+  unchanged-list duplicate ratcheting only for earlier or missing origins.
+  The alpha root field is `spec.envs`. This webhook rule leaves the root list's OpenAPI merge
+  semantics unchanged so legacy-origin duplicate lists can be ratcheted.
+  See [Environment Variable Order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order).
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
 </ParamField>
