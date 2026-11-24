@@ -46,6 +46,16 @@ type DynamoComponentDeploymentSpec struct {
 	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
 
+	// Env supplies general environment defaults, distinct from component Envs
+	// and extraPodSpec.mainContainer.env. It maps directly to v1beta1 spec.env.
+	// Container-specific definitions take precedence. Semantic ordering is
+	// selected by the immutable operator origin; older origins retain legacy
+	// composition. No default is applied.
+	// For origins >= 1.8.0, admission requires unique names within this list,
+	// even when the list is unchanged on update. Component overrides remain allowed.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component (resources, scaling, ingress, etc.).
 	DynamoComponentDeploymentSharedSpec `json:",inline"`

@@ -63,8 +63,8 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
+use dynamo_http_server::metrics::generate_log_buckets;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
