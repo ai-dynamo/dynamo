@@ -1249,6 +1249,66 @@ func TestDGDCheckpointsReconciler_AutoUsesLeaderRolePodTemplate(t *testing.T) {
 	assert.Equal(t, "leader", podTemplate.Labels["example.com/source-role"])
 }
 
+func TestDGDCheckpointsReconciler_JobContainerOverrideAppendsEnvFrom(t *testing.T) {
+	t.Log("Build an auto-checkpoint worker whose main container and job override both set envFrom")
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid"),
+		Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(dynamo.BackendFrameworkVLLM)},
+	}
+	componentSecret := corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "hf-token-secret"},
+	}}
+	jobSecret := corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "job-only-secret"},
+	}}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:    commonconsts.MainContainerName,
+			Image:   "main:latest",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			EnvFrom: []corev1.EnvFromSource{componentSecret},
+		}}}},
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Enabled: true,
+				Mode:    v1beta1.CheckpointModeAuto,
+				Identity: &v1beta1.DynamoCheckpointIdentity{
+					Model:            "example/model",
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+				},
+				Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name:    commonconsts.MainContainerName,
+						EnvFrom: []corev1.EnvFromSource{jobSecret},
+					}}},
+				}},
+			},
+		},
+	}
+
+	t.Log("Build the checkpoint job template")
+	podTemplate, err := newTestDGDCheckpointsReconciler(reconciler).buildCheckpointJobPodTemplate(
+		dgd,
+		component,
+		"worker",
+		dynamo.BackendFrameworkVLLM,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify the override's envFrom is appended after the component's instead of replacing it")
+	main := findContainer(podTemplate.Spec.Containers, commonconsts.MainContainerName)
+	require.NotNil(t, main)
+	assert.Equal(t, []corev1.EnvFromSource{componentSecret, jobSecret}, main.EnvFrom)
+}
+
 func TestDGDCheckpointsReconciler_CUDASharedMemorySupport(t *testing.T) {
 	tests := []struct {
 		name        string
