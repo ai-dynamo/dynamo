@@ -1561,14 +1561,43 @@ jobs:
           ${{ matrix.dir }}/coverage-rust.lcov
         retention-days: 7
 
-    - name: Publish Rust test reports
+    - name: Convert completed Rust test logs
+      id: rust_report
       if: always()
-      uses: ./.github/actions/rust-test-report
+      shell: bash
+      env:
+        REPORT_WORKSPACE: ${{ matrix.dir }}
+        HAS_DD_API_KEY: ${{ secrets.DD_API_KEY != '' }}
+      run: |
+        python3 .github/scripts/rust_test_report.py --log-dir rust-test-results --workspace "$REPORT_WORKSPACE"
+        echo "has-api-key=$HAS_DD_API_KEY" >> "$GITHUB_OUTPUT"
+    - name: Archive Rust test reports and console logs
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        api-key: ${{ secrets.DD_API_KEY }}
-        dd-env: nightly
-        workspace: ${{ matrix.dir }}
-        artifact-name: rust-nightly-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: rust-nightly-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: rust-test-results/
+        if-no-files-found: ignore
+        retention-days: 7
+    - name: Install Datadog CLI
+      id: datadog_cli
+      if: ${{ !cancelled() && steps.rust_report.outcome == 'success' && steps.rust_report.outputs.has-api-key == 'true' && hashFiles('rust-test-results/*.xml') != '' }}
+      uses: DataDog/install-datadog-ci-github-action@6d7f0c7c5402a4b1912055b76970ca76bef71fe5  # v1.0.4
+      with:
+        version: v5.27.0
+    - name: Upload Rust results to Datadog
+      if: ${{ !cancelled() && steps.datadog_cli.outcome == 'success' && hashFiles('rust-test-results/*.xml') != '' }}
+      shell: bash
+      env:
+        DATADOG_API_KEY: ${{ secrets.DD_API_KEY }}
+        DATADOG_SITE: datadoghq.com
+        DD_ENV: nightly
+        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:console
+      run: |
+        # source_ref callers can test a different SHA from github.sha.
+        DD_GIT_COMMIT_SHA="$(git rev-parse HEAD)"
+        export DD_GIT_COMMIT_SHA
+        datadog-ci junit upload --service ai-dynamo rust-test-results/
 
   # ============================================================================
   # RELEASE (workflow_call into release.yml)

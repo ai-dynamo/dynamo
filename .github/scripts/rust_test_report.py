@@ -142,7 +142,8 @@ def parse_log(
                 elif outcome.startswith("ignored"):
                     ET.SubElement(case, "skipped", message=outcome)
         active = None
-        header = ""
+        if not header.startswith("doctest/"):
+            header = ""
     if active is not None:
         warnings.append(f"Incomplete suite omitted: {active.name}")
     return report, warnings
