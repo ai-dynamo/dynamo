@@ -26,7 +26,6 @@ use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
-    http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, role_routing},
     local_model::runtime_config::{
@@ -61,6 +60,7 @@ use crate::{
     utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
+use dynamo_http_server::metrics::Metrics;
 
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{

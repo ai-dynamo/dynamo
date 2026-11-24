@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-module.exports = async function rerunFailedCI({ github, context, core }) {
+module.exports = async function rerunFailedCI({ github, context, core, glamrCiRequestsDisabled = false }) {
+  const GLAMR_USER_ID = 282374502;
   const COPY_PR_BOT_ID = 138252374;
   const ACTIONS_BOT_ID = 41898282;
   const FAILED = new Set(['failure', 'timed_out']);
@@ -17,7 +18,8 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
 
   const { issue, comment, action } = context.payload;
   if (context.eventName !== 'issue_comment' || action !== 'created' || !issue.pull_request) return;
-  if (!/^\/rerun ci$/i.test(comment.body.trim())) return;
+  const glamrRequest = /^(?:\S+:[ \t]+)?@dynamo-ops please rerun failed CI for ([0-9a-f]{40})$/.exec(comment.body.trim());
+  if (!/^\/rerun ci$/i.test(comment.body.trim()) && !glamrRequest) return;
 
   const repo = context.repo;
   const issueArgs = { ...repo, issue_number: issue.number };
@@ -29,12 +31,24 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
   const respond = body => github.rest.issues.createComment({
     ...issueArgs, body: `${eventMarker}\n${body}`,
   });
-  // Effective repository permission is authoritative; author_association is not.
-  const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
-    ...repo, username: comment.user.login,
-  });
-  if (!['write', 'maintain', 'admin'].includes(access.permission)) {
-    await respond('The `/rerun ci` command requires repository write access.');
+  const pullArgs = { ...repo, pull_number: issue.number };
+  const { data: pull } = await github.rest.pulls.get(pullArgs);
+  let allowed;
+  if (glamrRequest) {
+    // Match the existing glamr-agent full-CI request policy.
+    allowed = comment.user.id === GLAMR_USER_ID && !glamrCiRequestsDisabled &&
+      pull.state === 'open' && glamrRequest[1] === pull.head.sha &&
+      pull.user.id === GLAMR_USER_ID && pull.head.repo?.fork === true &&
+      pull.head.repo.owner.id === GLAMR_USER_ID;
+  } else {
+    // Effective repository permission is authoritative; author_association is not.
+    const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+      ...repo, username: comment.user.login,
+    });
+    allowed = ['write', 'maintain', 'admin'].includes(access.permission);
+  }
+  if (!allowed) {
+    await respond('CI retries require repository write access or an enabled glamr-agent request for its own current fork PR commit.');
     return;
   }
 
@@ -46,8 +60,6 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
     core.warning(`Could not acknowledge CI retry command ${comment.id}. Continuing without a reaction.`);
   }
 
-  const pullArgs = { ...repo, pull_number: issue.number };
-  const { data: pull } = await github.rest.pulls.get(pullArgs);
   const sha = pull.head.sha;
   const branch = `pull-request/${issue.number}`;
   // This protected mirror records copy-pr-bot's approval of this exact commit.
