@@ -25,6 +25,7 @@ from dynamo._core import Context
 
 from .args import Config
 from .handlers import EmbeddingWorkerHandler
+from .multimodal_utils.request_processor import validate_mm_processor_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +342,9 @@ def _prepare_pooling_prompt(
     tokenizer: Any,
 ) -> Any:
     """Build a vLLM prompt and preprocess token-ID inputs with its renderer."""
-    mm_processor_kwargs = request.get("mm_processor_kwargs")
+    mm_processor_kwargs = validate_mm_processor_kwargs(
+        request.get("mm_processor_kwargs")
+    )
     cache_salt = request.get("cache_salt")
     if isinstance(prompt, str):
         if mm_processor_kwargs is None and cache_salt is None:
