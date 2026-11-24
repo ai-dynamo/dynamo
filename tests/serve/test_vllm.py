@@ -2,25 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-import hashlib
-import json
 import logging
 import os
 import platform
 import random
-import re
-import shutil
-import tempfile
-import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
-from urllib.parse import urlsplit
 
 import pytest
-import requests
 
-from tests.serve import common as serve_common
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
@@ -32,13 +21,10 @@ from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
-from tests.utils import payload_builder as payload_builders
-from tests.utils.client import send_request as send_http_request
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import PYNVVIDEOCODEC_RESERVED_BYTES
 from tests.utils.multimodal import make_multimodal_configs
-from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
@@ -91,7 +77,7 @@ class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
-    # Warm the split-KV kernels during readiness, within one 5 s attempt.
+    # Warm the split-KV kernels during readiness, before the timed request.
     health_check_max_tokens: int = 128
 
 
@@ -1028,265 +1014,6 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-# TODO: remove this comparison after the NFS results requested on PR #19332.
-_CUDA_CACHE_CONFIGS = {
-    name: dataclasses.replace(
-        vllm_configs[name],
-        marks=[
-            mark
-            for mark in vllm_configs[name].marks
-            if mark.name not in ("pre_merge", "post_merge", "timeout")
-        ]
-        + [
-            pytest.mark.pre_merge,
-            pytest.mark.cuda_cache_comparison,
-            pytest.mark.timeout(1200),
-        ],
-    )
-    for name in ("completions_only",)
-}
-
-
-@dataclass
-class _CacheRequestTiming:
-    phase: str
-    endpoint: str
-    max_tokens: int | None
-    timeout: float
-    seconds: float = 0.0
-    status: int | None = None
-    error: str | None = None
-
-
-@dataclass
-class _CacheTrial:
-    label: str
-    readiness_tokens: int
-    cache_path: str
-    outcome: str = "incomplete"
-    seconds: float = 0.0
-    requests: list[_CacheRequestTiming] = field(default_factory=list)
-
-
-def _nfs_cuda_cache_root() -> Path:
-    configured_path = os.environ.get("CUDA_CACHE_PATH")
-    if not configured_path:
-        raise RuntimeError("CUDA_CACHE_PATH must be set for the NFS comparison")
-    cache_root = Path(configured_path).resolve()
-    selected_mount = None
-    for line in Path("/proc/self/mountinfo").read_text().splitlines():
-        mount_fields, filesystem_fields = line.split(" - ", 1)
-        mount = Path(
-            re.sub(
-                r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), mount_fields.split()[4]
-            )
-        )
-        if cache_root.is_relative_to(mount) and (
-            selected_mount is None or len(mount.parts) > len(selected_mount[0].parts)
-        ):
-            selected_mount = (mount, filesystem_fields.split()[0])
-    if selected_mount is None or selected_mount[1] not in ("nfs", "nfs4"):
-        raise RuntimeError(f"CUDA cache is not on NFS: {cache_root}, {selected_mount}")
-    logger.info("CUDA cache comparison: root=%s, mount=%s", cache_root, selected_mount)
-    return cache_root / "nursery-pr19332-8a3e69e1"
-
-
-def _cache_sample(cache_path: Path) -> dict[str, str]:
-    files = sorted(path for path in cache_path.rglob("*") if path.is_file())
-    logger.info("CUDA cache %s contains %d files", cache_path, len(files))
-    return {
-        str(path.relative_to(cache_path)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in files[:3]
-    }
-
-
-@pytest.fixture(params=params_with_model_mark(_CUDA_CACHE_CONFIGS))
-def cuda_cache_config(request):
-    return _CUDA_CACHE_CONFIGS[request.param]
-
-
-@pytest.mark.vllm
-@pytest.mark.e2e
-@pytest.mark.parametrize("num_system_ports", [3], indirect=True)
-def test_cuda_cache_readiness_comparison(
-    cuda_cache_config,
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    num_system_ports,
-    predownload_models,
-    image_server,
-    monkeypatch,
-):
-    # Marker collection runs in a smaller environment without Allure.
-    import allure
-
-    cache_root = _nfs_cuda_cache_root()
-    cache_root.mkdir(exist_ok=True)
-    manifest_path = cache_root / f"{cuda_cache_config.name}.json"
-    run_id = os.environ["GITHUB_RUN_ID"]
-    previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
-    seed_tokens = cuda_cache_config.health_check_max_tokens
-    if previous is None:
-        case_path = Path(
-            tempfile.mkdtemp(prefix=f"{cuda_cache_config.name}-", dir=cache_root)
-        )
-        warm_path = case_path / "warm"
-        cold_path = case_path / "cold"
-        warm_path.mkdir()
-        cold_path.mkdir()
-        trials = [
-            (f"cold-{seed_tokens}", seed_tokens, warm_path),
-            (f"warm-{seed_tokens}", seed_tokens, warm_path),
-        ]
-        if seed_tokens != 128:
-            cold_128_path = case_path / "cold-128"
-            cold_128_path.mkdir()
-            trials.append(("warm-128", 128, warm_path))
-        trials.append(("warm-8", 8, warm_path))
-        if seed_tokens != 128:
-            trials.append(("cold-128", 128, cold_128_path))
-        trials.append(("cold-8", 8, cold_path))
-    else:
-        if previous["run_id"] == run_id:
-            raise RuntimeError(
-                "The comparison must use a distinct CI run for cache reuse"
-            )
-        case_path = (cache_root / previous["directory"]).resolve()
-        if not case_path.is_relative_to(cache_root) or case_path == cache_root:
-            raise RuntimeError(
-                "The saved comparison directory is outside its namespace"
-            )
-        warm_path = case_path / "warm"
-        if not warm_path.is_dir():
-            raise RuntimeError(
-                "The previous run's CUDA cache directory did not persist"
-            )
-        if not previous["sample"]:
-            raise RuntimeError("The previous run did not produce CUDA cache files")
-        if _cache_sample(warm_path) != previous["sample"]:
-            raise RuntimeError(
-                "The previous run's CUDA cache files did not persist unchanged"
-            )
-        logger.info("Reusing CUDA cache from CI run %s", previous["run_id"])
-        trials = []
-        if seed_tokens != 128:
-            trials.append((f"cross-run-warm-{seed_tokens}", seed_tokens, warm_path))
-        trials.extend(
-            [
-                ("cross-run-warm-128", 128, warm_path),
-                ("cross-run-warm-8", 8, warm_path),
-            ]
-        )
-
-    results = []
-    completed = False
-    try:
-        for label, tokens, cache_path in trials:
-            trial = _CacheTrial(label, tokens, str(cache_path))
-
-            def measure(phase, measured_trial=trial):
-                def measured_request(url, payload, **kwargs):
-                    event = _CacheRequestTiming(
-                        phase,
-                        urlsplit(url).path,
-                        payload.get("max_tokens"),
-                        kwargs["timeout"],
-                    )
-                    measured_trial.requests.append(event)
-                    started = time.monotonic()
-                    try:
-                        response = send_http_request(url, payload, **kwargs)
-                        event.status = response.status_code
-                        return response
-                    except requests.RequestException as error:
-                        event.error = type(error).__name__
-                        raise
-                    finally:
-                        event.seconds = time.monotonic() - started
-
-                @contextmanager
-                def measured_timed_request(url, payload, **kwargs):
-                    started = time.monotonic()
-                    try:
-                        with measured_request(url, payload, **kwargs) as response:
-                            yield response
-                    except requests.RequestException as error:
-                        measured_trial.requests[-1].error = type(error).__name__
-                        raise
-                    finally:
-                        # Streaming bodies are consumed by the standard validator.
-                        measured_trial.requests[-1].seconds = time.monotonic() - started
-
-                return measured_timed_request if phase == "timed" else measured_request
-
-            started = time.monotonic()
-            try:
-                with monkeypatch.context() as patch:
-                    patch.setattr(serve_common, "send_request", measure("timed"))
-                    patch.setattr(
-                        payload_builders, "send_request", measure("readiness")
-                    )
-                    config = dataclasses.replace(
-                        cuda_cache_config, health_check_max_tokens=tokens
-                    )
-                    run_serve_deployment(
-                        config,
-                        request,
-                        ports=dynamo_dynamic_ports,
-                        extra_env={"CUDA_CACHE_PATH": str(cache_path)},
-                    )
-                    trial.outcome = "passed"
-            except RuntimeError as error:
-                trial.outcome = "RuntimeError"
-                baseline = label == "cold-8" or (
-                    label == "cold-128" and seed_tokens > 128
-                )
-                if not baseline or not isinstance(
-                    error.__cause__, requests.ReadTimeout
-                ):
-                    raise
-                trial.outcome = "ReadTimeout"
-                logger.info("Baseline %s request timed out: %s", label, error)
-            finally:
-                trial.seconds = time.monotonic() - started
-                results.append(dataclasses.asdict(trial))
-                report = json.dumps(dataclasses.asdict(trial), indent=2)
-                logger.info("CUDA cache trial: %s", report)
-                allure.attach(
-                    report, name=label, attachment_type=allure.attachment_type.JSON
-                )
-                server_log = (
-                    Path(resolve_test_output_path(request.node.name)) / "bash.log.txt"
-                )
-                if server_log.is_file():
-                    allure.attach.file(
-                        str(server_log),
-                        name=f"{label}-server",
-                        attachment_type=allure.attachment_type.TEXT,
-                    )
-        if previous is None:
-            manifest = {
-                "run_id": run_id,
-                "head_sha": os.environ["GITHUB_SHA"],
-                "directory": case_path.name,
-                "sample": _cache_sample(warm_path),
-            }
-            manifest_path.write_text(json.dumps(manifest))
-            logger.info("Saved NFS cache manifest: %s", json.dumps(manifest))
-        else:
-            manifest_path.unlink()
-        completed = True
-    finally:
-        if previous is not None or not completed:
-            shutil.rmtree(case_path)
-        allure.attach(
-            json.dumps(results, indent=2),
-            name="CUDA cache comparison",
-            attachment_type=allure.attachment_type.JSON,
-        )
 
 
 @pytest.mark.vllm
