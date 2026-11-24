@@ -521,7 +521,7 @@ impl DirectEngineHost {
                         return;
                     }
                     Err(ProbeError::NotRegistered(register_error)) => {
-                        tracing::error!(
+                        tracing::warn!(
                             url = %self.spec.url,
                             %register_error,
                             retry_in = ?delay,
