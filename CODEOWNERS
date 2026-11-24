@@ -88,6 +88,7 @@
 /lib/router/scheduler/                                                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/router/kv-indexer/                                                                                 @ai-dynamo/dynamo-router-codeowners
 /lib/router/slot-tracker/                                                                               @ai-dynamo/dynamo-router-codeowners
+/examples/router/policies/                                                                              @ai-dynamo/dynamo-router-codeowners
 /lib/kv-events/src/zmq_wire/                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/router/kv-router/tests/                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/router/session-affinity/                                                                           @ai-dynamo/dynamo-router-codeowners

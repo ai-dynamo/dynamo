@@ -1562,21 +1562,20 @@ def test_disagg_per_role_policy_file(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    tmp_path,
 ):
     """KV-routed prefill in front of round-robin decode, from a policy file alone.
 
     The frontend takes only ``--router-policy-config`` and no worker advertises a
-    router configuration.
+    router configuration. The file is the shipped example that the docs link.
     """
     shared_namespace = f"test-namespace-{generate_random_suffix()}"
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
     }
-    policy_file = tmp_path / "policy.yaml"
-    policy_file.write_text(
-        "worker_selection:\n  prefill: dynamo-default-cost-fn\n  decode: round-robin\n"
+    policy_file = (
+        Path(__file__).resolve().parents[2]
+        / "examples/router/policies/kv-prefill-round-robin-decode.yaml"
     )
 
     with launch_disagg_workers(
