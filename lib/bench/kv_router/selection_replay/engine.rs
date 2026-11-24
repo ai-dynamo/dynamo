@@ -37,7 +37,8 @@ use dynamo_scheduler::host::{
     SelectionOperation, SelectionOutcome, SessionBinding,
 };
 use dynamo_slot_tracker::host::{
-    ActiveSequenceEvent, ActiveSequenceEventData, BusyThresholds, SchedulerBookingDescriptor,
+    ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin, BusyThresholds,
+    SchedulerBookingDescriptor,
 };
 use futures_util::FutureExt;
 use serde::Serialize;
@@ -1084,6 +1085,7 @@ async fn mark_prefill_complete(shared: &Shared, index: usize) {
         data: ActiveSequenceEventData::MarkPrefillCompleted,
         router_id: booking.worker.worker_id,
         lora_name: None,
+        origin: ActiveSequenceEventOrigin::Worker,
     };
     // A full channel drops the mark, as the frontend's ingress does; it counts them too.
     if shared.host.inbound.try_send(mark).is_err() {

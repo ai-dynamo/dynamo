@@ -6,7 +6,8 @@ use dynamo_error::http::{
 };
 use dynamo_runtime::error::ErrorClass;
 
-use super::{super::metrics, DispatchError};
+use super::DispatchError;
+use dynamo_http_server::metrics;
 
 pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchError {
     if metrics::request_was_cancelled(cause) {
