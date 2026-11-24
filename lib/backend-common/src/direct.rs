@@ -260,7 +260,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
         _input: ManyIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         Err(error(
-            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
             "engines dialed directly take unary requests only",
         )
         .into())
@@ -306,14 +306,14 @@ async fn serve_engines(
 ) -> Result<Arc<DirectDispatch>, DynamoError> {
     if !drt.discovery_is_process_local() {
         return Err(error(
-            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
             "direct mode needs process-local discovery (--discovery-backend mem); \
              engines are listed, not discovered",
         ));
     }
     if specs.is_empty() {
         return Err(error(
-            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
             "direct mode needs at least one engine",
         ));
     }
@@ -324,7 +324,7 @@ async fn serve_engines(
     for spec in &specs {
         if !urls.insert(normalized_url(&spec.url)) {
             return Err(error(
-                ErrorType::InvalidArgument,
+                ErrorType::Backend(BackendError::InvalidArgument),
                 format!("engine {} is listed twice", spec.url),
             ));
         }
@@ -348,7 +348,7 @@ async fn serve_engines(
     )
     .map_err(|register_error| {
         error(
-            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
             format!("register the direct dispatch: {register_error}"),
         )
     })?;
@@ -700,7 +700,7 @@ fn record_kv_event_sources(
             }
             KvEventSource::Push { dp_rank, .. } => {
                 return Err(error(
-                    ErrorType::InvalidArgument,
+                    ErrorType::Backend(BackendError::InvalidArgument),
                     format!(
                         "DP rank {dp_rank} pushes KV events in-process; a frontend can only subscribe to ZMQ publishers"
                     ),
@@ -1908,7 +1908,12 @@ mod tests {
             mode: DisaggregationMode::Aggregated,
         };
         let result = serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory).await;
-        assert!(result.is_err());
+        // A setup error of this crate, in the backend category like the
+        // sidecar `Worker`'s.
+        assert_eq!(
+            result.err().map(|rejected| rejected.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
         drt.shutdown();
     }
 
@@ -1953,7 +1958,12 @@ mod tests {
             on_ready: Box::new(|_| Ok(())),
             dp_rank: 0,
         };
-        assert!(record_kv_event_sources(&mut HashMap::new(), vec![push]).is_err());
+        assert_eq!(
+            record_kv_event_sources(&mut HashMap::new(), vec![push])
+                .err()
+                .map(|rejected| rejected.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
     }
 
     #[test]
