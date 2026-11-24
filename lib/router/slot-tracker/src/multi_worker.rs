@@ -349,6 +349,10 @@ enum BookingReleaseVisibility {
 
 /// Observes request attempts mirrored from another router so their local
 /// scheduler state can share the router's request-liveness reaper.
+///
+/// `progressed` runs for every prefill-completed event that matches a live
+/// booking, including one that changes nothing: the owning router re-sends that
+/// event as a keepalive, and this call is what keeps the mirrored lease alive.
 pub trait ReplicaRequestLeaseObserver: Send + Sync {
     fn admitted(&self, booking: SchedulerBookingDescriptor);
     fn progressed(&self, booking: &SchedulerBookingDescriptor);
@@ -584,7 +588,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
         // FIFO begins at this enqueue boundary. Local mutation completes first, so overlapping
         // lifecycle calls can enqueue in a different order from their local mutations; replica
-        // sync is best-effort and peer expiry reconciles stale state.
+        // sync is best-effort. A peer drops a stale mirror when this router books the same
+        // request again, or by its own expiry once this router's keepalives stop.
         let request_id = event.request_id.clone();
         let worker = event.worker;
         if let Err(error) = self.publisher.enqueue_event(event) {
@@ -896,6 +901,37 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         if !self.has_booking(booking) {
             return false;
         }
+        self.enqueue_publish_event(|| ActiveSequenceEvent {
+            request_id: booking.request_id.clone(),
+            worker: booking.worker,
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: self.router_id,
+            origin: Default::default(),
+            lora_name: self.request_index.lora_for(&booking.request_id),
+        });
+        true
+    }
+
+    /// Re-send the idempotent completion event for `booking` while it is live and
+    /// already past prefill, so peer routers keep its mirrored lease alive. A booking
+    /// still in prefill is skipped: the mark would move it to decode on peers.
+    pub fn publish_prefill_keepalive_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> bool {
+        if !self.replica_sync {
+            return false;
+        }
+        let table = self.workers.read();
+        let Some(&idx) = table.index.get(&booking.worker) else {
+            return false;
+        };
+        let seq = table.slots[idx].sequences.read();
+        if !self.has_booking(booking) || !seq.is_prefill_completed(&booking.request_id) {
+            return false;
+        }
+        // Enqueued under the sequence lock: the mark carries no attempt id, so it must
+        // not follow this booking's `Free` onto a later attempt of the same request.
         self.enqueue_publish_event(|| ActiveSequenceEvent {
             request_id: booking.request_id.clone(),
             worker: booking.worker,
@@ -1590,7 +1626,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             };
             let attempt_id = self
                 .request_index
-                .try_insert_request(request_id.clone(), worker, lora_name)
+                .try_insert_request(request_id.clone(), worker, lora_name, None)
                 .map_err(|existing_worker| SequenceError::DuplicateRequest {
                     request_id: request_id.clone(),
                     worker: existing_worker,
@@ -3415,6 +3451,8 @@ mod tests {
     fn replica_phase_only_mark_observes_without_waking_scheduler() {
         let worker = WorkerWithDpRank::new(1, 0);
         let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let observer = Arc::new(RecordingReplicaLeaseObserver::default());
+        assert!(sequences.set_replica_request_lease_observer(observer.clone()));
         let mut add = replica_add("req-1", worker, vec![1, 2, 3]);
         add.data = ActiveSequenceEventData::AddRequest {
             token_sequence: Some(vec![1, 2, 3]),
@@ -3426,34 +3464,121 @@ mod tests {
         state.clear();
         let wake_count_before = sequences.remote_state_update_count();
 
+        // The first mark changes the phase; the repeat is the owner's keepalive.
+        sequences.apply_replica_batch(vec![replica_mark("req-1", worker)]);
         sequences.apply_replica_batch(vec![replica_mark("req-1", worker)]);
 
         assert!(state.load_batches().is_empty());
         assert_eq!(sequences.remote_state_update_count(), wake_count_before);
         let load = last_observed_load(&state, worker).unwrap();
         assert_eq!((load.active_requests, load.prefill_requests), (1, 0));
+        let booking = sequences.request_booking("req-1").unwrap();
+        assert_eq!(
+            observer.events.lock().unwrap()[1..],
+            [
+                ObservedReplicaLeaseEvent::Progressed(booking.clone()),
+                ObservedReplicaLeaseEvent::Progressed(booking),
+            ]
+        );
     }
 
     #[test]
-    fn replica_duplicate_add_preserves_first_owner_without_side_effects() {
+    fn keepalive_publishes_mark_only_for_live_booking_past_prefill() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "req-1".to_string();
+        let now = Instant::now();
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let attempt_id = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        let booking = sequences.request_booking(&request_id).unwrap();
+
+        // Still in prefill: the mark would move the request to decode on peers.
+        assert!(!sequences.publish_prefill_keepalive_if_booking(&booking));
+
+        sequences
+            .mark_prefill_completed_if_booking(&request_id, worker, attempt_id, now)
+            .unwrap();
+        state.clear();
+        assert!(sequences.publish_prefill_keepalive_if_booking(&booking));
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [ActiveSequenceEventData::MarkPrefillCompleted]
+        ));
+
+        sequences
+            .free_if_booking(&request_id, worker, attempt_id, now)
+            .unwrap();
+        state.clear();
+        assert!(!sequences.publish_prefill_keepalive_if_booking(&booking));
+        assert!(state.events.lock().unwrap().is_empty());
+
+        let (unsynced, _) =
+            make_recording_sequences_without_replica_sync(HashMap::from([(1, (0, 1))]));
+        let attempt_id = unsynced
+            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        unsynced
+            .mark_prefill_completed_if_booking(&request_id, worker, attempt_id, now)
+            .unwrap();
+        let booking = unsynced.request_booking(&request_id).unwrap();
+        assert!(!unsynced.publish_prefill_keepalive_if_booking(&booking));
+    }
+
+    #[test]
+    fn replica_add_replaces_only_a_mirror_from_the_same_router() {
         let worker_a = WorkerWithDpRank::new(1, 0);
         let worker_b = WorkerWithDpRank::new(2, 0);
         let (sequences, publisher) =
             make_recording_sequences(HashMap::from([(worker_a.worker_id, (0, 1))]));
+        let observer = Arc::new(RecordingReplicaLeaseObserver::default());
+        assert!(sequences.set_replica_request_lease_observer(observer.clone()));
         sequences.apply_replica_batch(vec![replica_add("req-1", worker_a, vec![1, 2, 3])]);
+        let first = sequences.request_booking("req-1").unwrap();
         publisher.clear();
         let wake_count = sequences.remote_state_update_count();
         let cleanup_count = sequences.prompt_registry.cleanup_attempts();
 
-        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
+        // Another router's Add for the same id is ignored without side effects.
+        let mut other_router_add = replica_add("req-1", worker_b, vec![4, 5, 6]);
+        other_router_add.router_id = 98;
+        sequences.apply_replica_batch(vec![other_router_add]);
 
-        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker_a));
+        assert_eq!(sequences.request_booking("req-1"), Some(first.clone()));
         assert_eq!(sequences.active_blocks()[&worker_a], 3);
         assert!(!sequences.active_blocks().contains_key(&worker_b));
         assert_eq!(sequences.num_workers(), 1);
         assert!(publisher.load_batches().is_empty());
         assert_eq!(sequences.remote_state_update_count(), wake_count);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), cleanup_count);
+
+        // The same router's Add frees the stale mirror, then books the new attempt.
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
+
+        let second = sequences.request_booking("req-1").unwrap();
+        assert_eq!(second.worker, worker_b);
+        assert_eq!(sequences.active_blocks()[&worker_a], 0);
+        assert_eq!(sequences.active_blocks()[&worker_b], 3);
+        assert_eq!(
+            *observer.events.lock().unwrap(),
+            [
+                ObservedReplicaLeaseEvent::Admitted(first.clone()),
+                ObservedReplicaLeaseEvent::Completed(first),
+                ObservedReplicaLeaseEvent::Admitted(second),
+            ]
+        );
+
+        sequences.apply_replica_batch(vec![replica_free("req-1", worker_b)]);
+        assert_eq!(sequences.request_booking("req-1"), None);
+        assert_eq!(sequences.active_blocks()[&worker_b], 0);
+
+        // A replica Add never displaces a local booking.
+        sequences
+            .add_request(local_sequence_request("local", worker_a), Instant::now())
+            .unwrap();
+        sequences.apply_replica_batch(vec![replica_add("local", worker_b, vec![7, 8, 9])]);
+        assert_eq!(sequences.request_worker("local"), Some(worker_a));
+        assert_eq!(sequences.active_blocks()[&worker_b], 0);
     }
 
     #[test]

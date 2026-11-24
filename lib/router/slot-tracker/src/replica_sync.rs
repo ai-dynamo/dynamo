@@ -14,7 +14,8 @@ use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
-use super::single::PrefillCompletion;
+use super::request_maps::RequestBooking;
+use super::single::{PrefillCompletion, RequestId};
 use crate::booking::SchedulerBookingDescriptor;
 use crate::wire::{
     ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin,
@@ -273,10 +274,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 if pending_event == Some(PendingWorkerEvent::Free) {
                     return;
                 }
+                // The same router only re-books an id after its own copy is gone, so its
+                // Add replaces the mirror left here (its `Free` was lost or never sent).
+                // An Add from another router, or onto a local booking, is still ignored.
+                if let Some(stale) = self
+                    .request_index
+                    .mirrored_booking_from(&request_id, router_id)
+                {
+                    self.free_replica_booking(&request_id, stale, decay_now, effects);
+                }
                 let Ok(attempt_id) = self.request_index.try_insert_request(
                     request_id.clone(),
                     event_worker,
                     lora_name,
+                    Some(router_id),
                 ) else {
                     return;
                 };
@@ -351,42 +362,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 if current.worker != event_worker {
                     return;
                 }
-                let booking = SchedulerBookingDescriptor {
-                    request_id: request_id.clone(),
-                    worker: current.worker,
-                    attempt_id: current.attempt_id,
-                };
-                let table = self.workers.read();
-                let Some(&idx) = table.index.get(&current.worker) else {
-                    return;
-                };
-                let load = {
-                    let slot = &table.slots[idx];
-                    let mut seq = slot.sequences.write();
-                    let Some(delta) = seq.free(&request_id, decay_now) else {
-                        return;
-                    };
-                    let load = seq.worker_load_snapshot();
-                    self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(
-                            current.worker,
-                            delta,
-                            load,
-                        );
-                    load
-                };
-                drop(table);
-                self.request_index.remove_request_if_booking(
-                    &request_id,
-                    current.worker,
-                    current.attempt_id,
-                );
-                if let Some(observer) = self.replica_request_lease_observer() {
-                    observer.completed(&booking);
-                }
-                effects.record_worker_load(current.worker, load, true);
-                effects.wake_scheduler = true;
-                effects.cleanup_prompt_trie = true;
+                self.free_replica_booking(&request_id, current, decay_now, effects);
             }
             ActiveSequenceEventData::MarkPrefillCompleted => {
                 let Some(current) = self.request_index.booking_for(&request_id) else {
@@ -413,6 +389,48 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
+    /// Free the live booking `current` of `request_id`. Returns with no table guard held.
+    fn free_replica_booking(
+        &self,
+        request_id: &RequestId,
+        current: RequestBooking,
+        decay_now: Instant,
+        effects: &mut ReplicaBatchEffects,
+    ) {
+        let booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker: current.worker,
+            attempt_id: current.attempt_id,
+        };
+        let table = self.workers.read();
+        let Some(&idx) = table.index.get(&current.worker) else {
+            return;
+        };
+        let load = {
+            let slot = &table.slots[idx];
+            let mut seq = slot.sequences.write();
+            let Some(delta) = seq.free(request_id, decay_now) else {
+                return;
+            };
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry
+                .apply_membership_delta_and_load_without_cleanup(current.worker, delta, load);
+            load
+        };
+        drop(table);
+        self.request_index.remove_request_if_booking(
+            request_id,
+            current.worker,
+            current.attempt_id,
+        );
+        if let Some(observer) = self.replica_request_lease_observer() {
+            observer.completed(&booking);
+        }
+        effects.record_worker_load(current.worker, load, true);
+        effects.wake_scheduler = true;
+        effects.cleanup_prompt_trie = true;
+    }
+
     fn apply_prefill_completed(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -426,23 +444,26 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let (completion, load) = {
             let mut seq = table.slots[idx].sequences.write();
             let completion = seq.mark_prefill_completed(&booking.request_id, now);
-            if completion == PrefillCompletion::Unchanged {
-                return;
-            }
-            let load = seq.worker_load_snapshot();
-            self.prompt_registry
-                .replace_worker_load_state(booking.worker, load);
+            let load = (completion != PrefillCompletion::Unchanged).then(|| {
+                let load = seq.worker_load_snapshot();
+                self.prompt_registry
+                    .replace_worker_load_state(booking.worker, load);
+                load
+            });
             (completion, load)
         };
         drop(table);
-        effects.record_worker_load(booking.worker, load, false);
-        if completion == PrefillCompletion::PhaseChanged {
-            return;
+        if let Some(load) = load {
+            effects.record_worker_load(booking.worker, load, false);
         }
+        // Every mark for a live booking is progress, including one that changes
+        // nothing: the owner re-sends the mark as a keepalive while it decodes.
         if let Some(observer) = self.replica_request_lease_observer() {
             observer.progressed(booking);
         }
-        effects.wake_scheduler = true;
+        if completion == PrefillCompletion::LoadReleased {
+            effects.wake_scheduler = true;
+        }
     }
 
     fn flush_replica_batch_effects(&self, effects: &mut ReplicaBatchEffects) {

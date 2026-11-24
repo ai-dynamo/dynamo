@@ -2723,12 +2723,21 @@ mod tests {
     /// Three default-config workers under the registry policy, with
     /// `router_track_active_blocks` on so bookings send tracking hashes.
     pub(super) async fn tracked_router(name: &str) -> KvRouter {
+        tracked_router_with_replica_sync(name, false).await
+    }
+
+    /// [`tracked_router`] with router replica sync on or off.
+    pub(super) async fn tracked_router_with_replica_sync(
+        name: &str,
+        router_replica_sync: bool,
+    ) -> KvRouter {
         // Prefill load decays with wall time and would let near-ties flip
         // between two runs microseconds apart.
         let config = KvRouterConfig {
             use_kv_events: false,
             router_track_prefill_tokens: false,
             skip_initial_worker_wait: true,
+            router_replica_sync,
             ..Default::default()
         };
         let workers = (0..3)

@@ -852,11 +852,18 @@ fn enqueue_cleanup_entry(
 pub struct SchedulerBookingCleanup {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
-    direct_release: DirectBookingRelease,
+    direct: Arc<DirectBookingCalls>,
+}
+
+/// Booking calls that run on the caller, off the queue actor. They share one `Arc`
+/// because `SchedulerBookingCleanup` is cloned per admission.
+struct DirectBookingCalls {
+    release: DirectBookingRelease,
+    keepalive: Box<dyn Fn(&SchedulerBookingDescriptor) -> bool + Send + Sync>,
 }
 
 type DirectBookingRelease =
-    Arc<dyn Fn(&SchedulerBookingDescriptor) -> Result<(), SequenceError> + Send + Sync>;
+    Box<dyn Fn(&SchedulerBookingDescriptor) -> Result<(), SequenceError> + Send + Sync>;
 
 /// The scheduler's acknowledgement of an enqueued booking release; `wait` resolves with
 /// the release outcome.
@@ -899,8 +906,15 @@ impl SchedulerBookingCleanup {
     /// capacity notification; pending admission runs asynchronously.
     pub fn enqueue_acknowledged(&self, booking: SchedulerBookingDescriptor) -> SchedulerCleanupAck {
         SchedulerCleanupAck {
-            response: (self.direct_release)(&booking),
+            response: (self.direct.release)(&booking),
         }
+    }
+
+    /// Re-send the prefill-completed event for `booking` so peer routers keep its
+    /// mirrored lease alive. `false` when the booking is gone, still in prefill, or
+    /// replica sync is off.
+    pub fn publish_prefill_keepalive(&self, booking: &SchedulerBookingDescriptor) -> bool {
+        (self.direct.keepalive)(booking)
     }
 
     pub async fn enqueue_and_wait(
@@ -1121,7 +1135,7 @@ pub struct SchedulerQueue<
     runtime_policy: Arc<RuntimePolicyControl>,
     cleanup: Arc<AdmissionCleanup>,
     capacity_updates: Option<Arc<CapacityUpdates>>,
-    direct_release: DirectBookingRelease,
+    direct: Arc<DirectBookingCalls>,
     /// Number of requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_count: Arc<AtomicUsize>,
@@ -1284,27 +1298,33 @@ impl<
         // wake it when a class queues on them or a gate is installed.
         let actor_wake = Arc::new(CapacityUpdates::new());
         let capacity_updates = queueing_enabled.then(|| Arc::clone(&actor_wake));
-        let direct_release: DirectBookingRelease = {
-            let slots = Arc::clone(&slots);
-            let capacity_updates = capacity_updates.clone();
-            let actor_wake = Arc::clone(&actor_wake);
-            let dispatch_gate = Arc::clone(&dispatch_gate);
-            Arc::new(move |booking| {
-                let outcome = slots.free_if_booking(
-                    &booking.request_id,
-                    booking.worker,
-                    booking.attempt_id,
-                    Instant::now(),
-                )?;
-                if outcome.is_applied()
-                    && let Some(updates) =
-                        capacity_wake(&capacity_updates, &actor_wake, &dispatch_gate)
-                {
-                    updates.record(Some(booking.worker));
-                }
-                Ok(())
-            })
-        };
+        let direct = Arc::new(DirectBookingCalls {
+            release: {
+                let slots = Arc::clone(&slots);
+                let capacity_updates = capacity_updates.clone();
+                let actor_wake = Arc::clone(&actor_wake);
+                let dispatch_gate = Arc::clone(&dispatch_gate);
+                Box::new(move |booking| {
+                    let outcome = slots.free_if_booking(
+                        &booking.request_id,
+                        booking.worker,
+                        booking.attempt_id,
+                        Instant::now(),
+                    )?;
+                    if outcome.is_applied()
+                        && let Some(updates) =
+                            capacity_wake(&capacity_updates, &actor_wake, &dispatch_gate)
+                    {
+                        updates.record(Some(booking.worker));
+                    }
+                    Ok(())
+                })
+            },
+            keepalive: {
+                let slots = Arc::clone(&slots);
+                Box::new(move |booking| slots.publish_prefill_keepalive_if_booking(booking))
+            },
+        });
         let eligibility = QueueEligibility {
             overloaded: overloaded_worker_provider,
             available: available_worker_provider
@@ -1360,7 +1380,7 @@ impl<
             runtime_policy,
             cleanup,
             capacity_updates,
-            direct_release,
+            direct,
             pending_count,
             pending_isl_tokens,
             class_counters,
@@ -1765,7 +1785,7 @@ impl<
         SchedulerBookingCleanup {
             cleanup: Arc::clone(&self.cleanup),
             actor_tx: self.admission_tx.clone(),
-            direct_release: Arc::clone(&self.direct_release),
+            direct: Arc::clone(&self.direct),
         }
     }
 
