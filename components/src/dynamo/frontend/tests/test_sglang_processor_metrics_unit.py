@@ -488,6 +488,9 @@ def test_token_budget_without_stop_conditions(
     assert engine.requests == [preprocessed]
 
 
+_IMAGE_MEDIA = {"image_url": [{"Url": "https://example.com/image.png"}]}
+
+
 @pytest.mark.parametrize(
     ("prompt_len", "max_tokens", "reject_prompt", "reject_total", "media", "reject"),
     [
@@ -497,14 +500,12 @@ def test_token_budget_without_stop_conditions(
         (6, 5, True, True, None, True),
         (6, 5, True, False, None, False),
         (10, 5, False, True, None, False),
-        (
-            10,
-            5,
-            True,
-            True,
-            {"image_url": [{"Url": "https://example.com/image.png"}]},
-            False,
-        ),
+        (10, 5, True, True, _IMAGE_MEDIA, True),
+        (10, None, True, True, _IMAGE_MEDIA, True),
+        (3, 8, True, True, _IMAGE_MEDIA, True),
+        (3, 7, True, True, _IMAGE_MEDIA, False),
+        (3, 8, True, False, _IMAGE_MEDIA, False),
+        (10, 5, False, True, _IMAGE_MEDIA, False),
     ],
 )
 def test_token_budget_before_dispatch(
