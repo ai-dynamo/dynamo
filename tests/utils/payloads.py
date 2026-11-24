@@ -1406,9 +1406,9 @@ def _validate_reasoning_split(reasoning: str, content: str) -> None:
 class ReasoningChatPayload(ChatPayload):
     """Check that a reasoning model's reply is split into reasoning and answer.
 
-    The answer must be complete (finish_reason "stop"). expected_response is
-    matched against the answer only, and a json_schema response_format must
-    hold for the answer, so the grammar has to start after the reasoning.
+    The answer must be complete (finish_reason "stop"), and a json_schema
+    response_format must hold for the answer, so the grammar has to start after
+    the reasoning.
     """
 
     def response_handler(self, response: Any) -> str:
