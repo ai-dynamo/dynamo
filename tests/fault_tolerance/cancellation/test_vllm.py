@@ -612,6 +612,7 @@ def test_request_cancellation_vllm_decode_cancel_during_kv_receive(
                     time.sleep(0.05)
                     running, waiting = decode_metrics.scheduler_counts()
 
+                cancelled_at = time.monotonic()
                 cancellable_req.cancel()
                 logger.info("Cancelled request ID: %s", request_id)
 
@@ -622,6 +623,11 @@ def test_request_cancellation_vllm_decode_cancel_during_kv_receive(
                     max_wait_ms=5000,
                     poll_interval_ms=50,
                 )
+                # poll_for_pattern bounds iterations, not wall time.
+                abort_latency_s = time.monotonic() - cancelled_at
+                assert (
+                    abort_latency_s <= 5
+                ), f"Abort took {abort_latency_s:.2f}s after cancellation"
                 aborted_after_s = time.monotonic() - held_at
 
                 decode_metrics.wait_for_scheduler(is_active=False)
