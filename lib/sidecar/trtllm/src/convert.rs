@@ -1138,11 +1138,8 @@ impl ResponseState {
         let stop_match = finished
             .stop_match
             .and_then(|stop_match| stop_match.r#match);
-        // A confirmed hidden stop is still sent so the frontend counts it in
-        // `completion_tokens`. It carries empty text: a bare ID would show at the
-        // `min_tokens` boundary. Engine text replaces the whole chunk's decode, so
-        // when earlier held tokens share this terminal (a context-phase finish)
-        // the stop is dropped instead, keeping their text.
+        // Send a confirmed hidden stop with empty text so it is counted but not shown;
+        // drop it if earlier held tokens share this terminal: engine text replaces their decode.
         let mut text = None;
         if let Some(pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id)) =
             stop_match
