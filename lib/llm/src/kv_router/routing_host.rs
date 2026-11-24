@@ -409,6 +409,12 @@ impl RoutingHost {
             .unwrap_or_default()
     }
 
+    /// The same set, shared rather than copied; `None` until discovery first reports a
+    /// worker. A rebuild that leaves the set unchanged keeps the same `Arc`.
+    pub(crate) fn available_instance_ids(&self) -> Option<Arc<HashSet<u64>>> {
+        self.inner.client.available_instance_ids()
+    }
+
     #[cfg(test)]
     pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
         self.inner.occupancy_for_test(worker_id)
