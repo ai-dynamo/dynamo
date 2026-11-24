@@ -12,9 +12,15 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 Known issues summarize each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
+<a id="v170"></a>
+
+## v1.7.0 — current release
+
+The v1.7.0 known issues come from the GitHub release notes and land here when the notes publish. Until then, the v1.6.0 entries below remain the latest recorded issues.
+
 <a id="v160"></a>
 
-## v1.6.0 — current release
+## v1.6.0
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **Out-of-Vocab Stop Token Crash:** A request whose `stop_token_ids` includes an ID at or above the model's vocabulary size can crash the SGLang scheduler when any request in the batch sets `min_tokens`, failing every request on that worker until it restarts. The issue also affects v1.5.0. No workaround is available yet.
 
