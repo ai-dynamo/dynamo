@@ -338,7 +338,7 @@ configuration error at startup.
 
 Router startup checks read the [operator's target configuration](../../reference/kubernetes-api/dynamo-component-deployment.mdx#target-role-configuration),
 including already-evaluated environment bindings and declared commands for each role. Known values
-are not expanded again. A missing or `unresolved` binding used by an argument is unknown; the
+are not expanded again. A missing binding, `valueFrom`, or remaining `$(...)` reference used by an argument is unknown; the
 Planner does not guess its value or safety from an injected name, provider, or DGD origin. The
 declared command and args still undergo argument interpretation; image entrypoints are not inferred.
 These target declarations do not prove which configuration existing Pods currently run. The live

@@ -234,37 +234,57 @@ def dgd_object() -> dict[str, Any]:
                     "roles": [
                         {
                             "name": "main",
-                            "containers": [
-                                {
-                                    "name": "main",
-                                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.8.0",
-                                    "command": ["python3"],
-                                    "args": [
-                                        "-m",
-                                        "dynamo.frontend",
-                                        "--router-mode",
-                                        "kv",
-                                        "--router-replica-sync",
-                                    ],
-                                    "env": {
-                                        "DYN_PARENT_DGD_K8S_NAME": {"value": DGD_NAME},
-                                        "DYN_POD_NAME": {"unresolved": True},
-                                        "DYN_REQUEST_TRACE": {"value": "1"},
-                                        "DYN_REQUEST_TRACE_RECORDS": {
-                                            "value": "request_end"
-                                        },
-                                        "DYN_REQUEST_TRACE_SINKS": {"value": "file"},
-                                        "DYN_REQUEST_TRACE_FILE_FORMAT": {
-                                            "value": "jsonl_gz"
-                                        },
-                                        "DYN_REQUEST_TRACE_FILE_PATH": {
-                                            "unresolved": True
-                                        },
-                                        "DYN_ENABLE_FRONTEND_ADMIN_API": {"value": "1"},
-                                        "DYN_FRONTEND_ADMIN_HOST": {"value": "0.0.0.0"},
-                                    },
-                                }
-                            ],
+                            "podSpec": {
+                                "containers": [
+                                    {
+                                        "name": "main",
+                                        "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.8.0",
+                                        "command": ["python3"],
+                                        "args": [
+                                            "-m",
+                                            "dynamo.frontend",
+                                            "--router-mode",
+                                            "kv",
+                                            "--router-replica-sync",
+                                        ],
+                                        "env": [
+                                            {
+                                                "name": "DYN_PARENT_DGD_K8S_NAME",
+                                                "value": DGD_NAME,
+                                            },
+                                            {
+                                                "name": "DYN_POD_NAME",
+                                                "value": "$(UNAVAILABLE)",
+                                            },
+                                            {"name": "DYN_REQUEST_TRACE", "value": "1"},
+                                            {
+                                                "name": "DYN_REQUEST_TRACE_RECORDS",
+                                                "value": "request_end",
+                                            },
+                                            {
+                                                "name": "DYN_REQUEST_TRACE_SINKS",
+                                                "value": "file",
+                                            },
+                                            {
+                                                "name": "DYN_REQUEST_TRACE_FILE_FORMAT",
+                                                "value": "jsonl_gz",
+                                            },
+                                            {
+                                                "name": "DYN_REQUEST_TRACE_FILE_PATH",
+                                                "value": "$(UNAVAILABLE)",
+                                            },
+                                            {
+                                                "name": "DYN_ENABLE_FRONTEND_ADMIN_API",
+                                                "value": "1",
+                                            },
+                                            {
+                                                "name": "DYN_FRONTEND_ADMIN_HOST",
+                                                "value": "0.0.0.0",
+                                            },
+                                        ],
+                                    }
+                                ]
+                            },
                         }
                     ]
                 },
@@ -273,15 +293,17 @@ def dgd_object() -> dict[str, Any]:
                     "roles": [
                         {
                             "name": "main",
-                            "containers": [
-                                {
-                                    "name": "main",
-                                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.8.0",
-                                    "command": ["python3", "-m", "dynamo.vllm"],
-                                    "args": [f"--model={MODEL}"],
-                                    "env": {},
-                                }
-                            ],
+                            "podSpec": {
+                                "containers": [
+                                    {
+                                        "name": "main",
+                                        "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.8.0",
+                                        "command": ["python3", "-m", "dynamo.vllm"],
+                                        "args": [f"--model={MODEL}"],
+                                        "env": [],
+                                    }
+                                ]
+                            },
                         }
                     ],
                 },

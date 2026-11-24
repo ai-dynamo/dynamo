@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestComponentRoleStatusChildGeneration(t *testing.T) {
@@ -34,12 +35,20 @@ func TestComponentRoleStatusChildGeneration(t *testing.T) {
 	}
 }
 
-func TestEnvironmentValueStatusKnownEmpty(t *testing.T) {
-	t.Log("Preserve the distinction between a known empty string and an unknown binding")
-	known, err := json.Marshal(EnvironmentValueStatus{Value: new("")})
+func TestComponentRoleStatusNativePodSpec(t *testing.T) {
+	t.Log("Serialize native PodSpec lists, known empty values, and unresolved references")
+	role := ComponentRoleStatus{Name: "leader", PodSpec: corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{
+			{Name: "EMPTY"}, {Name: "RANK", Value: "$(PROVIDER_RANK)"},
+		}}},
+		InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:test"}},
+	}}
+	data, err := json.Marshal(role)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"value":""}`, string(known))
-	unknown, err := json.Marshal(EnvironmentValueStatus{Unresolved: true})
-	require.NoError(t, err)
-	require.JSONEq(t, `{"unresolved":true}`, string(unknown))
+	var decoded ComponentRoleStatus
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, role, decoded)
+	require.Contains(t, string(data), `"podSpec":`)
+	require.Contains(t, string(data), `"env":[{"name":"EMPTY"},{"name":"RANK","value":"$(PROVIDER_RANK)"}]`)
+	require.NotContains(t, string(data), "unresolved")
 }

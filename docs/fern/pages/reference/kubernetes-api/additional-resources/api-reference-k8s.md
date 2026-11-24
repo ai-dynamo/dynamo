@@ -1792,27 +1792,6 @@ _Appears in:_
 | `ready` _boolean_ | ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
 
 
-#### ComponentContainerStatus
-
-
-
-ComponentContainerStatus projects a container's lowered launch declarations.
-Shell scripts and image entrypoints are not interpreted.
-
-
-
-_Appears in:_
-- [ComponentRoleStatus](#componentrolestatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ | name is the container name from the lowered PodSpec. |  | Required: \{\} <br /> |
-| `image` _string_ | image is the declared image; tags are not resolved to image digests. |  | Required: \{\} <br /> |
-| `command` _string array_ | command is the final declared command, without Kubernetes or shell expansion.<br />Omission does not imply a known image entrypoint. |  | Optional: \{\} <br /> |
-| `args` _string array_ | args is the final declared argument list, without Kubernetes or shell expansion. |  | Optional: \{\} <br /> |
-| `env` _object (keys:string, values:[EnvironmentValueStatus](#environmentvaluestatus))_ | env contains the final bindings after sequential Kubernetes-style expansion<br />of the lowered environment. Unavailable references, valueFrom sources, and<br />expansions exceeding the replay or export budget remain unresolved. ConfigMaps,<br />Secrets, images, and provider environments are not read. Missing names are<br />not known absent: envFrom, images, or providers may define additional names. |  | Optional: \{\} <br /> |
-
-
 #### ComponentKind
 
 _Underlying type:_ _string_
@@ -1898,7 +1877,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | name identifies the logical role, such as main, leader, or worker. |  | Required: \{\} <br /> |
-| `containers` _[ComponentContainerStatus](#componentcontainerstatus) array_ | containers contains the final application and initialization containers,<br />including native runtime sidecars, keyed by their Pod container name. |  | Optional: \{\} <br /> |
+| `podSpec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podspec-v1-core)_ | podSpec is a sparse projection of the lowered target PodSpec, not a complete<br />or deployable Pod specification. It currently includes containers and<br />initContainers with their name, image, command, args, and env declarations.<br />Environment names have their final binding, in last-definition order. Known<br />values are evaluated once; unavailable inputs and oversized expansions retain<br />their original value or valueFrom. Consumers must not replay these values.<br />Remaining $(...) strings require conservative handling: they may be<br />unavailable references or already evaluated escaped literals.<br />ConfigMaps, Secrets, images, and provider environments are not read. Omitted<br />fields are unavailable, not Kubernetes defaults or proof of absence.<br />The projection is preserved without Pod admission validation or defaulting. |  | Schemaless: \{\} <br />Type: object <br />Required: \{\} <br /> |
 
 
 #### ComponentType
@@ -2448,24 +2427,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | configMapRef references a user-provided ConfigMap containing EPP<br />configuration. Mutually exclusive with `config`. |  | Optional: \{\} <br /> |
 | `config` _EndpointPickerConfig_ | config allows specifying EPP `EndpointPickerConfig` directly as a<br />structured object. The operator marshals this to YAML and creates a<br />ConfigMap automatically. Mutually exclusive with `configMapRef`. One of<br />`configMapRef` or `config` must be specified. |  | Type: object <br />Optional: \{\} <br /> |
-
-
-#### EnvironmentValueStatus
-
-
-
-EnvironmentValueStatus is either a known value, including the empty string,
-or an unresolved binding. Partial expansions are never published.
-
-
-
-_Appears in:_
-- [ComponentContainerStatus](#componentcontainerstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `value` _string_ | value is the resolved literal value. An empty string is a known value. |  | Optional: \{\} <br /> |
-| `unresolved` _boolean_ | unresolved is true when the binding cannot be resolved from the lowered list<br />or its value cannot be exported within the status size budget. |  | Optional: \{\} <br /> |
 
 
 #### ExperimentalSpec

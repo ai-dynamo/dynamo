@@ -3,6 +3,8 @@
 
 package v1beta1
 
+import corev1 "k8s.io/api/core/v1"
+
 // ComponentRoleStatus describes the lowered target configuration of one logical
 // role. It does not describe the configuration of individual running Pods.
 type ComponentRoleStatus struct {
@@ -10,55 +12,20 @@ type ComponentRoleStatus struct {
 	// +required
 	Name string `json:"name"`
 
-	// containers contains the final application and initialization containers,
-	// including native runtime sidecars, keyed by their Pod container name.
-	// +optional
-	// +listType=map
-	// +listMapKey=name
-	Containers []ComponentContainerStatus `json:"containers,omitempty"`
-}
-
-// ComponentContainerStatus projects a container's lowered launch declarations.
-// Shell scripts and image entrypoints are not interpreted.
-type ComponentContainerStatus struct {
-	// name is the container name from the lowered PodSpec.
+	// podSpec is a sparse projection of the lowered target PodSpec, not a complete
+	// or deployable Pod specification. It currently includes containers and
+	// initContainers with their name, image, command, args, and env declarations.
+	// Environment names have their final binding, in last-definition order. Known
+	// values are evaluated once; unavailable inputs and oversized expansions retain
+	// their original value or valueFrom. Consumers must not replay these values.
+	// Remaining $(...) strings require conservative handling: they may be
+	// unavailable references or already evaluated escaped literals.
+	// ConfigMaps, Secrets, images, and provider environments are not read. Omitted
+	// fields are unavailable, not Kubernetes defaults or proof of absence.
+	// The projection is preserved without Pod admission validation or defaulting.
 	// +required
-	Name string `json:"name"`
-
-	// image is the declared image; tags are not resolved to image digests.
-	// +required
-	Image string `json:"image"`
-
-	// command is the final declared command, without Kubernetes or shell expansion.
-	// Omission does not imply a known image entrypoint.
-	// +optional
-	// +listType=atomic
-	Command []string `json:"command,omitempty"`
-
-	// args is the final declared argument list, without Kubernetes or shell expansion.
-	// +optional
-	// +listType=atomic
-	Args []string `json:"args,omitempty"`
-
-	// env contains the final bindings after sequential Kubernetes-style expansion
-	// of the lowered environment. Unavailable references, valueFrom sources, and
-	// expansions exceeding the replay or export budget remain unresolved. ConfigMaps,
-	// Secrets, images, and provider environments are not read. Missing names are
-	// not known absent: envFrom, images, or providers may define additional names.
-	// +optional
-	Env map[string]EnvironmentValueStatus `json:"env,omitempty"`
-}
-
-// EnvironmentValueStatus is either a known value, including the empty string,
-// or an unresolved binding. Partial expansions are never published.
-// +kubebuilder:validation:XValidation:rule="has(self.value) ? !has(self.unresolved) : (has(self.unresolved) && self.unresolved)",message="specify either value or unresolved: true"
-type EnvironmentValueStatus struct {
-	// value is the resolved literal value. An empty string is a known value.
-	// +optional
-	Value *string `json:"value,omitempty"`
-
-	// unresolved is true when the binding cannot be resolved from the lowered list
-	// or its value cannot be exported within the status size budget.
-	// +optional
-	Unresolved bool `json:"unresolved,omitempty"`
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodSpec corev1.PodSpec `json:"podSpec"`
 }

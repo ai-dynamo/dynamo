@@ -157,7 +157,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			require.Equal(t, "runtime:new", pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].Image)
 			require.Equal(t, dgd.Generation, result.Status.ObservedGeneration)
 			require.Len(t, result.Status.Components["frontend"].Roles, 1)
-			require.Equal(t, "runtime:new", result.Status.Components["frontend"].Roles[0].Containers[0].Image)
+			require.Equal(t, "runtime:new", result.Status.Components["frontend"].Roles[0].PodSpec.Containers[0].Image)
 			dgd.Status = result.Status
 
 			t.Log("Fresh program instances keep the new spec pending despite old or missing progress")

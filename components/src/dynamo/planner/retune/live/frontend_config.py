@@ -751,7 +751,10 @@ def _target_roles(dgd: Mapping[str, Any], name: str) -> list[Mapping[str, Any]]:
                 f"P4: component {name!r} has ambiguous target roles"
             )
         seen.add(role_name)
-        containers = role.get("containers")
+        pod_spec = role.get("podSpec")
+        containers = (
+            pod_spec.get("containers") if isinstance(pod_spec, Mapping) else None
+        )
         if not isinstance(containers, list) or not containers:
             raise FrontendParseError(f"P4: component {name!r} has no target containers")
         container_names: set[str] = set()
@@ -774,7 +777,7 @@ def _target_roles(dgd: Mapping[str, Any], name: str) -> list[Mapping[str, Any]]:
 
 
 def _target_main(role: Mapping[str, Any]) -> Mapping[str, Any]:
-    for container in role["containers"]:
+    for container in role["podSpec"]["containers"]:
         if container["name"] == MAIN_CONTAINER:
             return container
     raise FrontendParseError(f"P4: target role {role['name']!r} has no main container")
@@ -799,22 +802,35 @@ def _container_argv(container: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _target_env(container: Mapping[str, Any]) -> _Env:
-    bindings = container.get("env", {})
-    if not isinstance(bindings, Mapping):
+    bindings = container.get("env", [])
+    if not isinstance(bindings, list):
         raise FrontendParseError("P4: target container env is malformed")
     values: dict[str, str] = {}
     opaque: set[str] = set()
-    for name, binding in bindings.items():
-        if not isinstance(name, str) or not isinstance(binding, Mapping):
+    for binding in bindings:
+        if not isinstance(binding, Mapping):
             raise FrontendParseError("P4: target environment binding is malformed")
-        if set(binding) == {"value"} and isinstance(binding["value"], str):
-            values[name] = binding["value"]
-        elif set(binding) == {"unresolved"} and binding["unresolved"] is True:
-            opaque.add(name)
-        else:
+        name = binding.get("name")
+        value = binding.get("value", "")
+        source = binding.get("valueFrom")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(value, str)
+            or set(binding) - {"name", "value", "valueFrom"}
+            or (source is not None and (not isinstance(source, Mapping) or value))
+        ):
             raise FrontendParseError(
                 f"P4: target environment binding {name!r} is malformed"
             )
+
+        # Never replay published values. Remaining references are conservatively opaque.
+        values.pop(name, None)
+        opaque.discard(name)
+        if source is not None or "$(" in value:
+            opaque.add(name)
+        else:
+            values[name] = value
     return _Env(values=values, opaque=frozenset(opaque))
 
 

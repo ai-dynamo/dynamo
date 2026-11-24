@@ -7,46 +7,44 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	fieldvalidation "k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
+	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/defaulting"
+	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/pruning"
+	apitest "k8s.io/apiextensions-apiserver/pkg/test"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func TestComponentRoleStatusEnvironmentSchema(t *testing.T) {
-	// The spec-admission harness removes status; validate this status-only CEL
-	// contract directly against its generated schema in both native versions.
-	validators := requestValidatorsFromCRD(t, "nvidia.com_dynamocomponentdeployments.yaml")
-	for _, version := range []string{"v1alpha1", "v1beta1"} {
-		for _, test := range []struct {
-			name    string
-			binding map[string]any
-			valid   bool
-		}{
-			{name: "empty literal", binding: map[string]any{"value": ""}, valid: true},
-			{name: "unknown", binding: map[string]any{"unresolved": true}, valid: true},
-			{name: "empty binding", binding: map[string]any{}},
-			{name: "false unknown", binding: map[string]any{"unresolved": false}},
-			{name: "both alternatives", binding: map[string]any{"value": "secret", "unresolved": true}},
-		} {
-			t.Run(version+"/"+test.name, func(t *testing.T) {
-				t.Log("Validate the generated native status schema rather than a handwritten copy of its rule")
-				component := map[string]any{"componentKind": "Deployment", "replicas": int64(0), "updatedReplicas": int64(0), "roles": []any{
-					map[string]any{"name": "main", "containers": []any{map[string]any{"name": "main", "image": "engine:test", "env": map[string]any{"MODE": test.binding}}}},
-				}}
-				field := "component"
-				if version == "v1alpha1" {
-					field = "service"
-					component["componentName"] = "worker"
-				}
-				object := map[string]any{"apiVersion": "nvidia.com/" + version, "kind": "DynamoComponentDeployment", "metadata": map[string]any{"name": "worker"}, "status": map[string]any{field: component}}
-				errs := validators[version].celValidator(object, nil)
-				if test.valid {
-					require.Empty(t, errs)
-				} else {
-					require.Len(t, errs, 1)
-					require.Equal(t, fieldvalidation.ErrorTypeInvalid, errs[0].Type)
-					require.Equal(t, "status."+field+".roles[0].containers[0].env[MODE]", errs[0].Field)
-					require.Contains(t, errs[0].Detail, "specify either value or unresolved: true")
-				}
-			})
-		}
+func TestComponentRoleStatusSparsePodSpecSchema(t *testing.T) {
+	// Spec admission removes status, so exercise its generated pruning/defaulting contract directly.
+	crd := apitest.MustLoadManifest[apiextensionsv1.CustomResourceDefinition](t, "../../../config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml")
+	for _, version := range crd.Spec.Versions {
+		t.Run(version.Name, func(t *testing.T) {
+			t.Log("Load the real native status schema without inventing Pod defaults or validation")
+			var schema apiextensions.JSONSchemaProps
+			require.NoError(t, apiextensionsv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(version.Schema.OpenAPIV3Schema, &schema, nil))
+			structural, err := structuralschema.NewStructural(&schema)
+			require.NoError(t, err)
+			field := "component"
+			if version.Name == "v1alpha1" {
+				field = "service"
+			}
+			object := map[string]any{"status": map[string]any{field: map[string]any{"roles": []any{
+				map[string]any{"name": "main", "podSpec": map[string]any{
+					"initContainers": []any{map[string]any{"name": "runtime", "env": []any{
+						map[string]any{"name": "EMPTY"},
+						map[string]any{"name": "RANK", "value": "$(PROVIDER_RANK)"},
+						map[string]any{"name": "POD", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}},
+					}}},
+				}},
+			}}}}
+			original := runtime.DeepCopyJSON(object)
+
+			t.Log("Preserve a sparse native PodSpec and EnvVar list without adding or pruning fields")
+			defaulting.Default(object, structural)
+			pruning.Prune(object, structural, true)
+			require.Equal(t, original, object)
+		})
 	}
 }

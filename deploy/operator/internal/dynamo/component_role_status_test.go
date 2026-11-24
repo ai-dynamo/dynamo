@@ -17,6 +17,7 @@ import (
 func TestResolveComponentRoleStatus(t *testing.T) {
 	t.Log("Build final declarations with ordered aliases, duplicate names, and opaque inputs")
 	pod := &corev1.PodSpec{
+		NodeName: "not-exported",
 		Containers: []corev1.Container{{
 			Name: "main", Image: "engine:test", Command: []string{"/bin/sh", "-c"}, Args: []string{"exec engine $(MODE)"},
 			Env: []corev1.EnvVar{
@@ -39,23 +40,32 @@ func TestResolveComponentRoleStatus(t *testing.T) {
 	t.Log("Project known final bindings without guessing provider, Secret, or Pod values")
 	status := ResolveComponentRoleStatus("leader", pod)
 	require.Equal(t, "leader", status.Name)
-	require.Len(t, status.Containers, 2)
-	main := status.Containers[0]
+	require.Len(t, status.PodSpec.Containers, 1)
+	require.Len(t, status.PodSpec.InitContainers, 1)
+	require.Empty(t, status.PodSpec.NodeName)
+	main := status.PodSpec.Containers[0]
 	require.Equal(t, pod.Containers[0].Command, main.Command)
 	require.Equal(t, pod.Containers[0].Args, main.Args)
+	env := make(map[string]corev1.EnvVar, len(main.Env))
+	for _, variable := range main.Env {
+		require.NotContains(t, env, variable.Name)
+		env[variable.Name] = variable
+	}
 	for name, value := range map[string]string{"Z_MODE": "kv", "MODE": "kv", "EMPTY": "", "ESCAPED": "$(MODE)", "LATER": "later"} {
-		require.Equal(t, v1beta1.EnvironmentValueStatus{Value: new(value)}, main.Env[name])
+		require.Equal(t, corev1.EnvVar{Name: name, Value: value}, env[name])
 	}
-	for _, name := range []string{"FORWARD", "TOKEN", "DERIVED", "CONFIG", "POD", "RANK"} {
-		require.Equal(t, v1beta1.EnvironmentValueStatus{Unresolved: true}, main.Env[name])
+	for _, index := range []int{5, 8, 9, 10, 11, 12} {
+		variable := pod.Containers[0].Env[index]
+		require.Equal(t, variable, env[variable.Name])
 	}
-	require.NotContains(t, main.Env, "GROVE_PCSG_POD_INDEX")
-	require.Equal(t, "round-robin", *status.Containers[1].Env["MODE"].Value)
+	require.NotContains(t, env, "GROVE_PCSG_POD_INDEX")
+	require.Equal(t, "round-robin", status.PodSpec.InitContainers[0].Env[0].Value)
 	require.Equal(t, original, pod)
 
 	t.Log("Editing the exported declarations must not mutate the workload")
-	status.Containers[0].Command[0] = "changed"
-	status.Containers[0].Args[0] = "changed"
+	status.PodSpec.Containers[0].Command[0] = "changed"
+	status.PodSpec.Containers[0].Args[0] = "changed"
+	env["TOKEN"].ValueFrom.SecretKeyRef.Key = "changed"
 	require.Equal(t, original, pod)
 }
 
@@ -70,12 +80,14 @@ func TestComponentRoleStatusBoundsRetainedExpansions(t *testing.T) {
 	for i := range 20 {
 		pod.Containers = append(pod.Containers, corev1.Container{Name: "container-" + strconv.Itoa(i), Env: env})
 	}
+	pod.InitContainers = pod.Containers[10:]
+	pod.Containers = pod.Containers[:10]
 	original := pod.DeepCopy()
 	status := ResolveComponentRoleStatus("main", pod)
 	data, err := json.Marshal(status)
 	require.NoError(t, err)
 	require.Less(t, len(data), maxComponentRoleStatusBytes)
-	require.True(t, status.Containers[19].Env["V18"].Unresolved)
+	require.Equal(t, env[18], status.PodSpec.InitContainers[9].Env[18])
 	require.Equal(t, original, pod)
 }
 
@@ -84,7 +96,7 @@ func TestBoundComponentRoleStatuses(t *testing.T) {
 	large := strings.Repeat("x", maxComponentRoleStatusBytes)
 	statuses := map[string]v1beta1.ComponentReplicaStatus{
 		"small": {Replicas: 2, Roles: []v1beta1.ComponentRoleStatus{{Name: "main"}}},
-		"large": {Replicas: 1, Roles: []v1beta1.ComponentRoleStatus{{Name: "main", Containers: []v1beta1.ComponentContainerStatus{{Name: "main", Env: map[string]v1beta1.EnvironmentValueStatus{"LARGE": {Value: &large}}}}}}},
+		"large": {Replicas: 1, Roles: []v1beta1.ComponentRoleStatus{{Name: "main", PodSpec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "LARGE", Value: large}}}}}}}},
 	}
 	BoundComponentRoleStatuses(statuses)
 	require.Nil(t, statuses["large"].Roles)

@@ -26,32 +26,50 @@ func ResolveComponentRoleStatus(name string, podSpec *corev1.PodSpec) v1beta1.Co
 }
 
 func resolveComponentRoleStatus(name string, podSpec *corev1.PodSpec, remaining *int) v1beta1.ComponentRoleStatus {
-	role := v1beta1.ComponentRoleStatus{Name: name}
-	for _, container := range slices.Concat(podSpec.Containers, podSpec.InitContainers) {
+	return v1beta1.ComponentRoleStatus{Name: name, PodSpec: corev1.PodSpec{
+		Containers:     resolveTargetContainers(podSpec.Containers, remaining),
+		InitContainers: resolveTargetContainers(podSpec.InitContainers, remaining),
+	}}
+}
+
+func resolveTargetContainers(containers []corev1.Container, remaining *int) []corev1.Container {
+	if len(containers) == 0 {
+		return nil
+	}
+
+	// Both native PodSpec lists share the retained expansion budget.
+	projected := make([]corev1.Container, 0, len(containers))
+	for _, container := range containers {
 		// Replay the actual final list, never the authored layers or a sorted map.
-		status := v1beta1.ComponentContainerStatus{
+		status := corev1.Container{
 			Name: container.Name, Image: container.Image,
 			Command: slices.Clone(container.Command), Args: slices.Clone(container.Args),
 		}
-		if len(container.Env) > 0 {
-			status.Env = make(map[string]v1beta1.EnvironmentValueStatus, len(container.Env))
-		}
 		values := semanticenv.Replay(container.Env)
-		for _, name := range slices.Sorted(maps.Keys(values)) {
-			value := values[name]
-			binding := v1beta1.EnvironmentValueStatus{Unresolved: true}
+		last := make(map[string]int, len(values))
+		for i, variable := range container.Env {
+			last[variable.Name] = i
+		}
+
+		// Preserve each final native binding and its source when evaluation is unavailable.
+		for i, variable := range container.Env {
+			if last[variable.Name] != i {
+				continue
+			}
+			binding := *variable.DeepCopy()
+			value := values[variable.Name]
 
 			// JSON escaping costs at most six bytes per input byte. Bound retained
 			// expansions across containers before allocating a serialization buffer.
 			if value.Known && len(value.Value) <= *remaining/6 {
-				binding = v1beta1.EnvironmentValueStatus{Value: new(value.Value)}
+				binding.Value = value.Value
 				*remaining -= 6 * len(value.Value)
 			}
-			status.Env[name] = binding
+			status.Env = append(status.Env, binding)
 		}
-		role.Containers = append(role.Containers, status)
+		projected = append(projected, status)
 	}
-	return role
+	return projected
 }
 
 // ResolveGroveComponentRoleStatuses projects final target templates using the

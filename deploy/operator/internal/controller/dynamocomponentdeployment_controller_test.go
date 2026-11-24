@@ -3237,11 +3237,11 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			}
 
 			t.Log("Publish target roles with generation acknowledgement even while readiness is false")
-			targetRoles := []v1beta1.ComponentRoleStatus{{Name: "main", Containers: []v1beta1.ComponentContainerStatus{{
-				Name: "main", Image: "engine:target", Env: map[string]v1beta1.EnvironmentValueStatus{
-					"EMPTY": {Value: new("")}, "POD_NAME": {Unresolved: true},
+			targetRoles := []v1beta1.ComponentRoleStatus{{Name: "main", PodSpec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "main", Image: "engine:target", Env: []corev1.EnvVar{
+					{Name: "EMPTY"}, {Name: "POD_NAME", Value: "$(PROVIDER_POD_NAME)"},
 				},
-			}}}}
+			}}}}}
 			tt.componentReconcileResult.serviceReplicaStatus.Roles = targetRoles
 			tt.wantServiceReplicaStatus.Roles = targetRoles
 			err = reconciler.setStatusConditionAndServiceReplicaStatus(ctx, dcd, tt.componentReconcileResult)

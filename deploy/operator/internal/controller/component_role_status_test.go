@@ -82,7 +82,7 @@ func TestDisaggregatedSetTargetRoleStatus(t *testing.T) {
 	err = applyDisaggregatedSetRoleStatuses(ds, disaggregatedset.Selection{ComponentToRole: map[string]string{"Prefill": "prefill"}}, statuses)
 	require.NoError(t, err)
 	require.Len(t, statuses["Prefill"].Roles, 2)
-	require.Equal(t, "leader:new", statuses["Prefill"].Roles[0].Containers[0].Image)
-	require.Equal(t, "worker:new", statuses["Prefill"].Roles[1].Containers[0].Image)
+	require.Equal(t, "leader:new", statuses["Prefill"].Roles[0].PodSpec.Containers[0].Image)
+	require.Equal(t, "worker:new", statuses["Prefill"].Roles[1].PodSpec.Containers[0].Image)
 	require.Equal(t, original, ds)
 }

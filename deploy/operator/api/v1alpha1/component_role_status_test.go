@@ -8,14 +8,16 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestComponentRoleStatusNativeConversion(t *testing.T) {
 	t.Log("Publish named roles, declared argv, known empty values, and unknown bindings")
-	roles := []v1beta1.ComponentRoleStatus{{Name: "worker", Containers: []v1beta1.ComponentContainerStatus{{
+	roles := []v1beta1.ComponentRoleStatus{{Name: "worker", PodSpec: corev1.PodSpec{Containers: []corev1.Container{{
 		Name: "main", Image: "engine:test", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"},
-		Env: map[string]v1beta1.EnvironmentValueStatus{"EMPTY": {Value: new("")}, "MODE": {Value: new("kv")}, "RANK": {Unresolved: true}},
-	}}}, {Name: "leader"}}
+		Env: []corev1.EnvVar{{Name: "EMPTY"}, {Name: "MODE", Value: "kv"}, {Name: "RANK", Value: "$(PROVIDER_RANK)"},
+			{Name: "POD", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}}},
+	}}, InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:test"}}}}, {Name: "leader"}}
 	dgd := &v1beta1.DynamoGraphDeployment{Status: v1beta1.DynamoGraphDeploymentStatus{ObservedGeneration: 7,
 		Components: map[string]v1beta1.ComponentReplicaStatus{"engine": {Roles: roles}},
 	}}

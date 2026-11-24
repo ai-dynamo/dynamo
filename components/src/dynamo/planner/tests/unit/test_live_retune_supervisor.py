@@ -2784,15 +2784,22 @@ def test_evaluate_spec_uses_only_current_target_launch_facts() -> None:
                 "roles": [
                     {
                         "name": "main",
-                        "containers": [
-                            {
-                                "name": "main",
-                                "image": "frontend:example",
-                                "command": ["python3", "-m", "dynamo.frontend"],
-                                "args": ["--router-mode", "kv"],
-                                "env": {"DYN_PARENT_DGD_K8S_NAME": {"value": DGD_NAME}},
-                            }
-                        ],
+                        "podSpec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "frontend:example",
+                                    "command": ["python3", "-m", "dynamo.frontend"],
+                                    "args": ["--router-mode", "kv"],
+                                    "env": [
+                                        {
+                                            "name": "DYN_PARENT_DGD_K8S_NAME",
+                                            "value": DGD_NAME,
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
                     }
                 ]
             },
@@ -2801,15 +2808,17 @@ def test_evaluate_spec_uses_only_current_target_launch_facts() -> None:
                 "roles": [
                     {
                         "name": "main",
-                        "containers": [
-                            {
-                                "name": "main",
-                                "image": "engine:example",
-                                "command": ["python3", "-m", "dynamo.vllm"],
-                                "args": [],
-                                "env": {},
-                            }
-                        ],
+                        "podSpec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "engine:example",
+                                    "command": ["python3", "-m", "dynamo.vllm"],
+                                    "args": [],
+                                    "env": [],
+                                }
+                            ]
+                        },
                     }
                 ],
             },
@@ -2839,9 +2848,9 @@ def test_evaluate_spec_uses_only_current_target_launch_facts() -> None:
 
     # Publish the target facts explicitly; the test never derives them from the spec.
     deployment["status"]["observedGeneration"] = 4
-    deployment["status"]["components"]["Frontend"]["roles"][0]["containers"][0]["env"][
-        "DYN_ROUTER_TEMPERATURE"
-    ] = {"value": "0.2"}
+    deployment["status"]["components"]["Frontend"]["roles"][0]["podSpec"]["containers"][
+        0
+    ]["env"].append({"name": "DYN_ROUTER_TEMPERATURE", "value": "0.2"})
     applied = bootstrap.evaluate_spec(
         deployment, config=config, k8s_namespace="ns", dynamo_namespace="dyn"
     )
