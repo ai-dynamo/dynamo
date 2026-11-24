@@ -233,6 +233,8 @@ navigation:
             path: pages/kubernetes/auto-deployment/auto-deploy-with-dgdr.md
           - page: Search with DGDR v1beta2
             path: pages/kubernetes/auto-deployment/dgdr-v1beta2.md
+          - page: Generate a DGD with AISimulate
+            path: pages/kubernetes/auto-deployment/aisimulate-dgd.mdx
           - page: Dynamo Profiler
             path: pages/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
@@ -1364,6 +1366,8 @@ navigation:
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
             path: pages/reference/components/profiler-configuration.mdx
+          - page: AISimulate DGD Output Adapter
+            path: pages/reference/components/aisimulate-dgd-output.md
           - page: Mocker CLI Reference
             path: pages/reference/components/mocker-cli-reference.mdx
           - page: DynoSim Replay CLI Reference
