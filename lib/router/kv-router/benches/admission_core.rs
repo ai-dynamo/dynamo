@@ -23,7 +23,9 @@
 //!   request, so the backlog is `backlog` keyed lanes that share one capacity answer.
 //! - `pinned`: every request is pinned to a worker, so the backlog is one lane per worker.
 //! - `classes`: four classes of weights 1:2:3:4 share the backlog and take deficit-round-robin
-//!   turns.
+//!   turns. One slot frees per cycle and the ring moves to the next class after every
+//!   dispatch, so the classes are served in turn whatever their weights: the case times a
+//!   backlog spread over four class queues, not weighted shares.
 //! - `constrained_lanes`: as `session_lanes`, but each session may run on one worker only, as a
 //!   caller allow-list, a LoRA, or a required taint restricts it. Such a lane has its own
 //!   capacity answer, so a worker that frees re-asks every one of them.
