@@ -37,6 +37,7 @@
 //! Run with: `cargo bench -p dynamo-kv-router --bench admission_core --features bench`
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -95,9 +96,10 @@ impl RequestClassifier for SessionLanes {
 }
 
 /// Holds every session whose id starts with `held`. With `wakes` it asks the queue to re-ask
-/// its held heads whenever a request completes.
+/// its held heads whenever a request completes, and counts the times it asked.
 struct HoldsHeldSessions {
     wakes: bool,
+    woke: AtomicU64,
     recheck: OnceLock<DispatchRecheck>,
 }
 
@@ -105,6 +107,7 @@ impl HoldsHeldSessions {
     fn new(wakes: bool) -> Arc<Self> {
         Arc::new(Self {
             wakes,
+            woke: AtomicU64::new(0),
             recheck: OnceLock::new(),
         })
     }
@@ -114,6 +117,7 @@ impl HoldsHeldSessions {
             && let Some(recheck) = self.recheck.get()
         {
             recheck.notify();
+            self.woke.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -253,6 +257,7 @@ struct Booked {
 struct Loaded {
     case: Case,
     scheduler: Arc<TestScheduler>,
+    gate: Option<Arc<HoldsHeldSessions>>,
     booked: VecDeque<Booked>,
     admitted_tx: mpsc::UnboundedSender<Booked>,
     admitted_rx: mpsc::UnboundedReceiver<Booked>,
@@ -275,7 +280,9 @@ impl Loaded {
         let cancel = CancellationToken::new();
         let (scheduler, config_tx) =
             local_test_scheduler(configs, case.profile(), BLOCK_SIZE, cancel.clone());
-        if let Some(classifier) = case.classifier() {
+        let classifier = case.classifier();
+        let gate = classifier.as_ref().and_then(|lanes| lanes.gate.clone());
+        if let Some(classifier) = classifier {
             assert!(scheduler.install_request_classifier(Box::new(classifier), cancel.clone()));
         }
 
@@ -283,6 +290,7 @@ impl Loaded {
         let mut loaded = Self {
             case,
             scheduler,
+            gate,
             booked: VecDeque::new(),
             admitted_tx,
             admitted_rx,
@@ -291,9 +299,10 @@ impl Loaded {
             _cancel: cancel,
         };
 
-        // Fill every worker, in worker order, so the bookings free in that order.
+        // Fill every worker, in worker order, so the bookings free in that order. A fill has a
+        // lifecycle where the case has a classifier, so its completion is an event like any other.
         for worker_id in 0..WORKERS {
-            let mut fill = request(format!("fill-{worker_id}"), false);
+            let mut fill = request(format!("fill-{worker_id}"), case.classified());
             fill.pinned_worker = Some(WorkerWithDpRank::new(worker_id, 0));
             loaded.submit(fill);
             let booked = loaded.admitted_rx.recv().await.expect("fill admitted");
@@ -404,6 +413,16 @@ fn bench_admission(c: &mut Criterion) {
             runtime.block_on(loaded.settle());
             let held = if case.holds_lanes() { 2 } else { 1 };
             assert_eq!(loaded.scheduler.pending_count() as u64, backlog * held);
+            // Without its wakes `gate_wake` is `gate_held`: each completion must reach the gate
+            // as `Completed`, and the gate must hold the scheduler's recheck handle. A name
+            // filter that skips the case still sets it up, and then no cycle ran.
+            if matches!(case, Case::GateWake) && loaded.sequence > backlog {
+                let gate = loaded.gate.as_ref().expect("gate_wake installs a gate");
+                assert!(
+                    gate.woke.load(Ordering::Relaxed) > 0,
+                    "no completion woke the queue"
+                );
+            }
         }
     }
     group.finish();
