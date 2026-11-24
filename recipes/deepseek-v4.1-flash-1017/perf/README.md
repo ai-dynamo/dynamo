@@ -22,7 +22,7 @@ for the variant to reproduce its published result.
 | `agg-b200-agentx` | `dsv41-flash-b200-agg` | 4 | 800 |
 | `disagg-b200-agentx` | `dsv41-flash-b200-disagg` | 28 | 6150 |
 | `agg-gb300-agentx` | `dsv41-flash-gb300-agg` | 4 | 1180 |
-| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 4 | 1200 |
+| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 4 | 1250 |
 
 tok/s/GPU is the total output tokens per second printed in the aiperf summary, divided by the GPU count. A point passes
 when decode p50 is at least 50 tok/s/user, TTFT p50 is under 2 s and errors are under 5%.
