@@ -4150,7 +4150,7 @@ from dynamo._core import StreamIncomplete
 </Accordion>
 
 <Accordion id="api-dynamo-core-transporttype" title="TransportType (class)">
-A read-only view of an instance's transport, wrapping the runtime ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp") and ``address`` is its (transport-specific) address. The address format is not a stable parse target.
+A read-only view of an instance's transport, wrapping the runtime ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp" / "direct") and ``address`` is its (transport-specific) address. The address format is not a stable parse target.
 
 ```python
 from dynamo._core import TransportType
