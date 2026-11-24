@@ -811,6 +811,7 @@ impl ModelWatcher {
                             self.migration_limit,
                             self.migration_max_seq_len,
                             self.metrics.clone(),
+                            false,
                         )
                         .context("PreprocessedRouting::build_preprocessed_pipeline")?;
                     Some(
@@ -906,6 +907,8 @@ impl ModelWatcher {
                         self.migration_limit,
                         self.migration_max_seq_len,
                         self.metrics.clone(),
+                        // The native body holds state only its format can rebuild.
+                        true,
                     )
                     .context("build generate (preprocessed) pipeline")?;
                 worker_set.generate_engine = Some(generate_engine);

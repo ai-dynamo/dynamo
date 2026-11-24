@@ -1513,6 +1513,16 @@ impl ModelDeploymentCard {
                     }
                 }
 
+                // A `/generate` format reads engine facts from the selected card,
+                // so workers that report different ones must not share a
+                // WorkerSet. Absent on existing deployments, whose checksums stay.
+                if let Some(info) = self.runtime_config.runtime_data.get(
+                    crate::local_model::runtime_config::GENERATE_ENGINE_INFO_RUNTIME_KEY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0generate_engine_info\0");
+                    bytes_to_hash.extend(info.to_string().as_bytes());
+                }
+
                 // Tower/connector LoRA changes vLLM's multimodal cache identity.
                 // Isolate such workers from the default/missing=false WorkerSet
                 // without changing checksums for existing deployments.

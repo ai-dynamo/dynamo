@@ -824,7 +824,7 @@ impl Model {
                         .card()
                         .runtime_config
                         .runtime_data
-                        .get(crate::generate_format::ENGINE_INFO_KEY)
+                        .get(crate::local_model::runtime_config::GENERATE_ENGINE_INFO_RUNTIME_KEY)
                         .cloned()
                         .unwrap_or_default(),
                 })

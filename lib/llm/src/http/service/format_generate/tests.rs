@@ -65,14 +65,6 @@ async fn streaming_events_preserve_native_json() {
             Ok(())
         }
 
-        fn migrate(
-            &mut self,
-            _: usize,
-            _: &mut crate::protocols::common::llm_backend::PreprocessedRequest,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
         fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
             Ok(None)
         }
