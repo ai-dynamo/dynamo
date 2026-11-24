@@ -689,6 +689,7 @@ func TestBuildSnapshotFailoverPod_Backends(t *testing.T) {
 func TestBuildColdStartFailoverPod_EngineEnvVars(t *testing.T) {
 	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Env = append(ps.Containers[0].Env, corev1.EnvVar{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)})
 	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
@@ -702,12 +703,22 @@ func TestBuildColdStartFailoverPod_EngineEnvVars(t *testing.T) {
 		assert.Equal(t, intraPodFailoverLockFile, env["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
 		assert.Equal(t, "notready", env["DYN_SYSTEM_STARTING_HEALTH_STATUS"], "engine-%d starting health", i)
 		assert.Equal(t, "true", env["DYN_SYSTEM_ENABLED"], "engine-%d system enabled", i)
+		assert.Equal(t, strconv.Itoa(commonconsts.DynamoFPMBasePort+i), env["DYN_FORWARDPASS_METRIC_PORT"], "engine-%d FPM port", i)
 
 		// Removed env vars should not be present
 		_, hasOldHealth := env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"]
 		assert.False(t, hasOldHealth, "engine-%d should not have DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", i)
 		_, hasHealthCheck := env["DYN_HEALTH_CHECK_ENABLED"]
 		assert.False(t, hasHealthCheck, "engine-%d should not have DYN_HEALTH_CHECK_ENABLED", i)
+	}
+}
+
+func TestBuildColdStartFailoverPod_NoFPMPortWithoutBasePort(t *testing.T) {
+	t.Log("A base without DYN_FORWARDPASS_METRIC_PORT (a vLLM --systemone-serial worker) keeps FPM off on every engine")
+	ps := intraPodFailoverPodSpec()
+	require.NoError(t, buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM))
+	for i := range failoverEngineCount {
+		assert.NotContains(t, envToMap(ps.Containers[i].Env), "DYN_FORWARDPASS_METRIC_PORT", "engine-%d", i)
 	}
 }
 

@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,13 @@ const (
 	// --data-parallel-backend (see the v0.26.0 `vllm serve` CLI reference).
 	dataParallelBackendShortFlag = "-dpb"
 	dataParallelBackendRay       = "ray"
+
+	// dynamo.vllm's opt-in to the qualified serialized decision profile. The
+	// worker rejects any forward-pass metrics setting while it is on.
+	systemOneSerialFlag         = "--systemone-serial"
+	noSystemOneSerialFlag       = "--no-systemone-serial"
+	systemOneSerialEnvVar       = "DYN_VLLM_SYSTEMONE_SERIAL"
+	forwardPassMetricPortEnvVar = "DYN_FORWARDPASS_METRIC_PORT"
 )
 
 type VLLMBackend struct {
@@ -35,6 +43,13 @@ type VLLMBackend struct {
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
+	// The worker rejects DYN_FORWARDPASS_METRIC_PORT under --systemone-serial,
+	// so drop the worker default for an opted-in worker. A port the user set
+	// stays, and the worker still rejects it at startup.
+	if isSystemOneSerialOptIn(container) && !userSetsEnvVar(component, forwardPassMetricPortEnvVar) {
+		removeEnvVar(container, forwardPassMetricPortEnvVar)
+	}
+
 	// The inter-pod GMS layout (with or without failover) requires the engine
 	// to load weights from the dedicated GMS weight-server pod rather than
 	// from disk.
@@ -125,6 +140,40 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	}
 
 	return nil
+}
+
+// isSystemOneSerialOptIn resolves --systemone-serial the way dynamo.vllm does:
+// the last --systemone-serial or --no-systemone-serial wins, and only without
+// either flag does DYN_VLLM_SYSTEMONE_SERIAL apply, with parse_bool's truthy
+// values. A value set through valueFrom cannot be read at render time, so it
+// does not count as opting in; the worker then fails at startup as before.
+func isSystemOneSerialOptIn(container *corev1.Container) bool {
+	for _, arg := range slices.Backward(getExpandedCommandLine(container)) {
+		switch arg {
+		case systemOneSerialFlag:
+			return true
+		case noSystemOneSerialFlag:
+			return false
+		}
+	}
+	env := findEnvVar(container.Env, systemOneSerialEnvVar)
+	return env != nil && env.ValueFrom == nil && isTruthyEnvValue(env.Value)
+}
+
+// isTruthyEnvValue matches the truthy values of dynamo's Python parse_bool.
+func isTruthyEnvValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
+// userSetsEnvVar reports whether the authored main container, which already
+// carries the graph-level spec.env, sets name.
+func userSetsEnvVar(component *v1beta1.DynamoComponentDeploymentSharedSpec, name string) bool {
+	main := GetMainContainer(component)
+	return main != nil && findEnvVar(main.Env, name) != nil
 }
 
 // ensureContainerCommandLineFlag adds one operator-owned flag while preserving
