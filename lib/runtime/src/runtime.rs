@@ -436,10 +436,25 @@ impl Runtime {
 
     pub(crate) async fn endpoint_registration_guard(
         &self,
-    ) -> anyhow::Result<tokio::sync::RwLockReadGuard<'_, ()>> {
-        let guard = self.endpoint_registration.read().await;
+    ) -> anyhow::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+        let guard = self.endpoint_registration.clone().read_owned().await;
         anyhow::ensure!(!self.is_shutting_down(), "runtime is shutting down");
         Ok(guard)
+    }
+
+    /// Own a discovery publication until its result is known, even if the
+    /// requesting HTTP client disconnects or a Python awaitable is cancelled.
+    pub(crate) async fn publish_endpoint_registration(
+        &self,
+        publish: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    ) -> anyhow::Result<()> {
+        let guard = self.endpoint_registration_guard().await?;
+        self.primary()
+            .spawn(async move {
+                let _guard = guard;
+                publish.await
+            })
+            .await?
     }
 
     /// Fence startup and resume registrations before discovery withdrawal.
@@ -704,15 +719,41 @@ mod tests {
     #[tokio::test]
     async fn shutdown_fences_registration_before_withdrawal() {
         let runtime = Runtime::from_current().unwrap();
-        let registration = runtime.endpoint_registration_guard().await.unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (finish, ack) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .publish_endpoint_registration(async move {
+                        entered.send(()).unwrap();
+                        ack.await?;
+                        Ok(())
+                    })
+                    .await
+            }
+        });
+        started.await.unwrap();
+        // HTTP disconnect and cancellation of the Python awaitable both drop
+        // this waiter while the remote registration may still commit.
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        // A short deadline can abandon the fence wait, but must never let
+        // another registration in or release the in-flight publication.
+        assert!(
+            tokio::time::timeout(Duration::ZERO, runtime.close_endpoint_registration())
+                .await
+                .is_err()
+        );
+        assert!(runtime.is_shutting_down());
+        assert!(runtime.endpoint_registration_guard().await.is_err());
         let close = runtime.close_endpoint_registration();
         tokio::pin!(close);
-        // An admitted registration must finish before withdrawal can start.
         assert!(futures::poll!(&mut close).is_pending());
-        assert!(runtime.is_shutting_down());
-        drop(registration);
+        finish
+            .send(())
+            .expect("the publication must survive its caller");
         close.await;
-        assert!(runtime.endpoint_registration_guard().await.is_err());
         // Fencing discovery must not interrupt admitted inference.
         assert!(!runtime.child_token().is_cancelled());
     }
