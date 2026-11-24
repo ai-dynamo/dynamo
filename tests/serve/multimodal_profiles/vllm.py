@@ -99,8 +99,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 # TODO: re-enable GPU-parallel scheduling with
                 # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
-                # First FP8 engine in a fresh CI pod: ~215s to /v1/models (cold
-                # torch.compile, DeepGEMM, FlashInfer caches); ~55s once warm.
                 timeout_s=360,
                 # agg_multimodal.sh's default, made explicit so the video
                 # decoder reservation below is added on top of it.
@@ -108,11 +106,17 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[
                     # Vanilla / baseline single-GPU multimodal smoke
                     # (HTTP-URL image, no frontend decoding).
-                    MmCase(payload=make_image_payload(["green"])),
+                    # TODO: remove these two pre_merge marks after the
+                    # requested CI timing run.
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        marks=[pytest.mark.pre_merge, pytest.mark.post_merge],
+                    ),
                     # Vanilla inline base64 path (no Rust frontend decode).
                     MmCase(
                         suffix="b64",
                         payload=make_image_payload_b64(["green"]),
+                        marks=[pytest.mark.pre_merge, pytest.mark.post_merge],
                     ),
                     # --frontend-decoding (HTTP-URL): exercises strip_inline_data_urls
                     # + NIXL RDMA. post_merge-only — local pre-merge builds outside
