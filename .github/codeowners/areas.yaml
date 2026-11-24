@@ -60,7 +60,6 @@ areas:
   - components/src/dynamo/thunderagent_router/
   - lib/kv-events/
   - lib/kv-events/src/zmq_wire/
-  - lib/kv-ledger/
   - lib/router/
   - lib/router/admission/
   - lib/router/kv-hints/

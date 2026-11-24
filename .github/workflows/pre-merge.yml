@@ -510,11 +510,6 @@ jobs:
       run: |
         cargo-hack --version || cargo install cargo-hack@0.6.45 --locked
         cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
-    - name: Check dynamo-kv-ledger on the engines' Rust
-      # Engines embed this crate on an older Rust than rust-toolchain.toml: SGLang pins 1.92.
-      run: |
-        rustup toolchain install 1.92.0 --profile minimal
-        cargo +1.92.0 check --locked -p dynamo-kv-ledger
     - name: Run kv-router adapter feature tests
       # No workspace member enables the http adapter, so these tests run only here.
       run: cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests

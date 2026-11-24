@@ -519,7 +519,6 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
-  - '**/clippy.toml'
   # Compiled into the native OpenAPI serializer/deserializer tests.
   - 'lib/llm/tests/fixtures/openapi/*.json'
   # Sidecar protobuf contracts are compiled by crate build scripts and need the

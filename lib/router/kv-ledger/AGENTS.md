@@ -1,4 +1,4 @@
-# lib/kv-ledger
+# lib/router/kv-ledger
 
 `dynamo-kv-ledger` is one KV cache event stream as a replay window and a block ledger. `LocalKvIndexer` in `lib/router/kv-indexer/src/local.rs` runs on it, and engines embed it. The contract is in the crate docs (`src/lib.rs`).
 
