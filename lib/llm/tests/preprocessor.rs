@@ -811,7 +811,7 @@ mod cached_multimodal_uuid {
 
     #[tokio::test]
     async fn drops_url_backed_client_uuid_by_default() {
-        let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1EAAAAASUVORK5CYII=";
+        let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         let messages = serde_json::json!([{
             "role": "user",
             "content": [{"type": "image_url", "image_url": {"url": image_url}, "uuid": "client-image"}]
