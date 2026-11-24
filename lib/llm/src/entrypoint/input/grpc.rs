@@ -9,13 +9,13 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
-    http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
+use dynamo_http_server::metrics::Metrics;
 use dynamo_runtime::DistributedRuntime;
 
 /// Build and run an KServe gRPC service

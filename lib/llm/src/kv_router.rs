@@ -1983,7 +1983,7 @@ mod tests {
         assert!(error.downcast_ref::<UnknownPolicyClassRefusal>().is_some());
         assert_eq!(error.to_string(), dynamo_error.to_string());
         assert_eq!(
-            crate::http::service::error::find_canonical_error_in_chain(error.as_ref()),
+            dynamo_error::http::find_canonical_error_in_chain(error.as_ref()),
             Some(dynamo_error)
         );
     }
@@ -1996,7 +1996,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
         assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
         assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
-        assert!(crate::http::service::metrics::request_deadline_exceeded(
+        assert!(dynamo_http_server::metrics::request_deadline_exceeded(
             &decoded
         ));
     }
