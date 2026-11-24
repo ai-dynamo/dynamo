@@ -375,8 +375,7 @@ There are three main production indexer shapes. This section maps deployment sce
 ### When to use each
 
 **`RadixTree` (non-concurrent)**
-- Never use on the router/scheduler side.
-- Also useful in unit tests where you want a simple, deterministic index.
+- Useful in unit tests where you want a simple, deterministic index.
 
 **`ThreadPoolIndexer<ConcurrentRadixTreeCompressed>`**
 - The default. Start here.

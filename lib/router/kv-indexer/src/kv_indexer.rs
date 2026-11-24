@@ -778,12 +778,6 @@ impl KvIndexer {
             .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
-    /// Test hook: the dump-request channel, so tests can observe snapshot coalescing.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
-        self.dump_tx.clone()
-    }
-
     /// Test hook: reserve every mutation-queue slot; the queue stays full until the guard drops.
     #[cfg(any(test, feature = "testing"))]
     pub async fn saturate_mutation_queue_for_test(&self) -> impl Send + '_ {

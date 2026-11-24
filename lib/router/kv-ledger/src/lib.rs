@@ -10,7 +10,7 @@
 //!
 //! | The host serves | It calls |
 //! |---|---|
-//! | the live stream | [`Replay::apply`], then publishes the batch it passed in |
+//! | the live stream | [`Replay::apply`] with a copy of each batch it publishes |
 //! | replay from a sequence | [`Replay::since`] |
 //! | a copy of the state, then the batches after it | [`Replay::cut`] and [`Replay::tail`] |
 //!

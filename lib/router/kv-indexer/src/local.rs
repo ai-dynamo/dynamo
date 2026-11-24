@@ -18,27 +18,11 @@ use crate::prelude::*;
 /// and token hash for a block, because an engine can describe one block differently per tier.
 type Residency = FxHashMap<(ResidencyOwner, StorageTier), Ledger<u64>>;
 
-/// A copy of the residency and the tree dump built from it. Requesters that arrive while the
-/// copy's cut is open clone the one dump.
-struct Dump {
-    /// Taken by the build, so the copy is freed as soon as the events exist.
-    residency: parking_lot::Mutex<Option<Residency>>,
-    events: OnceLock<Vec<RouterEvent>>,
-}
-
-impl Dump {
-    fn events(&self) -> &[RouterEvent] {
-        self.events.get_or_init(|| {
-            let residency = self.residency.lock().take();
-            dump_events(&residency.expect("the build that sets the events takes the copy"))
-        })
-    }
-}
-
 struct Inner {
     replay: Replay<RouterEvent, Residency>,
-    /// The dump for the replay's open cut.
-    dump: Option<Arc<Dump>>,
+    /// The tree dump of the replay's open cut, set when its build finishes. Requesters that
+    /// arrive while the cut is open clone the one dump.
+    dump: Option<Arc<OnceLock<Vec<RouterEvent>>>>,
 }
 
 /// One rank publisher's recent events and current residency, kept on the worker so a router
@@ -149,26 +133,32 @@ impl LocalKvIndexer {
         // its cut is still open. The gate goes into the build task, so a requester that goes
         // away does not let a second build start beside the one it left running.
         let one_build = self.dump_gate.clone().lock_owned().await;
-        let (dump, tail, last_event_id) = {
+        let (dump, copy, tail, last_event_id) = {
             let mut inner = self.inner.lock();
             let shared = match (&inner.dump, inner.replay.tail()) {
-                (Some(dump), Some(tail)) => Some((dump.clone(), tail.cloned().collect())),
+                // The gate is held, so no build is running: an unset dump is one whose build
+                // did not finish, and it is replaced.
+                (Some(dump), Some(tail)) if dump.get().is_some() => {
+                    Some((dump.clone(), tail.cloned().collect()))
+                }
                 _ => None,
             };
-            let (dump, tail) = shared.unwrap_or_else(|| {
-                // The residency is copied here, under the lock, so the dump is an exact cut
-                // at its last event id. Turning it into events is left to the blocking pool.
-                #[cfg(test)]
-                self.dump_builds
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let dump = Arc::new(Dump {
-                    residency: parking_lot::Mutex::new(Some(inner.replay.cut().clone())),
-                    events: OnceLock::new(),
-                });
-                inner.dump = Some(dump.clone());
-                (dump, Vec::new())
-            });
-            (dump, tail, inner.replay.last_seq().unwrap_or(0))
+            let (dump, copy, tail) = match shared {
+                Some((dump, tail)) => (dump, None, tail),
+                None => {
+                    // The residency is copied here, under the lock, so the dump is an exact
+                    // cut at its last event id. Turning it into events is left to the
+                    // blocking pool.
+                    #[cfg(test)]
+                    self.dump_builds
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let copy = inner.replay.cut().clone();
+                    let dump = Arc::new(OnceLock::new());
+                    inner.dump = Some(dump.clone());
+                    (dump, Some(copy), Vec::new())
+                }
+            };
+            (dump, copy, tail, inner.replay.last_seq().unwrap_or(0))
         };
         #[cfg(test)]
         {
@@ -179,8 +169,22 @@ impl LocalKvIndexer {
         }
 
         let built = tokio::task::spawn_blocking(move || {
-            let _one_build = one_build;
-            let dumped = dump.events();
+            let dumped = match copy {
+                Some(residency) => {
+                    let events = dump_events(&residency);
+                    tracing::info!(
+                        event_count = events.len(),
+                        last_event_id,
+                        "Built recovery dump"
+                    );
+                    // Unset until here: the gate admits one build, and this dump is new.
+                    dump.get_or_init(|| events)
+                }
+                None => dump.get().expect("a shared dump was set when it was found"),
+            };
+            // The copy of the residency is freed. Requesters that share this dump from here
+            // on copy it side by side.
+            drop(one_build);
             let mut events = Vec::with_capacity(dumped.len() + tail.len());
             events.extend_from_slice(dumped);
             events.extend(tail);
@@ -585,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lower_tier_events_are_buffered_without_touching_primary_index() {
+    async fn lower_tier_events_are_buffered_and_dumped_on_their_own_tier() {
         let indexer = make_indexer();
         let event = lower_tier_store_event(7, 0, 1, 900, 11, 101, StorageTier::HostPinned);
 

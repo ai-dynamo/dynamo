@@ -6,8 +6,6 @@
 use std::collections::VecDeque;
 
 /// A dense run of batches `[oldest, next)`, bounded by count.
-///
-/// `B` is whatever the host publishes, so replay hands back the same object the live path sent.
 pub(crate) struct History<B> {
     batches: VecDeque<B>,
     oldest: u64,

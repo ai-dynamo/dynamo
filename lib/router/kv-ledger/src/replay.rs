@@ -81,7 +81,7 @@ impl<B, S> Replay<B, S> {
         batch: B,
         fold: impl FnOnce(&B, &mut S) -> Effect,
     ) -> Applied {
-        let expected = self.last_seq.map(|last| last.wrapping_add(1));
+        let expected = self.last_seq.map(|last| last + 1);
         let in_order = expected.is_none_or(|expected| expected == seq);
         let effect = fold(&batch, &mut self.state);
 
@@ -104,8 +104,8 @@ impl<B, S> Replay<B, S> {
         }
     }
 
-    /// The retained batches from `from_seq` on, or `None` when the window no longer reaches
-    /// back that far.
+    /// The retained batches from `from_seq` on, which is an empty iterator when `from_seq` is
+    /// past the newest batch. `None` when the window no longer reaches back that far.
     pub fn since(&self, from_seq: u64) -> Option<impl Iterator<Item = &B>> {
         self.history.since(from_seq)
     }

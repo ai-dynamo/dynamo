@@ -115,8 +115,8 @@ impl<T: Copy> Ledger<T> {
                 roots.push(at as u32);
                 continue;
             };
-            // Blocks stored together sit together, so the parent is usually in the next slot
-            // and needs no lookup. A hash is held once, so a neighbour with the parent's hash
+            // Blocks stored together sit together, so the parent is usually in a neighbouring
+            // slot and needs no lookup. A hash is held once, so a neighbour with the parent's hash
             // is the parent.
             let holds_parent =
                 |slot: usize| matches!(self.slots.get(slot), Some(&(hash, _)) if hash == parent);

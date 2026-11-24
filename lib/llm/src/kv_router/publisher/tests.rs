@@ -2248,7 +2248,7 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
-    async fn recovery_barrier_waits_for_the_index_like_live_ingestion() {
+    async fn recovery_barrier_flushes_pending_events_into_the_local_index() {
         use dynamo_kv_indexer::host::{LocalKvIndexer, WorkerKvQueryResponse};
         for is_unreachable in [false, true] {
             let indexer = Arc::new(LocalKvIndexer::new(16));
