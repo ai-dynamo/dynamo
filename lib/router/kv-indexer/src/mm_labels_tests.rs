@@ -32,6 +32,10 @@ const B: u64 = 2;
 /// Routing labels: Dynamo's per-item hash, e.g. of an image URL.
 const LABEL_U: u64 = 0x9e37_79b9_7f4a_7c15;
 const LABEL_V: u64 = 0x0123_4567_89ab_cdef;
+const ENGINE_SALT_X: &str =
+    "sglang-mm-v1:0000000000000000000000000000000000000000000000000000000000000001";
+const ENGINE_SALT_Y: &str =
+    "sglang-mm-v1:0000000000000000000000000000000000000000000000000000000000000002";
 
 /// SGLang pad values for two different images (four 62-bit values each).
 const IMAGE_X: [u64; 4] = [
@@ -75,6 +79,10 @@ struct WireStored {
     token_ids: Vec<u64>,
     block_size: usize,
     lora_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_salt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_cache_salt: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     medium: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,6 +140,8 @@ fn stored_on(parent: Option<u64>, blocks: &[Block], medium: Option<&'static str>
             .collect(),
         block_size: BLOCK,
         lora_id: None,
+        cache_salt: None,
+        user_cache_salt: None,
         medium,
         mm_routing_spans: any_spans.then(|| {
             blocks
@@ -226,6 +236,13 @@ fn is_noop(event: &PlacementEvent) -> bool {
 }
 
 fn request_hashes(blocks: &[Vec<u64>]) -> Vec<LocalBlockHash> {
+    request_hashes_in_namespace(blocks, None)
+}
+
+fn request_hashes_in_namespace(
+    blocks: &[Vec<u64>],
+    cache_namespace: Option<&str>,
+) -> Vec<LocalBlockHash> {
     let tokens: Vec<u32> = blocks
         .concat()
         .into_iter()
@@ -238,7 +255,7 @@ fn request_hashes(blocks: &[Vec<u64>]) -> Vec<LocalBlockHash> {
             block_mm_infos: None,
             lora_name: None,
             is_eagle: None,
-            cache_namespace: None,
+            cache_namespace,
         },
     )
 }
@@ -330,7 +347,7 @@ fn invalid_or_overflowing_labels_leave_media_unmapped() {
         let event = run(&mut normalizer, A, 1, Wire::Stored(wire));
         let store = store_data(&event).expect("text prefix survives an unusable label");
         assert_eq!(store.blocks.len(), 1, "{label}");
-        assert_eq!(store.blocks[0].block_hash.0, E_T);
+        assert_eq!(store.blocks[0].tokens_hash, request(LABEL_U)[0]);
         let evict = run(&mut normalizer, A, 2, removed(&[E_IX, E_KX]));
         assert!(is_noop(&evict), "{label}");
     }
@@ -349,15 +366,17 @@ fn labeled_image_block_hashes_match_the_request_side() {
     let local: Vec<LocalBlockHash> = store.blocks.iter().map(|block| block.tokens_hash).collect();
     assert_eq!(local, request(LABEL_U));
 
-    // The text block keeps SGLang's id; the image chain gets Dynamo-owned ids.
-    let d_image = compute_next_seq_hash(E_T, local[1]);
+    // Text prefixes also need canonical ids: SGLang salts every native id.
+    let d_text = store.blocks[0].block_hash.0;
+    assert_ne!(d_text, E_T);
+    let d_image = compute_next_seq_hash(d_text, local[1]);
     let d_after = compute_next_seq_hash(d_image, local[2]);
     let ids: Vec<u64> = store
         .blocks
         .iter()
         .map(|block| block.block_hash.0)
         .collect();
-    assert_eq!(ids, vec![E_T, d_image, d_after]);
+    assert_eq!(ids, vec![d_text, d_image, d_after]);
     assert_eq!(store.parent_hash, None);
 }
 
@@ -521,16 +540,24 @@ async fn alias_on_one_worker_is_reference_counted() {
 }
 
 /// The id map never evicts a live mapping. When it is full, a new multimodal
-/// chain is excluded like an unmapped one, its text prefix still routes, and
+/// chain is excluded like an unmapped one, an existing text prefix still routes, and
 /// it is mapped once capacity frees up.
 #[tokio::test]
 async fn full_id_map_falls_back_to_exclusion_without_evicting() {
     let mut normalizer = labeled_normalizer()
         .with_engine_mm_excluded_capacity(1 << 10)
-        .with_engine_mm_id_capacity(2);
+        .with_engine_mm_id_capacity(4);
     let mut indexes = Indexes::new();
 
-    // X under U fills the map: its image block and the text block after it.
+    let prefix = run(
+        &mut normalizer,
+        B,
+        1,
+        stored(None, &[block(E_T, text(100), vec![])]),
+    );
+    indexes.apply(B, &prefix).await;
+
+    // A's three blocks plus B's existing text prefix fill the map.
     let a = run(
         &mut normalizer,
         A,
@@ -539,16 +566,14 @@ async fn full_id_map_falls_back_to_exclusion_without_evicting() {
     );
     indexes.apply(A, &a).await;
 
-    // Y under V needs two more mappings: excluded, text prefix kept.
+    // Y under V needs two more mappings; its existing prefix stays indexed.
     let b = run(
         &mut normalizer,
         B,
-        1,
+        2,
         image_request_store(IMAGE_Y, LABEL_V, [E_T, E_IY, E_KY]),
     );
-    let store = store_data(&b).expect("text prefix still published");
-    assert_eq!(store.blocks.len(), 1);
-    assert_eq!(store.blocks[0].block_hash.0, E_T);
+    assert!(is_noop(&b));
     indexes.apply(B, &b).await;
     assert_eq!(indexes.scores(&request(LABEL_U), &[A, B]).await, vec![3, 1]);
     assert_eq!(indexes.scores(&request(LABEL_V), &[A, B]).await, vec![1, 1]);
@@ -557,13 +582,13 @@ async fn full_id_map_falls_back_to_exclusion_without_evicting() {
     // (nothing reaches the index) and stores Y again: now it is mapped.
     let a_evict = run(&mut normalizer, A, 2, removed(&[E_IX, E_KX]));
     indexes.apply(A, &a_evict).await;
-    let b_evict = run(&mut normalizer, B, 2, removed(&[E_IY, E_KY]));
+    let b_evict = run(&mut normalizer, B, 3, removed(&[E_IY, E_KY]));
     assert!(is_noop(&b_evict));
     indexes.apply(B, &b_evict).await;
     let b_again = run(
         &mut normalizer,
         B,
-        3,
+        4,
         image_request_store(IMAGE_Y, LABEL_V, [E_T, E_IY, E_KY]),
     );
     indexes.apply(B, &b_again).await;
@@ -715,13 +740,14 @@ async fn relabeled_engine_block_keeps_the_first_mapping() {
 
 #[test]
 fn cleared_releases_mapping_capacity() {
-    let mut normalizer = labeled_normalizer().with_engine_mm_id_capacity(2);
-    run(
+    let mut normalizer = labeled_normalizer().with_engine_mm_id_capacity(3);
+    let initial = run(
         &mut normalizer,
         A,
         1,
         image_request_store(IMAGE_X, LABEL_U, [E_T, E_IX, E_KX]),
     );
+    assert_eq!(store_data(&initial).unwrap().blocks.len(), 3);
     let cleared = run(
         &mut normalizer,
         A,
@@ -744,7 +770,10 @@ fn cleared_releases_mapping_capacity() {
         1,
         image_request_store(IMAGE_Y, LABEL_U, [E_T, E_IY, E_KY]),
     );
-    assert_eq!(store_data(&other).unwrap().blocks.len(), 1);
+    assert!(
+        is_noop(&other),
+        "all mappings, including text, consume capacity"
+    );
 }
 
 #[test]
@@ -871,6 +900,41 @@ fn mapped_suffix_with_a_forgotten_parent_keeps_its_eviction_identity() {
 }
 
 #[tokio::test]
+async fn unknown_parent_chain_is_excluded_until_replayed_from_root() {
+    let mut normalizer = labeled_normalizer();
+    let mut indexes = Indexes::new();
+    let child = || stored(Some(E_T), &[block(E_IX, text(300), vec![])]);
+    let query = request_hashes(&[text(100), text(300)]);
+    for (i, wire) in [
+        child(),
+        stored(Some(E_IX), &[block(E_KX, text(500), vec![])]),
+        removed(&[E_IX, E_KX]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let event = run(&mut normalizer, A, i as u64 + 1, wire);
+        assert!(is_noop(&event));
+        indexes.apply(A, &event).await;
+    }
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
+
+    let root = run(
+        &mut normalizer,
+        A,
+        4,
+        stored(None, &[block(E_T, text(100), vec![])]),
+    );
+    indexes.apply(A, &root).await;
+    let replay = run(&mut normalizer, A, 5, child());
+    indexes.apply(A, &replay).await;
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![2]);
+    let evict = run(&mut normalizer, A, 6, removed(&[E_IX, E_T]));
+    indexes.apply(A, &evict).await;
+    assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
+}
+
+#[tokio::test]
 async fn host_continuation_uses_the_gpu_parents_routing_identity() {
     let mut normalizer = labeled_normalizer();
     let mut indexes = Indexes::new();
@@ -981,7 +1045,7 @@ fn unflagged_source_excludes_wide_blocks_and_their_descendants() {
 }
 
 #[test]
-fn text_only_events_are_unchanged() {
+fn text_only_events_preserve_hashes_and_translate_evictions() {
     let mut labeled = labeled_normalizer();
     let mut plain = ZmqEventNormalizer::new(BLOCK as u32);
     let wire = || {
@@ -994,8 +1058,36 @@ fn text_only_events_are_unchanged() {
         )
     };
     let with_flag = run(&mut labeled, A, 1, wire());
-    let without_flag = run(&mut plain, A, 1, wire());
-    assert_eq!(with_flag.event, without_flag.event);
+    let mut without_flag = run(&mut plain, A, 1, wire());
+    let mapped = store_data(&with_flag).unwrap();
+    let KvCacheEventData::Stored(native) = &mut without_flag.event.data else {
+        panic!("text store");
+    };
+    assert_eq!(
+        native
+            .blocks
+            .iter()
+            .map(|block| block.block_hash.0)
+            .collect::<Vec<_>>(),
+        vec![E_T, E_KX]
+    );
+    for (native, mapped) in native.blocks.iter_mut().zip(&mapped.blocks) {
+        assert_ne!(native.block_hash, mapped.block_hash);
+        native.block_hash = mapped.block_hash;
+    }
+    assert_eq!(
+        with_flag.event, without_flag.event,
+        "only external ids change"
+    );
+    let evict = run(&mut labeled, A, 2, removed(&[E_T, E_KX]));
+    assert_eq!(
+        removed_ids(&evict),
+        mapped
+            .blocks
+            .iter()
+            .map(|block| block.block_hash.0)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// SGLang's label registry is bounded, so a later store of a cached block can
@@ -1080,5 +1172,137 @@ async fn readmitted_block_is_mapped() {
             indexes.apply(A, &child).await;
             assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![3]);
         }
+    }
+}
+
+fn with_sglang_salts(wire: Wire, engine: Option<&str>, caller: Option<&str>) -> Wire {
+    let Wire::Stored(mut store) = wire else {
+        unreachable!("salts belong to stores");
+    };
+    store.cache_salt = engine.map(str::to_owned);
+    store.user_cache_salt = Some(caller.map(str::to_owned));
+    Wire::Stored(store)
+}
+
+#[tokio::test]
+async fn caller_namespace_text_prefix_aliases_survive_eviction_and_clear() {
+    for caller in [None, Some("tenant-a")] {
+        // A text node can be stored before its request's image node. Its native
+        // id still includes the request's full internal multimodal salt.
+        for first_is_plain_text in [false, true] {
+            let mut normalizer = labeled_normalizer();
+            let mut indexes = Indexes::new();
+            let query = request_hashes_in_namespace(&[text(100)], caller);
+            let first_salt = if first_is_plain_text {
+                caller
+            } else {
+                Some(ENGINE_SALT_X)
+            };
+            let first = run(
+                &mut normalizer,
+                A,
+                1,
+                with_sglang_salts(
+                    stored(None, &[block(E_T, text(100), vec![])]),
+                    first_salt,
+                    caller,
+                ),
+            );
+            let second = run(
+                &mut normalizer,
+                A,
+                2,
+                with_sglang_salts(
+                    stored(None, &[block(E_IY, text(100), vec![])]),
+                    Some(ENGINE_SALT_Y),
+                    caller,
+                ),
+            );
+            indexes.apply(A, &first).await;
+            indexes.apply(A, &second).await;
+            assert_eq!(
+                indexes.scores(&query, &[A]).await,
+                vec![1],
+                "caller={caller:?}, plain={first_is_plain_text}"
+            );
+            let first_evict = run(&mut normalizer, A, 3, removed(&[E_T]));
+            indexes.apply(A, &first_evict).await;
+            assert_eq!(
+                indexes.scores(&query, &[A]).await,
+                vec![1],
+                "remaining text alias must stay resident"
+            );
+            let second_evict = run(&mut normalizer, A, 4, removed(&[E_IY]));
+            indexes.apply(A, &second_evict).await;
+            assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
+
+            let again = || {
+                with_sglang_salts(
+                    stored(None, &[block(E_T, text(100), vec![])]),
+                    first_salt,
+                    caller,
+                )
+            };
+            let store = run(&mut normalizer, A, 5, again());
+            indexes.apply(A, &store).await;
+            let clear = run(&mut normalizer, A, 6, cleared());
+            indexes.apply(A, &clear).await;
+            assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
+            let store = run(&mut normalizer, A, 7, again());
+            indexes.apply(A, &store).await;
+            assert_eq!(indexes.scores(&query, &[A]).await, vec![1]);
+            let evict = run(&mut normalizer, A, 8, removed(&[E_T]));
+            indexes.apply(A, &evict).await;
+            assert_eq!(indexes.scores(&query, &[A]).await, vec![0]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn caller_namespace_image_aliases_route_and_evict_across_workers() {
+    for caller in [None, Some("tenant-a")] {
+        let mut normalizer = labeled_normalizer();
+        let mut indexes = Indexes::new();
+        let tokens = [text(100), routing_pad(LABEL_U, BLOCK), text(300)];
+        let query = request_hashes_in_namespace(&tokens, caller);
+        let other_namespace = request_hashes_in_namespace(&tokens, Some("tenant-b"));
+        let first = run(
+            &mut normalizer,
+            A,
+            1,
+            with_sglang_salts(
+                image_request_store(IMAGE_X, LABEL_U, [E_T, E_IX, E_KX]),
+                Some(ENGINE_SALT_X),
+                caller,
+            ),
+        );
+        // Even the leading text block gets a different native id when the
+        // same URL resolves to another image and SGLang changes its full salt.
+        let second_text_id = E_T + 1;
+        let second = run(
+            &mut normalizer,
+            B,
+            1,
+            with_sglang_salts(
+                image_request_store(IMAGE_Y, LABEL_U, [second_text_id, E_IY, E_KY]),
+                Some(ENGINE_SALT_Y),
+                caller,
+            ),
+        );
+        indexes.apply(A, &first).await;
+        indexes.apply(B, &second).await;
+        assert_eq!(indexes.scores(&query, &[A, B]).await, vec![3, 3]);
+        assert_eq!(indexes.scores(&other_namespace, &[A, B]).await, vec![0, 0]);
+        let evict = run(
+            &mut normalizer,
+            B,
+            2,
+            removed(&[E_KY, E_IY, second_text_id]),
+        );
+        indexes.apply(B, &evict).await;
+        assert_eq!(indexes.scores(&query, &[A, B]).await, vec![3, 0]);
+        let evict = run(&mut normalizer, A, 2, removed(&[E_KX, E_IX, E_T]));
+        indexes.apply(A, &evict).await;
+        assert_eq!(indexes.scores(&query, &[A, B]).await, vec![0, 0]);
     }
 }

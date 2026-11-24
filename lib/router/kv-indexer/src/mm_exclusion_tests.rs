@@ -235,7 +235,12 @@ async fn image_is_excluded_with_its_descendants() {
         );
         let store = store_data(&event).expect("text prefix still published");
         assert_eq!(store.blocks.len(), 1);
-        assert_eq!(store.blocks[0].block_hash.0, E_T);
+        let text_id = store.blocks[0].block_hash.0;
+        if engine_owned {
+            assert_ne!(text_id, E_T);
+        } else {
+            assert_eq!(text_id, E_T);
+        }
         indexes.apply(A, &event).await;
 
         // A later store chained under the excluded block is dropped too.
@@ -249,7 +254,7 @@ async fn image_is_excluded_with_its_descendants() {
 
         // Removals of excluded blocks never reach the index.
         let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, 0xc0de, E_T]));
-        assert_eq!(removed_ids(&evict), vec![E_T]);
+        assert_eq!(removed_ids(&evict), vec![text_id]);
         assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
         indexes.apply(A, &evict).await;
 
@@ -316,9 +321,13 @@ async fn exclusion_overflow_preserves_the_relay_source_and_text_evictions() {
         continuation(),
         stored(None, &[block(6, text(700))]),
     ];
+    let mut text_ids = Vec::new();
     for (i, wire) in wires.into_iter().enumerate() {
         let event = run(&mut normalizer, A, i as u64 + 1, wire);
         assert_eq!(is_noop(&event), (2..=4).contains(&i));
+        if let Some(store) = store_data(&event) {
+            text_ids.extend(store.blocks.iter().map(|block| block.block_hash.0));
+        }
         indexes.apply(A, &event).await;
         assert_eq!(
             relay.apply_event(router_event(A, &event)).first_error(),
@@ -335,7 +344,10 @@ async fn exclusion_overflow_preserves_the_relay_source_and_text_evictions() {
     // Unknown image removals must not hide evictions of text indexed before
     // overflow, including the continuation whose replay was suppressed.
     let evict = run(&mut normalizer, A, 7, removed(&[E_IX, 4, 5, E_KX, E_T, 6]));
-    assert_eq!(removed_ids(&evict), vec![4, 5, E_KX, E_T, 6]);
+    assert_eq!(
+        removed_ids(&evict),
+        vec![4, 5, text_ids[1], text_ids[0], text_ids[2]]
+    );
     let event = router_event(A, &evict);
     assert_eq!(relay.apply_event(event.clone()).first_error(), None);
     assert_eq!(
@@ -390,6 +402,7 @@ async fn malformed_multimodal_stores_do_not_suppress_text_eviction() {
             1,
             stored(None, &[block(E_T, text(100))]),
         );
+        let text_id = store_data(&text_store).unwrap().blocks[0].block_hash.0;
         indexes.apply(A, &text_store).await;
         let malformed = if excluded_parent {
             run(
@@ -421,7 +434,7 @@ async fn malformed_multimodal_stores_do_not_suppress_text_eviction() {
         indexes.apply(A, &rejected).await;
         assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
         let evict = run(&mut normalizer, A, 4, removed(&[E_T]));
-        assert_eq!(removed_ids(&evict), vec![E_T]);
+        assert_eq!(removed_ids(&evict), vec![text_id]);
         indexes.apply(A, &evict).await;
         assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![0]);
     }
@@ -481,7 +494,11 @@ fn eagle_overlap_token_is_classified_with_the_preceding_block() {
         );
         let store = store_data(&event).expect("text block published");
         assert_eq!(store.blocks.len(), 1, "engine_owned={engine_owned}");
-        assert_eq!(store.blocks[0].block_hash.0, E_T);
+        if engine_owned {
+            assert_ne!(store.blocks[0].block_hash.0, E_T);
+        } else {
+            assert_eq!(store.blocks[0].block_hash.0, E_T);
+        }
         assert_eq!(
             store.blocks[0].tokens_hash,
             hashes(&after_overlap[..=BLOCK], true)[0],

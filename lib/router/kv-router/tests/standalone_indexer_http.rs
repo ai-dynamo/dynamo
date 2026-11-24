@@ -567,6 +567,7 @@ fn raw_block_stored(
         medium: Some(medium.to_string()),
         lora_name: None,
         cache_namespace: None,
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,

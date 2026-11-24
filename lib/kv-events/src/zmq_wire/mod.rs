@@ -171,7 +171,7 @@ impl ZmqEventNormalizer {
 
     /// Mark this source as deriving multimodal pad values from engine
     /// identities (sgl-project/sglang#43043): labeled spans map to Dynamo routing
-    /// pads and multimodal chains get Dynamo-owned ids. Other multimodal values
+    /// pads and all indexed chains get Dynamo-owned ids. Other multimodal values
     /// and their following blocks are excluded. Unflagged sources exclude only
     /// values that did not fit in `u32`.
     pub fn with_engine_owned_mm_identity(mut self, enabled: bool) -> Self {
@@ -348,14 +348,11 @@ impl ZmqEventNormalizer {
             RawKvEvent::BlockStored { .. } => {
                 // An excluded store still yields an event so the event id is
                 // not mistaken for an engine-side drop.
-                let Some(prepared) = self.engine_mm.prepare_store(&mut raw, worker, tier) else {
+                if !self.engine_mm.prepare_store(&mut raw, worker, tier) {
                     return Some(empty_removal(event_id, worker, tier));
-                };
+                }
                 let mut event = convert(raw)?;
-                if !self
-                    .engine_mm
-                    .translate_store(&mut event, &prepared, worker, tier)
-                {
+                if !self.engine_mm.translate_store(&mut event, worker, tier) {
                     return Some(empty_removal(event_id, worker, tier));
                 }
                 Some(event)
@@ -453,8 +450,11 @@ impl ZmqEventNormalizer {
                 block_hashes,
                 parent_block_hash,
                 cache_namespace,
+                user_cache_salt,
                 ..
             } => {
+                let explicit_namespace = user_cache_salt.is_some();
+                let cache_namespace = user_cache_salt.as_mut().unwrap_or(cache_namespace);
                 if cache_namespace.as_deref() == Some("") {
                     *cache_namespace = None;
                 }
@@ -473,7 +473,9 @@ impl ZmqEventNormalizer {
                             _ => None,
                         })
                         .or_else(|| Some(Arc::from(namespace)))
-                } else if let Some(parent) = parent_block_hash.as_ref() {
+                } else if let Some(parent) =
+                    parent_block_hash.as_ref().filter(|_| !explicit_namespace)
+                {
                     match self.cache_namespaces.get(&(worker, (*parent).into_u64())) {
                         Some(CacheNamespaceState::Namespaced(namespace)) => {
                             *cache_namespace = Some(namespace.to_string());

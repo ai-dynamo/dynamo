@@ -7,8 +7,11 @@
 //! values derived from its own identity, so event tokens no longer equal
 //! Dynamo's routing pads. SGLang echoes the caller's per-item routing label as
 //! block-relative spans. This module rewrites those positions to
-//! `pad_value_for_mm_hash(label)` before hashing and gives every block in a
-//! multimodal chain a Dynamo-owned id, `compute_next_seq_hash(parent, local)`.
+//! `pad_value_for_mm_hash(label)` before hashing and gives every block from an
+//! engine-owned source a Dynamo-owned id, `compute_next_seq_hash(parent, local)`.
+//! This includes text-only chains: SGLang namespaces a whole multimodal request
+//! by its media, so even leading text can have several engine ids for one local
+//! routing hash.
 //! Because those ids derive only from Dynamo's own hashes, the index sees one
 //! id chain per local hash chain even when several engine blocks share a label,
 //! for example two different images behind one URL. Engine ids are translated
@@ -46,7 +49,7 @@ use crate::residency::StorageTier;
 use super::convert::has_duplicate_block_hashes;
 use super::types::{BlockHashValue, RawKvEvent, WIDE_TOKEN_SENTINEL};
 
-/// Parent seed for a multimodal chain that starts at the root.
+/// Parent seed for a routing chain that starts at the root.
 const MM_CHAIN_ROOT: u64 = 0x6d6d_5f72_6f6f_7421;
 
 /// Bound on per-block exclusion state. Overflow switches the affected rank to
@@ -54,7 +57,7 @@ const MM_CHAIN_ROOT: u64 = 0x6d6d_5f72_6f6f_7421;
 const DEFAULT_EXCLUDED_CAPACITY: usize = 1 << 20;
 
 /// Bound on engine block residencies with a Dynamo-owned id. A live mapping is never
-/// evicted: once full, new multimodal chains are excluded like unmapped ones.
+/// evicted: once full, new block residencies are excluded like unmapped ones.
 const DEFAULT_ID_CAPACITY: usize = 1 << 22;
 
 type Key = (WorkerWithDpRank, StorageTier, u64);
@@ -85,12 +88,6 @@ pub(super) struct EngineMmState {
     pub(super) id_capacity: usize,
     /// One latch per affected source worker/rank, independent of its block count.
     overflowed_workers: FxHashSet<WorkerWithDpRank>,
-}
-
-/// The first labeled block starts the translated portion of this store.
-#[derive(Default)]
-pub(super) struct PreparedStore {
-    first_mm: Option<usize>,
 }
 
 enum BlockIssue {
@@ -126,13 +123,13 @@ impl EngineMmState {
 
     /// Rewrite labeled spans to Dynamo routing pads and cut the store at the
     /// first block whose hashed tokens hold a multimodal value that no span
-    /// maps. Returns `None` when nothing in the store may be indexed.
+    /// maps. Returns `false` when nothing in the store may be indexed.
     pub(super) fn prepare_store(
         &mut self,
         raw: &mut RawKvEvent,
         worker: WorkerWithDpRank,
         tier: StorageTier,
-    ) -> Option<PreparedStore> {
+    ) -> bool {
         let RawKvEvent::BlockStored {
             block_hashes,
             parent_block_hash,
@@ -143,13 +140,13 @@ impl EngineMmState {
             ..
         } = raw
         else {
-            return Some(PreparedStore::default());
+            return true;
         };
 
         if parent_block_hash.is_some() && self.overflowed_workers.contains(&worker) {
             // This may repeat a text store indexed before overflow. Do not mark
             // its ids excluded: its eventual removal must still reach the index.
-            return None;
+            return false;
         }
 
         if !self.excluded.is_empty()
@@ -157,12 +154,12 @@ impl EngineMmState {
             && self.excluded.contains(&(worker, tier, parent))
         {
             if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
-                return Some(PreparedStore::default());
+                return true;
             }
             for hash in block_hashes.iter() {
                 self.exclude((worker, tier, hash.into_u64()));
             }
-            return None;
+            return false;
         }
 
         // Spans are consumed here; leaving them would make conversion mix the
@@ -178,7 +175,6 @@ impl EngineMmState {
         let block_len = *block_size;
         let eagle = is_eagle.unwrap_or(false);
         let window = block_len + usize::from(eagle);
-        let mut first_mm = None;
         let mut cut = None;
 
         for block_idx in 0..block_hashes.len() {
@@ -201,10 +197,9 @@ impl EngineMmState {
                 // Legacy sources and Eagle windows carry no usable labels.
                 Err(BlockIssue::Unmapped)
             } else {
-                Ok(false)
+                Ok(())
             };
             match result {
-                Ok(true) if first_mm.is_none() => first_mm = Some(block_idx),
                 Ok(_) => {}
                 Err(_) => {
                     cut = Some(block_idx);
@@ -217,7 +212,7 @@ impl EngineMmState {
             // Validate before truncation can hide a repeated text id and mark
             // it excluded, which would suppress that text block's eviction.
             if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
-                return Some(PreparedStore::default());
+                return true;
             }
             for hash in block_hashes.drain(block_idx..) {
                 self.exclude((worker, tier, hash.into_u64()));
@@ -226,24 +221,19 @@ impl EngineMmState {
             token_ids.truncate(block_idx * block_len + usize::from(eagle && block_idx > 0));
         }
 
-        if block_hashes.is_empty() {
-            return None;
-        }
-        Some(PreparedStore { first_mm })
+        !block_hashes.is_empty()
     }
 
-    /// Replace engine ids with Dynamo-owned ids for blocks in a multimodal
-    /// chain. Leading blocks already indexed under the same Dynamo-owned id are
+    /// Replace engine ids with Dynamo-owned ids for engine-owned sources.
+    /// Leading blocks already indexed under the same Dynamo-owned id are
     /// dropped from the store. Returns `false` when nothing new remains.
     pub(super) fn translate_store(
         &mut self,
         event: &mut PlacementEvent,
-        prepared: &PreparedStore,
         worker: WorkerWithDpRank,
         tier: StorageTier,
     ) -> bool {
-        // Without a label or a mapped parent, no block joins a chain.
-        if self.ids.is_empty() && prepared.first_mm.is_none() {
+        if !self.engine_owned {
             return true;
         }
         let KvCacheEventData::Stored(store) = &mut event.event.data else {
@@ -252,8 +242,15 @@ impl EngineMmState {
 
         let parent_engine = store.parent_hash.map(|hash| hash.0);
         let mapped_parent = parent_engine.and_then(|parent| self.ids.get(&(worker, parent)));
-        let mut in_chain = mapped_parent.is_some();
-        let mut parent_effective = mapped_parent.map(|block| block.dynamo_id).or(parent_engine);
+        if parent_engine.is_some() && mapped_parent.is_none() {
+            // A late listener or an evicted parent cannot reconstruct this
+            // chain. Never seed a routing id with an unknown native parent.
+            for block in &store.blocks {
+                self.exclude((worker, tier, block.block_hash.0));
+            }
+            return false;
+        }
+        let mut parent_effective = mapped_parent.map(|block| block.dynamo_id);
         let mut run_parent = parent_effective;
         let mut publishing = false;
 
@@ -261,72 +258,55 @@ impl EngineMmState {
         let mut published = Vec::with_capacity(blocks.len());
         // Engine ids dropped with the rest of the store (relabel or full map).
         let mut dropped: Vec<u64> = Vec::new();
-        let mut remaining = blocks.into_iter().enumerate();
+        let mut remaining = blocks.into_iter();
         let tier_bit = tier_bit(tier);
 
-        while let Some((block_idx, mut block)) = remaining.next() {
+        while let Some(mut block) = remaining.next() {
             let engine_id = block.block_hash.0;
-            let labeled = prepared.first_mm == Some(block_idx);
-            let mut already_indexed = false;
+            let mut already_indexed;
             let key = (worker, engine_id);
-
-            if !in_chain && !labeled && self.ids.contains_key(&key) {
-                // The parent mapping has gone away. Publishing the native id
-                // would bypass this block's existing routing identity.
-                dropped.push(engine_id);
-                dropped.extend(remaining.by_ref().map(|(_, rest)| rest.block_hash.0));
-                break;
-            }
-
-            if in_chain || labeled {
-                in_chain = true;
-                let dynamo_id = compute_next_seq_hash(
-                    parent_effective.unwrap_or(MM_CHAIN_ROOT),
-                    block.tokens_hash,
-                );
-                match self.ids.get(&key) {
-                    Some(existing) if existing.dynamo_id != dynamo_id => {
-                        // The engine re-stored a block with a different label.
-                        // Keep the first mapping and drop the rest of the store:
-                        // publishing it would give one external id two local
-                        // hashes.
-                        dropped.push(engine_id);
-                        dropped.extend(remaining.by_ref().map(|(_, rest)| rest.block_hash.0));
-                        break;
-                    }
-                    existing
-                        if existing.is_none_or(|block| block.tiers & tier_bit == 0)
-                            && self.mapped_residencies >= self.id_capacity =>
-                    {
-                        // Never evict a live mapping; exclude this block and
-                        // the rest of the store as if they were unmapped.
-                        dropped.push(engine_id);
-                        dropped.extend(remaining.by_ref().map(|(_, rest)| rest.block_hash.0));
-                        break;
-                    }
-                    _ => {
-                        let mapping = self.ids.entry(key).or_insert(MappedBlock {
-                            dynamo_id,
-                            tiers: 0,
-                        });
-                        already_indexed = mapping.tiers & tier_bit != 0;
-                        if !already_indexed {
-                            mapping.tiers |= tier_bit;
-                            self.mapped_residencies += 1;
-                            self.excluded.remove(&(worker, tier, engine_id));
-                            let refs = self.refs.entry((worker, tier, dynamo_id)).or_insert(0);
-                            *refs += 1;
-                            if *refs > 1 {
-                                already_indexed = true;
-                            }
+            let dynamo_id =
+                compute_next_seq_hash(parent_effective.unwrap_or(MM_CHAIN_ROOT), block.tokens_hash);
+            match self.ids.get(&key) {
+                Some(existing) if existing.dynamo_id != dynamo_id => {
+                    // The engine re-stored a block with a different label.
+                    // Keep the first mapping and drop the rest of the store:
+                    // publishing it would give one external id two local
+                    // hashes.
+                    dropped.push(engine_id);
+                    dropped.extend(remaining.by_ref().map(|rest| rest.block_hash.0));
+                    break;
+                }
+                existing
+                    if existing.is_none_or(|block| block.tiers & tier_bit == 0)
+                        && self.mapped_residencies >= self.id_capacity =>
+                {
+                    // Never evict a live mapping; exclude this block and
+                    // the rest of the store as if they were unmapped.
+                    dropped.push(engine_id);
+                    dropped.extend(remaining.by_ref().map(|rest| rest.block_hash.0));
+                    break;
+                }
+                _ => {
+                    let mapping = self.ids.entry(key).or_insert(MappedBlock {
+                        dynamo_id,
+                        tiers: 0,
+                    });
+                    already_indexed = mapping.tiers & tier_bit != 0;
+                    if !already_indexed {
+                        mapping.tiers |= tier_bit;
+                        self.mapped_residencies += 1;
+                        self.excluded.remove(&(worker, tier, engine_id));
+                        let refs = self.refs.entry((worker, tier, dynamo_id)).or_insert(0);
+                        *refs += 1;
+                        if *refs > 1 {
+                            already_indexed = true;
                         }
                     }
                 }
-                block.block_hash = ExternalSequenceBlockHash(dynamo_id);
-                parent_effective = Some(dynamo_id);
-            } else {
-                parent_effective = Some(engine_id);
             }
+            block.block_hash = ExternalSequenceBlockHash(dynamo_id);
+            parent_effective = Some(dynamo_id);
 
             if !publishing && already_indexed {
                 run_parent = parent_effective;
@@ -431,9 +411,8 @@ impl EngineMmState {
     }
 }
 
-/// Rewrite labeled spans in one block. Returns whether the block carried
-/// labeled multimodal tokens.
-fn rewrite_block(tokens: &mut [u32], info: Option<&BlockExtraInfo>) -> Result<bool, BlockIssue> {
+/// Rewrite labeled spans in one block, rejecting any unmapped media tokens.
+fn rewrite_block(tokens: &mut [u32], info: Option<&BlockExtraInfo>) -> Result<(), BlockIssue> {
     if info.is_none() {
         return if tokens
             .iter()
@@ -441,11 +420,10 @@ fn rewrite_block(tokens: &mut [u32], info: Option<&BlockExtraInfo>) -> Result<bo
         {
             Err(BlockIssue::Unmapped)
         } else {
-            Ok(false)
+            Ok(())
         };
     }
     let mut covered = vec![false; tokens.len()];
-    let mut has_mm = false;
     if let Some(info) = info {
         for object in &info.mm_objects {
             let pad = pad_value_for_mm_hash(object.mm_hash);
@@ -459,7 +437,6 @@ fn rewrite_block(tokens: &mut [u32], info: Option<&BlockExtraInfo>) -> Result<bo
                     }
                     tokens[position] = pad;
                     covered[position] = true;
-                    has_mm = true;
                 }
             }
         }
@@ -471,5 +448,5 @@ fn rewrite_block(tokens: &mut [u32], info: Option<&BlockExtraInfo>) -> Result<bo
     if unmapped {
         return Err(BlockIssue::Unmapped);
     }
-    Ok(has_mm)
+    Ok(())
 }

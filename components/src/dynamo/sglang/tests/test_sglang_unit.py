@@ -2477,10 +2477,12 @@ async def test_systemone_serial_capability_published_only_when_isolated(
 
     async def fake_register_model(*args, **kwargs):
         assert kwargs["runtime_config"] is runtime_config
+        assert kwargs["indexer_identity"] is None
 
     monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
     monkeypatch.setattr(sglang_register, "version", lambda package: installed)
+    monkeypatch.setattr(sglang_register, "sglang_has_wide_mm_pad_values", lambda: True)
     server_args = SimpleNamespace(
         model_path="Qwen/Qwen3-0.6B",
         served_model_name="model",
@@ -2491,7 +2493,10 @@ async def test_systemone_serial_capability_published_only_when_isolated(
         speculative_algorithm=None,
     )
     dynamo_args = SimpleNamespace(
-        use_sglang_tokenizer=False, custom_jinja_template=None, model_source_uri=None
+        use_sglang_tokenizer=False,
+        custom_jinja_template=None,
+        model_source_uri=None,
+        use_kv_events=False,
     )
     with caplog.at_level(logging.INFO):
         assert await sglang_register._register_model_with_runtime_config(
@@ -2605,8 +2610,9 @@ def test_should_fetch_model_keeps_default_non_local_fetch():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_source", ["hf", "local", "ngc"])
 @pytest.mark.parametrize("worker_name", ["Aggregated", "Encode"])
+@pytest.mark.parametrize("wide_pads", [False, True])
 async def test_register_model_preserves_source_with_sglang_modelexpress(
-    monkeypatch, tmp_path, model_source, worker_name
+    monkeypatch, tmp_path, model_source, worker_name, wide_pads
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -2622,6 +2628,9 @@ async def test_register_model_preserves_source_with_sglang_modelexpress(
 
     monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+    monkeypatch.setattr(
+        sglang_register, "sglang_has_wide_mm_pad_values", lambda: wide_pads
+    )
 
     model_path = "Qwen/Qwen3-0.6B" if model_source == "hf" else str(tmp_path)
     model_uri = (
@@ -2641,6 +2650,7 @@ async def test_register_model_preserves_source_with_sglang_modelexpress(
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        use_kv_events=True,
     )
 
     result = await sglang_register._register_model_with_runtime_config(
@@ -2657,11 +2667,23 @@ async def test_register_model_preserves_source_with_sglang_modelexpress(
     assert server_args.model_path == model_path
     assert captured["kwargs"]["ignore_weights"] is True
     assert captured["kwargs"]["kv_cache_block_size"] == 512
+    expected_identity = (
+        {
+            "semantics": {
+                "model_source": model_uri or model_path,
+                "kv_event_block_id_scheme": "dynamo-canonical-v1",
+            }
+        }
+        if wide_pads and worker_name == "Aggregated"
+        else None
+    )
+    assert captured["kwargs"]["indexer_identity"] == expected_identity
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_dir", ["worker-a", "worker-b"])
 async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
-    monkeypatch,
+    monkeypatch, tmp_path, metadata_dir
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -2679,6 +2701,7 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
 
     monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+    monkeypatch.setattr(sglang_register, "sglang_has_wide_mm_pad_values", lambda: True)
 
     server_args = SimpleNamespace(
         model_path="s3://bucket/model",
@@ -2693,12 +2716,13 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        use_kv_events=True,
     )
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
             model_config=SimpleNamespace(
                 model_weights="s3://bucket/model",
-                model_path="/tmp/runai-model-metadata",
+                model_path=str(tmp_path / metadata_dir),
             )
         )
     )
@@ -2712,7 +2736,11 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
     )
 
     assert result is True
-    assert captured["args"][3] == "/tmp/runai-model-metadata"
+    assert captured["args"][3] == str(tmp_path / metadata_dir)
+    assert captured["kwargs"]["indexer_identity"]["semantics"] == {
+        "model_source": "s3://bucket/model",
+        "kv_event_block_id_scheme": "dynamo-canonical-v1",
+    }
     assert "skip_model_path_fetch" not in captured["kwargs"]
     assert captured["kwargs"]["ignore_weights"] is False
 

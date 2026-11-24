@@ -89,6 +89,7 @@ pub fn convert_event(
             block_size,
             lora_name,
             cache_namespace,
+            user_cache_salt,
             block_mm_infos,
             medium: _,
             is_eagle,
@@ -99,6 +100,7 @@ pub fn convert_event(
             ownership: _,
             session_id,
         } => {
+            let cache_namespace = user_cache_salt.unwrap_or(cache_namespace);
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             if has_duplicate_block_hashes(&block_hashes, parent_block_hash) {
                 tracing::warn!(

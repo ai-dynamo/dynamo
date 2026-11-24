@@ -658,8 +658,12 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 ///
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
+///
+/// `indexer_identity` accepts optional `semantics` and `routing_scope` maps of
+/// non-empty strings. Each present dimension replaces its derived defaults;
+/// omitted dimensions preserve their defaults. Invalid maps fail registration.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false, indexer_identity=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -685,6 +689,7 @@ fn register_model<'p>(
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
     skip_model_assets: bool,
+    indexer_identity: Option<&Bound<'p, PyDict>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -805,6 +810,13 @@ fn register_model<'p>(
         })
         .transpose()?;
 
+    let indexer_identity: Option<dynamo_kv_indexer::host::IndexerIdentitySpec> = indexer_identity
+        .map(|dict| pythonize::depythonize(dict))
+        .transpose()
+        .map_err(|err| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid indexer_identity: {err}"))
+        })?;
+
     let user_data_json = user_data
         .map(|dict| pythonize::depythonize(dict))
         .transpose()
@@ -904,6 +916,7 @@ fn register_model<'p>(
             card.runtime_config = rc;
             card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
+            card.indexer_identity = indexer_identity;
 
             // Register the Model Deployment Card via discovery interface
             register_model_card(&endpoint.inner, &card)
@@ -938,6 +951,7 @@ fn register_model<'p>(
             .model_aliases(model_aliases)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
+            .indexer_identity(indexer_identity)
             .runtime_config({
                 let mut rc = runtime_config.inner;
                 // The base worker registration carries the worker's LoRA slot capacity so the

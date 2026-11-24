@@ -318,6 +318,8 @@ struct MapBlockStoredFixture {
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_salt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    user_cache_salt: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     extra_keys: Option<Vec<Option<Vec<String>>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     locality: Option<&'static str>,
@@ -338,6 +340,7 @@ impl Default for MapBlockStoredFixture {
             medium: None,
             lora_name: None,
             cache_salt: None,
+            user_cache_salt: None,
             extra_keys: None,
             locality: None,
             ownership: None,
@@ -442,6 +445,76 @@ fn test_deserialize_map_block_stored_cache_salt() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn sglang_caller_salt_overrides_internal_namespace_by_presence() {
+    for (user_cache_salt, expected) in [
+        (None, Some("sglang-mm-v1:internal")),
+        (Some(None), None),
+        (Some(Some("tenant-a")), Some("tenant-a")),
+        (Some(Some("")), None),
+    ] {
+        for lora_name in [None, Some("adapter-a")] {
+            let encoded = to_vec_named(&MapBlockStoredFixture {
+                cache_salt: Some("sglang-mm-v1:internal".to_string()),
+                user_cache_salt: user_cache_salt.map(|salt| salt.map(str::to_owned)),
+                lora_name: lora_name.map(str::to_owned),
+                ..Default::default()
+            })
+            .unwrap();
+            let raw: RawKvEvent = from_slice(&encoded).unwrap();
+            let event = ZmqEventNormalizer::new(2)
+                .normalize(raw, 1, WorkerWithDpRank::new(7, 0))
+                .unwrap();
+            let KvCacheEventData::Stored(stored) = event.event.data else {
+                panic!("expected BlockStored");
+            };
+            let request_hashes = compute_block_hash_for_seq(
+                &[10, 11],
+                2,
+                BlockHashOptions {
+                    cache_namespace: expected,
+                    lora_name,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(stored.blocks[0].tokens_hash, request_hashes[0]);
+        }
+    }
+}
+
+#[test]
+fn explicit_unsalted_caller_does_not_inherit_a_parent_namespace() {
+    for ambiguous_parent in [false, true] {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let mut normalizer = ZmqEventNormalizer::new(2);
+        let decode = |value| from_slice::<RawKvEvent>(&to_vec_named(&value).unwrap()).unwrap();
+        let mut parent = serde_json::json!({
+            "type": "BlockStored", "block_hashes": [11], "token_ids": [10, 11],
+            "block_size": 2, "cache_salt": "sglang-mm-v1:internal"
+        });
+        normalizer
+            .preprocess(decode(parent.clone()), worker)
+            .unwrap();
+        if ambiguous_parent {
+            parent["cache_salt"] = serde_json::json!("another-namespace");
+            normalizer.preprocess(decode(parent), worker).unwrap();
+        }
+        let child = decode(serde_json::json!({
+            "type": "BlockStored", "block_hashes": [12], "parent_block_hash": 11,
+            "token_ids": [12, 13], "block_size": 2,
+            "cache_salt": "sglang-mm-v1:internal", "user_cache_salt": null
+        }));
+        let event = normalizer.normalize(child, 2, worker).unwrap();
+        let KvCacheEventData::Stored(stored) = event.event.data else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            stored.blocks[0].tokens_hash,
+            compute_block_hash_for_seq(&[12, 13], 2, BlockHashOptions::default())[0]
+        );
+    }
 }
 
 /// An empty-string `medium` is normalized to absent (like empty `cache_salt`),
@@ -1003,6 +1076,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         medium: None,
         lora_name: None,
         cache_namespace: Some("tenant-a".to_string()),
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: Some(false),
         group_idx: None,
@@ -1020,6 +1094,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         medium: None,
         lora_name: None,
         cache_namespace: None,
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: Some(false),
         group_idx: None,
@@ -1066,6 +1141,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
         medium: None,
         lora_name: None,
         cache_namespace: Some("tenant-a".to_string()),
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: Some(false),
         group_idx: None,
@@ -1100,6 +1176,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
             medium: None,
             lora_name: None,
             cache_namespace: cache_namespace.map(str::to_owned),
+            user_cache_salt: None,
             block_mm_infos: None,
             is_eagle: Some(false),
             group_idx: None,
@@ -1140,6 +1217,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         medium: None,
         lora_name: None,
         cache_namespace: Some("tenant-a".to_string()),
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: Some(false),
         group_idx: None,
@@ -1157,6 +1235,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         medium: None,
         lora_name: None,
         cache_namespace: Some(String::new()),
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: Some(false),
         group_idx: None,
@@ -1205,6 +1284,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         medium: None,
         lora_name: None,
         cache_namespace: None,
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: Some(true),
         group_idx: None,
@@ -1282,6 +1362,7 @@ fn cpu_block_stored(fixture: CpuBlockStoredFixture<'_>) -> RawKvEvent {
         medium: Some("CPU".to_string()),
         lora_name: None,
         cache_namespace: None,
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,
@@ -1378,6 +1459,7 @@ fn gpu_block_stored(block_hashes: &[u64], token_ids: &[u32], block_size: usize) 
         medium: None,
         lora_name: None,
         cache_namespace: None,
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,
@@ -1614,6 +1696,7 @@ fn raw_placement_event(
             medium: medium.map(str::to_owned),
             lora_name: None,
             cache_namespace: None,
+            user_cache_salt: None,
             block_mm_infos: None,
             is_eagle: Some(false),
             group_idx: None,
@@ -1807,6 +1890,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
         medium: Some("STORAGE".to_string()),
         lora_name: None,
         cache_namespace: None,
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,
@@ -1854,6 +1938,7 @@ fn namespaced_block_stored(
         medium: Some(medium.to_string()),
         lora_name: None,
         cache_namespace: cache_namespace.map(str::to_owned),
+        user_cache_salt: None,
         block_mm_infos: None,
         is_eagle: Some(false),
         group_idx: None,
