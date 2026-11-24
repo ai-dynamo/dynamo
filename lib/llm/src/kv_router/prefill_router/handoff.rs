@@ -278,30 +278,35 @@ fn cancel_prefill_on_decode_error(error: &anyhow::Error, prefill_context: &dyn A
             "Cancelling remote prefill after the decode router's queue deadline expired before dispatch");
         prefill_context.stop_generating();
     } else {
-        cancel_prefill_on_decode_rejection(error.as_ref(), prefill_context);
+        let rejection = error
+            .downcast_ref::<DynamoError>()
+            .filter(|error| error.rejected_before_kv_receiver())
+            .map_or(error.as_ref(), |error| error as &dyn std::error::Error);
+        cancel_prefill_on_decode_rejection(rejection, prefill_context);
     }
 }
 
-/// Cancel only an explicit decode admission refusal, which has no receiver
-/// waiting for staged KV. Ambiguous transport errors retain the existing
-/// independent-prefill transfer cleanup behavior.
+/// Cancel an explicitly marked validation failure or an admission refusal.
 fn cancel_prefill_on_decode_rejection(
     error: &(dyn std::error::Error + 'static),
     prefill_context: &dyn AsyncEngineContext,
 ) -> bool {
-    let mut current = Some(error);
-    while let Some(cause) = current {
-        if let Some(error) = cause.downcast_ref::<DynamoError>()
-            && error.class() == ErrorClass::CapacityExhausted
-        {
-            tracing::debug!(request_id = %prefill_context.id(), %error,
-                "Cancelling remote prefill after decode admission rejection");
-            prefill_context.stop_generating();
-            return true;
-        }
-        current = cause.source();
-    }
-    false
+    // A marked cause below a transport failure does not prove the final attempt was rejected.
+    let rejection = error
+        .downcast_ref::<DynamoError>()
+        .filter(|error| error.rejected_before_kv_receiver())
+        .or_else(|| {
+            std::iter::successors(Some(error), |cause| cause.source())
+                .filter_map(|cause| cause.downcast_ref::<DynamoError>())
+                .find(|cause| cause.class() == ErrorClass::CapacityExhausted)
+        });
+    let Some(decode_rejection) = rejection else {
+        return false;
+    };
+    tracing::debug!(request_id = %prefill_context.id(), error = %decode_rejection,
+        "Cancelling remote prefill after explicit decode rejection");
+    prefill_context.stop_generating();
+    true
 }
 
 #[cfg(test)]
@@ -763,8 +768,8 @@ mod tests {
             .unwrap();
     }
 
-    async fn assert_stream_rejection_cancels_prefill(output: PrefillNeed, error_type: ErrorType) {
-        let case = format!("output={output:?}, error={error_type:?}");
+    async fn assert_stream_rejection_cancels_prefill(output: PrefillNeed, error: DynamoError) {
+        let case = format!("output={output:?}, error={error:?}");
         let prefill_context = Arc::new(Controller::default());
         let task_context = prefill_context.clone();
         let (cleaned_tx, cleaned_rx) = oneshot::channel();
@@ -777,12 +782,8 @@ mod tests {
             prefill_context.clone(),
         );
         let request_context = Arc::new(Controller::default());
-        let error = dynamo_runtime::error::DynamoError::builder()
-            .error_type(error_type)
-            .message("decode stream admission rejected")
-            .build();
         let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
-            Box::pin(stream::iter([Annotated::from_err(error)])),
+            Box::pin(stream::iter([Annotated::from_err(error.clone())])),
             request_context.clone(),
         );
         let mut response = task
@@ -800,12 +801,7 @@ mod tests {
                 panic!("decode admission error blocked behind prefill output: {case}")
             })
             .unwrap();
-        assert!(
-            item.err()
-                .unwrap()
-                .to_string()
-                .contains("decode stream admission rejected")
-        );
+        assert_eq!(item.err(), Some(error));
         assert!(
             prefill_context.is_stopped(),
             "stream rejection left independent prefill running: {case}"
@@ -872,8 +868,22 @@ mod tests {
                 ErrorType::CapacityExhausted,
                 ErrorType::Backend(BackendError::WorkerOverloaded),
             ] {
-                assert_stream_rejection_cancels_prefill(output, error_type).await;
+                let error = DynamoError::builder().error_type(error_type).build();
+                assert_stream_rejection_cancels_prefill(output, error).await;
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn marked_decode_rejection_cancels_prefill() {
+        for output in [
+            PrefillNeed::None,
+            PrefillNeed::BeforeLast,
+            PrefillNeed::BeforeFirst,
+        ] {
+            let error = DynamoError::reject_before_kv_receiver("invalid sampling options".into());
+            assert_dispatch_rejection_cancels_prefill(output, error.clone().into()).await;
+            assert_stream_rejection_cancels_prefill(output, error).await;
         }
     }
 
@@ -887,6 +897,9 @@ mod tests {
             let error = dynamo_runtime::error::DynamoError::builder()
                 .error_type(dynamo_runtime::error::ErrorType::Disconnected)
                 .message("decode connection lost after possible dispatch")
+                .cause(DynamoError::reject_before_kv_receiver(
+                    "an earlier attempt rejected sampling options".into(),
+                ))
                 .build();
             assert_decode_error_preserves_prefill(output, error.into()).await;
         }
