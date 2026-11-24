@@ -13,7 +13,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -2828,21 +2828,8 @@ def test_maybe_freeze_gc_after_init_runs_once(monkeypatch, enabled):
     assert freeze.call_count == (1 if enabled else 0)
 
 
-@pytest.mark.asyncio
-async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch):
-    vllm_main = _load_vllm_main()
-    order: list[str] = []
-    monkeypatch.setattr(
-        vllm_main, "freeze_gc_heap", lambda: order.append("freeze_gc_heap")
-    )
-    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
-
-    async def fake_register_model(*_args, **_kwargs):
-        order.append("register_model")
-
-    monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
-    # Stub everything register_vllm_model calls before register_model; this
-    # test covers only the freeze ordering.
+def _stub_register_vllm_model_dependencies(monkeypatch, vllm_main):
+    """Stub everything register_vllm_model calls before register_model."""
     for name in (
         "ModelRuntimeConfig",
         "publish_vllm_structural_tag_reasoning_policy",
@@ -2880,6 +2867,23 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
         },
     )
 
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch):
+    vllm_main = _load_vllm_main()
+    order: list[str] = []
+    monkeypatch.setattr(
+        vllm_main, "freeze_gc_heap", lambda: order.append("freeze_gc_heap")
+    )
+    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
+
+    async def fake_register_model(*_args, **_kwargs):
+        order.append("register_model")
+
+    monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
+    # This test covers only the freeze ordering.
+    _stub_register_vllm_model_dependencies(monkeypatch, vllm_main)
+
     config = Mock(freeze_gc_after_init=True, dyn_default_thinking_mode=None)
     vllm_config = Mock(lora_config=None)
 
@@ -2894,3 +2898,37 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
     )
 
     assert order == ["freeze_gc_heap", "register_model"]
+
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_publishes_hidden_state_capture(monkeypatch):
+    from dynamo.artifacts.vllm.hidden_states import HiddenStateProfile
+
+    vllm_main = _load_vllm_main()
+    monkeypatch.setattr(vllm_main, "freeze_gc_heap", Mock())
+    monkeypatch.setattr(vllm_main, "register_model", AsyncMock())
+    _stub_register_vllm_model_dependencies(monkeypatch, vllm_main)
+    profile = HiddenStateProfile((2, 16, 30), 4096, "bf16", "/var/hs")
+    monkeypatch.setattr(
+        vllm_main, "hidden_state_profile_from_vllm_config", lambda _: profile
+    )
+    runtime_config = vllm_main.ModelRuntimeConfig.return_value
+
+    await vllm_main.register_vllm_model(
+        dynamo_llm.ModelInput.Tokens,
+        dynamo_llm.ModelType.Chat,
+        Mock(),
+        Mock(freeze_gc_after_init=False, dyn_default_thinking_mode=None),
+        Mock(),
+        Mock(lora_config=None),
+        worker_type=dynamo_llm.WorkerType.Aggregated,
+    )
+
+    runtime_config.set_engine_specific.assert_any_call(
+        vllm_main.HIDDEN_STATE_CAPTURE_RUNTIME_KEY,
+        json.dumps({"layer_ids": [2, 16, 30], "hidden_size": 4096, "dtype": "bf16"}),
+    )
+    published = [
+        call.args[1] for call in runtime_config.set_engine_specific.call_args_list
+    ]
+    assert not any("/var/hs" in value for value in published)

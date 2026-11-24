@@ -20,6 +20,7 @@ import numpy as np
 from dynamo.artifacts.vllm.format import (
     GenerationArtifactChoice,
     GenerationArtifactView,
+    HiddenStates,
     MoeRoutes,
     SelectedLogprobs,
     Tensor,
@@ -27,9 +28,18 @@ from dynamo.artifacts.vllm.format import (
     compact_routes,
     encode_generation_artifact,
 )
+from dynamo.artifacts.vllm.hidden_states import (
+    HiddenStateFileError,
+    HiddenStateProfile,
+    discard_hidden_state_file,
+    hidden_state_path,
+    load_hidden_state_file,
+)
 from dynamo.common.metadata_upload import _backend_metadata_upload_settings
 
-_CONTENTS = frozenset({"moe_routes", "selected_logprobs", "topk_logprobs"})
+_CONTENTS = frozenset(
+    {"hidden_states", "moe_routes", "selected_logprobs", "topk_logprobs"}
+)
 
 
 class CaptureCapacityError(ValueError):
@@ -158,6 +168,9 @@ class VllmArtifactSession:
     candidates: list[list[int]]
     candidate_scores: list[list[float]]
     routes: MoeRoutes | None
+    hidden_profile: HiddenStateProfile | None
+    hidden_path: str | None
+    hidden_states: HiddenStates | None
     error: bool
     _closed: bool
     budget: CaptureBudget
@@ -177,6 +190,7 @@ class VllmArtifactSession:
         logprob_width=1,
         budget=None,
         runtime=None,
+        hidden_state_profile=None,
     ):
         settings = _backend_metadata_upload_settings(request)
         if settings is None or "kind" not in settings:
@@ -225,6 +239,13 @@ class VllmArtifactSession:
             raise ValueError(
                 "routed-expert capture and declared router profile are required"
             )
+        if "hidden_states" in contents and not isinstance(
+            hidden_state_profile, HiddenStateProfile
+        ):
+            raise ValueError(
+                "hidden-state capture requires a worker launched with vLLM "
+                "extract_hidden_states and its hidden-states connector"
+            )
         owned_settings = deepcopy(settings)
         if mode != "inline_base64":
             if runtime is None:
@@ -245,6 +266,11 @@ class VllmArtifactSession:
         session.candidates = []
         session.candidate_scores = []
         session.routes = None
+        session.hidden_profile = (
+            hidden_state_profile if "hidden_states" in contents else None
+        )
+        session.hidden_path = None
+        session.hidden_states = None
         session.error = False
         session._closed = False
         session.budget = budget or process_capture_budget()
@@ -259,10 +285,16 @@ class VllmArtifactSession:
             4 * ("selected_logprobs" in contents)
             + 12 * logprob_width * ("topk_logprobs" in contents)
         )
+        hidden_bytes = (
+            extent * session.hidden_profile.row_bytes
+            if session.hidden_profile is not None
+            else 0
+        )
         source_bound = (
             extent * 8
             + route_elements * 2
             + logprob_bytes
+            + hidden_bytes
             + 8192
             + len(session.profile) * 512
         )
@@ -352,14 +384,61 @@ class VllmArtifactSession:
             self.error = True
             self._discard()
 
+    def observe_transfer(self, kv_transfer_params):
+        """Record the connector's hidden-state file from the final engine output."""
+        if self.hidden_profile is None or self._closed:
+            return
+        try:
+            path = hidden_state_path(kv_transfer_params, self.hidden_profile)
+        except HiddenStateFileError:
+            self.error = True
+            self._discard()
+            return
+        if path is not None:
+            self.hidden_path = path
+
+    def _load_hidden_states(self):
+        """Read the connector file and bind it to the observed sequence. Blocking."""
+        path, self.hidden_path = self.hidden_path, None
+        if path is None:
+            raise ValueError("requested hidden states unavailable")
+        loaded = load_hidden_state_file(path)
+        profile = cast(HiddenStateProfile, self.hidden_profile)
+        if self.error or self.prompt is None:
+            raise ValueError("invalid artifact capture")
+        sequence = (*self.prompt, *self.tokens)
+        extent = len(sequence) - 1 if self.tokens else len(sequence)
+        rows, layers, hidden_size = loaded.shape
+        if (
+            rows != extent
+            or layers != len(profile.layer_ids)
+            or hidden_size != profile.hidden_size
+            or loaded.dtype != profile.dtype
+        ):
+            raise ValueError("hidden-state geometry differs from profile")
+        if loaded.token_ids != sequence[:extent]:
+            raise ValueError("hidden-state tokens differ from observed sequence")
+        self.hidden_states = HiddenStates(
+            0,
+            profile.layer_ids,
+            profile.hidden_size,
+            Tensor(loaded.dtype, (rows, layers * hidden_size), loaded.data),
+        )
+
     def _view(self):
         if self.error or self.prompt is None:
             raise ValueError("invalid artifact capture")
-        components: list[MoeRoutes | SelectedLogprobs | TopKLogprobs] = []
+        components: list[
+            MoeRoutes | SelectedLogprobs | TopKLogprobs | HiddenStates
+        ] = []
         if "moe_routes" in self.contents:
             if self.routes is None:
                 raise ValueError("requested routes unavailable")
             components.append(self.routes)
+        if "hidden_states" in self.contents:
+            if self.hidden_states is None:
+                raise ValueError("requested hidden states unavailable")
+            components.append(self.hidden_states)
         if "selected_logprobs" in self.contents:
             components.append(
                 SelectedLogprobs(
@@ -393,6 +472,12 @@ class VllmArtifactSession:
     async def finalize(self, *, release_capture=True):
         encoding = None
         try:
+            if self.hidden_profile is not None:
+                # Waits for the connector's writer and reads the file off-loop.
+                encoding = asyncio.create_task(
+                    asyncio.to_thread(self._load_hidden_states)
+                )
+                await asyncio.shield(encoding)
             encoding = asyncio.create_task(
                 asyncio.to_thread(encode_generation_artifact, self._view())
             )
@@ -454,6 +539,11 @@ class VllmArtifactSession:
         self._discard()
 
     def _discard(self):
+        if self.hidden_path is not None:
+            # The connector already finished this request; never leave its file.
+            discard_hidden_state_file(self.hidden_path)
+            self.hidden_path = None
+        self.hidden_states = None
         self.routes = None
         self.prompt = None
         self.tokens = []

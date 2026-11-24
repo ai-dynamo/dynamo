@@ -19,6 +19,7 @@ from dynamo.artifacts.vllm.format import (  # noqa: E402
     GenerationArtifactChoice,
     GenerationArtifactFormatError,
     GenerationArtifactView,
+    HiddenStates,
     MoeRoutes,
     RouterRoutes,
     SelectedLogprobs,
@@ -101,7 +102,7 @@ def test_decode_rejects_noncontiguous_buffer():
 def test_unknown_minor_version_requires_explicit_reader_support():
     encoded = encode_generation_artifact(_view()).data
     magic, major, _, codec, manifest_bytes, payload_bytes = PRELUDE.unpack_from(encoded)
-    header = PRELUDE.pack(magic, major, 1, codec, manifest_bytes, payload_bytes)
+    header = PRELUDE.pack(magic, major, 2, codec, manifest_bytes, payload_bytes)
     with pytest.raises(GenerationArtifactFormatError, match="version"):
         decode_generation_artifact(header + encoded[PRELUDE.size :])
 
@@ -451,3 +452,89 @@ def test_floating_conversion_rejects_nan_and_positive_infinity():
     for value in (float("nan"), float("inf")):
         with pytest.raises(GenerationArtifactFormatError, match="nonfinite"):
             Tensor.from_array(np.asarray([value], dtype=np.float32), dtype="fp16")
+
+
+def _hidden(rows=3, layers=(2, 5), hidden_size=4, dtype="fp16", start=0):
+    values = np.arange(rows * len(layers) * hidden_size, dtype=np.float32) / 8
+    return HiddenStates(
+        start,
+        layers,
+        hidden_size,
+        Tensor.from_array(values.reshape(rows, -1), dtype=dtype),
+    )
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "fp32"])
+def test_hidden_states_roundtrip_with_other_components(dtype):
+    hidden = _hidden(dtype=dtype)
+    selected = SelectedLogprobs(2, _tensor([-0.1, -0.2], "fp32"))
+    decoded = decode_generation_artifact(
+        encode_generation_artifact(_view(selected, hidden)).data
+    )
+    assert decoded == _view(selected, hidden)
+    assert decoded.choices[0].components[1].layer_ids == (2, 5)
+
+
+def test_hidden_states_bfloat16_preserves_raw_bits():
+    data = struct.pack("<" + "H" * 6, *([0x3F80, 0xBF80] * 3))
+    hidden = HiddenStates(0, (7,), 2, Tensor("bf16", (3, 2), data))
+    decoded = decode_generation_artifact(encode_generation_artifact(_view(hidden)).data)
+    assert decoded.choices[0].components[0].hidden_states.data == data
+
+
+def test_minor_version_is_one_only_when_hidden_states_are_present():
+    plain = encode_generation_artifact(_view(), codec=CODEC_NONE).data
+    hidden = encode_generation_artifact(_view(_hidden()), codec=CODEC_NONE).data
+    assert PRELUDE.unpack_from(plain)[1:3] == (1, 0)
+    assert PRELUDE.unpack_from(hidden)[1:3] == (1, 1)
+
+
+def test_version_one_zero_object_cannot_carry_hidden_states():
+    encoded = encode_generation_artifact(_view(_hidden()), codec=CODEC_NONE).data
+    magic, major, _, codec, manifest_bytes, payload_bytes = PRELUDE.unpack_from(encoded)
+    header = PRELUDE.pack(magic, major, 0, codec, manifest_bytes, payload_bytes)
+    with pytest.raises(GenerationArtifactFormatError, match="version 1.1"):
+        decode_generation_artifact(header + encoded[PRELUDE.size :])
+
+
+def test_hidden_states_follow_prefill_extent_without_completion():
+    hidden = _hidden(rows=2)
+    view = _view(hidden, tokens=(11, 12), prompt=2)
+    assert decode_generation_artifact(encode_generation_artifact(view).data) == view
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        _hidden(rows=4),
+        _hidden(rows=2),
+        _hidden(rows=2, start=2),
+        _hidden(start=4),
+        HiddenStates(0, (2, 5), 3, _hidden().hidden_states),
+        HiddenStates(0, (2, 2), 4, _hidden().hidden_states),
+        HiddenStates(0, (), 4, _hidden().hidden_states),
+        HiddenStates(0, (-1, 5), 4, _hidden().hidden_states),
+        HiddenStates(0, (2, 5), 4, _tensor(np.zeros((3, 8), dtype=np.int64))),
+    ],
+)
+def test_hidden_state_semantics_rejected(component):
+    with pytest.raises(GenerationArtifactFormatError):
+        encode_generation_artifact(_view(component))
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "fp32"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_hidden_states_rejected(dtype, value):
+    array = np.zeros((3, 8), dtype=np.float16 if dtype == "fp16" else np.float32)
+    array[1, 3] = value
+    hidden = HiddenStates(0, (2, 5), 4, Tensor(dtype, (3, 8), array.tobytes()))
+    with pytest.raises(GenerationArtifactFormatError, match="hidden-state value"):
+        encode_generation_artifact(_view(hidden))
+
+
+@pytest.mark.parametrize("bits", [0x7F80, 0xFF80, 0x7FC0])
+def test_nonfinite_bfloat16_hidden_states_rejected(bits):
+    data = struct.pack("<" + "H" * 6, 0x3F80, 0x3F80, bits, 0x3F80, 0x3F80, 0x3F80)
+    hidden = HiddenStates(0, (7,), 2, Tensor("bf16", (3, 2), data))
+    with pytest.raises(GenerationArtifactFormatError, match="hidden-state value"):
+        encode_generation_artifact(_view(hidden))

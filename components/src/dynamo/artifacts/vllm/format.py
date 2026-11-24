@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded producer and strict reader for generation_artifact_v1 (wire version 1.0).
+"""Bounded producer and strict reader for generation_artifact_v1 (wire 1.0 and 1.1).
 
 Logprob tensors allow finite values and -Inf (zero probability), but not NaN or +Inf.
-Only minor version 0 is defined here. A later additive minor revision needs an
+Hidden-state tensors allow finite values only.
+
+Minor version 1 adds the ``hidden_states`` component and changes nothing else. The
+writer emits 1.1 only for an object that carries hidden states, so objects without
+them stay readable by 1.0 readers. A later additive minor revision needs an
 explicit schema and capability update before this reader accepts it.
 """
 
@@ -32,6 +36,10 @@ _MAX_ROUTERS = 4096
 _MAX_DIMENSION = 1 << 20
 _MAX_TOPK = 1024
 _MAX_TENSORS = 4096
+_MAX_COMPONENTS = 4
+_MAX_HIDDEN_LAYERS = 256
+_MINOR_VERSIONS = (0, 1)
+_HIDDEN_STATES_MINOR = 1
 _DTYPES: dict[str, np.dtype[Any]] = {
     "u8": np.dtype("u1"),
     "u16": np.dtype("<u2"),
@@ -173,7 +181,23 @@ class TopKLogprobs:
     logprobs: Tensor
 
 
-GenerationComponent = MoeRoutes | SelectedLogprobs | TopKLogprobs
+@dataclass(frozen=True)
+class HiddenStates:
+    """Target-model activations for each position that was a forward-pass input.
+
+    Row ``r`` describes sequence position ``token_start + r``. It holds the
+    activations of ``layer_ids`` in order, concatenated into
+    ``len(layer_ids) * hidden_size`` values. The rows end where MoE routes end: a
+    completion's last token is never fed back, so it has no row.
+    """
+
+    token_start: int
+    layer_ids: tuple[int, ...]
+    hidden_size: int
+    hidden_states: Tensor
+
+
+GenerationComponent = MoeRoutes | SelectedLogprobs | TopKLogprobs | HiddenStates
 
 
 @dataclass(frozen=True)
@@ -279,11 +303,42 @@ def _validate_routes(
     return replace(component, routers=tuple(routers))
 
 
+def _validate_hidden_states(component: HiddenStates, rows: int) -> HiddenStates:
+    layer_ids = component.layer_ids
+    _require(
+        isinstance(layer_ids, tuple) and 0 < len(layer_ids) <= _MAX_HIDDEN_LAYERS,
+        "invalid hidden-state layer count",
+    )
+    for layer_id in layer_ids:
+        _integer(layer_id, 0, (1 << 31) - 1, "hidden-state layer ID")
+    _require(len(set(layer_ids)) == len(layer_ids), "duplicate hidden-state layer ID")
+    hidden_size = _integer(component.hidden_size, 1, _MAX_DIMENSION, "hidden size")
+    tensor = component.hidden_states
+    _require(
+        tensor.dtype in _FLOAT_DTYPES and len(tensor.shape) == 2,
+        "hidden states require floating [T,L*H]",
+    )
+    _require(
+        tensor.shape == (rows, len(layer_ids) * hidden_size),
+        "hidden-state geometry mismatch",
+    )
+    values = tensor.as_array()
+    if tensor.dtype == "bf16":
+        finite = (values & 0x7F80) != 0x7F80
+    else:
+        finite = np.isfinite(values)
+    _require(bool(np.all(finite)), "invalid hidden-state value")
+    return component
+
+
 def _validate_component(
     component: GenerationComponent, sequence: int, prompt: int, *, strict_dtype: bool
 ) -> GenerationComponent:
-    if isinstance(component, MoeRoutes):
+    if isinstance(component, (MoeRoutes, HiddenStates)):
         extent = sequence - 1 if sequence > prompt else sequence
+        if isinstance(component, HiddenStates):
+            start = _integer(component.token_start, 0, extent, "hidden-state start")
+            return _validate_hidden_states(component, extent - start)
         start = _integer(component.token_start, 0, extent, "route start")
         return _validate_routes(component, extent - start, strict_dtype=strict_dtype)
     _require(
@@ -347,7 +402,8 @@ def _validated(
         sequence = tokens.shape[0]
         prompt = _integer(choice.prompt_token_count, 0, sequence, "prompt token count")
         _require(
-            isinstance(choice.components, tuple) and len(choice.components) <= 3,
+            isinstance(choice.components, tuple)
+            and len(choice.components) <= _MAX_COMPONENTS,
             "invalid components",
         )
         _require(
@@ -367,7 +423,8 @@ def _capture_bounds(view: GenerationArtifactView) -> None:
     tensor_count = 0
     for choice in view.choices:
         _require(
-            isinstance(choice.components, tuple) and len(choice.components) <= 3,
+            isinstance(choice.components, tuple)
+            and len(choice.components) <= _MAX_COMPONENTS,
             "invalid components",
         )
         tensors = [choice.sequence_token_ids]
@@ -383,6 +440,8 @@ def _capture_bounds(view: GenerationArtifactView) -> None:
                 tensors.append(component.logprobs)
             elif isinstance(component, TopKLogprobs):
                 tensors.extend((component.candidate_token_ids, component.logprobs))
+            elif isinstance(component, HiddenStates):
+                tensors.append(component.hidden_states)
             else:
                 raise GenerationArtifactFormatError("unsupported component")
         payload_bytes += sum(len(tensor.data) for tensor in tensors)
@@ -440,6 +499,16 @@ def _manifest(view: GenerationArtifactView) -> tuple[bytes, tuple[Tensor, ...]]:
                         "logprobs": reference(component.logprobs),
                     }
                 )
+            elif isinstance(component, HiddenStates):
+                components.append(
+                    {
+                        **base,
+                        "kind": "hidden_states",
+                        "layer_ids": list(component.layer_ids),
+                        "hidden_size": component.hidden_size,
+                        "hidden_states": reference(component.hidden_states),
+                    }
+                )
             else:
                 components.append(
                     {
@@ -462,6 +531,19 @@ def _manifest(view: GenerationArtifactView) -> tuple[bytes, tuple[Tensor, ...]]:
     return encoded, tuple(tensors)
 
 
+def _minor_version(view: GenerationArtifactView) -> int:
+    """Emit the oldest minor version that can represent this object."""
+    return (
+        _HIDDEN_STATES_MINOR
+        if any(
+            isinstance(component, HiddenStates)
+            for choice in view.choices
+            for component in choice.components
+        )
+        else 0
+    )
+
+
 def iter_generation_artifact(
     view: GenerationArtifactView,
     *,
@@ -473,11 +555,19 @@ def iter_generation_artifact(
         type(codec) is int and codec in (CODEC_NONE, CODEC_ZSTD), "unsupported codec"
     )
     _integer(chunk_size, 1, 1 << 20, "chunk size")
-    manifest, tensors = _manifest(_validated(view, strict_dtype=False))
+    validated = _validated(view, strict_dtype=False)
+    manifest, tensors = _manifest(validated)
     payload_bytes = sum(len(tensor.data) for tensor in tensors)
     padding = bytes(-len(manifest) % 64)
     decoded_size = len(manifest) + len(padding) + payload_bytes
-    yield _PRELUDE.pack(b"DYNEXP1\0", 1, 0, codec, len(manifest), payload_bytes)
+    yield _PRELUDE.pack(
+        b"DYNEXP1\0",
+        1,
+        _minor_version(validated),
+        codec,
+        len(manifest),
+        payload_bytes,
+    )
     compressor = (
         zstd.ZstdCompressor(level=1, write_content_size=True).compressobj(
             size=decoded_size
@@ -525,7 +615,9 @@ def _list(value: Any, maximum: int, name: str, *, nonempty: bool = False) -> lis
     return value
 
 
-def _parse_manifest(manifest: Any, payload: bytes) -> GenerationArtifactView:
+def _parse_manifest(
+    manifest: Any, payload: bytes, *, minor: int = 0
+) -> GenerationArtifactView:
     _keys(manifest, {"choices"}, "manifest")
     offset = 0
     tensor_count = 0
@@ -568,6 +660,25 @@ def _parse_manifest(manifest: Any, payload: bytes) -> GenerationArtifactView:
         if kind == "selected_logprobs":
             _keys(raw, {"kind", "token_start", "logprobs"}, "selected logprobs")
             return SelectedLogprobs(raw["token_start"], tensor(raw["logprobs"]))
+        if kind == "hidden_states":
+            _require(minor >= _HIDDEN_STATES_MINOR, "hidden states require version 1.1")
+            _keys(
+                raw,
+                {"kind", "token_start", "layer_ids", "hidden_size", "hidden_states"},
+                "hidden states",
+            )
+            layer_ids = _list(
+                raw["layer_ids"],
+                _MAX_HIDDEN_LAYERS,
+                "hidden-state layers",
+                nonempty=True,
+            )
+            return HiddenStates(
+                raw["token_start"],
+                tuple(layer_ids),
+                raw["hidden_size"],
+                tensor(raw["hidden_states"]),
+            )
         _require(kind == "topk_logprobs", "unsupported component kind")
         _keys(
             raw,
@@ -589,7 +700,8 @@ def _parse_manifest(manifest: Any, payload: bytes) -> GenerationArtifactView:
         )
         tokens = tensor(raw["sequence_token_ids"])
         components = tuple(
-            component(item) for item in _list(raw["components"], 3, "components")
+            component(item)
+            for item in _list(raw["components"], _MAX_COMPONENTS, "components")
         )
         choices.append(
             GenerationArtifactChoice(
@@ -627,7 +739,7 @@ def decode_generation_artifact(
         data
     )
     _require(
-        magic == b"DYNEXP1\0" and (major, minor) == (1, 0),
+        magic == b"DYNEXP1\0" and major == 1 and minor in _MINOR_VERSIONS,
         "unsupported artifact version",
     )
     _require(codec in (CODEC_NONE, CODEC_ZSTD), "unsupported codec")
@@ -663,7 +775,7 @@ def decode_generation_artifact(
     except (msgspec.DecodeError, TypeError, ValueError, RecursionError) as exc:
         raise GenerationArtifactFormatError("invalid MessagePack manifest") from exc
     _require(canonical == manifest_data, "noncanonical or duplicate MessagePack keys")
-    view = _parse_manifest(manifest, body[payload_start:])
+    view = _parse_manifest(manifest, body[payload_start:], minor=minor)
     if expected_router_profile is not None:
         for choice in view.choices:
             for component in choice.components:

@@ -75,9 +75,51 @@ Before admitting a sample to training, verify:
 | Selected and prompt log probabilities | Standard completion log probabilities, named `nvext.prompt_logprobs`, or native SGLang metadata | Check support and alignment on the exact backend and response path. |
 | Routed experts and raw engine data | Opt-in `nvext.routed_experts` or `nvext.engine_data` | Backend-specific. Prefer named fields over the raw engine payload. |
 | Large SGLang `meta_info` | `nvext.metadata_upload.url` on the OpenAI-compatible path | Uploaded out of band by an RL-enabled SGLang worker; the destination is trusted control input. |
+| Target-model hidden states | `hidden_states` content of a vLLM generation artifact | Requires a worker launched for hidden-state extraction. See [Capture Target Hidden States](#capture-target-hidden-states). |
 | Masks, rewards, advantages, tool or environment state, and trajectory objects | Not a generic Dynamo response contract | The framework derives, stores, validates, and accepts these values. |
 
 See [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md) for the complete `nvext` request and response shapes.
+
+## Capture Target Hidden States
+
+Drafter training for speculative decoding, such as EAGLE-3, needs the target model's intermediate activations for each rollout token. A vLLM worker can return them in the `hidden_states` content of a generation artifact, delivered inline or to object storage like the other artifact contents.
+
+Launch the worker with vLLM's `extract_hidden_states` method and its hidden-states connector. The layer IDs are fixed at launch; a request cannot choose them.
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-8B \
+  --speculative-config '{"method": "extract_hidden_states", "num_speculative_tokens": 1,
+    "draft_model_config": {"hf_config": {"eagle_aux_hidden_state_layer_ids": [2, 18, 33]}}}' \
+  --kv-transfer-config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer",
+    "kv_connector_extra_config": {"shared_storage_path": "/var/lib/dynamo/hidden-states"}}'
+```
+
+The worker publishes the captured `layer_ids`, `hidden_size`, and `dtype` under the `hidden_state_capture` key of its runtime config, and rejects a launch whose connector disables `use_synchronization_lock` or enables `allow_custom_save_path`.
+
+Request the content through `nvext.metadata_upload`:
+
+```json
+{
+  "nvext": {
+    "metadata_upload": {
+      "kind": "generation_artifact",
+      "contents": ["hidden_states", "selected_logprobs"],
+      "mode": "object_store",
+      "destination": {"...": "..."}
+    }
+  }
+}
+```
+
+The artifact's `hidden_states` component holds one row per position that was a forward-pass input, starting at the first prompt token. The completion's last token is never fed back, so it has no row. Each row concatenates the activations of `layer_ids` in order, `len(layer_ids) * hidden_size` values in the model dtype. Objects that carry hidden states use artifact format version 1.1; objects without them stay at version 1.0.
+
+Limits of the current implementation:
+
+- `extract_hidden_states` takes the place of a drafter, so the worker does not speculate while it captures.
+- Capture requires aggregated serving with token prompts and one choice, like the other artifact contents.
+- An artifact payload is capped at 64 MiB, checked against the prompt length plus `max_tokens` before inference. With three captured layers of a 4096-wide bfloat16 model, that admits about 2,700 tokens.
+- The connector writes each file to local disk before the worker reads, uploads, and deletes it.
 
 ## Handle Streaming and Retries
 

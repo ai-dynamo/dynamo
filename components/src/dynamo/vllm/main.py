@@ -27,6 +27,7 @@ from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
+from dynamo.artifacts.vllm.hidden_states import hidden_state_profile_from_vllm_config
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
@@ -115,6 +116,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+HIDDEN_STATE_CAPTURE_RUNTIME_KEY = "hidden_state_capture"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
@@ -1079,6 +1081,17 @@ async def register_vllm_model(
             SPEC_DECODE_RUNTIME_KEY, json.dumps(spec_decode)
         )
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
+
+    # Layers are fixed at launch, so trainers read them here instead of per request.
+    hidden_state_profile = hidden_state_profile_from_vllm_config(vllm_config)
+    if hidden_state_profile is not None:
+        hidden_state_capture = hidden_state_profile.runtime_data()
+        runtime_config.set_engine_specific(
+            HIDDEN_STATE_CAPTURE_RUNTIME_KEY, json.dumps(hidden_state_capture)
+        )
+        logging.info(
+            "Published vLLM hidden-state capture metadata: %s", hidden_state_capture
+        )
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config, _worker_topology_config())

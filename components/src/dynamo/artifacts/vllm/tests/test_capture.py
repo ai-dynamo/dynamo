@@ -444,3 +444,168 @@ async def test_cancelled_encoder_holds_reservation_until_thread_finishes(monkeyp
     with pytest.raises(asyncio.CancelledError):
         await task
     assert budget.used == 0
+
+
+def _hidden_profile(root, layers=(2, 5), hidden_size=4, dtype="fp16"):
+    from dynamo.artifacts.vllm.hidden_states import HiddenStateProfile
+
+    return HiddenStateProfile(layers, hidden_size, dtype, str(root.resolve()))
+
+
+def _write_hidden(path, rows, token_ids, layers=2, hidden_size=4, dtype=None):
+    torch = pytest.importorskip("torch")
+    safetensors_torch = pytest.importorskip("safetensors.torch")
+    hidden = torch.arange(rows * layers * hidden_size, dtype=torch.float32).reshape(
+        rows, layers, hidden_size
+    )
+    safetensors_torch.save_file(
+        {
+            "hidden_states": hidden.to(dtype or torch.float16),
+            "token_ids": torch.tensor(token_ids),
+        },
+        str(path),
+    )
+    return hidden
+
+
+def test_hidden_state_request_requires_capture_profile():
+    budget = CaptureBudget(1 << 20)
+    with pytest.raises(ValueError, match="extract_hidden_states"):
+        session(request(("hidden_states",)), budget)
+    assert budget.used == 0
+
+
+def test_hidden_state_reservation_scales_with_profile(tmp_path):
+    budget = CaptureBudget(1 << 30)
+    small = session(request(), budget)
+    hidden = session(
+        request(("hidden_states",)),
+        budget,
+        hidden_state_profile=_hidden_profile(tmp_path, hidden_size=4096),
+    )
+    assert hidden.reserved_bytes > small.reserved_bytes + 4 * 2 * 4096 * 2
+    with pytest.raises(ValueError, match="worst-case size"):
+        VllmArtifactSession.from_request(
+            request(("hidden_states",), mode="inline_base64"),
+            prompt_token_count=2,
+            max_tokens=1 << 14,
+            hidden_state_profile=_hidden_profile(tmp_path, hidden_size=4096),
+            budget=budget,
+        )
+
+
+@pytest.mark.asyncio
+async def test_hidden_states_bind_to_observed_sequence(tmp_path):
+    torch = pytest.importorskip("torch")
+    capture = session(
+        request(("hidden_states", "selected_logprobs")),
+        hidden_state_profile=_hidden_profile(tmp_path),
+    )
+    path = tmp_path / "req.safetensors"
+    hidden = _write_hidden(path, 3, [10, 11, 12])
+    capture.observe(
+        SimpleNamespace(
+            index=0,
+            token_ids=[12, 13],
+            logprobs=[
+                {12: SimpleNamespace(logprob=-0.5)},
+                {13: SimpleNamespace(logprob=-0.25)},
+            ],
+        ),
+        [10, 11],
+    )
+    capture.observe_transfer({"hidden_states_path": str(path)})
+    result = await capture.finalize()
+
+    assert result["contents"] == ["hidden_states", "selected_logprobs"]
+    choice = decode_generation_artifact(
+        base64.b64decode(result["data_base64"])
+    ).choices[0]
+    component = next(
+        item for item in choice.components if type(item).__name__ == "HiddenStates"
+    )
+    assert component.token_start == 0
+    assert component.layer_ids == (2, 5)
+    assert component.hidden_size == 4
+    assert component.hidden_states.shape == (3, 8)
+    assert (
+        component.hidden_states.data
+        == hidden.to(torch.float16).reshape(3, 8).numpy().tobytes()
+    )
+    assert not path.exists()
+    assert capture.reserved_bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rows,token_ids,layers",
+    [(3, [10, 11, 99], 2), (2, [10, 11], 2), (3, [10, 11, 12], 3)],
+)
+async def test_mismatched_hidden_state_file_is_capture_invalid(
+    tmp_path, rows, token_ids, layers
+):
+    capture = session(
+        request(("hidden_states",)), hidden_state_profile=_hidden_profile(tmp_path)
+    )
+    path = tmp_path / "req.safetensors"
+    _write_hidden(path, rows, token_ids, layers=layers)
+    capture.observe(SimpleNamespace(index=0, token_ids=[12, 13]), [10, 11])
+    capture.observe_transfer({"hidden_states_path": str(path)})
+    result = await capture.finalize()
+    assert result["state"] == "failed"
+    assert result["error_code"] == "capture_invalid"
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_missing_hidden_state_file_reference_fails_explicitly(tmp_path):
+    capture = session(
+        request(("hidden_states",)), hidden_state_profile=_hidden_profile(tmp_path)
+    )
+    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe_transfer({"do_remote_decode": False})
+    result = await capture.finalize()
+    assert result["error_code"] == "capture_invalid"
+
+
+@pytest.mark.asyncio
+async def test_hidden_state_path_outside_storage_root_is_never_read(tmp_path):
+    root = tmp_path / "hs"
+    root.mkdir()
+    outside = tmp_path / "req.safetensors"
+    _write_hidden(outside, 2, [10, 11])
+    capture = session(
+        request(("hidden_states",)), hidden_state_profile=_hidden_profile(root)
+    )
+    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe_transfer({"hidden_states_path": str(outside)})
+    result = await capture.finalize()
+    assert result["error_code"] == "capture_invalid"
+    assert outside.exists()
+
+
+def test_closing_without_finalize_discards_the_file(tmp_path):
+    capture = session(
+        request(("hidden_states",)), hidden_state_profile=_hidden_profile(tmp_path)
+    )
+    path = tmp_path / "req.safetensors"
+    _write_hidden(path, 2, [10, 11])
+    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe_transfer({"hidden_states_path": str(path)})
+    capture.close()
+    deadline = threading.Event()
+    for _ in range(500):
+        if not path.exists():
+            break
+        deadline.wait(0.01)
+    assert not path.exists()
+    assert capture.reserved_bytes == 0
+
+
+def test_transfer_is_ignored_when_hidden_states_were_not_requested(tmp_path):
+    capture = session(request(), hidden_state_profile=_hidden_profile(tmp_path))
+    path = tmp_path / "req.safetensors"
+    path.write_bytes(b"x")
+    capture.observe_transfer({"hidden_states_path": str(path)})
+    capture.close()
+    assert path.exists()
