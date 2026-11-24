@@ -60,7 +60,7 @@ Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (
 Emitted by `python -m dynamo.frontend` at `/metrics` on the HTTP port (`--http-port`, default `8000`). The frontend serves its [router](#router-metrics) and [runtime](#every-process) metrics on the same port and does not use `DYN_SYSTEM_PORT`. Frontend metrics carry no automatic labels.
 
 - `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, `dynamo_frontend_event_loop_*`, and `dynamo_frontend_metrics_start_time_seconds`, which keep their names.
-- With `--kserve-grpc-server`, the frontend serves metrics on `DYN_GRPC_METRICS_PORT` (default `8788`) instead. The model configuration and migration metrics, the `dynamo_router_*` metrics, and the metrics in the runtime registry (`dynamo_component_*`, including the router request metrics, and `dynamo_quic_response_*`) are not exposed in that mode; the `dynamo_frontend_router_*` metrics are.
+- With `--kserve-grpc-server`, the frontend serves metrics on `DYN_GRPC_METRICS_PORT` (default `8788`) instead, including the metrics in the runtime registry (`dynamo_component_*`, including the router request metrics, and `dynamo_quic_response_*`) and the `dynamo_frontend_router_*` metrics. The model configuration and migration metrics are not populated in that mode, and the `dynamo_router_*` metrics are not registered.
 
 For endpoints that canonicalize aliases, the `model` label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
 
@@ -593,7 +593,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 
 ## Every Process
 
-Emitted by every process that runs a Dynamo DistributedRuntime: on the HTTP port for the frontend (not with `--kserve-grpc-server`), and on `DYN_SYSTEM_PORT` for other processes.
+Emitted by every process that runs a Dynamo DistributedRuntime: on the frontend's metrics port (`--http-port`, or `DYN_GRPC_METRICS_PORT` with `--kserve-grpc-server`), and on `DYN_SYSTEM_PORT` for other processes.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
