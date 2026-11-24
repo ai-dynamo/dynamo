@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use super::approximate_lru::{ApproximateLruCommandSink, ApproximateLruLane};
 use super::types::RoutingDecisionRequest;
@@ -371,9 +371,8 @@ pub struct KvIndexer {
     approximate_lru: Option<ApproximateLruClient>,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
-    /// Reference counter for Clone-aware Drop.
-    /// Only the last clone should cancel the token on drop.
-    _ref_count: Arc<()>,
+    /// Cancels the token when the last clone drops.
+    _cancel_on_last_drop: Arc<DropGuard>,
 }
 
 impl KvIndexer {
@@ -674,7 +673,7 @@ impl KvIndexer {
         });
 
         Self {
-            cancel: token,
+            cancel: token.clone(),
             mutation_tx,
             match_tx,
             match_details_tx,
@@ -687,7 +686,7 @@ impl KvIndexer {
             routing_tx,
             approximate_lru,
             kv_block_size,
-            _ref_count: Arc::new(()),
+            _cancel_on_last_drop: Arc::new(token.drop_guard()),
         }
     }
 
@@ -1067,13 +1066,48 @@ impl KvIndexer {
     }
 }
 
-impl Drop for KvIndexer {
-    fn drop(&mut self) {
-        // Only cancel the token if we're the last reference.
-        // This allows clones to be dropped without killing the background task.
-        if Arc::strong_count(&self._ref_count) == 1 {
-            self.shutdown();
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::approximate_lru::ApproximateLruClient;
+
+    /// Owns a clone of the indexer whose field it is, so that clone drops while the owner is
+    /// mid-drop, where another thread's drop can land.
+    struct HoldsClone {
+        _clone: KvIndexer,
+        lane_exited: CancellationToken,
+    }
+
+    impl ApproximateLruCommandSink for HoldsClone {
+        fn send(&self, _task: ApproximateLruTask) -> Result<(), KvRouterError> {
+            Err(KvRouterError::IndexerOffline)
         }
+
+        fn lane_exited(&self) -> &CancellationToken {
+            &self.lane_exited
+        }
+    }
+
+    #[test]
+    fn overlapping_last_drops_cancel_the_actor() {
+        let token = CancellationToken::new();
+        let mut indexer = KvIndexer::new(
+            token.clone(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        drop(indexer.clone());
+        assert!(
+            !token.is_cancelled(),
+            "a live clone keeps the actor running"
+        );
+
+        indexer.approximate_lru = Some(ApproximateLruClient::new(Arc::new(HoldsClone {
+            _clone: indexer.clone(),
+            lane_exited: CancellationToken::new(),
+        })));
+        drop(indexer);
+        assert!(token.is_cancelled());
     }
 }
 
