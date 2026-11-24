@@ -7,7 +7,7 @@ use std::{
 };
 
 use dynamo_router_protocol::worker::WorkerId;
-use dynamo_runtime::metrics::PrometheusMetric;
+use dynamo_runtime::metrics::{PrometheusMetric, format_instance_id_label};
 use parking_lot::Mutex;
 use prometheus::{
     IntGaugeVec, Opts,
@@ -103,7 +103,7 @@ impl Collector for RouterWorkerRegistered {
                 let Ok(ranks) = config.data_parallel_rank_range() else {
                     continue;
                 };
-                let worker_id = worker_id.to_string();
+                let worker_id = format_instance_id_label(*worker_id);
                 for rank in ranks {
                     gauge
                         .with_label_values(&[&worker_id, &rank.to_string(), source.worker_type])

@@ -38,6 +38,7 @@ use crate::protocols::{
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
+use dynamo_runtime::metrics::format_instance_id_label;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 use dynamo_runtime::{engine::Data, pipeline::Context};
 
@@ -1235,7 +1236,7 @@ pub struct ResponseMetricCollector {
     // Cached per-worker ITL gauge handle. The decode-worker labels are latched once at
     // routing time (`set_worker_info` only sets when unset), so this GaugeVec handle is
     // resolved a single time and reused — the per-token observe path then does no label
-    // formatting (`worker_id.to_string()`) or label hashing, only `set`.
+    // formatting or label hashing, only `set`.
     decode_itl_gauge: Option<prometheus::Gauge>,
 }
 
@@ -2770,7 +2771,7 @@ impl ResponseMetricCollector {
             // Use stored worker_type (from routing time) to avoid MDC lookup.
             // Falls back to WORKER_TYPE_PREFILL if not available.
             if let Some(worker_id) = self.prefill_worker_id {
-                let worker_id_str = worker_id.to_string();
+                let worker_id_str = format_instance_id_label(worker_id);
                 let dp_rank_str = self.prefill_dp_rank.map(|r| r.to_string());
                 let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
                 let worker_type = self
@@ -2819,7 +2820,7 @@ impl ResponseMetricCollector {
             if self.decode_itl_gauge.is_none()
                 && let Some(worker_id) = self.decode_worker_id
             {
-                let worker_id_str = worker_id.to_string();
+                let worker_id_str = format_instance_id_label(worker_id);
                 let dp_rank_str = self.decode_dp_rank.map(|r| r.to_string());
                 let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
                 let worker_type = self
@@ -4480,7 +4481,7 @@ mod tests {
 
         // Distinctive worker id so this never collides with other tests on the
         // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
-        let worker_id: u64 = 9_876_543_210;
+        let worker_id: u64 = 0x2_4cb0_16ea;
         let mut collector = response_collector(&metrics, model);
         collector.set_worker_info(
             None,
@@ -4498,12 +4499,8 @@ mod tests {
         sleep(Duration::from_millis(2));
         collector.observe_response(10, 1);
 
-        let worker_id_str = worker_id.to_string();
-        let gauge = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
-            worker_id_str.as_str(),
-            "0",
-            "decode",
-        ]);
+        let gauge =
+            WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&["24cb016ea", "0", "decode"]);
         assert!(
             gauge.get() > 0.0,
             "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",
@@ -4515,7 +4512,7 @@ mod tests {
     fn test_worker_last_gauges_use_unset_label_without_dp_rank() {
         let metrics = Arc::new(Metrics::new());
         // Distinctive worker id, as above: the per-worker gauges are process-global.
-        let worker_id: u64 = 9_876_543_211;
+        let worker_id: u64 = 0x2_4cb0_16eb;
         let mut collector = response_collector(&metrics, "unset-rank-model");
         collector.set_worker_info(
             Some(worker_id),
@@ -4533,13 +4530,13 @@ mod tests {
         collector.observe_response(10, 1);
 
         // The scrape filter and the worker cleanup match an unset rank by this value.
-        let worker_id = worker_id.to_string();
+        let worker_label = "24cb016eb";
         let isl = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
-            .with_label_values(&[worker_id.as_str(), "none", WORKER_TYPE_PREFILL])
+            .with_label_values(&[worker_label, "none", WORKER_TYPE_PREFILL])
             .get();
         assert_eq!(isl, 10);
         let itl = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-            .with_label_values(&[worker_id.as_str(), "none", WORKER_TYPE_DECODE])
+            .with_label_values(&[worker_label, "none", WORKER_TYPE_DECODE])
             .get();
         assert!(itl > 0.0, "ITL gauge should be positive, got {itl}");
     }

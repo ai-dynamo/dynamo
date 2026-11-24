@@ -38,9 +38,11 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
 </ParamField>
 
 <ParamField path="worker_id" type="string">
-  `[Shared]` Hex-encoded discovery instance ID of the endpoint, providing a stable per-worker identity that does not depend on Kubernetes. Injected only when the endpoint hierarchy has a connection ID. Example: `1a2b3c4d`.
+  `[Shared]` Lowercase hexadecimal discovery instance ID (without a `0x` prefix) of the endpoint, providing a stable per-worker identity that does not depend on Kubernetes. Injected only when the endpoint hierarchy has a connection ID. Example: `1a2b3c4d`.
 
-  On the per-worker frontend gauges (`dynamo_frontend_worker_*`), this label carries the routed worker's discovery instance ID in decimal instead: a worker whose own metrics carry `worker_id="1a2b3c4d"` appears there as `worker_id="439041101"`.
+  On the per-worker frontend gauges (`dynamo_frontend_worker_*`), this label identifies the routed worker. A worker with `worker_id="1a2b3c4d"` on its own component metrics has the same label value on the frontend gauges.
+
+  When upgrading from decimal ID labels, update exact-value selectors for frontend worker gauges, Planner per-engine forward-pass gauges, `router_worker_id`, and `router_id`. For example, change `worker_id="123"` to `worker_id="7b"` for the same frontend worker. A digit-only selector can also match a different instance across versions: the label value `"10"` identifies instance 10 on a decimal exporter and instance 16 on a hexadecimal exporter. Scope per-instance queries to exporters of the same version during a rolling upgrade.
 </ParamField>
 
 ## Registration-time labels

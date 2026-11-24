@@ -4,6 +4,7 @@
 use crate::load::{
     FrontendLoadFrame, FrontendModelLoad, ModelLoadView, RequestGauges, RequestTotals,
 };
+use dynamo_runtime::metrics::format_instance_id_label;
 use dynamo_runtime::metrics::prometheus_names::{
     clamp_u64_to_i64, frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
 };
@@ -855,7 +856,7 @@ pub struct ResponseMetricCollector {
     // Cached per-worker ITL gauge handle. The decode-worker labels are latched once at
     // routing time (`set_worker_info` only sets when unset), so this GaugeVec handle is
     // resolved a single time and reused — the per-token observe path then does no label
-    // formatting (`worker_id.to_string()`) or label hashing, only `set`.
+    // formatting or label hashing, only `set`.
     decode_itl_gauge: Option<prometheus::Gauge>,
 }
 
@@ -2351,7 +2352,7 @@ impl ResponseMetricCollector {
             // Use stored worker_type (from routing time) to avoid MDC lookup.
             // Falls back to WORKER_TYPE_PREFILL if not available.
             if let Some(worker_id) = self.prefill_worker_id {
-                let worker_id_str = worker_id.to_string();
+                let worker_id_str = format_instance_id_label(worker_id);
                 let dp_rank_str = self
                     .prefill_dp_rank
                     .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
@@ -2408,7 +2409,7 @@ impl ResponseMetricCollector {
             if self.decode_itl_gauge.is_none()
                 && let Some(worker_id) = self.decode_worker_id
             {
-                let worker_id_str = worker_id.to_string();
+                let worker_id_str = format_instance_id_label(worker_id);
                 let dp_rank_str = self
                     .decode_dp_rank
                     .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
@@ -3451,12 +3452,12 @@ mod tests {
 
         // Distinctive worker id so this never collides with other tests on the
         // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
-        let worker_id: u64 = 9_876_543_210;
+        let worker_id: u64 = 0x2_4cb0_16ea;
         let mut collector = response_collector(&metrics, model);
         collector.set_worker_info(
-            None,
-            None,
-            None,
+            Some(0x2_4cb0_16eb),
+            Some(0),
+            Some(WORKER_TYPE_PREFILL.to_string()),
             Some(worker_id),
             Some(0),
             Some("decode".to_string()),
@@ -3464,17 +3465,20 @@ mod tests {
 
         // First chunk: TTFT only, no ITL yet (no prior response time) -> gauge unset.
         collector.observe_response(10, 1);
+        let prefill_labels = &["24cb016eb", "0", WORKER_TYPE_PREFILL];
+        assert_eq!(
+            WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(prefill_labels)
+                .get(),
+            10
+        );
         // Elapse measurable time so ITL > 0, then a second chunk drives the cached
         // per-worker ITL gauge.
         std::thread::sleep(std::time::Duration::from_millis(2));
         collector.observe_response(10, 1);
 
-        let worker_id_str = worker_id.to_string();
-        let gauge = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
-            worker_id_str.as_str(),
-            "0",
-            "decode",
-        ]);
+        let gauge =
+            WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&["24cb016ea", "0", "decode"]);
         assert!(
             gauge.get() > 0.0,
             "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",

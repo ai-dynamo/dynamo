@@ -22,6 +22,7 @@ use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::kv_router::routing_load::SchedulerLoadReceiver;
 use dynamo_runtime::component::Client;
+use dynamo_runtime::metrics::format_instance_id_label;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 
 use super::runtime_config_watch;
@@ -34,7 +35,7 @@ pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFI
 /// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.
 /// Called when workers are removed to prevent stale metrics from accumulating.
 fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
-    let worker_id_str = worker_id.to_string();
+    let worker_id_str = format_instance_id_label(worker_id);
     for dp_rank in dp_ranks {
         WORKER_LOAD_METRICS.remove(worker_id, *dp_rank, worker_type);
         let dp_rank_str = dp_rank.to_string();
@@ -2070,7 +2071,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_every_load_series_for_the_worker_ranks() {
+    fn cleanup_removes_load_and_timing_metrics_for_the_worker_ranks() {
         use dynamo_slot_tracker::host::LocalWorkerLoad;
         use prometheus::core::Collector;
 
@@ -2084,13 +2085,27 @@ mod tests {
         for dp_rank in [0, 1] {
             WORKER_LOAD_METRICS.observe(WORKER_ID, dp_rank, "decode", load);
         }
+        for rank in ["0", "1", super::UNSET_DP_RANK_LABEL] {
+            let labels = &["10696", rank, "decode"];
+            super::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(labels)
+                .set(1.0);
+            super::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(labels)
+                .set(1);
+            super::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .with_label_values(labels)
+                .set(1.0);
+        }
         let worker_series = || {
-            let worker_id = WORKER_ID.to_string();
             let m = &*WORKER_LOAD_METRICS;
             [
                 m.active_decode_blocks.collect(),
                 m.active_prefill_tokens.collect(),
                 m.active_requests.collect(),
+                super::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.collect(),
+                super::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.collect(),
+                super::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.collect(),
             ]
             .into_iter()
             .flatten()
@@ -2099,11 +2114,11 @@ mod tests {
                 metric
                     .get_label()
                     .iter()
-                    .any(|label| label.name() == "worker_id" && label.value() == worker_id)
+                    .any(|label| label.name() == "worker_id" && label.value() == "10696")
             })
             .count()
         };
-        assert_eq!(worker_series(), 2 * (1 + 1 + 2));
+        assert_eq!(worker_series(), 2 * (1 + 1 + 2) + 3 * 3);
 
         cleanup_worker_metrics(WORKER_ID, &[0, 1], "decode");
         assert_eq!(worker_series(), 0);
