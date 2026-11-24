@@ -52,6 +52,9 @@ def _make_handler(
                 tensor_parallel_size=tensor_parallel_size,
                 prefill_context_parallel_size=prefill_context_parallel_size,
                 data_parallel_size=data_parallel_size,
+                data_parallel_rank=0,
+                data_parallel_external_lb=False,
+                data_parallel_hybrid_lb=False,
                 # Elastic EP enabled + Ray backend so the capability gate passes.
                 enable_elastic_ep=True,
                 data_parallel_backend="ray",
@@ -128,6 +131,23 @@ async def test_integer_valued_sizes_are_accepted(size, stub_ray):
 
     assert result["status"] == "ok"
     handler.engine_client.scale_elastic_ep.assert_awaited_once_with(2)
+
+
+@pytest.mark.asyncio
+async def test_successful_scale_refreshes_dp_range(stub_ray):
+    """Prefill DP-rank pinning reads dp_range, so it must follow a shrink."""
+    handler = _make_handler(tensor_parallel_size=1, data_parallel_size=4)
+    handler.dp_range = (0, 4)
+    parallel_config = handler.engine_client.vllm_config.parallel_config
+
+    async def scale(size):  # vLLM updates the config when the scale completes
+        parallel_config.data_parallel_size = size
+
+    handler.engine_client.scale_elastic_ep.side_effect = scale
+    result = await handler.scale_elastic_ep({"new_data_parallel_size": 2})
+
+    assert result["status"] == "ok"
+    assert handler.dp_range == (0, 2)
 
 
 @pytest.mark.asyncio
@@ -214,6 +234,9 @@ class _FakeVllmEngine:
         self.vllm_config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 data_parallel_size=prev_dp,
+                data_parallel_rank=0,
+                data_parallel_external_lb=False,
+                data_parallel_hybrid_lb=False,
                 tensor_parallel_size=tensor_parallel_size,
                 enable_elastic_ep=enable_elastic_ep,
                 data_parallel_backend=data_parallel_backend,

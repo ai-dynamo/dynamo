@@ -33,6 +33,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.core,
 ]
 
 _MOONCAKE_MOD = (
@@ -239,7 +240,6 @@ def test_mooncake_dp_decode_without_dp_rank_raises(fake_mooncake):
 
 
 def test_nixl_and_lmcache_mp_do_not_need_dp_rank():
-    """These protocols do not derive decode params from the serving rank."""
     for cls in (NixlConnectorProtocol, LMCacheMPConnectorProtocol):
         assert cls(_config(None, data_parallel_size=4)).needs_dp_rank is False
 

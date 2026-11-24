@@ -1511,6 +1511,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
                 self._shutdown_worker()  # NoReturn: runtime.shutdown() + os._exit(1)
 
+            # vLLM updates data_parallel_size when the scale completes; keep the
+            # DP range used for rank selection in step with it.
+            self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
             logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
             return {
                 "status": "ok",
