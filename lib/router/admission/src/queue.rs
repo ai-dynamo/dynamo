@@ -958,7 +958,7 @@ impl<T> PolicyClassQueue<T> {
                 candidate_lane_heads,
                 ..
             } = self;
-            // The heads of the lanes that leave the group, and of those that may go.
+            // The heads of the lanes that leave the group, and the lanes that may go.
             let mut departed = Vec::new();
             let mut may_go = Vec::new();
             let mut any_refused = false;
@@ -971,7 +971,7 @@ impl<T> PolicyClassQueue<T> {
                     }
                     // Stays until every lane has answered.
                     LaneCheck::Dispatch => {
-                        may_go.push(*head);
+                        may_go.push(lane);
                         return true;
                     }
                     LaneCheck::Blocked(BlockReason::Gate) => {
@@ -989,8 +989,10 @@ impl<T> PolicyClassQueue<T> {
             let has_room = !any_refused && !may_go.is_empty();
             if any_refused {
                 // The group has no room, so a lane that may go has room of its own.
-                for head in may_go {
-                    shared_blocked.remove(&head.lane);
+                for lane in may_go {
+                    let head = shared_blocked
+                        .remove(&lane)
+                        .expect("lane stayed in the group");
                     candidate_lane_heads.insert(head);
                     departed.push(head);
                 }
