@@ -528,6 +528,18 @@ impl Default for ParsingOptions {
 }
 
 impl ParsingOptions {
+    /// Default for workers that omit per-call native completion authority.
+    pub(crate) fn legacy_native_completion_authority(&self) -> bool {
+        use chat_completions::unified_parser;
+
+        unified_parser::selected_batch_family(
+            self.tool_call_parser.as_deref(),
+            self.reasoning_parser.as_deref(),
+        )
+        .and_then(unified_parser::registration)
+        .is_some_and(|entry| entry.descriptor.native_completion_authoritative)
+    }
+
     pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
         Self {
             tool_call_parser,

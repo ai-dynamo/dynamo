@@ -484,13 +484,7 @@ impl DeltaAggregator {
         parsing_options: ParsingOptions,
         require_explicit_tool_terminal: bool,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
-        // Older workers omitted per-call authority; retain their configured native policy.
-        let legacy_native_authority = super::unified_parser::selected_batch_family(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-        )
-        .and_then(super::unified_parser::registration)
-        .is_some_and(|entry| entry.descriptor.native_completion_authoritative);
+        let legacy_native_authority = parsing_options.legacy_native_completion_authority();
         let mut aggregator = stream
             .map(Annotated::into_data)
             .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -686,7 +680,7 @@ impl DeltaAggregator {
                     // Apply it independently so the final call is not discarded.
                     for evidence in delta.tool_call_completion {
                         if let Some(choice) = aggregator.choices.get_mut(&evidence.choice_index) {
-                            if evidence.native_completion_authoritative.unwrap_or(legacy_native_authority) {
+                            if evidence.has_native_authority(legacy_native_authority) {
                                 choice.parser_authoritative_completion.insert(evidence.tool_index);
                             }
                             choice.parser_call_completion.entry(evidence.tool_index)

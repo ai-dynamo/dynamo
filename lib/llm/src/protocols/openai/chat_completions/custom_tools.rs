@@ -24,9 +24,7 @@ pub(crate) struct ChatCustomToolAdapter {
     pending: BTreeMap<(u32, u32), PendingToolCall>,
     // Named function continuations can pass through without being buffered again.
     streamed: HashSet<(u32, u32)>,
-    // Mistral marks calls whose body it closed; unary keeps those on a `length` or
-    // `content_filter` finish too.
-    keep_parser_confirmed: bool,
+    legacy_native_authority: bool,
     parser_confirmed: HashSet<(u32, u32)>,
 }
 
@@ -46,15 +44,13 @@ impl ChatCustomToolAdapter {
             single_tool_call: request.inner.parallel_tool_calls == Some(false),
             pending: BTreeMap::new(),
             streamed: HashSet::new(),
-            keep_parser_confirmed: false,
+            legacy_native_authority: false,
             parser_confirmed: HashSet::new(),
         })
     }
 
-    /// Keep parser-confirmed calls on a `length` or `content_filter` finish, matching
-    /// unary aggregation.
-    pub(crate) fn keep_parser_confirmed_calls(&mut self, keep: bool) {
-        self.keep_parser_confirmed = keep;
+    pub(crate) fn set_legacy_native_authority(&mut self, enabled: bool) {
+        self.legacy_native_authority = enabled;
     }
 
     pub(crate) fn project_response(
@@ -86,15 +82,15 @@ impl ChatCustomToolAdapter {
         if self.names.is_empty() {
             return Ok(());
         }
-        if self.keep_parser_confirmed {
-            self.parser_confirmed.extend(
-                response
-                    .tool_call_completion
-                    .iter()
-                    .filter(|evidence| evidence.complete)
-                    .map(|evidence| (evidence.choice_index, evidence.tool_index)),
-            );
-        }
+        self.parser_confirmed.extend(
+            response
+                .tool_call_completion
+                .iter()
+                .filter(|evidence| {
+                    evidence.complete && evidence.has_native_authority(self.legacy_native_authority)
+                })
+                .map(|evidence| (evidence.choice_index, evidence.tool_index)),
+        );
         for choice in &mut response.inner.choices {
             let mut output = Vec::new();
             for call in choice.delta.tool_calls.take().into_iter().flatten() {
@@ -602,17 +598,19 @@ mod tests {
         ) {
             return;
         }
-        for (finish, keep, complete, expected) in
+        for (finish, legacy_default, authority, complete, expected) in
             ["length", "content_filter"].into_iter().flat_map(|finish| {
                 [
-                    (finish, true, true, Some(r#"{"workspace"}"#)),
-                    (finish, true, false, None),
-                    (finish, false, true, None),
+                    (finish, true, None, true, Some(r#"{"workspace"}"#)),
+                    (finish, true, None, false, None),
+                    (finish, false, None, true, None),
+                    (finish, false, Some(true), true, Some(r#"{"workspace"}"#)),
+                    (finish, true, Some(false), true, None),
                 ]
             })
         {
             let mut adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
-            adapter.keep_parser_confirmed_calls(keep);
+            adapter.set_legacy_native_authority(legacy_default);
             let mut data = chunk(
                 0,
                 json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":r#"{"workspace"}"#}}]),
@@ -623,7 +621,17 @@ mod tests {
                     choice_index: 0,
                     tool_index: 0,
                     complete,
-                    native_completion_authoritative: None,
+                    native_completion_authoritative: authority,
+                });
+            let mut other_choice = data.inner.choices[0].clone();
+            other_choice.index = 1;
+            data.inner.choices.insert(0, other_choice);
+            data.tool_call_completion
+                .push(super::super::ToolCallCompletion {
+                    choice_index: 1,
+                    tool_index: 0,
+                    complete: true,
+                    native_completion_authoritative: Some(false),
                 });
             let out: Vec<_> = adapter
                 .stream(futures::stream::iter([Annotated::from_data(data)]))
@@ -631,21 +639,24 @@ mod tests {
                 .await;
             assert!(out.iter().all(|item| !item.is_error()));
             let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
-            assert_eq!(value["choices"][0]["finish_reason"], finish);
+            assert_eq!(value["choices"][0]["index"], 1);
+            assert!(value["choices"][0]["delta"]["tool_calls"].is_null());
+            let selected_choice = &value["choices"][1];
+            assert_eq!(selected_choice["index"], 0);
+            assert_eq!(selected_choice["finish_reason"], finish);
             match expected {
                 Some(input) => assert_eq!(
-                    value["choices"][0]["delta"]["tool_calls"],
+                    selected_choice["delta"]["tool_calls"],
                     json!([{"index":0,"id":"c1","type":"custom","custom":{"name":"run_python","input":input}}])
                 ),
-                None => assert!(value["choices"][0]["delta"]["tool_calls"].is_null()),
+                None => assert!(selected_choice["delta"]["tool_calls"].is_null()),
             }
         }
 
         for finish in [FinishReason::Length, FinishReason::ContentFilter] {
             for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
             {
-                let mut adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
-                adapter.keep_parser_confirmed_calls(true);
+                let adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
                 let mut text = chunk(0, json!(null), json!(null));
                 text.inner.choices[0].delta.content = Some(
                     dynamo_protocols::types::ChatCompletionMessageContent::Text(

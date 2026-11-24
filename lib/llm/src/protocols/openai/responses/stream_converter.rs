@@ -90,7 +90,7 @@ pub struct ResponseStreamConverter {
     active_reasoning_index: Option<usize>,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
-    keep_parser_confirmed: bool,
+    legacy_native_authority: bool,
     parser_confirmed: HashSet<usize>,
     // Hold custom calls and following tool headers until a completion boundary,
     // so dropping a partial custom input cannot leave an item or an index gap.
@@ -191,7 +191,7 @@ impl ResponseStreamConverter {
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
             function_call_items: Vec::new(),
-            keep_parser_confirmed: false,
+            legacy_native_authority: false,
             parser_confirmed: HashSet::new(),
             deferred_tool_calls: Vec::new(),
             next_output_index: 0,
@@ -207,8 +207,8 @@ impl ResponseStreamConverter {
         converter
     }
 
-    pub(crate) fn keep_parser_confirmed_calls(&mut self, keep: bool) {
-        self.keep_parser_confirmed = keep;
+    pub(crate) fn set_legacy_native_authority(&mut self, enabled: bool) {
+        self.legacy_native_authority = enabled;
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -599,15 +599,17 @@ impl ResponseStreamConverter {
             });
         }
 
-        if self.keep_parser_confirmed {
-            self.parser_confirmed.extend(
-                chunk
-                    .tool_call_completion
-                    .iter()
-                    .filter(|evidence| evidence.choice_index == 0 && evidence.complete)
-                    .map(|evidence| evidence.tool_index as usize),
-            );
-        }
+        self.parser_confirmed.extend(
+            chunk
+                .tool_call_completion
+                .iter()
+                .filter(|evidence| {
+                    evidence.choice_index == 0
+                        && evidence.complete
+                        && evidence.has_native_authority(self.legacy_native_authority)
+                })
+                .map(|evidence| evidence.tool_index as usize),
+        );
 
         // Terminal status must be known before phase/text boundaries can flush
         // a buffered custom call from this same chunk.
@@ -2803,13 +2805,21 @@ mod tests {
         let complete = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}"#;
         let cut_tail = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]cd[ARGS]{"input":"cut"#;
         let raw_cut_tail = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]cd[ARGS]dir_na"#;
-        for (finish, text, keep, expected_count) in [
-            (FinishReason::Length, complete, true, 1),
-            (FinishReason::ContentFilter, complete, true, 1),
-            (FinishReason::Length, cut_tail, true, 1),
-            (FinishReason::Length, raw_cut_tail, true, 1),
-            (FinishReason::ContentFilter, raw_cut_tail, true, 1),
-            (FinishReason::Length, complete, false, 0),
+        for (finish, text, legacy_default, wire_authority, expected_count) in [
+            (FinishReason::Length, complete, false, Some(true), 1),
+            (FinishReason::ContentFilter, complete, false, Some(true), 1),
+            (FinishReason::Length, cut_tail, false, Some(true), 1),
+            (FinishReason::Length, raw_cut_tail, false, Some(true), 1),
+            (
+                FinishReason::ContentFilter,
+                raw_cut_tail,
+                false,
+                Some(true),
+                1,
+            ),
+            (FinishReason::Length, complete, true, None, 1),
+            (FinishReason::Length, complete, false, None, 0),
+            (FinishReason::Length, complete, true, Some(false), 0),
         ] {
             for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
             {
@@ -2823,7 +2833,7 @@ mod tests {
                     ..default_params()
                 };
                 let mut conv = ResponseStreamConverter::new("test-model".into(), params);
-                conv.keep_parser_confirmed_calls(keep);
+                conv.set_legacy_native_authority(legacy_default);
                 let chunks = if separate_finish {
                     let mut terminal = finish_chunk(finish);
                     if reasoning_finish {
@@ -2850,7 +2860,12 @@ mod tests {
                 let mut reasoning = String::new();
                 while let Some(chunk) = parsed.next().await {
                     assert!(!chunk.is_error());
-                    if let Some(data) = chunk.data {
+                    if let Some(mut data) = chunk.data {
+                        for evidence in &mut data.tool_call_completion {
+                            if wire_authority != Some(true) {
+                                evidence.native_completion_authoritative = wire_authority;
+                            }
+                        }
                         for choice in &data.inner.choices {
                             if let Some(text) = &choice.delta.reasoning_content {
                                 reasoning.push_str(text);

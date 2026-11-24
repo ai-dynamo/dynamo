@@ -381,6 +381,13 @@ pub struct ToolCallCompletion {
     pub native_completion_authoritative: Option<bool>,
 }
 
+impl ToolCallCompletion {
+    pub(crate) fn has_native_authority(&self, legacy_default: bool) -> bool {
+        self.native_completion_authoritative
+            .unwrap_or(legacy_default)
+    }
+}
+
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
