@@ -37,7 +37,8 @@ Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
 ## Skills
 
 Skills live canonically in `skills/`; `.agents/skills/` and `.claude/skills/` are symlinks
-to it — edit only the canonical copy.
+to it — edit only the canonical copy. Discovery through them needs a checkout with
+`core.symlinks=true`.
 
 **Build, debug, and measure:**
 

@@ -13,6 +13,10 @@ a skill explicitly.
 The canonical sources live in
 [`skills/`](https://github.com/ai-dynamo/dynamo/tree/main/skills). The `.agents/skills/` and
 `.claude/skills/` directories are compatibility symlinks to the same content.
+Agents only find skills through them in a checkout that keeps symlinks. If `core.symlinks` is
+false, which is common on Windows, set it to true and check out again, or point your agent at
+`skills/` directly. To install these skills into another project, use `npx skills add` with
+`--copy`, which writes regular directories.
 
 <CardGroup cols={3}>
   <Card title="Deployment and Operations" icon="screwdriver-wrench" href="deployment.mdx">
