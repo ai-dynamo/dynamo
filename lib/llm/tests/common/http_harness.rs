@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
+use dynamo_http_server::metrics::Metrics;
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::{Annotated, codec::create_message_stream};
