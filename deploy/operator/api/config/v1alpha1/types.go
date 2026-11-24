@@ -95,8 +95,9 @@ type OperatorConfiguration struct {
 	LPX LPXConfiguration `json:"lpx"`
 }
 
-// DefaultDGDROutputCopierImage is used when no output-copier image is configured.
-const DefaultDGDROutputCopierImage = "bitnami/kubectl:latest"
+// DefaultDGDROutputCopierImage pins kubectl v1.37.2's amd64/arm64 manifest list.
+// Refresh with crane digest docker.io/bitnami/kubectl:latest after checking its version and both architectures.
+const DefaultDGDROutputCopierImage = "docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d"
 
 // DGDRConfiguration holds operator-wide profiling Job settings.
 type DGDRConfiguration struct {

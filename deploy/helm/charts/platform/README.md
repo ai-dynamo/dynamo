@@ -129,6 +129,16 @@ Enable experimental live retune per deployment with `retune.executor: dgdr` in t
 
 #### Operator behavior breaking changes
 
+##### DGDR output-copier default image
+
+New v1beta1 profiling Jobs use the digest-pinned kubectl image listed under
+[DGDR Output-Copier Image](#dgdr-output-copier-image) instead of `bitnami/kubectl:latest`.
+
+If your cluster pulls through a private registry or a tag-based mirror, mirror this image and set
+`dynamo-operator.dgdr.outputCopierImage` before upgrading. Use a production mirror whose retention
+you control. Existing profiling Jobs and explicit operator or per-request image overrides keep
+their selected image.
+
 ##### LPX units-only deployment contract
 
 **Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.
@@ -1032,13 +1042,15 @@ Kubernetes: `>=1.30.0-0`
 
 The v1beta1 DGDR profiling Job's `output-copier` sidecar relays profiler status and writes
 results to a ConfigMap. Configure it with `dynamo-operator.dgdr.outputCopierImage`.
-Omitting the value or setting it to `""` keeps the default `bitnami/kubectl:latest`.
+Omitting the value or setting it to `""` uses
+`docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d`
+(kubectl v1.37.2, amd64/arm64).
 To use a private registry or another kubectl image, set a complete image reference:
 
 ```yaml
 dynamo-operator:
   dgdr:
-    outputCopierImage: registry.example.com/tools/kubectl:approved
+    outputCopierImage: registry.example.com/tools/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d
 ```
 
 Replace the example reference with your image's repository and tag or digest. Copy the full
