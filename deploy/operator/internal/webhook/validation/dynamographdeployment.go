@@ -426,24 +426,15 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			if !opts.grovePathway {
 				allErrs = append(allErrs, field.Forbidden(modePath, opts.grovePathwayRequirement))
 			}
-			if spec.BackendFramework != string(dynamo.BackendFrameworkVLLM) {
-				detected := spec.BackendFramework
-				if detected == "" {
-					detected = unsetValue
-				}
-				allErrs = append(allErrs, field.Invalid(
-					modePath,
-					gms.Mode,
-					fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", detected),
-				))
-			}
 		}
+		allErrs = append(allErrs, dynamo.ValidateInterPodGMSBackend(component, componentPath, spec.BackendFramework)...)
 
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
 		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework)...)
+		allErrs = append(allErrs, dynamo.ValidateColdStartFailover(component, componentPath, spec.BackendFramework)...)
 
 		// Allow existing LPX components to survive disablement without accepting new or changed specs.
 		allErrs = append(allErrs, lpxComponentGateErrors(

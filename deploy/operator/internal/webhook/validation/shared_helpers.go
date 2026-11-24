@@ -43,8 +43,6 @@ import (
 )
 
 const (
-	unsetValue = "<unset>"
-
 	vllmDistributedExecutorBackendMP  = "mp"
 	vllmDistributedExecutorBackendRay = "ray"
 
