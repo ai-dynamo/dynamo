@@ -7,8 +7,12 @@ pub mod generate;
 pub use inspect::{Inspected, inspect};
 mod inspect;
 pub mod merge;
+mod migrate;
 
+#[cfg(test)]
+use merge::REQUEST_RULES;
 pub use merge::{ClientCodec, Encoded, Native, SglangFormat, rules};
+pub use migrate::DEFAULT_MAX_NEW_TOKENS;
 
 pub const NAME: &str = "sglang";
 /// The runtime capability workers serving SGLang's `/generate` advertise.

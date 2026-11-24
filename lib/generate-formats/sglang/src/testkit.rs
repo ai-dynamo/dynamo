@@ -4,12 +4,12 @@
 //! Testing SGLang-backed `/generate` formats without GPUs (feature `testkit`).
 //!
 //! - [`sim`] models SGLang's incremental stream and answers the body a format
-//!   builds, for each generated request.
-//! - [`driver`] plays the frontend, prefill router, and worker
-//!   around a format.
+//!   builds, including the retry bodies of migrated requests.
+//! - [`driver`] plays the frontend, prefill router, migration, and worker
+//!   around a format, and fails attempts on cue.
 //! - [`laws`] are property tests a format must pass: streamed chunks join into
-//!   the unary response, P/D matches aggregated serving, malformed responses
-//!   never panic.
+//!   the unary response, P/D matches aggregated serving, migration is
+//!   invisible, blocked requests fail cleanly, malformed responses never panic.
 //!
 //! A format that reshapes the client side implements [`ClientShape`] to write
 //! a [`RequestSpec`] in its own body, then runs [`laws::Harness::check_all`].
@@ -23,9 +23,14 @@ use dynamo_llm::generate_format::Worker;
 
 /// A worker set for testing format binding.
 pub fn worker() -> Worker<'static> {
+    worker_with(&Value::Null)
+}
+
+/// A worker set advertising `engine_info`.
+pub fn worker_with(engine_info: &Value) -> Worker<'_> {
     Worker {
         model: "test-model",
-        engine_info: &serde_json::Value::Null,
+        engine_info,
         kv_cache_block_size: 16,
         lora_name: None,
         tower_connector_lora_enabled: false,
