@@ -34,16 +34,17 @@ Benefits:
 Structural tags are enabled by default. Configure the tool-call parser on the
 **worker**; the Frontend needs no extra flags:
 
-<Note>
-TensorRT-LLM guided decoding remains **opt-in** pending
-[TensorRT-LLM #19913](https://github.com/NVIDIA/TensorRT-LLM/issues/19913).
-Its `--guided-decoding-backend` default is unset, so default deployments ignore
-structural tags and do not enforce their tool argument schemas. For affected
-deployments using `--guided-decoding-backend xgrammar`, pass
-`--dyn-structural-tag false` until a supported upgrade resolves the issue.
-The TensorRT-LLM sidecar publishes no structural tags unless you pass
-`--dyn-structural-tag`.
-</Note>
+> [!NOTE]
+> TensorRT-LLM guided decoding is **opt-in**. Its `--guided-decoding-backend`
+> default is unset, so default deployments ignore structural tags and do not
+> enforce their tool argument schemas. Set `--guided-decoding-backend xgrammar`
+> to enable structural-tag enforcement. Releases that bundle XGrammar 0.1.32
+> reject several tool-call tag formats
+> ([TensorRT-LLM #19913](https://github.com/NVIDIA/TensorRT-LLM/issues/19913));
+> on those releases, pass `--dyn-structural-tag false`. The TensorRT-LLM
+> release that Dynamo pins, 1.4.0rc3, bundles XGrammar 0.2.8. The TensorRT-LLM
+> sidecar defaults structural tags to `false`; enable them with
+> `--dyn-structural-tag` or `DYN_STRUCTURAL_TAG=true`.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -144,13 +145,14 @@ export DYN_STRUCTURAL_TAG=false
 ```
 
 Rust preprocessing, including the native sidecars, still applies native tags to
-Kimi K2 `required`/named choices and Kimi K3 named choices when optional
-structural tags are disabled.
-A lookahead pattern can still be rejected by XGrammar
-0.2.1 or 0.2.7 unless the tool sets `strict: false` under schema mode `auto`.
-Global schema mode `strict` overrides that workaround. Kimi K2/K3 automatic
-choices and Kimi K3 `required` do not use this exception. Python vLLM and SGLang
-preprocessing respect the opt-out for all tool choices.
+Kimi K2 `required`/named choices, Kimi K3 named choices, and Muse Spark
+`required`/named choices when optional structural tags are disabled.
+These tags still enforce tool argument schemas, so a regex lookahead can still be
+rejected (see [Schema Modes](#schema-modes)) unless the tool sets
+`strict: false` under schema mode `auto`. Global schema mode `strict` overrides
+that workaround. Automatic choices for these families, and Kimi K3 `required`,
+do not use this exception. Python vLLM and SGLang preprocessing respect the
+opt-out for all tool choices.
 
 To keep structural tags enabled but preserve the previous conditional activation
 policy, set the scope to `auto`:
@@ -167,21 +169,23 @@ The legacy `--dyn-enable-structural-tag`, `--no-dyn-enable-structural-tag`,
 `--dyn-structural-tag-scope`, and `--dyn-structural-tag-schema` flags and their
 environment variables remain accepted with a deprecation warning.
 
-The native Rust sidecars accept `--dyn-structural-tag` and `DYN_STRUCTURAL_TAG`
-as described in [CLI Flags](#cli-flags), but not the legacy flags or their
-environment variables. The SGLang sidecar uses the same default-on policy. The
+The native vLLM, SGLang, and TensorRT-LLM sidecars accept `--dyn-structural-tag`
+and `DYN_STRUCTURAL_TAG` as described in [CLI Flags](#cli-flags), but not the
+legacy flags or their environment variables. The LPX sidecar does not support
+structural tags and rejects any value other than `false`. The SGLang sidecar
+uses the same default-on policy. The
 vLLM sidecar uses it when vLLM reports version 0.33 or later, the first release
 whose gRPC server compiles these tags with xgrammar. Against older vLLM it
 defaults to `false`, because that gRPC server compiles them with guidance,
 which rejects them. 0.33 release candidates and development builds also use
-it. The TensorRT-LLM sidecar defaults to `false`: the
-xgrammar version TensorRT-LLM pins rejects several tool-call tag formats.
+it. The TensorRT-LLM sidecar also defaults to `false`; enable it with
+`--dyn-structural-tag` or `DYN_STRUCTURAL_TAG=true`.
 
-Setting `strict: false` on a tool relaxes its argument schema. On vLLM
-0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
-non-strict also gets no structural tag from the registry; see
-[Schema Modes](#schema-modes). Use the global opt-out above to disable optional
-structural guidance.
+Setting `strict: false` on a tool relaxes its argument schema but keeps the
+tool-call envelope; it is not an opt-out. With the vLLM chat processor
+(`--dyn-chat-processor vllm`), automatic tool choice gets no structural tag when
+every tool sets `strict: false`; see [Schema Modes](#schema-modes). Use the
+global opt-out above to disable optional structural guidance.
 
 ## Supported Parsers
 
@@ -194,11 +198,11 @@ After selector validation, builder lookup tries the compatible Unified builder, 
 - `beam` through the pinned Unified library builder
 - `deepseek_v3_2`, `deepseek_v4`, `deepseek_v41`
 - `glm47` (V1 and V2 builders)
-- `gpt_oss` / `harmony` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict
+- `gpt_oss` / `harmony` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict. With structural tags enabled, a `required` request that allows parallel calls gets a tag whose payload is one JSON array of calls, not native Harmony calls.
 - `hermes`, `qwen25`
 - `inkling`
 - `kimi_k2`, `kimi_k3`, `kimi-k3`
-- `minimax_m3` / `minimax-m3` with explicit V2
+- `minimax_m3` / `minimax-m3` on V2, which the default `auto` parser version selects; V1 has no MiniMax builder
 - `muse_spark` / `muse_spark_open` on V2
 - `nemotron_nano`, `qwen3_coder`
 
@@ -238,7 +242,7 @@ based on the request's `tool_choice`:
 |---|---|
 | `required` / `named` | Always |
 | `auto` | Always attempted; the parser may return no tag |
-| `none` | Exclusion tag on the Rust path only |
+| `none` | Exclusion tag on the Rust path only when tools remain in the prompt (see [below](#tool_choicenone-and-token-banning)) |
 
 ### `auto` (legacy conditional activation)
 
@@ -246,7 +250,20 @@ based on the request's `tool_choice`:
 |---|---|
 | `required` / `named` | Always |
 | `auto` | Only when any tool has `strict: true` or `parallel_tool_calls` is `false` |
-| `none` | Exclusion tag only when tools remain in the prompt (see [below](#tool_choicenone-and-token-banning)) |
+| `none` | Exclusion tag on the Rust path only when tools remain in the prompt (see [below](#tool_choicenone-and-token-banning)) |
+
+On the Rust path, a JSON `response_format` imposes additional limits for parsers
+other than Beam and Mistral 4 in both scopes. With `tool_choice="auto"`, a
+tool-call tag is added only when `allow_tool_calls_with_structured_output` is
+`true`; otherwise only the response-format constraint applies. With
+`tool_choice="none"`, no exclusion tag is added.
+
+On the Rust path, explicit `guided_json`, `guided_regex`, `guided_grammar`, or
+nonempty `guided_choice` constraints cannot be combined with `required` or named
+tool choice (HTTP 400). With `auto`, they suppress additional tool-call
+structural tags regardless of `allow_tool_calls_with_structured_output`.
+Mistral 4 can merge `guided_json` into its native grammar. Null values and an
+empty `guided_choice` array do not activate this rule.
 
 ## Request Validation
 
@@ -303,31 +320,42 @@ the strongest safe tool envelope and relaxes that argument section. If the
 builder cannot produce an automatically added tool-call tag, Dynamo uses the existing
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
+On the Rust path, a Muse Spark `required` or named request returns HTTP 400 if
+its native structural-tag builder returns an error.
 
-<Warning>
-Valid tool schemas containing constructs unsupported by the backend's
-XGrammar version, such as regex lookahead, can cause request rejection.
-Backend compilation errors do not trigger Dynamo's builder fallback.
-With XGrammar 0.2.1 or 0.2.7 and schema mode `auto`, setting the tool
-function's `strict: false` avoids this lookahead rejection by disabling
-argument-schema enforcement. This workaround is not guaranteed on older
-versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
-</Warning>
+> [!WARNING]
+> Valid tool schemas containing constructs unsupported by the backend's
+> XGrammar version, such as regex lookahead, can cause request rejection.
+> XGrammar 0.2.7 (SGLang 0.5.23) and 0.2.8 (vLLM 0.33.0 and TensorRT-LLM
+> 1.4.0rc3) reject a lookahead when a model-native builder turns a string
+> `pattern` into a grammar regex. When compiled as a JSON Schema `pattern`
+> instead, these versions warn and ignore lookahead. Backend compilation errors
+> do not trigger Dynamo's builder fallback. For builders that honor per-tool
+> strictness, setting `strict: false` under schema mode `auto` can avoid this
+> rejection by relaxing argument-schema enforcement. Global schema mode `strict`
+> still overrides it, as does parameter-level tool strictness in the SGLang chat
+> processor. This workaround is not guaranteed on XGrammar 0.1.32. The deployment
+> opt-out does not remove the native tags listed in
+> [Preserve Previous Behavior](#preserve-previous-behavior).
 
-In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
-structural tag when every tool is explicitly `strict: false`. The `always`
-activation scope still attempts the tag, but cannot enforce the native tool
-envelope for that request. Set schema mode to `strict` to override the opt-out
-and let vLLM build the tag.
+The vLLM chat processor (`--dyn-chat-processor vllm`) builds tags through vLLM's
+registry. In vLLM 0.33.0, the version in Dynamo's vLLM image, that registry
+returns no structural tag for `tool_choice="auto"` when every tool is explicitly
+`strict: false`. The `always` activation scope still attempts the tag, but
+cannot enforce the native tool envelope for that request. Set schema mode to
+`strict` to override the opt-out and let vLLM build the tag. The Rust path and
+the SGLang chat processor keep the envelope.
 
 ## `tool_choice="none"` and Token Banning
 
-On the Rust frontend preprocessing path, when `tool_choice="none"` and
-structural tags are enabled, Dynamo injects an exclusion structural tag that
-bans parser-specific tool-call start tokens (for example `<tool_call>`) so the
-model cannot start native tool-call syntax. The Python vLLM and SGLang frontend
-processors continue to handle `none` through their existing prompt and response
-shaping; this release does not add token banning to those paths.
+On the Rust frontend preprocessing path, the exclusion structural tag for
+`tool_choice="none"` requires structural tags to be enabled and tool definitions
+to remain in the prompt. It bans parser-specific tool-call start tokens (for
+example `<tool_call>`) so the model cannot start native tool-call syntax. This
+applies to both activation scopes. Tools are removed from the prompt by default,
+so the ban is skipped. The Python vLLM and SGLang frontend processors continue to
+handle `none` through their existing prompt and response shaping; this release
+does not add token banning to those paths.
 
 **Quality trade-off**. If tools remain in the prompt on `none` (often via
 `--no-exclude-tools-when-tool-choice-none` to keep the chat prefix stable for KV
@@ -350,9 +378,9 @@ This interacts with the `--exclude-tools-when-tool-choice-none` flag (default:
 | `false` | off | Tools stay in prompt; no token ban. Same response shaping as above: no structured `tool_calls` for explicit `none`. Tool-like text may still appear in `content`. |
 
 For multi-turn conversations where `tool_choice` changes between turns,
-consider `--no-exclude-tools-when-tool-choice-none` combined with
-`--dyn-structural-tag` to keep the prompt stable and benefit from
-KV cache reuse.
+consider `--no-exclude-tools-when-tool-choice-none` with structural tags
+enabled (the default) to keep the prompt stable and benefit from KV cache
+reuse.
 
 ## Example
 
