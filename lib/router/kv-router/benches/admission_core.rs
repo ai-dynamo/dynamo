@@ -368,8 +368,8 @@ impl Loaded {
     }
 
     /// Lets the submitted tasks reach the queue actor and the actor take their commands. Setup
-    /// only: the barrier makes the actor re-ask every blocked lane, which no arrival or
-    /// completion does.
+    /// only: the barrier makes the actor re-ask every blocked lane, which an arrival or a
+    /// completion does only when a dispatch gate wakes the queue (`gate_wake`).
     async fn settle(&self) {
         tokio::task::yield_now().await;
         self.scheduler.admission_barrier().await.expect("barrier");
