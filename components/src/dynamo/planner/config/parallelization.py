@@ -14,6 +14,8 @@ ConfigMap as part of ``AICInterpolationSpec``.
 
 from pydantic import BaseModel, ConfigDict
 
+from dynamo.common.gpu_topology import physical_gpu_count
+
 
 class PickedParallelConfig(BaseModel):
     """Lightweight representation of a picked parallelization config.
@@ -48,8 +50,13 @@ class PickedParallelConfig(BaseModel):
         expert width ``moe_tp * moe_ep`` captures the same physical engine
         width and keeps pure DEP / hybrid MoE picks at the expected GPU count.
         """
-        stage_width = max(self.tp, self.dp, self.moe_tp * self.moe_ep)
-        return self.pp * stage_width
+        return physical_gpu_count(
+            tensor=self.tp,
+            pipeline=self.pp,
+            attention_data=self.dp,
+            moe_tensor=self.moe_tp,
+            moe_expert=self.moe_ep,
+        )
 
     @property
     def tp_size(self) -> int:

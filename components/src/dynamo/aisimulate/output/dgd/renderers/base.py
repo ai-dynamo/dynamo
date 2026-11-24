@@ -13,6 +13,8 @@ from typing import Any, Protocol
 
 import yaml
 
+from dynamo.common.gpu_topology import physical_gpu_count
+
 _SUPPORTED_BACKENDS = frozenset({"sglang", "trtllm", "vllm"})
 _EVALUATION_CONTEXT_ANNOTATION = "nvidia.com/sweeper-evaluation-context"
 _CONTEXT_LENGTH_ARG = {
@@ -283,19 +285,33 @@ def _apply_trtllm_worker_resources(
     for component_type, role in roles.items():
         prefix = "" if role == "agg" else f"{role}_"
         try:
-            gpus_per_worker = math.prod(
-                int(config.get(f"{prefix}{field}", 1))
-                for field in ("tp", "pp", "attention_dp", "cp")
-            )
+            dimensions = {
+                field: int(config.get(f"{prefix}{field}", 1))
+                for field in (
+                    "tp",
+                    "pp",
+                    "attention_dp",
+                    "moe_tp",
+                    "moe_ep",
+                    "cp",
+                )
+            }
         except (TypeError, ValueError) as exc:
             raise CandidateMaterializationError(
                 f"candidate {role} parallelism must contain integer dimensions"
             ) from exc
-        if gpus_per_worker < 1:
+        if any(value < 1 for value in dimensions.values()):
             raise CandidateMaterializationError(
                 f"candidate {role} parallelism must use at least one GPU"
             )
 
+        gpus_per_worker = physical_gpu_count(
+            tensor=dimensions["tp"],
+            pipeline=dimensions["pp"],
+            attention_data=dimensions["attention_dp"],
+            moe_tensor=dimensions["moe_tp"],
+            moe_expert=dimensions["moe_ep"],
+        )
         node_count = math.ceil(gpus_per_worker / num_gpus_per_node)
         if gpus_per_worker % node_count:
             raise CandidateMaterializationError(

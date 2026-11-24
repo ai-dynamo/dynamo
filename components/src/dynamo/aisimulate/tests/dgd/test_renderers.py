@@ -372,13 +372,17 @@ def test_trtllm_resources_follow_disaggregated_candidate_topology() -> None:
     dgd = {"spec": {"components": [worker("prefill"), worker("decode")]}}
     candidate = _candidate(
         deployment_mode="disagg",
-        prefill_tp=8,
+        prefill_tp=16,
         prefill_pp=1,
-        prefill_attention_dp=2,
+        prefill_attention_dp=16,
+        prefill_moe_tp=1,
+        prefill_moe_ep=16,
         prefill_cp=1,
         decode_tp=1,
         decode_pp=1,
         decode_attention_dp=2,
+        decode_moe_tp=1,
+        decode_moe_ep=2,
         decode_cp=1,
     )
 
