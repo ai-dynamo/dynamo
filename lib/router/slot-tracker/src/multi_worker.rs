@@ -2700,6 +2700,9 @@ mod tests {
         let now = Instant::now();
         let mut projections = FxHashMap::default();
         let version = sequences.project_worker_loads_into(None, now, &mut projections, None);
+        let reproject = |projections: &mut FxHashMap<_, _>| {
+            sequences.reproject_worker_loads(None, now, &[worker], version, projections, None)
+        };
 
         // A booking changes the rank's load, not the set of ranks.
         sequences
@@ -2716,37 +2719,16 @@ mod tests {
                 now,
             )
             .unwrap();
-        assert!(sequences.reproject_worker_loads(
-            None,
-            now,
-            &[worker],
-            version,
-            &mut projections,
-            None
-        ));
+        assert!(reproject(&mut projections));
         assert_eq!(projections[&worker].active_requests, 1);
 
         sequences
             .register_worker(WorkerDpRange::new(3, 0, 1))
             .unwrap();
-        assert!(!sequences.reproject_worker_loads(
-            None,
-            now,
-            &[worker],
-            version,
-            &mut projections,
-            None
-        ));
+        assert!(!reproject(&mut projections));
         // Removing it again does not bring the projected set of ranks back.
         sequences.unregister_worker(3).unwrap();
-        assert!(!sequences.reproject_worker_loads(
-            None,
-            now,
-            &[worker],
-            version,
-            &mut projections,
-            None
-        ));
+        assert!(!reproject(&mut projections));
     }
 
     #[test]

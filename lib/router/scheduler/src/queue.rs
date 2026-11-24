@@ -203,14 +203,12 @@ struct PreparedAdmission {
     load: Option<PreparedLoad>,
 }
 
-/// Projected loads the caller read for its request, with the ranks the same pass found
-/// past the host's reject thresholds. The actor re-reads and judges again the ranks it
-/// changed since, then selects with them instead of projecting every rank itself. A rank
-/// another task changed after the pass (a release, a prefill mark, a replica's booking)
-/// keeps the pass's load and fullness for this selection, and prefill decays only up to
-/// the pass's instant. At most the rest of a full channel and one taken batch of commands
-/// lie between the two (`ADMISSION_CHANNEL_CAPACITY`): a load judged against reject
-/// thresholds is dropped when the actor awaits an overlap refresh.
+/// Projected loads the caller read for its request, with the ranks that pass found past
+/// the host's reject thresholds. The actor re-reads and judges again the ranks it wrote
+/// since, then selects with them instead of projecting every rank itself. A rank another
+/// task changed since (a release, a prefill mark, a replica's booking) keeps the pass's
+/// load, fullness and prefill decay for this selection. The commands ahead of the caller's
+/// (under `ADMISSION_CHANNEL_CAPACITY + ADMISSION_BATCH`) and what they drain lie between.
 struct PreparedLoad {
     loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     /// The ranks of `loads` past `limits`; empty without limits.
@@ -1941,21 +1939,12 @@ impl<
         let actor_writes = self.actor_writes.load(AtomicOrdering::Acquire);
         let decay_now = Instant::now();
         let (mut loads, mut full_ranks) = self.load_maps.pop().unwrap_or_default();
-        let judged = match limits {
-            Some(limits) => {
-                full_ranks.reset(limits);
-                Some(&mut full_ranks)
-            }
-            None => {
-                full_ranks.clear();
-                None
-            }
-        };
+        full_ranks.reset(limits.unwrap_or_default());
         let load_table_version = self.slots.project_worker_loads_into(
             request.token_seq.as_deref().filter(|_| overlap),
             decay_now,
             &mut loads,
-            judged,
+            limits.is_some().then_some(&mut full_ranks),
         );
         PreparedLoad {
             loads,
@@ -2818,15 +2807,10 @@ impl<
                         stopping = matches!(end, RefreshEnd::Shutdown);
                     }
                 }
-                // This turn's request has not been admitted yet, and its caller judged the
-                // reject thresholds before the await: the actor judges them again.
-                if let Some(prepared) = &mut self.turn_prepared
-                    && prepared
-                        .load
-                        .as_ref()
-                        .is_some_and(|load| load.limits.is_some())
-                {
-                    prepared.load = None;
+                // This turn's request is not admitted yet: fullness its caller judged before
+                // the await is stale, so the actor judges again.
+                if let Some(prepared) = &mut self.turn_prepared {
+                    prepared.load.take_if(|load| load.limits.is_some());
                 }
             }
             let mut queued = candidate.into_payload();
@@ -5915,26 +5899,11 @@ mod tests {
         let mut actor = actor_with_selector_for_test(
             &prepared_queue.queue,
             &prepared_queue.slots,
-            counting_policy(
-                &prepared_queue.prepared_selections,
-                false,
-                Box::new(LeastLoaded),
-            ),
+            counting_policy(&Arc::default(), false, Box::new(LeastLoaded)),
         );
         let admit = |actor: &mut SchedulerQueueActor<_, _, _, _>, request, prepared| {
-            actor.refresh_workers_generation();
-            actor.with_projected_loads(
-                request,
-                Instant::now(),
-                prepared,
-                |actor, request, prepared| {
-                    actor.admit_one_projected(
-                        AdmissionContext::untracked(0, None),
-                        request,
-                        prepared,
-                    )
-                },
-            )
+            let context = AdmissionContext::untracked(0, None);
+            actor.admit_one(context, request, Instant::now(), prepared)
         };
         // Fill a rank past its limit with a booking of this actor's.
         let mut held = Vec::new();
