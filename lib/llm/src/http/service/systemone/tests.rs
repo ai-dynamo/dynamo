@@ -219,7 +219,7 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
     assert!(
         response
             .extensions()
-            .get::<super::DecisionCapacityRejection>()
+            .get::<super::DecisionRejection>()
             .is_none()
     );
     let permit =
@@ -235,7 +235,7 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
     assert!(
         response
             .extensions()
-            .get::<super::DecisionCapacityRejection>()
+            .get::<super::DecisionRejection>()
             .is_some()
     );
     drop(permit);
@@ -258,7 +258,7 @@ async fn capacity_error_code_is_independent_of_configured_status() {
                     public_message: "capacity exhausted",
                     detail: "private detail".into(),
                     retry_after: true,
-                    is_capacity_exhausted: true,
+                    is_rejected: true,
                 },
                 dialect,
             );
@@ -267,7 +267,7 @@ async fn capacity_error_code_is_independent_of_configured_status() {
             assert!(
                 response
                     .extensions()
-                    .get::<super::DecisionCapacityRejection>()
+                    .get::<super::DecisionRejection>()
                     .is_some()
             );
             let body = response_body(response).await;
@@ -303,7 +303,7 @@ async fn unavailable_with_retry_after_does_not_claim_capacity() {
         assert!(
             response
                 .extensions()
-                .get::<super::DecisionCapacityRejection>()
+                .get::<super::DecisionRejection>()
                 .is_none()
         );
         let body = response_body(response).await;

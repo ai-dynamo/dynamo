@@ -108,7 +108,7 @@ async fn handle_http(
     match response.status().as_u16() {
         _ if response
             .extensions()
-            .get::<super::DecisionCapacityRejection>()
+            .get::<super::DecisionRejection>()
             .is_some() =>
         {
             state.metrics_clone().inc_rejection(&metric_model, endpoint);

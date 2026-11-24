@@ -57,7 +57,7 @@ async fn backend_overload_preserves_retry_status_and_releases_admission() {
         assert!(
             response
                 .extensions()
-                .get::<super::super::DecisionCapacityRejection>()
+                .get::<super::super::DecisionRejection>()
                 .is_some()
         );
         let body = response_body(response).await;
@@ -71,9 +71,26 @@ async fn backend_overload_preserves_retry_status_and_releases_admission() {
 #[tokio::test]
 async fn deterministic_worker_rejections_match_for_first_and_pinned_branches() {
     use dynamo_runtime::error::ErrorClass;
-    for (class, status) in [
-        (ErrorClass::InvalidRequest, StatusCode::BAD_REQUEST),
-        (ErrorClass::NotFound, StatusCode::NOT_FOUND),
+    for (class, status, retry_after, rejected) in [
+        (
+            ErrorClass::InvalidRequest,
+            StatusCode::BAD_REQUEST,
+            false,
+            false,
+        ),
+        (ErrorClass::NotFound, StatusCode::NOT_FOUND, false, false),
+        (
+            ErrorClass::RateLimited,
+            StatusCode::TOO_MANY_REQUESTS,
+            false,
+            true,
+        ),
+        (
+            ErrorClass::CapacityExhausted,
+            dynamo_error::http::overload_status_code(),
+            true,
+            true,
+        ),
     ] {
         for branch in [0, 1] {
             for in_stream in [false, true] {
@@ -88,7 +105,15 @@ async fn deterministic_worker_rejections_match_for_first_and_pinned_branches() {
                 )
                 .await;
                 assert_eq!(response.status(), status);
-                assert!(!response.headers().contains_key("retry-after"));
+                assert_eq!(response.headers().contains_key("retry-after"), retry_after);
+                assert_eq!(
+                    response
+                        .extensions()
+                        .get::<super::super::DecisionRejection>()
+                        .is_some(),
+                    rejected,
+                    "{class:?}",
+                );
                 let body = response_body(response).await;
                 assert!(body.get("answers").is_none());
                 assert!(

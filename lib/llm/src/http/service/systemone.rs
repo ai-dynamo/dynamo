@@ -67,7 +67,7 @@ const MAX_TOKENIZATION_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONCURRENT_SIBLINGS: usize = 4;
 
 #[derive(Clone, Copy)]
-pub(super) struct DecisionCapacityRejection;
+pub(super) struct DecisionRejection;
 
 fn metric_endpoint(dialect: Dialect) -> Endpoint {
     match dialect {
@@ -112,7 +112,7 @@ struct DispatchError {
     public_message: &'static str,
     detail: String,
     retry_after: bool,
-    is_capacity_exhausted: bool,
+    is_rejected: bool,
 }
 
 impl DispatchError {
@@ -122,7 +122,7 @@ impl DispatchError {
             public_message: "request was cancelled",
             detail: "parent request context was cancelled".to_string(),
             retry_after: false,
-            is_capacity_exhausted: false,
+            is_rejected: false,
         }
     }
 
@@ -132,7 +132,7 @@ impl DispatchError {
             public_message: "scoring worker is unavailable",
             detail: detail.into(),
             retry_after: false,
-            is_capacity_exhausted: false,
+            is_rejected: false,
         }
     }
 
@@ -142,7 +142,7 @@ impl DispatchError {
             public_message: "malformed scoring response",
             detail: detail.into(),
             retry_after: false,
-            is_capacity_exhausted: false,
+            is_rejected: false,
         }
     }
 
@@ -152,7 +152,7 @@ impl DispatchError {
             public_message: "scoring worker failed",
             detail: detail.into(),
             retry_after: false,
-            is_capacity_exhausted: false,
+            is_rejected: false,
         }
     }
 }
@@ -626,10 +626,11 @@ fn dispatch_error(
     } else {
         tracing::error!(%request_id, error = %cause.detail, "System One scoring failed");
     }
-    if cause.is_capacity_exhausted {
-        return response::capacity_error(dialect, cause.status, cause.public_message);
-    }
-    let mut response = error(dialect, cause.status, cause.public_message);
+    let mut response = if cause.is_rejected {
+        response::rejection_error(dialect, cause.status, cause.public_message)
+    } else {
+        error(dialect, cause.status, cause.public_message)
+    };
     if cause.retry_after {
         response.headers_mut().insert(
             axum::http::header::RETRY_AFTER,
