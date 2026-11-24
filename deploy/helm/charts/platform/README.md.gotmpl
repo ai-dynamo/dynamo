@@ -205,6 +205,26 @@ prevents the panic but does not forward hook output to controller logs or events
 
 #### Runtime Compatibility
 
+##### Custom System Ports and Router Monitoring
+
+**Change:** Container-level `DYN_SYSTEM_PORT` overrides now align generated system ports and probes.
+Host-network declarations use the selected port. Model and LoRA discovery follow resolved
+EndpointSlice ports, and the router PodMonitor selects the named `system` port without rewriting
+addresses to `9090`.
+
+**Affected:** Deployments with custom system ports or standalone routers without a named system
+port. Corrected Pod declarations can trigger a rollout. Every intra-pod failover Pod rolls,
+including default-port deployments: the primary port and probes change from `system-0` to `system`.
+The standby keeps `system-1`; Model and LoRA discovery continue to select only the primary.
+
+**Action:** Upgrade the operator and chart together. Before changing the router monitor, ensure
+existing router Pods declare `system` at the listener port, for example `12345`, and allow the
+Pods to roll. Keep their `nvidia.com/dynamo-component-type: default` and
+`nvidia.com/metrics-enabled: "true"` labels. Sourced `DYN_SYSTEM_PORT` values require an explicit
+matching declaration. Update authored numeric probes and custom PodMonitors selecting `system-0`.
+The bundled chart retains the legacy selector during migration without duplicate targets. See
+[System Port Configuration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#system-port-configuration).
+
 ##### Frontend Startup Probe Defaults
 
 **Change:** Generated frontend startup probes require both a workload origin of operator

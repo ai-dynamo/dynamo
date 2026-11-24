@@ -20,6 +20,7 @@ package dynamo
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -524,10 +525,30 @@ func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
 
 	// Clone main before applying any path-specific overrides.
 	mainContainer := podSpec.Containers[0]
+
+	// Both engine listeners must fit Dynamo's signed 16-bit system-port setting.
+	basePort := commonconsts.DynamoSystemPort
+	maxBasePort := int32(32767 - (failoverEngineCount - 1))
+	for _, env := range slices.Backward(mainContainer.Env) {
+		if env.Name != "DYN_SYSTEM_PORT" {
+			continue
+		}
+		port, err := parseSystemPort(env.Value)
+		if env.ValueFrom != nil || err != nil || port < 1 || port > maxBasePort {
+			return fmt.Errorf("intra-pod failover requires a literal DYN_SYSTEM_PORT between 1 and %d to allocate both engine ports", maxBasePort)
+		}
+		basePort = int(port)
+		break
+	}
+
+	// Keep each engine's listener, scheduler reservation and named probes aligned.
 	sidecars := podSpec.Containers[1:]
 	engines := make([]corev1.Container, failoverEngineCount, failoverEngineCount+len(sidecars))
 	for i := range failoverEngineCount {
-		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
+		engines[i] = buildEngineContainer(mainContainer, i, basePort+i)
+		if podSpec.HostNetwork {
+			engines[i].Ports[0].HostPort = int32(basePort + i)
+		}
 	}
 	podSpec.Containers = append(engines, sidecars...)
 	return nil
@@ -539,7 +560,11 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	engine := *base.DeepCopy()
 	engine.Name = fmt.Sprintf("engine-%d", engineID)
 
-	portName := fmt.Sprintf("system-%d", engineID)
+	// Keep the primary engine reachable through existing named Service targets.
+	portName := commonconsts.DynamoSystemPortName
+	if engineID > 0 {
+		portName = fmt.Sprintf("%s-%d", commonconsts.DynamoSystemPortName, engineID)
+	}
 
 	engine.Ports = []corev1.ContainerPort{
 		{

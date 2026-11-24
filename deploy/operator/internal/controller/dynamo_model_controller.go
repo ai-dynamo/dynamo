@@ -450,7 +450,7 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 	logs.Info("Found endpoint slices for model", "count", len(endpointSlices.Items))
 
 	// Extract pod-ready endpoint candidates from all EndpointSlices
-	candidates, serviceNames := modelendpoint.ExtractCandidates(endpointSlices, int32(consts.DynamoSystemPort))
+	candidates, serviceNames := modelendpoint.ExtractCandidates(endpointSlices)
 	if model.IsLoRA() && len(candidates) > 0 {
 		for i := range candidates {
 			pod := &corev1.Pod{}
