@@ -4,6 +4,8 @@
 //! The SGLang fixture for `sglang.api.v1`, the gRPC contract of SGLang's Rust
 //! server.
 
+use tonic_v14 as tonic;
+
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -18,9 +20,7 @@ use dynamo_mocker::common::protocols::EngineType;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::SglangSidecarEngine;
 use dynamo_sglang_sidecar::proto::{
-    self as pb,
-    generate_stream_item::Item,
-    sglang_service_server::{SglangService, SglangServiceServer},
+    self as pb, generate_stream_item::Item, sglang_service_server::SglangServiceServer,
 };
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
@@ -629,138 +629,139 @@ struct ControlledService {
     index: usize,
 }
 
-#[tonic::async_trait]
-impl SglangService for ControlledService {
-    type GenerateStream = BoxStream<'static, Result<pb::GenerateStreamItem, Status>>;
+dynamo_sglang_mocker::impl_sglang_service! {
+    impl ControlledService {
+        type GenerateStream = BoxStream<'static, Result<pb::GenerateStreamItem, Status>>;
 
-    async fn generate(
-        &self,
-        request: Request<pb::GenerateRequest>,
-    ) -> Result<Response<Self::GenerateStream>, Status> {
-        let opened = self.control.open(request.get_ref()).await?;
-        let rid = Adapter::request_id(request.get_ref()).to_owned();
-        self.received.send_modify(|received| received.push(rid));
-        let scripted = self
-            .scripted
-            .lock()
-            .unwrap()
-            .remove(Adapter::request_id(request.get_ref()));
-        if let Some(items) = scripted {
-            return Ok(Response::new(
-                opened.wrap(Box::pin(futures::stream::iter(items.into_iter().map(Ok)))),
-            ));
+        async fn generate(
+            &self,
+            request: Request<pb::GenerateRequest>,
+        ) -> Result<Response<Self::GenerateStream>, Status> {
+            let opened = self.control.open(request.get_ref()).await?;
+            let rid = Adapter::request_id(request.get_ref()).to_owned();
+            self.received.send_modify(|received| received.push(rid));
+            let scripted = self
+                .scripted
+                .lock()
+                .unwrap()
+                .remove(Adapter::request_id(request.get_ref()));
+            if let Some(items) = scripted {
+                return Ok(Response::new(
+                    opened.wrap(Box::pin(futures::stream::iter(items.into_iter().map(Ok)))),
+                ));
+            }
+            let response = self.inner.generate(request).await?;
+            Ok(Response::new(opened.wrap(response.into_inner())))
         }
-        let response = self.inner.generate(request).await?;
-        Ok(Response::new(opened.wrap(response.into_inner())))
-    }
 
-    async fn health_check(
-        &self,
-        _request: Request<pb::HealthCheckRequest>,
-    ) -> Result<Response<pb::HealthCheckResponse>, Status> {
-        self.health_calls.send_modify(|count| *count += 1);
-        let mut health = self.health.clone();
-        let healthy = health.wait_for(Option::is_some).await.unwrap().unwrap();
-        if !healthy {
-            // SGLang's Rust server reports an unready or stalled scheduler as
-            // UNAVAILABLE; it never answers healthy=false.
-            return Err(Status::unavailable(
-                "no scheduler output within the health-check timeout",
-            ));
+        async fn health_check(
+            &self,
+            _request: Request<pb::HealthCheckRequest>,
+        ) -> Result<Response<pb::HealthCheckResponse>, Status> {
+            self.health_calls.send_modify(|count| *count += 1);
+            let mut health = self.health.clone();
+            let healthy = health.wait_for(Option::is_some).await.unwrap().unwrap();
+            if !healthy {
+                // SGLang's Rust server reports an unready or stalled scheduler as
+                // UNAVAILABLE; it never answers healthy=false.
+                return Err(Status::unavailable(
+                    "no scheduler output within the health-check timeout",
+                ));
+            }
+            Ok(Response::new(pb::HealthCheckResponse { healthy }))
         }
-        Ok(Response::new(pb::HealthCheckResponse { healthy }))
-    }
 
-    async fn get_model_info(
-        &self,
-        request: Request<pb::GetModelInfoRequest>,
-    ) -> Result<Response<pb::GetModelInfoResponse>, Status> {
-        let mut response = self.inner.get_model_info(request).await?.into_inner();
-        if let Some(patch) = self.model_info.lock().unwrap().as_ref() {
-            patch(&mut response);
+        async fn get_model_info(
+            &self,
+            request: Request<pb::GetModelInfoRequest>,
+        ) -> Result<Response<pb::GetModelInfoResponse>, Status> {
+            let mut response = self.inner.get_model_info(request).await?.into_inner();
+            if let Some(patch) = self.model_info.lock().unwrap().as_ref() {
+                patch(&mut response);
+            }
+            Ok(Response::new(response))
         }
-        Ok(Response::new(response))
-    }
 
-    async fn get_server_info(
-        &self,
-        request: Request<pb::GetServerInfoRequest>,
-    ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
-        let mut response = self.inner.get_server_info(request).await?.into_inner();
-        let table = self.table.lock().unwrap().clone();
-        let port = table
-            .get(self.index)
-            .map_or(0, |listener| listener.http_port);
-        response
-            .deployment_info
-            .as_mut()
-            .expect("the Mocker reports deployment_info")
-            .node_listeners = table;
-        if port != 0 {
-            response.port = port;
+        async fn get_server_info(
+            &self,
+            request: Request<pb::GetServerInfoRequest>,
+        ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
+            let mut response = self.inner.get_server_info(request).await?.into_inner();
+            let table = self.table.lock().unwrap().clone();
+            let port = table
+                .get(self.index)
+                .map_or(0, |listener| listener.http_port);
+            response
+                .deployment_info
+                .as_mut()
+                .expect("the Mocker reports deployment_info")
+                .node_listeners = table;
+            if port != 0 {
+                response.port = port;
+            }
+            let mut scripts = self.server_info.lock().unwrap();
+            if let Some(patch) = scripts.front() {
+                patch(&mut response);
+            }
+            if scripts.len() > 1 {
+                scripts.pop_front();
+            }
+            Ok(Response::new(response))
         }
-        let mut scripts = self.server_info.lock().unwrap();
-        if let Some(patch) = scripts.front() {
-            patch(&mut response);
+
+        async fn list_models(
+            &self,
+            request: Request<pb::ListModelsRequest>,
+        ) -> Result<Response<pb::ListModelsResponse>, Status> {
+            self.inner.list_models(request).await
         }
-        if scripts.len() > 1 {
-            scripts.pop_front();
+
+        async fn detokenize(
+            &self,
+            request: Request<pb::DetokenizeRequest>,
+        ) -> Result<Response<pb::DetokenizeResponse>, Status> {
+            self.inner.detokenize(request).await
         }
-        Ok(Response::new(response))
-    }
 
-    async fn list_models(
-        &self,
-        request: Request<pb::ListModelsRequest>,
-    ) -> Result<Response<pb::ListModelsResponse>, Status> {
-        self.inner.list_models(request).await
-    }
+        async fn abort(
+            &self,
+            request: Request<pb::AbortRequest>,
+        ) -> Result<Response<pb::AbortResponse>, Status> {
+            let rid = request.get_ref().rid.clone();
+            let response = self.inner.abort(request).await?;
+            let success = response.get_ref().success;
+            self.aborts
+                .send_modify(|aborts| aborts.push((rid, success)));
+            Ok(response)
+        }
 
-    async fn detokenize(
-        &self,
-        request: Request<pb::DetokenizeRequest>,
-    ) -> Result<Response<pb::DetokenizeResponse>, Status> {
-        self.inner.detokenize(request).await
-    }
+        async fn get_hi_cache_storage(
+            &self,
+            request: Request<pb::GetHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStatus>, Status> {
+            self.inner.get_hi_cache_storage(request).await
+        }
 
-    async fn abort(
-        &self,
-        request: Request<pb::AbortRequest>,
-    ) -> Result<Response<pb::AbortResponse>, Status> {
-        let rid = request.get_ref().rid.clone();
-        let response = self.inner.abort(request).await?;
-        let success = response.get_ref().success;
-        self.aborts
-            .send_modify(|aborts| aborts.push((rid, success)));
-        Ok(response)
-    }
+        async fn attach_hi_cache_storage(
+            &self,
+            request: Request<pb::AttachHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+            self.inner.attach_hi_cache_storage(request).await
+        }
 
-    async fn get_hi_cache_storage(
-        &self,
-        request: Request<pb::GetHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStatus>, Status> {
-        self.inner.get_hi_cache_storage(request).await
-    }
+        async fn detach_hi_cache_storage(
+            &self,
+            request: Request<pb::DetachHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+            self.inner.detach_hi_cache_storage(request).await
+        }
 
-    async fn attach_hi_cache_storage(
-        &self,
-        request: Request<pb::AttachHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
-        self.inner.attach_hi_cache_storage(request).await
-    }
-
-    async fn detach_hi_cache_storage(
-        &self,
-        request: Request<pb::DetachHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
-        self.inner.detach_hi_cache_storage(request).await
-    }
-
-    async fn clear_hi_cache_storage(
-        &self,
-        request: Request<pb::ClearHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
-        self.inner.clear_hi_cache_storage(request).await
+        async fn clear_hi_cache_storage(
+            &self,
+            request: Request<pb::ClearHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+            self.inner.clear_hi_cache_storage(request).await
+        }
     }
 }
 

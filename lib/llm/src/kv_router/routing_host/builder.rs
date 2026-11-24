@@ -40,7 +40,7 @@ use crate::{
 /// The transport a [`RoutingHost`] sends through.
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
-/// A caller-supplied final hop in place of the request plane.
+/// A caller-supplied final hop in place of the default one.
 pub type LlmDispatch = Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>;
 
 /// Multimodal embedding-cache state for [`RouterMode::DeviceAwareWeighted`].
@@ -120,7 +120,7 @@ impl RoutingHostBuilder {
         self
     }
 
-    /// Send through `dispatch` instead of the request plane. A host that does not
+    /// Send through `dispatch` instead of the default final hop. A host that does not
     /// send requests itself, such as a gateway endpoint picker, supplies the hop
     /// that records the selection and relays observed progress.
     pub fn dispatch(mut self, dispatch: impl Into<Option<LlmDispatch>>) -> Self {

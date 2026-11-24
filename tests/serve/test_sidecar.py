@@ -229,8 +229,8 @@ _MEDIA_MODELS = {
 
 sidecar_configs = {
     **{
-        f"trtllm_{scenario.replace('-', '_')}": SidecarConfig(
-            name=f"trtllm_{scenario.replace('-', '_')}",
+        f"trtllm_{name}": SidecarConfig(
+            name=f"trtllm_{name}",
             directory=trtllm_sidecar_dir,
             script_name="agg.sh",
             marks=[
@@ -238,7 +238,6 @@ sidecar_configs = {
                 pytest.mark.gpu_1,
                 pytest.mark.nightly,
                 pytest.mark.multimodal,
-                pytest.mark.upstream_trtllm,
                 *(
                     []
                     if scenario == "audio"
@@ -262,7 +261,12 @@ sidecar_configs = {
             },
             request_payloads=[make_sidecar_media_payload(scenario)],
         )
-        for scenario in ("image", "video", "audio", "image-routing")
+        for name, scenario in (
+            ("image", "image"),
+            ("video", "video"),
+            ("audio", "audio"),
+            ("image_routing", "image-routing"),
+        )
         for model, revision in [
             _MEDIA_MODELS["audio" if scenario == "audio" else "vision"]
         ]
@@ -776,7 +780,7 @@ def _prepare_media_config(config, request, tmp_path, ports):
     env = dict(config.env)
     if scenario == "audio":
         options = yaml.safe_load(
-            pathlib.Path(trtllm_sidecar_dir, "ci/whisper.yaml").read_text()
+            pathlib.Path(trtllm_sidecar_dir, "launch/whisper.yaml").read_text()
         )
         template = tmp_path / "transcribe.jinja"
         template.write_text("<|startoftranscript|><|en|><|transcribe|><|notimestamps|>")

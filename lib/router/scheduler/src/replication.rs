@@ -21,6 +21,7 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::{AffinityReplicaSink, AffinityTarget, AffinityVersion};
 use dynamo_slot_tracker::ActiveSequenceEvent;
 use dynamo_slot_tracker::RateLimitedFailureLog;
+use dynamo_slot_tracker::host::ActiveSequenceEventOrigin;
 use dynamo_slot_tracker::{
     LocalWorkerLoad, SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher,
     SequenceSubscriber,
@@ -176,7 +177,7 @@ impl ReplicaSyncConfig {
     }
 
     pub fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {
-        event.router_id == self.process_id
+        event.origin == ActiveSequenceEventOrigin::Router && event.router_id == self.process_id
     }
 }
 
@@ -465,7 +466,8 @@ impl ReplicaInbox {
         block_size: u32,
         event: ActiveSequenceEvent,
     ) {
-        if block_size != expected_block_size {
+        // Worker events carry no blocks.
+        if event.origin == ActiveSequenceEventOrigin::Router && block_size != expected_block_size {
             tracing::debug!(
                 %partition,
                 expected_block_size,
@@ -515,6 +517,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(1, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 42,
+                origin: Default::default(),
                 lora_name: None,
             },
         }
@@ -543,12 +546,13 @@ mod tests {
 
     #[test]
     fn previous_flat_replica_event_wire_schema_is_accepted() {
-        let previous = serde_json::json!({
+        let mut previous = serde_json::json!({
             "model_name": "model",
             "routing_group": "group",
             "block_size": 16,
             "event": event().event,
         });
+        previous["event"].as_object_mut().unwrap().remove("origin");
         let payload = rmp_serde::to_vec_named(&previous).unwrap();
 
         let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
@@ -557,6 +561,7 @@ mod tests {
             RoutingPartitionRef::new("model", "group")
         );
         assert_eq!(decoded.block_size, 16);
+        assert_eq!(decoded.event.origin, ActiveSequenceEventOrigin::Router);
     }
 
     #[test]
@@ -570,6 +575,21 @@ mod tests {
         let payload = rmp_serde::to_vec_named(&legacy).unwrap();
 
         assert!(rmp_serde::from_slice::<ScopedReplicaEvent>(&payload).is_err());
+    }
+
+    #[test]
+    fn worker_events_skip_block_size_check() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let inbox = ReplicaInbox::new(tx);
+        let partition = RoutingPartitionId::new("model", "group");
+        let mut event = event().event;
+
+        inbox.deliver(&partition, 16, 32, event.clone());
+        assert!(rx.try_recv().is_err());
+
+        event.origin = ActiveSequenceEventOrigin::Worker;
+        inbox.deliver(&partition, 16, 0, event);
+        assert_eq!(rx.try_recv().unwrap().request_id, "request");
     }
 
     #[tokio::test]
@@ -737,6 +757,7 @@ mod tests {
                         prefill_load_hint: None,
                     },
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 })
                 .expect("inbound channel has capacity");
