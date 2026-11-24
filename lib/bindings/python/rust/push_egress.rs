@@ -763,6 +763,7 @@ impl PythonPushEngine {
                     ("response_sender", Py::new(py, sender)?.into_any()),
                 ])
             }),
+            dynamo_runtime::nvtx::request_key(context.id()),
         )
         .await?;
 
