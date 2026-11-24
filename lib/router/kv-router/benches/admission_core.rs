@@ -32,9 +32,15 @@
 //!   `session_lanes` does.
 //! - `gate_wake`: as `gate_held`, but the gate wakes the queue on every completion. Each wake
 //!   re-asks every held lane and every waiting lane, so this is the cost that grows with the
-//!   backlog. ThunderAgent wakes the queue whenever its ledger changes, which one request can
-//!   cause three times: at its dispatch, when it is sent, and when it completes or aborts.
-//!   This case issues one wake per request, so it is a lower bound for that plugin.
+//!   backlog. The wake follows the free, so it finds the freed slot taken and every waiting
+//!   lane stays blocked, as a wake at a request's dispatch does. ThunderAgent wakes the queue
+//!   whenever its ledger changes, which one request can cause three times: at its dispatch,
+//!   when it is sent, and when it completes or aborts. This case issues one wake per request,
+//!   so it is a lower bound for that plugin.
+//! - `gate_wake_room`: as `gate_wake`, but a request's lifecycle ends before its slot frees,
+//!   which is the frontend's order. The wake and the free reach the actor together, so the
+//!   recheck finds a slot free: every waiting lane may go and becomes a candidate, one is
+//!   admitted, and the rest are refused and blocked again.
 //!
 //! Run with: `cargo bench -p dynamo-kv-router --bench admission_core --features bench`
 
@@ -150,6 +156,7 @@ enum Case {
     ConstrainedLanes,
     GateHeld,
     GateWake,
+    GateWakeRoom,
 }
 
 impl Case {
@@ -162,6 +169,7 @@ impl Case {
             Self::ConstrainedLanes => "constrained_lanes",
             Self::GateHeld => "gate_held",
             Self::GateWake => "gate_wake",
+            Self::GateWakeRoom => "gate_wake_room",
         }
     }
 
@@ -196,24 +204,27 @@ impl Case {
     }
 
     fn classifier(self) -> Option<SessionLanes> {
-        let gate = match self {
-            Self::GateHeld => Some(HoldsHeldSessions::new(false)),
-            Self::GateWake => Some(HoldsHeldSessions::new(true)),
-            _ => None,
-        };
+        let gate = self
+            .holds_lanes()
+            .then(|| HoldsHeldSessions::new(self.wakes()));
         self.classified().then_some(SessionLanes { gate })
     }
 
     /// Whether the gate holds `backlog` lanes on top of the `backlog` that waits for capacity.
     fn holds_lanes(self) -> bool {
-        matches!(self, Self::GateHeld | Self::GateWake)
+        matches!(self, Self::GateHeld | Self::GateWake | Self::GateWakeRoom)
+    }
+
+    /// Whether the gate wakes the queue on every completion.
+    fn wakes(self) -> bool {
+        matches!(self, Self::GateWake | Self::GateWakeRoom)
     }
 
     fn request(self, sequence: u64) -> ScheduleRequest {
         let mut request = request(format!("request-{sequence}"), self.classified());
         match self {
             Self::Shared => {}
-            Self::SessionLanes | Self::GateHeld | Self::GateWake => {
+            Self::SessionLanes | Self::GateHeld | Self::GateWake | Self::GateWakeRoom => {
                 request.session_context = Some(session(format!("session-{sequence}")));
             }
             // Frees go round the workers in booking order, so each lane's head is next in turn.
@@ -380,8 +391,13 @@ impl Loaded {
         // The arrival's task runs up to its hand-off to the actor.
         tokio::task::yield_now().await;
         let mut done = self.booked.pop_front().expect("a booked request");
+        // In `gate_wake_room` the completion's wake is on its way before the slot frees.
+        let complete_first = matches!(self.case, Case::GateWakeRoom);
+        if complete_first && let Some(lifecycle) = done.lifecycle.as_mut() {
+            lifecycle.complete();
+        }
         self.scheduler.free(&done.request_id).await.expect("free");
-        if let Some(lifecycle) = done.lifecycle.as_mut() {
+        if !complete_first && let Some(lifecycle) = done.lifecycle.as_mut() {
             lifecycle.complete();
         }
         let booked = self.admitted_rx.recv().await.expect("an admission");
@@ -401,6 +417,7 @@ fn bench_admission(c: &mut Criterion) {
         Case::ConstrainedLanes,
         Case::GateHeld,
         Case::GateWake,
+        Case::GateWakeRoom,
     ] {
         for backlog in [1_000u64, 10_000] {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -418,8 +435,8 @@ fn bench_admission(c: &mut Criterion) {
             // Without its wakes `gate_wake` is `gate_held`: each completion must reach the gate
             // as `Completed`, and the gate must hold the scheduler's recheck handle. A name
             // filter that skips the case still sets it up, and then no cycle ran.
-            if matches!(case, Case::GateWake) && loaded.sequence > backlog {
-                let gate = loaded.gate.as_ref().expect("gate_wake installs a gate");
+            if case.wakes() && loaded.sequence > backlog {
+                let gate = loaded.gate.as_ref().expect("a waking case installs a gate");
                 assert!(
                     gate.woke.load(Ordering::Relaxed) > 0,
                     "no completion woke the queue"
