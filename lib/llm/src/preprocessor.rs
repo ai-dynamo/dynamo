@@ -855,6 +855,26 @@ impl ReasoningUsageEstimator {
     }
 }
 
+/// Tell the request classifier, if one left its handle on `tracker`, how each choice that
+/// finishes in `response` ended.
+fn record_reply_end(
+    tracker: &RequestTracker,
+    response: &Annotated<NvCreateChatCompletionStreamResponse>,
+) {
+    let finished = response
+        .data
+        .iter()
+        .flat_map(|data| &data.inner.choices)
+        .filter_map(|choice| choice.finish_reason);
+    for finish_reason in finished {
+        if let Some(progress) = tracker.classifier_progress() {
+            progress.record_reply_end(
+                finish_reason == dynamo_protocols::types::FinishReason::ToolCalls,
+            );
+        }
+    }
+}
+
 fn choice_has_visible_output(choice: &dynamo_protocols::types::ChatChoiceStream) -> bool {
     choice.delta.content.is_some()
         || choice
@@ -8955,6 +8975,7 @@ impl
         let trace_finish_reason_metadata =
             crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
+        let reply_tracker = tracker.clone();
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
 
@@ -9008,6 +9029,14 @@ impl
             guided_tool_constraint,
             tool_processing_route,
         )?;
+        // After tool-call parsing, which is what turns `stop` into `tool_calls`. The router
+        // leaves its handle before `next.generate` returns, so one check here is enough.
+        let reply_tracker = reply_tracker.filter(|tracker| tracker.classifier_progress().is_some());
+        let transformed_stream = edit::edit_items(transformed_stream, move |response| {
+            if let Some(tracker) = &reply_tracker {
+                record_reply_end(tracker, response);
+            }
+        });
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
         // Request payload capture is a pass-through: every chunk reaches the HTTP
@@ -13328,6 +13357,46 @@ mod tests {
         chunk
     }
 
+    #[test]
+    fn a_tool_call_on_any_choice_marks_the_reply() {
+        fn chunk(
+            finish_reasons: &[Option<FinishReason>],
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut chunk = chat_stream_chunk(0, None);
+            let choices = &mut chunk.data.as_mut().unwrap().inner.choices;
+            let choice = choices.pop().unwrap();
+            choices.extend(
+                finish_reasons
+                    .iter()
+                    .zip(0..)
+                    .map(|(&finish_reason, index)| ChatChoiceStream {
+                        index,
+                        finish_reason,
+                        ..choice.clone()
+                    }),
+            );
+            chunk
+        }
+        fn recorded(chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Option<bool> {
+            let (progress, updater) = dynamo_admission::host::RequestProgress::new(0);
+            let tracker = RequestTracker::new();
+            tracker.set_classifier_progress(updater);
+            for chunk in chunks {
+                record_reply_end(&tracker, chunk);
+            }
+            progress.reply_tool_call()
+        }
+        use FinishReason::{Stop, ToolCalls};
+
+        let both = chunk(&[Some(Stop), Some(ToolCalls)]);
+        assert_eq!(recorded(&[both]), Some(true));
+        // A choice that stops later does not clear it.
+        let then_stop = [chunk(&[Some(ToolCalls)]), chunk(&[Some(Stop)])];
+        assert_eq!(recorded(&then_stop), Some(true));
+        assert_eq!(recorded(&[chunk(&[Some(Stop)])]), Some(false));
+        assert_eq!(recorded(&[chunk(&[None])]), None);
+    }
+
     fn glm47_stream_chunk(
         content: &str,
         finish_reason: Option<FinishReason>,
@@ -16932,6 +17001,95 @@ mod tests {
             .expect("error should preserve the DynamoError type");
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
+    }
+
+    /// Replies with one chunk that finishes with `stop`. Leaves a classifier handle on the
+    /// request's tracker as the router does at dispatch, and replaces it while the reply
+    /// streams as a retry's dispatch does.
+    struct RepliesWith {
+        text: &'static str,
+        classifier_progress: dynamo_admission::host::RequestProgressUpdater,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for RepliesWith
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            let tracker = request.tracker.clone().unwrap();
+            tracker.set_classifier_progress(dynamo_admission::host::RequestProgress::new(0).1);
+            let classifier_progress = self.classifier_progress.clone();
+            let output = BackendOutput {
+                token_ids: vec![],
+                tokens: vec![],
+                text: Some(self.text.to_string()),
+                cum_log_probs: None,
+                log_probs: None,
+                top_logprobs: None,
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                stop_reason: None,
+                index: Some(0),
+                completion_usage: None,
+                disaggregated_params: None,
+                encoder_result: None,
+                worker_trace_link: None,
+                engine_data: None,
+                routing_data: None,
+                jailed_text: None,
+            };
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async move {
+                    tracker.set_classifier_progress(classifier_progress);
+                    Annotated::from_data(output)
+                })),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_operator_tells_the_classifier_a_reply_ended_in_a_tool_call() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": "auto",
+        }))
+        .unwrap();
+        let (progress, classifier_progress) = dynamo_admission::host::RequestProgress::new(0);
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(RepliesWith {
+            text: r#"<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>"#,
+            classifier_progress,
+        });
+
+        let mut stream =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                .await
+                .unwrap();
+        while stream.next().await.is_some() {}
+
+        // The worker finished with `stop`; only the tool-call parser makes that `tool_calls`.
+        assert_eq!(progress.reply_tool_call(), Some(true));
     }
 
     /// Records dispatched requests, then fails before any output.
