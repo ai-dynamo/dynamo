@@ -25,6 +25,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** If you pass a policy file with a `--router-mode` other than `kv`, remove one of the two. If you set `--router-policy-config` or `DYN_ROUTER_POLICY_CONFIG` with no `--router-mode` and want to keep `round-robin`, remove the file. `--router-mode kv --router-policy-config <file>` can drop `--router-mode kv`.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGDR v1beta2 is available without a feature gate.** The operator installs and serves the Request, Run, and Candidate APIs and starts their controllers by default. The API is not feature complete. Existing v1beta1 Requests keep their behavior and storage version. See the [DGDR API reference](../../kubernetes-api/dynamo-graph-deployment-request.mdx).
+
+  > **Migrate:** Remove `--dgdr-v1beta2-enabled` from custom operator or CRD-installer commands. The legacy `dynamo-operator.dgdrV1Beta2.enabled` Helm value no longer controls API availability and remains solely for the existing Planner live-retune RBAC condition. Ordinary Helm upgrades update the commands automatically. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, need matching CRDs installed by an administrator before upgrading the operator. Planner live retune behavior and its disabled defaults are unchanged.
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the separate AIS perf model inputs** in favor of one input per component: `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` on a command line, and `ais_perf_model` in a configuration. The value is one perf model config or a list of configs with one `worker_type` each; on a command line it is a path to a YAML or JSON file, or inline JSON. The old inputs still work, print one warning, and are scheduled for removal in v1.9.0. An old input together with the new one is an error.
 
 | Old | New |
@@ -73,6 +77,18 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **A response plane mismatch no longer fails requests** ([#17885](https://github.com/ai-dynamo/dynamo/pull/17885)). During a rolling update that changes the response plane, frontends and workers briefly disagree. A worker now serves such a request on its frontend's plane and logs a warning. Previously it failed the request with `response plane mismatch`, and the frontend quarantined the worker. Frontends and workers should still use the same `--response-plane`.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Selecting `velo` while TLS is configured uses the tcp response plane** ([#17885](https://github.com/ai-dynamo/dynamo/pull/17885)). Velo has no TLS. A process that selects `velo` while any `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is true now runs on tcp and logs one warning, instead of refusing to start.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend HTTP server log targets follow the move into `dynamo-http-server`.** The frontend's listener, service stages, request metrics, and connection monitor moved out of the `dynamo-llm` crate into `dynamo-http-server`, so their log lines, including the per-request `request received` and `request completed` lines, report a `dynamo_http_server` target.
+
+| Log target before | Log target now |
+| :---- | :---- |
+| `dynamo_llm::http::service::service_v2`, for listener startup, bind failure, shutdown, and the drain timeout | `dynamo_http_server::server` |
+| `dynamo_llm::http::service::service_v2`, for the draining and stopping stage changes | `dynamo_http_server::lifecycle` |
+| `dynamo_llm::http::service::server`, for accept and TLS handshake failures | `dynamo_http_server::server` |
+| `dynamo_llm::http::service::metrics`, for request received and completed lines, histogram bucket configuration, the metrics prefix, and scrape failures | `dynamo_http_server::metrics` |
+| `dynamo_llm::http::service::disconnect`, for the connection monitor | `dynamo_http_server::disconnect` |
+
+  > **Migrate:** A `DYN_LOG` filter scoped to `dynamo_llm`, `dynamo_llm::http`, `dynamo_llm::http::service`, or one of the modules in the table must also name `dynamo_http_server` or the new target, for example `dynamo_http_server=<level>`. There is no runtime alias, so the old directive no longer selects these lines.
 
 <a id="v170"></a>
 

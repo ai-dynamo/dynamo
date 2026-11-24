@@ -23,6 +23,7 @@ dynamo-global-router = { workspace = true }
 dynamo-global-router-store-dynamodb = { workspace = true }
 # For the PoolRelay protocol and the session header.
 dynamo-llm = { workspace = true }
+dynamo-http-server = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
