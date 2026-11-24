@@ -131,6 +131,8 @@ fn validate_forced_tool_choice(
         })
 }
 
+// TODO(parser removal): Get the guidance requirement from the resolved parser.
+// Cover named and required tools, including unsupported backend constraints.
 fn is_kimi_k3_parser(parser_name: Option<&str>) -> bool {
     parser_name.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
 }

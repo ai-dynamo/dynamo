@@ -43,25 +43,6 @@ use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_templ
 static V1_REASONING_PARSER_NAMES: LazyLock<Vec<&'static str>> =
     LazyLock::new(dynamo_parsers::reasoning::get_available_reasoning_parsers);
 
-// TODO: when glm47 is added here,
-// port the streaming <tool_call> truncation recovery from apply_tool_calling_jail
-// (preprocessor.rs) to tool_parser_v2::apply_stream. The v2 path skips the jail
-// entirely, so the ChoiceRecovery buffer and finish_reason=length synthetic-chunk
-// logic will not run. The aggregator.rs (non-streaming) half is parser-agnostic
-// and keeps working on both paths — only the streaming side needs porting.
-/// Map Dynamo tool-parser names onto the corresponding v2 registry family.
-#[cfg(test)]
-pub(crate) const V2_FAMILIES: &[&str] =
-    &["qwen3_coder", "deepseek_v4", "deepseek-v4", "deepseekv4"];
-
-fn v2_family(parser: &str) -> Option<&'static str> {
-    match parser {
-        "qwen3_coder" => Some("qwen3_coder"),
-        "deepseek_v4" | "deepseek-v4" | "deepseekv4" => Some("deepseek_v4"),
-        _ => None,
-    }
-}
-
 pub(crate) use dynamo_runtime::config::ParserVersion;
 
 pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
@@ -71,15 +52,6 @@ pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
 #[cfg(test)]
 fn parser_version_value(value: Option<&str>) -> anyhow::Result<ParserVersion> {
     ParserVersion::try_from(value)
-}
-
-/// Map engine-facing parser aliases onto the family keys used by
-/// `dynamo-parsers-v2`.
-pub(crate) fn canonical_family(family: &str) -> &str {
-    match family {
-        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
-        family => family,
-    }
 }
 
 /// Whether the deployment explicitly selects parsers v2.
@@ -202,11 +174,6 @@ fn validate_parser_version_for_mode(
     }
 }
 
-/// Whether `family` has a v2 parser and should bypass the v1 jail when [`enabled`].
-pub(crate) fn supports_family(family: &str) -> bool {
-    v2_family(family).is_some()
-}
-
 pub fn unified_family_names() -> &'static [&'static str] {
     &super::unified_parser::FAMILY_NAMES
 }
@@ -270,7 +237,7 @@ pub(crate) fn parse_complete(
     family: &str,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, String)> {
     let v2_tools = to_v2_tools(tools);
-    let mut parser = create_tool_parser_for_family(canonical_family(family), &v2_tools)?;
+    let mut parser = create_tool_parser_for_family(family, &v2_tools)?;
     let result = parser.parse_complete(content)?;
 
     let tool_calls = result
@@ -631,7 +598,6 @@ pub(crate) fn apply_stream<S>(
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
-    let family = canonical_family(&family).to_string();
     let v2_tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         // The caller only routes supported families here, but if a parser cannot be
@@ -1073,8 +1039,10 @@ mod tests {
     #[test]
     fn deepseek_v4_engine_aliases_select_the_v2_family() {
         for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
-            assert!(supports_family(alias), "unsupported alias: {alias}");
-            assert_eq!(canonical_family(alias), "deepseek_v4");
+            assert_eq!(
+                dynamo_parsers_v2::standalone_batch_tool_family(alias),
+                Some("deepseek_v4")
+            );
         }
     }
 
@@ -1946,7 +1914,7 @@ mod tests {
         assert!(validate_tool_request_mode(ParserVersion::V2, None, None, true).is_err());
         for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
             assert!(validate_parser_version_for_mode(ParserVersion::V2, Some(alias), None).is_ok());
-            assert!(supports_family(alias));
+            assert!(dynamo_parsers_v2::standalone_batch_tool_family(alias).is_some());
         }
     }
 

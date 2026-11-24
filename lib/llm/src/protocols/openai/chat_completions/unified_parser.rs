@@ -113,6 +113,8 @@ pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 /// The Mistral v11+ native grammar.
 pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
 const MISTRAL_REASONING_START: &str = "[THINK]";
+// TODO(parser removal): Let the parser own native boundary detection after
+// a pre-parsed chunk. Verify quoted markers and partial calls across splits.
 const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
 
 fn uses_qwen_xml_grammar(family: &str) -> bool {
@@ -1826,6 +1828,8 @@ impl ChoiceState {
         mut cache: Option<&mut HarmonyPrefill>,
         registration: Option<&dynamo_parsers_v2::UnifiedParserRegistration>,
     ) -> anyhow::Result<Self> {
+        // TODO(parser removal): Move continuation preparation to the parser.
+        // Verify cached and uncached initialization produce the same choice events.
         // The built-in Harmony initializer resets its call counter. Replay consumed
         // tokens afterward so the open call and later calls share that counter.
         // Guided JSON inherits only the resolved channel, since its request constraint

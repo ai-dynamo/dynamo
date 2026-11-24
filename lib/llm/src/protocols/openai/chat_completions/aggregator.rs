@@ -84,14 +84,10 @@ async fn parse_complete_tool_output(
     Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
     Option<String>,
 )> {
-    let parser = match parser {
-        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
-        parser => parser,
-    };
+    let batch_family = dynamo_parsers_v2::standalone_batch_tool_family(parser);
+    let parser = batch_family.unwrap_or(parser);
     let version = super::tool_parser_v2::selected_version()?;
-    if version == super::tool_parser_v2::ParserVersion::V2
-        && !super::tool_parser_v2::supports_family(parser)
-    {
+    if version == super::tool_parser_v2::ParserVersion::V2 && batch_family.is_none() {
         anyhow::bail!(
             "{}=2 was requested, but parser {parser:?} has no compatible v2 implementation",
             dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION
@@ -114,9 +110,7 @@ async fn parse_complete_tool_output(
         }
     }
 
-    let result = if version == super::tool_parser_v2::ParserVersion::V2
-        && super::tool_parser_v2::supports_family(parser)
-    {
+    let result = if version == super::tool_parser_v2::ParserVersion::V2 {
         super::tool_parser_v2::parse_complete(content, Some(tools), parser)
             .map(|(calls, normal)| (calls, Some(normal)))
     } else {

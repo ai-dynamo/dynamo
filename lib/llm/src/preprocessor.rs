@@ -2501,7 +2501,7 @@ impl OpenAIPreprocessor {
             && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
 
         (is_guided_tool_choice || structured_response_requires_reasoning)
-            && Self::sglang_effective_reasoning_enabled(
+            && dynamo_renderer::thinking::sglang_reasoning_enabled(
                 reasoning_parser,
                 request.chat_template_args(),
             )
@@ -2514,7 +2514,7 @@ impl OpenAIPreprocessor {
     ) -> bool {
         Self::guided_output_requires_reasoning(request, reasoning_parser)
             || (has_thinking_budget
-                && Self::sglang_effective_reasoning_enabled(
+                && dynamo_renderer::thinking::sglang_reasoning_enabled(
                     reasoning_parser,
                     request.chat_template_args(),
                 ))
@@ -2603,74 +2603,6 @@ impl OpenAIPreprocessor {
                 .ok()
                 .is_some_and(|kind| kind.as_str().is_some_and(|kind| kind != "text"))
         })
-    }
-
-    /// Match the rendered prompt's reasoning mode before selecting SGLang NativeGrammar.
-    fn sglang_effective_reasoning_enabled(
-        reasoning_parser: Option<&str>,
-        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
-    ) -> bool {
-        let thinking_enabled = dynamo_renderer::thinking_bool_from_args(chat_template_args);
-
-        match reasoning_parser {
-            // These SGLang reasoners are enabled unless the request opts out.
-            Some("qwen3" | "glm45" | "nemotron_nano" | "nemotron3" | "nemotron_v3") => {
-                thinking_enabled != Some(false)
-            }
-            Some("kimi_k25" | "kimi_k3" | "kimi-k3") => thinking_enabled != Some(false),
-            Some("minimax_m2") => {
-                Self::deepseek_renderer_reasoning_enabled(chat_template_args, true)
-            }
-
-            // DeepSeek V3/V3.1 templates are opt-in. The native V3.2/V4
-            // renderers default to thinking; all honor the same aliases.
-            Some("deepseek_v3" | "deepseek_v3_1") => {
-                Self::deepseek_renderer_reasoning_enabled(chat_template_args, false)
-            }
-            Some(
-                "deepseek_v3_2" | "deepseek_v4" | "deepseek-v4" | "deepseekv4" | "deepseek_v41",
-            ) => Self::deepseek_renderer_reasoning_enabled(chat_template_args, true),
-            Some("gemma4" | "gemma-4") => thinking_enabled == Some(true),
-
-            // SGLang's Mistral reasoner is active only for a concrete effort.
-            Some("mistral") => Self::mistral_reasoning_enabled(chat_template_args),
-
-            // MiniMax M3 defaults to adaptive reasoning unless disabled.
-            Some("minimax_m3" | "minimax-m3") => chat_template_args
-                .and_then(|args| args.get("thinking_mode"))
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|mode| mode != "disabled"),
-
-            // Muse Spark always advertises the `self` recipient. Its public
-            // template has no `disable_reasoning` switch; `reasoning_effort`
-            // controls strength without disabling the reasoning channel.
-            Some("muse_spark_open" | "muse_spark") => true,
-
-            // These SGLang reasoners do not expose a per-request off mode.
-            Some("deepseek_r1" | "step3" | "gpt_oss" | "kimi") => true,
-            _ => false,
-        }
-    }
-
-    /// Mirror dynamo-renderer's DeepSeek reasoning-toggle precedence.
-    fn deepseek_renderer_reasoning_enabled(
-        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
-        default_enabled: bool,
-    ) -> bool {
-        if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args) {
-            return enabled;
-        }
-        if let Some(mode) = chat_template_args
-            .and_then(|args| args.get("thinking_mode"))
-            .and_then(serde_json::Value::as_str)
-        {
-            return match mode {
-                "chat" => false,
-                "thinking" => true,
-                _ => default_enabled,
-            };
-        }
-        default_enabled
     }
 
     #[cfg(test)]
@@ -2874,15 +2806,6 @@ impl OpenAIPreprocessor {
             "enable_thinking".to_string(),
             serde_json::Value::Bool(false),
         );
-    }
-
-    fn mistral_reasoning_enabled(
-        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
-    ) -> bool {
-        chat_template_args
-            .and_then(|args| args.get("reasoning_effort"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|effort| effort != "none")
     }
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
@@ -3444,7 +3367,7 @@ impl OpenAIPreprocessor {
                 "chat_template_kwargs": chat_template_kwargs.cloned().unwrap_or_default()
             }))?;
         request.normalize_reasoning_template_args()?;
-        if Self::sglang_effective_reasoning_enabled(
+        if dynamo_renderer::thinking::sglang_reasoning_enabled(
             self.runtime_config.reasoning_parser.as_deref(),
             request.chat_template_args(),
         ) {
@@ -6148,7 +6071,7 @@ impl OpenAIPreprocessor {
 
         // Keep prompt-open M3 reasoning active when explicit guidance waits for its closer.
         let reasoning_disabled_by_request =
-            Self::is_reasoning_disabled_by_request(
+            dynamo_renderer::thinking::legacy_reasoning_disabled(
                 self.runtime_config.reasoning_parser.as_deref(),
                 request.chat_template_args.as_ref(),
             ) && (prompt_prefill.reasoning_closed_by_prompt != Some(false) || is_guided_output)
@@ -6882,6 +6805,8 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
         let pending_in = Arc::clone(&pending);
 
+        // TODO(parser removal): Have the parser report unfinished native calls
+        // in both streaming and batch before removing the GLM jail recovery.
         // The legacy jail recognizes markers with a substring search. Retain
         // GLM47 text per choice so the terminal chunk can use the shared
         // quote-aware marker policy before exposing content to the client.
@@ -7424,7 +7349,10 @@ impl OpenAIPreprocessor {
         // channel, which withholds nothing past it.
         let reasoning_disabled_by_request =
             !Self::unified_keeps_gemma4_reasoning(tool_call_parser, reasoning_parser)
-                && Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args);
+                && dynamo_renderer::thinking::legacy_reasoning_disabled(
+                    reasoning_parser,
+                    chat_template_args,
+                );
         has_reasoning_decoder
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
             && (Self::is_minimax_m3_reasoning_parser(reasoning_parser)
@@ -7722,12 +7650,18 @@ impl OpenAIPreprocessor {
                         && !tool_parser.is_some_and(|selector| descriptor.accepts(selector))
                 }
                 ReasoningControl::DeepSeek => {
-                    !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
+                    !dynamo_renderer::thinking::template_mode_reasoning_enabled(
+                        chat_template_args.as_ref(),
+                        true,
+                    )
                 }
                 ReasoningControl::Request => thinking == Some(false),
             };
         }
-        Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args.as_ref())
+        dynamo_renderer::thinking::legacy_reasoning_disabled(
+            reasoning_parser,
+            chat_template_args.as_ref(),
+        )
     }
 
     /// With thinking off, Gemma 4's chat template prefills an empty
@@ -7774,55 +7708,6 @@ impl OpenAIPreprocessor {
                 crate::protocols::openai::chat_completions::unified_parser::GEMMA4_EMPTY_THOUGHT_CHANNEL,
             ),
             _ => None,
-        }
-    }
-
-    fn is_reasoning_disabled_by_request(
-        reasoning_parser: Option<&str>,
-        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
-    ) -> bool {
-        match reasoning_parser {
-            Some("kimi_k25" | "kimi_k3" | "kimi-k3") => {
-                dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
-            }
-            parser if Self::is_nemotron_force_reasoning(parser) => {
-                // `enable_thinking=false` turns reasoning off entirely (streaming
-                // and non-streaming). `force_nonempty_content=true` does NOT
-                // disable parsing: keeping the parser on splits reasoning from the
-                // answer, so a reasoning+answer turn no longer leaks the reasoning
-                // text and `</think>` into `content`.
-                //
-                // The reasoning-*only* move (surface reasoning as content when the
-                // answer is empty) happens on both paths, by different means.
-                // Non-streaming uses the aggregator flag
-                // ParsingOptions::move_reasoning_to_content_when_empty. Streaming
-                // cannot retract a reasoning_content delta already sent, so it
-                // instead holds reasoning back until it knows whether an answer
-                // follows — see `defer_reasoning_for_nonempty_content` and
-                // `drain_deferred_reasoning`. Both end with the same contract: a
-                // reasoning-only turn surfaces its text as `content`.
-                dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
-            }
-            Some("deepseek_v3" | "deepseek_v3_1") => {
-                !Self::deepseek_renderer_reasoning_enabled(chat_template_args, false)
-            }
-            Some(
-                "deepseek_r1" | "deepseek_v3_2" | "deepseek_v4" | "deepseek-v4" | "deepseekv4"
-                | "deepseek_v41" | "minimax_m2",
-            ) => !Self::deepseek_renderer_reasoning_enabled(chat_template_args, true),
-            Some("gemma4") | Some("gemma-4") => {
-                dynamo_renderer::thinking_bool_from_args(chat_template_args) != Some(true)
-            }
-            Some("mistral") => !Self::mistral_reasoning_enabled(chat_template_args),
-            Some("minimax_m3") | Some("minimax-m3") => {
-                if let Some(args) = chat_template_args
-                    && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
-                {
-                    return mode == "disabled";
-                }
-                false
-            }
-            _ => false,
         }
     }
 
@@ -12127,7 +12012,7 @@ mod tests {
             None
         );
         let disabled = HashMap::from([("thinking".to_string(), serde_json::json!(false))]);
-        assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+        assert!(dynamo_renderer::thinking::legacy_reasoning_disabled(
             Some("deepseek_v41"),
             Some(&disabled)
         ));
@@ -15961,7 +15846,7 @@ mod tests {
 
             for parser in ["gemma4", "gemma-4"] {
                 assert_eq!(
-                    OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                    dynamo_renderer::thinking::legacy_reasoning_disabled(
                         Some(parser),
                         request.chat_template_args.as_ref(),
                     ),
@@ -16629,7 +16514,7 @@ mod tests {
         for (parser, request_args, expected) in cases {
             let request_args = serde_json::from_value(request_args).unwrap();
             assert_eq!(
-                OpenAIPreprocessor::sglang_effective_reasoning_enabled(
+                dynamo_renderer::thinking::sglang_reasoning_enabled(
                     Some(parser),
                     Some(&request_args),
                 ),
@@ -16637,7 +16522,7 @@ mod tests {
                 "parser={parser}, args={request_args:?}",
             );
         }
-        assert!(!OpenAIPreprocessor::sglang_effective_reasoning_enabled(
+        assert!(!dynamo_renderer::thinking::sglang_reasoning_enabled(
             None, None
         ));
     }
@@ -17462,7 +17347,7 @@ mod tests {
                         .is_none(),
                     "{args}/{choice:?}: closed prompts do not forward reasoning_ended"
                 );
-                assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                assert!(dynamo_renderer::thinking::legacy_reasoning_disabled(
                     Some("minimax_m2"),
                     request.chat_template_args.as_ref(),
                 ));
@@ -17512,7 +17397,7 @@ mod tests {
                 false,
                 "{args}: opened prompts keep forwarding reasoning_ended=false"
             );
-            assert!(!OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            assert!(!dynamo_renderer::thinking::legacy_reasoning_disabled(
                 Some("minimax_m2"),
                 request.chat_template_args.as_ref(),
             ));
@@ -17958,12 +17843,12 @@ mod tests {
                     "renderer helper mismatch for {description}"
                 );
                 assert_eq!(
-                    OpenAIPreprocessor::sglang_effective_reasoning_enabled(Some("kimi_k25"), args),
+                    dynamo_renderer::thinking::sglang_reasoning_enabled(Some("kimi_k25"), args),
                     expected,
                     "SGLang gate mismatch for {description}"
                 );
                 assert_eq!(
-                    !OpenAIPreprocessor::is_reasoning_disabled_by_request(Some("kimi_k25"), args,),
+                    !dynamo_renderer::thinking::legacy_reasoning_disabled(Some("kimi_k25"), args,),
                     expected,
                     "postprocessor gate mismatch for {description}"
                 );
@@ -18075,7 +17960,7 @@ mod tests {
                 Some(&serde_json::Value::String("high".to_string())),
                 "the public effort value is preserved while the named-call exception disables thinking"
             );
-            assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            assert!(dynamo_renderer::thinking::legacy_reasoning_disabled(
                 Some(parser),
                 Some(args)
             ));
@@ -20232,7 +20117,7 @@ mod tests {
                         minimax_m3_request(minimax_m3_merge_body(form_body, &control_body));
                     minimax_m3_normalize_thinking(&preprocessor, &mut request);
                     assert!(
-                        OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                        dynamo_renderer::thinking::legacy_reasoning_disabled(
                             Some("minimax_m3"),
                             request.chat_template_args.as_ref(),
                         ),
@@ -20720,7 +20605,7 @@ mod tests {
         // and the per-family signals decide it identically for both paths.
         for (parser, args, expected, desc) in cases {
             assert_eq!(
-                OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
+                dynamo_renderer::thinking::legacy_reasoning_disabled(parser, args),
                 expected,
                 "FAILED: {desc}",
             );
@@ -20731,14 +20616,14 @@ mod tests {
         // (no leak). Non-streaming additionally moves reasoning into content when
         // no content was generated (the aggregator); streaming skips that move.
         assert!(
-            !OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            !dynamo_renderer::thinking::legacy_reasoning_disabled(
                 Some("nemotron3"),
                 Some(&force_nonempty_content_true),
             ),
             "nemotron3 + force_nonempty_content=true → NOT disabled",
         );
         assert!(
-            !OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            !dynamo_renderer::thinking::legacy_reasoning_disabled(
                 Some("nemotron_v3"),
                 Some(&force_nonempty_content_true),
             ),
@@ -20746,7 +20631,7 @@ mod tests {
         );
         // enable_thinking=false disables entirely (user turned thinking off).
         assert!(
-            OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            dynamo_renderer::thinking::legacy_reasoning_disabled(
                 Some("nemotron3"),
                 Some(&enable_thinking_false),
             ),

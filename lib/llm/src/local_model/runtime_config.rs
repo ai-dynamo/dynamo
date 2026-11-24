@@ -908,8 +908,6 @@ impl ModelRuntimeConfig {
 mod tests {
     use super::*;
 
-    use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
-
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {
         assert_eq!(
@@ -1564,7 +1562,7 @@ mod tests {
         };
 
         // Every v2 or unified parser must remain valid at registration.
-        for &parser in V2_FAMILIES.iter().chain(unified_family_names()) {
+        for &parser in unified_family_names() {
             assert!(validate(parser).is_ok(), "{parser} must be supported");
         }
         assert!(validate("").is_ok());
