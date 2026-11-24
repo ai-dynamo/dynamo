@@ -204,6 +204,47 @@ def test_recommendation_config_preserves_comparison_intent(
     }
 
 
+def test_recommendation_config_uses_reproducible_model_and_parallelism(
+    monkeypatch, tmp_path
+) -> None:
+    _write_case_and_hardware(tmp_path, monkeypatch, backend="sglang")
+    fixture_path = tmp_path / "fixtures" / "qwen-revision"
+    fixture_path.mkdir(parents=True)
+    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(run_cases, "_MODEL_FIXTURES_ROOT", tmp_path / "fixtures")
+    monkeypatch.setattr(run_cases, "_LOCAL_MODEL_INPUTS", {"qwen": "qwen-revision"})
+    preset = {
+        "prefill": {
+            "replicas": 1,
+            "tensor": 8,
+            "pipeline": 1,
+            "attention_data": 1,
+            "moe_tensor": 1,
+            "moe_expert": 8,
+        },
+        "decode": {
+            "replicas": 1,
+            "tensor": 1,
+            "pipeline": 1,
+            "attention_data": 8,
+            "moe_tensor": 1,
+            "moe_expert": 8,
+        },
+    }
+    monkeypatch.setattr(run_cases, "_PARALLELISM_PRESETS", {"qwen": preset})
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    )
+
+    engine = run_cases.recommendation_config(case)["engine"]
+
+    assert engine["model"] == "fixtures/qwen-revision"
+    assert engine["workers"] == {
+        role: {"parallelism": {"preset": [values]}}
+        for role, values in preset.items()
+    }
+
+
 def test_discovered_recipe_requirements_preserve_source_and_merge_proposals(
     monkeypatch, tmp_path
 ) -> None:

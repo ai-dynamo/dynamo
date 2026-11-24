@@ -7,11 +7,6 @@ tests:
   - case: deepseek-r1-sglang-disagg-16gpu
     hardware: h200-sxm-32gpu
     exceptions:
-      recommend:
-        aic:
-          status: broken
-          reason: AISim's SGLang H200 performance data lacks the required FP8 context-MLA measurements.
-          match: '(?s)context MLA data missing.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -23,11 +18,6 @@ tests:
   - case: deepseek-r1-sglang-disagg-8gpu
     hardware: h200-sxm-16gpu
     exceptions:
-      recommend:
-        aic:
-          status: broken
-          reason: AISim's SGLang H200 performance data lacks the required FP8 context-MLA measurements.
-          match: '(?s)context MLA data missing.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -47,11 +37,6 @@ tests:
   - case: deepseek-r1-vllm-disagg
     hardware: h200-sxm-32gpu
     exceptions:
-      recommend:
-        aic:
-          status: broken
-          reason: The DGD output adapter refuses implicit remote-code trust for a mutable model ref.
-          match: "Refusing to auto-inject --trust-remote-code for mutable remote model ref 'deepseek-ai/DeepSeek-R1'"
       render:
         profiler-v1beta1:
           status: broken
@@ -144,7 +129,9 @@ tests:
       recommend:
         aic:
           status: broken
-          reason: AISim's SGLang H200 performance data lacks the model's FP8 MoE measurements.
+          reason: The pinned AISim H200/SGLang support matrix marks every Nemotron FP8 topology unsupported because no silicon rows match its FP8 MoE key.
+          links:
+            - https://github.com/ai-dynamo/aisim/blob/f85518b36f5488a4c8f6c9553a85d523f173bbb6/python/aisim/src/aisim_core/systems/fpe_support_matrix/h200_sxm.csv
           match: '(?s)MoE data missing for MoeKey.*no feasible candidate found'
       render:
         profiler-v1beta1:
@@ -160,7 +147,9 @@ tests:
       recommend:
         aic:
           status: broken
-          reason: AISim's SGLang H200 performance data lacks the model's FP8 MoE measurements.
+          reason: The pinned AISim H200/SGLang support matrix marks every Nemotron FP8 topology unsupported because no silicon rows match its FP8 MoE key.
+          links:
+            - https://github.com/ai-dynamo/aisim/blob/f85518b36f5488a4c8f6c9553a85d523f173bbb6/python/aisim/src/aisim_core/systems/fpe_support_matrix/h200_sxm.csv
           match: '(?s)MoE data missing for MoeKey.*no feasible candidate found'
       render:
         profiler-v1beta1:
@@ -181,11 +170,6 @@ tests:
   - case: nemotron-3-super-fp8-vllm-agg
     hardware: h200-sxm-4gpu
     exceptions:
-      recommend:
-        aic:
-          status: broken
-          reason: The DGD output adapter refuses implicit remote-code trust for a mutable model ref.
-          match: "Refusing to auto-inject --trust-remote-code for mutable remote model ref 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8'"
       render:
         profiler-v1beta1:
           status: broken

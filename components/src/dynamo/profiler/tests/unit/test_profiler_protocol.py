@@ -1656,7 +1656,14 @@ def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
     assert "--trust-remote-code" not in args
 
 
-def test_materialize_dgd_fails_closed_for_mutable_remote_ref() -> None:
+@pytest.mark.parametrize(
+    "model_ref",
+    [
+        "deepseek-ai/DeepSeek-R1",
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+    ],
+)
+def test_materialize_dgd_fails_closed_for_mutable_remote_ref(model_ref: str) -> None:
     from dynamo.profiler.utils.dgd_materialization import (
         DGDMaterializationPurpose,
         materialize_dgd,
@@ -1680,7 +1687,7 @@ def test_materialize_dgd_fails_closed_for_mutable_remote_ref() -> None:
                 cfg,
                 purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
                 runtime_backend="vllm",
-                model_name_or_path="some/model",
+                model_name_or_path=model_ref,
             )
 
 

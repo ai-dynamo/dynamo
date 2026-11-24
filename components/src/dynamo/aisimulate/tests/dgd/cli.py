@@ -222,7 +222,17 @@ def assert_dgd_outputs(
                 * node_count
                 * int(container["resources"]["limits"]["nvidia.com/gpu"])
             )
-        assert used_gpus == candidate.used_gpus
+        assert used_gpus == candidate.used_gpus, (
+            f"rendered DGD uses {used_gpus} GPUs, but the selected Candidate "
+            f"uses {candidate.used_gpus}"
+        )
+        max_candidate_gpus = input_config["optimization"]["constraints"][
+            "max_candidate_gpus"
+        ]
+        assert used_gpus <= max_candidate_gpus, (
+            f"rendered DGD uses {used_gpus} GPUs, exceeding the configured "
+            f"max_candidate_gpus={max_candidate_gpus}"
+        )
 
     if case_name == "pareto":
         assert len(manifests) >= 2

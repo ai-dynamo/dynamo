@@ -34,6 +34,7 @@ _CASES_ROOT = _ROOT / "cases"
 _HARDWARE_ROOT = _ROOT / "hardware"
 _DEFAULT_OUTPUT_ROOT = _ROOT / "generated"
 _DEFAULT_MANUAL_OUTPUT_ROOT = _DEFAULT_OUTPUT_ROOT / "manual"
+_MODEL_FIXTURES_ROOT = _ROOT.parent / "fixtures" / "models"
 _DGDR_INPUT = "dgdr-v1beta1.yaml"
 _SWEEPER_INPUT = "sweeper.yaml"
 _DGDR_HARDWARE_PATCH = "dgdr-v1beta1.patch.yaml"
@@ -53,6 +54,52 @@ _PHASE_VARIANTS = {
         "sweeper",
         "sweeper-aic",
         "sweeper-direct",
+    },
+}
+# Config-only Hugging Face snapshots use the immutable revision prefix in their
+# directory name so model facts and remote-code detection stay reproducible.
+_LOCAL_MODEL_INPUTS = {
+    "deepseek-r1-sglang-disagg-16gpu": "deepseek-r1-56d4cbbb",
+    "deepseek-r1-sglang-disagg-8gpu": "deepseek-r1-56d4cbbb",
+    "deepseek-r1-vllm-disagg": "deepseek-r1-56d4cbbb",
+    "nemotron-3-super-fp8-vllm-agg": "nemotron-3-super-fp8-744b1880",
+}
+_PARALLELISM_PRESETS = {
+    "deepseek-r1-sglang-disagg-8gpu": {
+        "prefill": {
+            "replicas": 1,
+            "tensor": 8,
+            "pipeline": 1,
+            "attention_data": 1,
+            "moe_tensor": 1,
+            "moe_expert": 8,
+        },
+        "decode": {
+            "replicas": 1,
+            "tensor": 1,
+            "pipeline": 1,
+            "attention_data": 8,
+            "moe_tensor": 1,
+            "moe_expert": 8,
+        },
+    },
+    "deepseek-r1-sglang-disagg-16gpu": {
+        "prefill": {
+            "replicas": 1,
+            "tensor": 16,
+            "pipeline": 1,
+            "attention_data": 1,
+            "moe_tensor": 1,
+            "moe_expert": 16,
+        },
+        "decode": {
+            "replicas": 1,
+            "tensor": 1,
+            "pipeline": 1,
+            "attention_data": 16,
+            "moe_tensor": 1,
+            "moe_expert": 16,
+        },
     },
 }
 
@@ -373,12 +420,25 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
         if mode == "aggregated"
         else {"prefill": copy.deepcopy(worker), "decode": copy.deepcopy(worker)}
     )
+    if case.name in _PARALLELISM_PRESETS:
+        workers = {
+            role: {"parallelism": {"preset": [copy.deepcopy(preset)]}}
+            for role, preset in _PARALLELISM_PRESETS[case.name].items()
+        }
 
     max_eval_seconds = sweep.get("max_eval_seconds", 600.0)
     sla = goal.get("sla")
     engine = {
         "mode": mode,
-        "model": search_space["model_name"],
+        "model": (
+            str(
+                (_MODEL_FIXTURES_ROOT / _LOCAL_MODEL_INPUTS[case.name]).relative_to(
+                    _REPOSITORY_ROOT
+                )
+            )
+            if case.name in _LOCAL_MODEL_INPUTS
+            else search_space["model_name"]
+        ),
         "hardware": search_space["hardware_sku"],
         "backend": backend,
         "workers": workers,

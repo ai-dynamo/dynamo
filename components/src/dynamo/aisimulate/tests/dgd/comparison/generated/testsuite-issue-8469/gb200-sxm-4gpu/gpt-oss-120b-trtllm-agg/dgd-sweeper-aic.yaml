@@ -74,10 +74,10 @@ spec:
           - '131072'
           resources:
             limits:
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '2'
             requests:
               ephemeral-storage: 2Gi
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '2'
           envFrom:
           - secretRef:
               name: hf-token-secret

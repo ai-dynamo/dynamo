@@ -78,7 +78,7 @@ spec:
           - '262144'
           resources:
             limits:
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '2'
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -138,7 +138,7 @@ spec:
           - '262144'
           resources:
             limits:
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '2'
           envFrom:
           - secretRef:
               name: hf-token-secret

@@ -48,8 +48,12 @@ def test_run_dgd_recommend_uses_workspace_relative_config(
 
 
 @pytest.mark.parametrize(
-    ("backend", "include_vllm_args", "node_count"),
-    [("vllm", True, 1), ("trtllm", False, 2)],
+    ("backend", "include_vllm_args", "node_count", "max_candidate_gpus"),
+    [
+        ("vllm", True, 1, 1),
+        ("trtllm", False, 2, 2),
+        ("trtllm", False, 2, 1),
+    ],
 )
 def test_assert_dgd_outputs_handles_backend_specific_manifests(
     monkeypatch,
@@ -57,6 +61,7 @@ def test_assert_dgd_outputs_handles_backend_specific_manifests(
     backend: str,
     include_vllm_args: bool,
     node_count: int,
+    max_candidate_gpus: int,
 ) -> None:
     config = {
         "backend": backend,
@@ -144,13 +149,23 @@ def test_assert_dgd_outputs_handles_backend_specific_manifests(
         )
     )
 
-    cli.assert_dgd_outputs(
-        case_name="example",
-        input_config={"engine": {"workers": {"aggregated": {}}}},
-        options={
+    arguments = {
+        "case_name": "example",
+        "input_config": {
+            "engine": {"workers": {"aggregated": {}}},
+            "optimization": {
+                "constraints": {"max_candidate_gpus": max_candidate_gpus}
+            },
+        },
+        "options": {
             "name": "example",
             "output_file": "deployment.yaml",
             "runtime_image": "example:latest",
         },
-        output_dir=tmp_path,
-    )
+        "output_dir": tmp_path,
+    }
+    if node_count > max_candidate_gpus:
+        with pytest.raises(AssertionError, match="exceeding.*max_candidate_gpus=1"):
+            cli.assert_dgd_outputs(**arguments)
+    else:
+        cli.assert_dgd_outputs(**arguments)
