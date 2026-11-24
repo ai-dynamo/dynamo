@@ -4201,6 +4201,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
 
         self._multimodal_request_processor.initialize_prefill_handoff()
+        # Round-robin over this worker's DP ranks for requests the router did
+        # not pin, when the KV connector must know the serving rank.
+        self._next_pinned_dp_rank = 0
 
     async def generate(self, request, context):
         normalize_request_token_ids(request)
@@ -4243,6 +4246,27 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             kv_protocol.prefill_request_kv_transfer_params(),
         )
         return kv_protocol
+
+    def _prefill_dp_rank(
+        self, kv_protocol: "KvConnectorProtocol | None", routed_dp_rank: int | None
+    ) -> int | None:
+        """The local DP rank to pass to vLLM for this prefill.
+
+        Normally this is the router's rank (or None, letting vLLM pick). When
+        the KV connector's decode-side params depend on the serving engine
+        (Mooncake with data parallelism), the prefill must run on a known
+        rank: an unpinned request is pinned round-robin over this worker's
+        ranks, and the global rank is reported to the protocol.
+        """
+        dp_rank = self._to_local_dp_rank(routed_dp_rank)
+        if kv_protocol is None or not kv_protocol.needs_dp_rank:
+            return dp_rank
+        dp_start, dp_size = self.dp_range
+        if dp_rank is None:
+            dp_rank = self._next_pinned_dp_rank % dp_size
+            self._next_pinned_dp_rank = (dp_rank + 1) % dp_size
+        kv_protocol.set_dp_rank(dp_start + dp_rank)
+        return dp_rank
 
     def _prefill_disaggregated_params(
         self,
@@ -4323,7 +4347,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         routing = request.get("routing") or {}
-        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        dp_rank = self._prefill_dp_rank(kv_protocol, routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
 
         trace_headers = context.trace_headers()

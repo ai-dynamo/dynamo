@@ -32,6 +32,17 @@ class KvConnectorProtocol(ABC):
     def __init__(self, vllm_config: Any) -> None:
         self._vllm_config = vllm_config
 
+    @property
+    def needs_dp_rank(self) -> bool:
+        """Whether the decode-side params depend on which DP engine served
+        the prefill. When True, the handler pins the request to a DP rank
+        and reports it through :meth:`set_dp_rank` before the decode params
+        are built."""
+        return False
+
+    def set_dp_rank(self, dp_rank: int) -> None:
+        """Record the global DP rank of the engine serving this prefill."""
+
     @abstractmethod
     def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
         """``kv_transfer_params`` for the prefill request to vLLM."""
@@ -90,6 +101,19 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
             ) from e
         self._get_bootstrap_addr = get_mooncake_bootstrap_addr
         self._transfer_id: str = str(uuid.uuid4())
+        self._dp_rank: Optional[int] = None
+
+    @property
+    def needs_dp_rank(self) -> bool:
+        # With data parallelism, vLLM appends ``_dp{dp_rank}`` to the
+        # engine_id of each engine core (``run_engine_core`` in
+        # vllm/v1/engine/core.py), and that suffixed id is what the prefill
+        # engine registers with its bootstrap server. Unlike NIXL, the prefill
+        # response carries no engine id, so the suffix has to be added here.
+        return self._vllm_config.parallel_config.data_parallel_size > 1
+
+    def set_dp_rank(self, dp_rank: int) -> None:
+        self._dp_rank = dp_rank
 
     def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
         return {
@@ -102,13 +126,22 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         self, prefill_response: Any
     ) -> Optional[Dict[str, Any]]:
         host, port = self._get_bootstrap_addr(self._vllm_config)
+        engine_id = self._vllm_config.kv_transfer_config.engine_id
+        if self.needs_dp_rank:
+            if self._dp_rank is None:
+                raise RuntimeError(
+                    "MooncakeConnector PD with data parallelism needs the DP "
+                    "rank of the prefill engine; the handler must call "
+                    "set_dp_rank() before building decode params."
+                )
+            engine_id = f"{engine_id}_dp{self._dp_rank}"
         return {
             "do_remote_decode": False,
             "do_remote_prefill": True,
             "transfer_id": self._transfer_id,
             # http:// is required: decode does `remote_bootstrap_addr + "/query"`.
             "remote_bootstrap_addr": f"http://{host}:{port}",
-            "remote_engine_id": self._vllm_config.kv_transfer_config.engine_id,
+            "remote_engine_id": engine_id,
         }
 
 
