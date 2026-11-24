@@ -1137,10 +1137,11 @@ class VllmProcessor:
         )
 
         # The fields of a PreprocessedRequest that depend on vLLM's rendering,
-        # tokenizer, parsers or sampling defaults. RoutedEngine.generate fills
-        # the rest from the client's request: routing hints, the cache salt,
-        # nvext and sampling passthrough arguments, and the sampling and stop
-        # values not set here.
+        # tokenizer, parsers or sampling defaults. Every value vLLM resolved
+        # into `sp` is sent, because the generation config can set it without
+        # the client. RoutedEngine.generate fills the rest from the client's
+        # request: routing hints, the cache salt, nvext and sampling
+        # passthrough arguments, and the sampling and stop values not set here.
         sp = vllm_preproc.sampling_params
         dynamo_preproc = {
             "model": request["model"],
@@ -1149,9 +1150,11 @@ class VllmProcessor:
                 "max_tokens": sp.max_tokens,
                 "stop": sp.stop,
                 "stop_token_ids": sp.stop_token_ids,
+                "min_tokens": sp.min_tokens,
                 "ignore_eos": sp.ignore_eos,
             },
             "sampling_options": {
+                "n": sp.n,
                 "presence_penalty": sp.presence_penalty,
                 "frequency_penalty": sp.frequency_penalty,
                 "repetition_penalty": sp.repetition_penalty,
@@ -1159,6 +1162,7 @@ class VllmProcessor:
                 "top_p": sp.top_p,
                 "top_k": _disabled_as_unset(sp.top_k, request_for_sampling.top_k),
                 "min_p": _disabled_as_unset(sp.min_p, request_for_sampling.min_p),
+                "seed": sp.seed,
             },
             "output_options": {
                 "logprobs": sp.logprobs,

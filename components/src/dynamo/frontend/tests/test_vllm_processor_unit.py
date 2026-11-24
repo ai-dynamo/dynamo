@@ -2089,6 +2089,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         ({}, {"top_k": 5, "min_p": 0.1}, 5, 0.1),
         ({"top_k": 20}, {"top_k": -1, "min_p": 0.0}, -1, 0.0),
         ({"top_k": 20}, {"temperature": 0.0, "top_k": -1}, 0, None),
+        ({"seed": 41, "n": 2, "min_tokens": 1}, {}, None, None),
     ],
     ids=[
         "no-defaults",
@@ -2097,9 +2098,10 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         "client-enabled",
         "client-disabled",
         "greedy-client-disabled",
+        "config-seed-n-min-tokens",
     ],
 )
-async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
+async def test_generator_sends_the_sampling_values_vllm_resolved(
     vllm_processor_module,
     monkeypatch,
     generation_config,
@@ -2167,6 +2169,7 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
         request_id, request, dynamo_preproc, *args, **kwargs
     ):
         captured["sampling_options"] = dynamo_preproc["sampling_options"]
+        captured["stop_conditions"] = dynamo_preproc["stop_conditions"]
         yield {}
 
     monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
@@ -2178,6 +2181,13 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
 
     assert captured["sampling_options"]["top_k"] == expected_top_k
     assert captured["sampling_options"]["min_p"] == expected_min_p
+    # The worker's own generation-config defaults do not carry these, so a value
+    # the config sets reaches it only from here.
+    assert captured["sampling_options"]["seed"] == generation_config.get("seed")
+    assert captured["sampling_options"]["n"] == generation_config.get("n", 1)
+    assert captured["stop_conditions"]["min_tokens"] == generation_config.get(
+        "min_tokens", 0
+    )
 
 
 @pytest.mark.asyncio

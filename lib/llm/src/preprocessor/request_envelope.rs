@@ -76,7 +76,14 @@ impl RequestEnvelope {
             request_timestamp_ms: chat.nvext().and_then(|nvext| nvext.request_timestamp_ms),
             // A request these reject is left to the processor's own validation.
             stop_conditions: chat.extract_stop_conditions().ok(),
-            sampling_options: chat.extract_sampling_options().ok(),
+            // The grammar is the processor's, and a schema can be large, so it is not kept
+            // for the life of the request.
+            sampling_options: chat.extract_sampling_options().ok().map(|sampling| {
+                SamplingOptions {
+                    guided_decoding: None,
+                    ..sampling
+                }
+            }),
             // `token_in` says the tokens came from the client; only the processor knows.
             nvext_args: nvext_passthrough_args(chat)
                 .map(|args| {
@@ -86,9 +93,14 @@ impl RequestEnvelope {
                 })
                 .filter(|args| !args.is_empty()),
             sampling_args: sampling_passthrough_args(chat),
-            token_budget: self.token_budget,
         }));
         scope
+    }
+
+    /// Apply the engine-published token budget to the request as it will reach the worker.
+    pub fn validate_token_budget(&self, request: &PreprocessedRequest) -> anyhow::Result<()> {
+        OpenAIPreprocessor::validate_preprocessed_token_budget(request, self.token_budget.as_ref())
+            .map(drop)
     }
 }
 
@@ -200,7 +212,6 @@ struct RequestFacts {
     sampling_options: Option<SamplingOptions>,
     nvext_args: Option<JsonObject>,
     sampling_args: Option<JsonObject>,
-    token_budget: Option<TokenBudget>,
 }
 
 /// One request's engine-agnostic facts, read when the request arrives.
@@ -330,7 +341,10 @@ impl RequestScope {
         if mdc_sum.is_none() {
             *mdc_sum = Some(facts.mdc_sum.clone());
         }
-        fill(router, &facts.router);
+        if let Some(client) = &facts.router {
+            let router = router.get_or_insert_default();
+            fill_unset!(router, client, RouterParams { ttft_target, itl_target } keep {});
+        }
         fill(request_timestamp_ms, &facts.request_timestamp_ms);
 
         // The router and the worker must use one cache salt, so a salt the processor set in
@@ -424,15 +438,6 @@ impl RequestScope {
 
         fill_extra_args(extra_args, "nvext", facts.nvext_args.as_ref());
         fill_extra_args(extra_args, "sampling_options", facts.sampling_args.as_ref());
-    }
-
-    /// Apply the engine-published token budget to the request as it will reach the worker.
-    pub fn validate_token_budget(&self, request: &PreprocessedRequest) -> anyhow::Result<()> {
-        let Some(facts) = self.request.as_deref() else {
-            return Ok(());
-        };
-        OpenAIPreprocessor::validate_preprocessed_token_budget(request, facts.token_budget.as_ref())
-            .map(drop)
     }
 }
 
@@ -537,6 +542,10 @@ mod tests {
             },
         }));
         let scope = envelope(None).begin_chat(&request);
+        // The grammar is never filled, so the scope does not keep the request's schema.
+        let facts = scope.request.as_deref().unwrap();
+        let sampling = facts.sampling_options.as_ref().unwrap();
+        assert!(sampling.guided_decoding.is_none());
 
         let mut rendered = rendered_request();
         // A null entry is unset, like a missing one.
@@ -584,13 +593,21 @@ mod tests {
             "seed": 7,
             "temperature": 0.2,
             "max_tokens": 64,
-            "nvext": {"backend_instance_id": 42, "cache_salt": "tenant-a"},
+            "nvext": {
+                "backend_instance_id": 42,
+                "cache_salt": "tenant-a",
+                "router": {"ttft_target": 95.0, "itl_target": 12.0},
+            },
         }));
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context("from-headers"));
         let scope = envelope(None).begin_chat(&request);
 
         let mut rendered = rendered_request();
         rendered.agent_context = Some(agent_context("from-processor"));
+        rendered.router = Some(RouterParams {
+            ttft_target: Some(50.0),
+            itl_target: None,
+        });
         rendered.sampling_options.temperature = Some(1.0);
         rendered.stop_conditions.max_tokens = Some(900);
         rendered.routing = Some(RoutingHints {
@@ -610,6 +627,14 @@ mod tests {
         assert_eq!(rendered.sampling_options.temperature, Some(1.0));
         assert_eq!(rendered.sampling_options.seed, Some(7));
         assert_eq!(rendered.stop_conditions.max_tokens, Some(900));
+        // Each latency target is the processor's when it set one, else the client's.
+        assert_eq!(
+            rendered.router,
+            Some(RouterParams {
+                ttft_target: Some(50.0),
+                itl_target: Some(12.0),
+            })
+        );
         let routing = rendered.routing.as_ref().unwrap();
         assert_eq!(routing.backend_instance_id, Some(7));
         // The router keys on the salt the processor gave the worker.
@@ -638,7 +663,7 @@ mod tests {
             let mut rendered = rendered_request();
             rendered.stop_conditions.max_tokens = processor_max_tokens;
             scope.complete_request(&mut rendered);
-            scope.validate_token_budget(&rendered)
+            envelope.validate_token_budget(&rendered)
         };
 
         check(serde_json::json!({}), Some(7)).unwrap();

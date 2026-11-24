@@ -11,6 +11,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
+use dynamo_llm::preprocessor::request_envelope::RequestEnvelope;
 use dynamo_llm::protocols::common::extensions::SESSION_AFFINITY_CONTEXT_KEY;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_llm::protocols::common::timing::RequestTracker;
@@ -25,11 +26,12 @@ use crate::to_pyerr;
 #[pyclass]
 pub struct RoutedEngine {
     inner: PrefillRoutedEngine,
+    envelope: RequestEnvelope,
 }
 
 impl RoutedEngine {
-    pub fn new(inner: PrefillRoutedEngine) -> Self {
-        Self { inner }
+    pub fn new(inner: PrefillRoutedEngine, envelope: RequestEnvelope) -> Self {
+        Self { inner, envelope }
     }
 }
 
@@ -89,8 +91,10 @@ impl RoutedEngine {
     /// With the `context` of a chat request, the routed request inherits the parent request's
     /// session affinity, and every engine-agnostic field `preprocessed` leaves unset is filled
     /// from the client's request: the agent context, routing hints, sampling and stop values
-    /// and passthrough arguments. A value `preprocessed` sets is kept. The engine's token
-    /// budget is checked against the completed request.
+    /// and passthrough arguments. A value `preprocessed` sets is kept.
+    ///
+    /// With or without `context`, the engine's token budget is checked against the request as
+    /// it will be routed.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
@@ -104,14 +108,14 @@ impl RoutedEngine {
         if request.tracker.is_none() {
             request.tracker = Some(Arc::new(RequestTracker::new()));
         }
+        if let Some(scope) = context.as_ref().and_then(|c| c.request_scope()) {
+            scope.complete_request(&mut request);
+            scope.apply_upstream_elapsed(request.tracker.as_deref());
+        }
+        self.envelope
+            .validate_token_budget(&request)
+            .map_err(rejected_request_to_pyerr)?;
         let request_context = if let Some(parent_context) = context.as_ref() {
-            if let Some(scope) = parent_context.request_scope() {
-                scope.complete_request(&mut request);
-                scope
-                    .validate_token_budget(&request)
-                    .map_err(rejected_request_to_pyerr)?;
-                scope.apply_upstream_elapsed(request.tracker.as_deref());
-            }
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
             let mut child_context = SingleIn::with_id_and_metadata(

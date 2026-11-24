@@ -818,7 +818,10 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                         .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {e}"))?;
                     let py_routed = Py::new(
                         py,
-                        crate::llm::routed_engine::RoutedEngine::new(routed_engine),
+                        crate::llm::routed_engine::RoutedEngine::new(
+                            routed_engine,
+                            envelope.clone(),
+                        ),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to create Python RoutedEngine: {e}"))?;
 
