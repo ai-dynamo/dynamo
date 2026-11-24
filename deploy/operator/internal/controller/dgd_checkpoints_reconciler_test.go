@@ -1262,10 +1262,10 @@ func TestDGDCheckpointsReconciler_JobContainerOverrideAppendsEnvFrom(t *testing.
 		Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(dynamo.BackendFrameworkVLLM)},
 	}
 	componentSecret := corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
-		LocalObjectReference: corev1.LocalObjectReference{Name: "hf-token-secret"},
+		Name: "hf-token-secret",
 	}}
 	jobSecret := corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
-		LocalObjectReference: corev1.LocalObjectReference{Name: "job-only-secret"},
+		Name: "job-only-secret",
 	}}
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "worker",
