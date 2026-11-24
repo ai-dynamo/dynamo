@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from dynamo._core import WorkerDraining
-from dynamo.common.utils import graceful_shutdown
+from dynamo.common.utils import worker_shutdown
 from dynamo.sglang import shutdown
 from dynamo.sglang.drain import DrainConflict
 from dynamo.sglang.drain_controls import configure_worker_drain
@@ -24,12 +24,8 @@ async def test_sigterm_without_system_listener_preserves_grace_and_rejects_late_
 ):
     loop = asyncio.get_running_loop()
     handlers = {}
-    unregistered, completed, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    terminal_event, shutdown_event, ready = (
-        asyncio.Event(),
-        asyncio.Event(),
-        asyncio.Event(),
-    )
+    unregistered, release = asyncio.Event(), asyncio.Event()
+    shutdown_event, ready = asyncio.Event(), asyncio.Event()
     ready.set()
     endpoint = SimpleNamespace(
         unregister_endpoint_instance=AsyncMock(side_effect=unregistered.set),
@@ -43,12 +39,15 @@ async def test_sigterm_without_system_listener_preserves_grace_and_rejects_late_
     runtime = SimpleNamespace(
         system_status_server_url=Mock(return_value=None),
         register_engine_http_handler=Mock(),
-        shutdown_and_wait=AsyncMock(side_effect=completed.set),
+        close_engine_routes=Mock(return_value=False),
+        shutdown_and_wait=AsyncMock(),
     )
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0.05")
-    monkeypatch.setattr(graceful_shutdown, "_shutdown_started", asyncio.Event())
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", "10")
+    monkeypatch.setattr(worker_shutdown, "ShutdownWatchdog", Mock())
+    coordinator = worker_shutdown.WorkerShutdown(runtime, [endpoint], shutdown_event)
     controller = configure_worker_drain(
-        handler, runtime, ready, shutdown_event, terminal_event
+        handler, runtime, ready, shutdown_event, coordinator.requested_event
     )
     runtime.register_engine_http_handler.assert_not_called()
 
@@ -57,37 +56,38 @@ async def test_sigterm_without_system_listener_preserves_grace_and_rejects_late_
         await release.wait()
         yield "last"
 
-    admitted = controller.wrap(generate)
-    async with aclosing(admitted({}, None)) as original:
-        assert await anext(original) == "first"
-        monkeypatch.setattr(
-            signal,
-            "signal",
-            lambda signum, callback: handlers.update({signum: callback}),
+    admitted = coordinator.wrap(controller.wrap(generate))
+    monkeypatch.setattr(
+        signal, "signal", lambda signum, callback: handlers.update({signum: callback})
+    )
+    with shutdown.defer_engine_signals(loop, coordinator) as deferred:
+        coordinator.post_shutdown = deferred
+        owner = asyncio.create_task(
+            coordinator.run(asyncio.Event().wait(), install_signals=False)
         )
-        # Restore the loop's method after the production installer wraps it.
-        monkeypatch.setattr(loop, "add_signal_handler", loop.add_signal_handler)
-        deferred = shutdown.install_graceful_shutdown(
-            loop,
-            runtime,
-            [endpoint],
-            shutdown_event,
-            signals=(signal.SIGTERM,),
-            terminal_event=terminal_event,
-        )
-        handlers[signal.SIGTERM](signal.SIGTERM, None)
-        await asyncio.wait_for(unregistered.wait(), 1)
-        assert terminal_event.is_set()
-        assert not shutdown_event.is_set()
-        with pytest.raises(DrainConflict, match="shutdown has started"):
-            await controller.resume({})
-        async with aclosing(admitted({}, None)) as during_grace:
-            assert await anext(during_grace) == "first"
-        await asyncio.wait_for(completed.wait(), 1)
-        assert shutdown_event.is_set()
-        with pytest.raises(WorkerDraining):
-            await anext(admitted({}, None))
-        release.set()
-        assert await asyncio.wait_for(anext(original), 1) == "last"
-        endpoint.register_endpoint_instance.assert_not_called()
-        await deferred()
+        try:
+            async with aclosing(admitted({}, None)) as original:
+                assert await anext(original) == "first"
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+                await asyncio.wait_for(unregistered.wait(), 1)
+                assert coordinator.requested_event.is_set()
+                assert not shutdown_event.is_set()
+                with pytest.raises(DrainConflict, match="shutdown has started"):
+                    await controller.resume({})
+                async with aclosing(admitted({}, None)) as during_grace:
+                    assert await anext(during_grace) == "first"
+                async with asyncio.timeout(1):
+                    while coordinator.accepting:
+                        await asyncio.sleep(0.001)
+                with pytest.raises(WorkerDraining):
+                    await anext(admitted({}, None))
+                runtime.shutdown_and_wait.assert_not_called()
+                release.set()
+                assert await asyncio.wait_for(anext(original), 1) == "last"
+        finally:
+            release.set()
+            if not coordinator.started:
+                coordinator.request_shutdown()
+            await asyncio.wait_for(owner, 2)
+    endpoint.register_endpoint_instance.assert_not_called()
+    runtime.shutdown_and_wait.assert_awaited_once()

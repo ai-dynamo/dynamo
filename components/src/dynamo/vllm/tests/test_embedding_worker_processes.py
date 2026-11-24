@@ -165,8 +165,9 @@ def test_stat_loggers_are_precreated_on_calling_thread():
     assert wrappers[0](_vllm_config(), 7) is logger
 
 
-def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
-    child = Mock(pid=101)
+@pytest.mark.parametrize("engine_fails", [False, True])
+def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch, engine_fails):
+    child = Mock(pid=101, returncode=0)
     child.poll.side_effect = [None, 0, 0]
     engine_manager = Mock()
     rpc_directory = Mock(name="rpc_directory")
@@ -180,11 +181,17 @@ def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
         previous_rpc_base_path="/tmp/original-rpc",
         zmq_listeners=Mock(),
     )
-    group.cleanup(timeout=2.0)
+    if engine_fails:
+        engine_manager.shutdown.side_effect = RuntimeError("EngineCore stop failed")
+        with pytest.raises(RuntimeError, match="EngineCore stop failed"):
+            group.cleanup(timeout=2.0)
+    else:
+        group.cleanup(timeout=2.0)
     group.cleanup(timeout=2.0)
 
     child.terminate.assert_called_once()
-    engine_manager.shutdown.assert_called_once_with(timeout=2.0)
+    engine_manager.shutdown.assert_called_once()
+    assert 0 < engine_manager.shutdown.call_args.kwargs["timeout"] <= 2.0
     rpc_directory.cleanup.assert_called_once()
     assert os.environ[processes._RPC_BASE_PATH_ENV] == "/tmp/original-rpc"
 
@@ -235,7 +242,7 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     children = []
 
     def create_child(*_args, **_kwargs):
-        child = Mock(pid=200 + len(children))
+        child = Mock(pid=200 + len(children), returncode=0)
         child.poll.side_effect = [None, 0, 0]
         children.append(child)
         return child

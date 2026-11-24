@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json,
@@ -45,15 +49,45 @@ enum Handler {
     Http(EngineHttpCallback),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Worker is shutting down")]
+struct EngineRoutesClosed;
+
+impl IntoResponse for EngineRoutesClosed {
+    fn into_response(self) -> Response {
+        (StatusCode::SERVICE_UNAVAILABLE, self.to_string()).into_response()
+    }
+}
+
 /// Registry for both legacy callbacks and method-aware handlers on `/engine/*`.
 #[derive(Clone, Default)]
 pub struct EngineRouteRegistry {
     routes: Arc<RwLock<HashMap<String, Handler>>>,
+    closed: Arc<AtomicBool>,
+    active: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl EngineRouteRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Permanently stop admission, including callbacks already fetched by HTTP.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.active.try_write().is_ok()
+    }
+
+    /// Join admitted callbacks without shutting down runtime transports.
+    pub async fn wait_for_idle(&self) {
+        let _guard = self.active.write().await;
     }
 
     pub fn register(&self, route: &str, callback: EngineRouteCallback) {
@@ -68,10 +102,16 @@ impl EngineRouteRegistry {
     }
 
     pub fn get(&self, route: &str) -> Option<EngineRouteCallback> {
-        match self.routes.read().get(route) {
-            Some(Handler::Legacy(callback)) => Some(Arc::clone(callback)),
-            _ => None,
-        }
+        let callback = match self.routes.read().get(route) {
+            Some(Handler::Legacy(callback)) => Arc::clone(callback),
+            _ => return None,
+        };
+        let registry = self.clone();
+        Some(Arc::new(move |body| {
+            let registry = registry.clone();
+            let callback = callback.clone();
+            Box::pin(async move { registry.invoke(move || callback(body)).await })
+        }))
     }
 
     pub fn routes(&self) -> Vec<String> {
@@ -113,13 +153,36 @@ impl EngineRouteRegistry {
     fn get_http(&self, path: &str) -> Option<(EngineHttpCallback, String)> {
         let (name, suffix) = path.split_once('/').unwrap_or((path, ""));
         let routes = self.routes.read();
-        if let Some(Handler::Http(callback)) = routes.get(path) {
-            return Some((Arc::clone(callback), String::new()));
-        }
-        match routes.get(name) {
-            Some(Handler::Http(callback)) => Some((Arc::clone(callback), suffix.to_owned())),
-            _ => None,
-        }
+        let (callback, suffix) = if let Some(Handler::Http(callback)) = routes.get(path) {
+            (Arc::clone(callback), "")
+        } else if let Some(Handler::Http(callback)) = routes.get(name) {
+            (Arc::clone(callback), suffix)
+        } else {
+            return None;
+        };
+        let registry = self.clone();
+        Some((
+            Arc::new(move |request| {
+                let registry = registry.clone();
+                let callback = callback.clone();
+                Box::pin(async move { registry.invoke(move || callback(request)).await })
+            }),
+            suffix.to_owned(),
+        ))
+    }
+
+    async fn invoke<T: Send + 'static, F: Future<Output = anyhow::Result<T>> + Send + 'static>(
+        &self,
+        callback: impl FnOnce() -> F + Send + 'static,
+    ) -> anyhow::Result<T> {
+        let guard = self.active.clone().read_owned().await;
+        anyhow::ensure!(!self.is_closed(), EngineRoutesClosed);
+        // HTTP cancellation must not detach a Python operation from the barrier.
+        tokio::spawn(async move {
+            let _guard = guard;
+            callback().await
+        })
+        .await?
     }
 }
 
@@ -144,6 +207,9 @@ pub(crate) async fn dispatch(
     method: Method,
     body: Bytes,
 ) -> Response {
+    if registry.is_closed() {
+        return EngineRoutesClosed.into_response();
+    }
     // Exact legacy routes keep their precedence and body-only callback contract.
     if let Some(callback) = registry.get(&path) {
         let payload = match parse_json(&body, json!({})) {
@@ -152,6 +218,7 @@ pub(crate) async fn dispatch(
         };
         return match callback(payload).await {
             Ok(response) => (StatusCode::OK, response.to_string()).into_response(),
+            Err(error) if error.is::<EngineRoutesClosed>() => EngineRoutesClosed.into_response(),
             Err(error) => {
                 tracing::error!(path, %error, "Engine route handler failed");
                 (
@@ -196,6 +263,7 @@ pub(crate) async fn dispatch(
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
         },
+        Err(error) if error.is::<EngineRoutesClosed>() => EngineRoutesClosed.into_response(),
         Err(error) => {
             tracing::error!(path, %error, "Engine HTTP handler failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -229,6 +297,82 @@ mod tests {
                 ),
             )
             .with_state(registry)
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_admitted_callbacks_and_rejects_cached_callbacks() {
+        for http in [false, true] {
+            let registry = EngineRouteRegistry::new();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let callback: EngineRouteCallback = Arc::new({
+                let entered = entered.clone();
+                let release = release.clone();
+                move |_| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(serde_json::Value::Null)
+                    })
+                }
+            });
+            let cached: EngineRouteCallback = if http {
+                registry
+                    .register_http(
+                        "control".into(),
+                        Arc::new(move |request| {
+                            let result = callback(request.body);
+                            Box::pin(async move {
+                                Ok(EngineHttpResponse {
+                                    status: 200,
+                                    body: result.await?,
+                                })
+                            })
+                        }),
+                    )
+                    .unwrap();
+                let (callback, _) = registry.get_http("control").unwrap();
+                Arc::new(move |body| {
+                    let result = callback(EngineHttpRequest {
+                        method: "POST".into(),
+                        path: String::new(),
+                        body,
+                    });
+                    Box::pin(async move { Ok(result.await?.body) })
+                })
+            } else {
+                registry.register("control", callback);
+                registry.get("control").unwrap()
+            };
+            let active = tokio::spawn(cached(serde_json::Value::Null));
+            entered.notified().await;
+            // Disconnecting the waiter must not release the shutdown barrier while
+            // its admitted engine operation is still running.
+            active.abort();
+            assert!(active.await.unwrap_err().is_cancelled());
+            let idle = registry.wait_for_idle();
+            tokio::pin!(idle);
+            assert!(futures::poll!(&mut idle).is_pending());
+            // This request passed dispatch's first check and is waiting for admission.
+            let racing = dispatch(&registry, "control".into(), Method::POST, Bytes::new());
+            tokio::pin!(racing);
+            assert!(futures::poll!(&mut racing).is_pending());
+            registry.close();
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), idle)
+                .await
+                .unwrap();
+            assert_eq!(racing.await.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(cached(serde_json::Value::Null).await.is_err());
+            assert_eq!(
+                dispatch(&registry, "control".into(), Method::POST, Bytes::new())
+                    .await
+                    .status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
     }
 
     #[tokio::test]

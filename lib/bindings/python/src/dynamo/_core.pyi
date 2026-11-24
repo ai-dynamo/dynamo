@@ -62,6 +62,24 @@ JsonLike = Any
 
 RequestHandler = Callable[..., AsyncIterator[JsonLike]]
 
+class _ShutdownSignals:
+    def __init__(self, timeout_secs: float, parent_fd: Optional[int]) -> None: ...
+    def intercept(self, sig: int) -> None: ...
+    def received_at(self) -> Optional[float]: ...
+    def close(self) -> None: ...
+
+class ShutdownWatchdog:
+    """OS-thread shutdown deadline; force-exits with code 70 when it expires."""
+
+    def __init__(self, timeout_secs: float) -> None: ...
+    def finish(self) -> None:
+        """Disarm after engine cleanup and runtime teardown finish."""
+        ...
+
+def worker_shutdown_timeout_secs() -> int:
+    """Resolve the worker timeout using the native build profile and environment."""
+    ...
+
 class DistributedRuntime:
     """
     The runtime object for dynamo applications
@@ -146,6 +164,18 @@ class DistributedRuntime:
         """
         Explicitly set the system-level health status (Ready / NotReady).
         """
+        ...
+
+    def close_engine_routes(self) -> bool:
+        """Close control and registration admission. Return whether a control is still active."""
+        ...
+
+    async def shutdown_engine_routes(self) -> None:
+        """Fence endpoint registration and join admitted engine-control callbacks."""
+        ...
+
+    def engine_routes_closed(self) -> bool:
+        """Whether terminal shutdown has closed engine-control admission."""
         ...
 
     def system_status_server_url(self) -> Optional[str]:
@@ -3240,13 +3270,15 @@ class VirtualConnectorClient:
         ...
 
 
-# =============================================================================
+# ======================================================================        ...
+
 # Dynamo Exception Types
 #
 # Standardized exceptions for Dynamo error categories. All inherit from
 # DynamoException. The Rust error type mapping depends on the context in
 # which the exception is raised (e.g., backend context wraps as Backend.<*>).
-# =============================================================================
+# ======================================================================        ...
+
 
 class DynamoException(Exception):
     """Base exception for all Dynamo error types."""
@@ -3316,7 +3348,7 @@ class WorkerUnavailable(DynamoException):
     ...
 
 class WorkerDraining(WorkerUnavailable):
-    """The selected worker closed admission for a reversible drain (HTTP 503)."""
+    """The selected worker has closed admission to drain requests (HTTP 503)."""
 
     ...
 

@@ -873,6 +873,9 @@ class BaseWorkerHandler(
 
     async def _sync_discovery_with_sglang_pause_state(self) -> None:
         """Make discovery match SGLang's authoritative generation pause state."""
+        runtime = getattr(self, "_engine_route_runtime", None)
+        if runtime is not None and runtime.engine_routes_closed():
+            return
         tokenizer_manager = (
             getattr(self.engine, "tokenizer_manager", None)
             if self.engine is not None
@@ -890,7 +893,11 @@ class BaseWorkerHandler(
             await self.generate_endpoint.unregister_endpoint_instance()
         else:
             await self.generate_endpoint.register_endpoint_instance()
-            if drain is not None and drain.withdrawn:
+            # A shared pause broadcast can race terminal shutdown independently
+            # of HTTP callbacks. Undo any publication that crossed that boundary.
+            if (runtime is not None and runtime.engine_routes_closed()) or (
+                drain is not None and drain.withdrawn
+            ):
                 await self.generate_endpoint.unregister_endpoint_instance()
 
     def follow_shared_pause_state(self) -> None:
@@ -899,6 +906,11 @@ class BaseWorkerHandler(
                 await self._sync_discovery_with_sglang_pause_state()
 
         follow_pause_broadcasts(getattr(self.engine, "tokenizer_manager", None), resync)
+
+    async def wait_for_discovery_sync(self) -> None:
+        """Join broadcasts after terminal control admission has been closed."""
+        async with self._engine_route_lock:
+            pass
 
     async def _invoke_engine_route(
         self, route_handler, body: dict, *, generation_control: bool = False
@@ -944,6 +956,7 @@ class BaseWorkerHandler(
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
+        self._engine_route_runtime = runtime
         configured_routes = resolve_configured_engine_routes(
             self.engine,
             self.config.dynamo_args.engine_routes,
