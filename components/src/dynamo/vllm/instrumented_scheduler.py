@@ -89,6 +89,7 @@ Inject via:
 
 from __future__ import annotations
 
+import argparse
 import enum
 import hashlib
 import json
@@ -130,6 +131,7 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 from vllm.v1.request import Request, RequestStatus
 
+from dynamo.common.configuration.utils import parse_bool
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
@@ -174,11 +176,11 @@ def _kvwarm_check_url_scheme(url: str, allow_http: bool) -> None:
     if scheme == "https" or (scheme == "http" and allow_http):
         return
     if scheme == "http":
-        raise ValueError(
+        raise RuntimeError(
             f"KVWARM dataset URL must use https: {url} "
             "(set DYN_BENCH_KV_WARMUP_ALLOW_HTTP=1 to allow plain http)"
         )
-    raise ValueError(f"KVWARM dataset must be a local path or an https URL: {url}")
+    raise RuntimeError(f"KVWARM dataset must be a local path or an https URL: {url}")
 
 
 class _KvwarmRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -6033,9 +6035,12 @@ class InstrumentedScheduler(AsyncScheduler):
             if not os.path.exists(spec):
                 raise RuntimeError(f"KVWARM dataset path does not exist: {spec}")
             return spec
-        allow_http = os.environ.get(
-            "DYN_BENCH_KV_WARMUP_ALLOW_HTTP", ""
-        ).strip().lower() in ("1", "true", "on", "yes")
+        try:
+            allow_http = parse_bool(
+                os.environ.get("DYN_BENCH_KV_WARMUP_ALLOW_HTTP", "")
+            )
+        except argparse.ArgumentTypeError as exc:
+            raise RuntimeError(f"DYN_BENCH_KV_WARMUP_ALLOW_HTTP: {exc}") from exc
         _kvwarm_check_url_scheme(spec, allow_http)
         # A non-default URL needs a pinned digest before the cache or the
         # network is touched, so no unverified bytes are ever used.
@@ -6045,7 +6050,7 @@ class InstrumentedScheduler(AsyncScheduler):
             else None
         )
         if not expected_sha:
-            raise ValueError(
+            raise RuntimeError(
                 "DYN_BENCH_KV_WARMUP_SHA256 is required for a non-default "
                 f"DYN_BENCH_KV_WARMUP_DATASET URL: {spec}"
             )
@@ -6064,9 +6069,6 @@ class InstrumentedScheduler(AsyncScheduler):
                 raise RuntimeError(
                     f"KVWARM dataset cache sha mismatch: {digest} != {expected_sha}"
                 )
-            logger.info(
-                "KVWARM: dataset source=%s path=%s sha256=%s", spec, cached, digest
-            )
             return cached
         logger.info("KVWARM: downloading dataset %s -> %s", spec, cached)
         # Per-process temp name: same-host ranks may download concurrently;
@@ -6083,7 +6085,6 @@ class InstrumentedScheduler(AsyncScheduler):
                 f"KVWARM dataset download sha mismatch: {digest} != {expected_sha}"
             )
         os.replace(tmp, cached)
-        logger.info("KVWARM: dataset source=%s path=%s sha256=%s", spec, cached, digest)
         return cached
 
     @staticmethod
@@ -6117,7 +6118,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 texts.append(body)
         meta = self._kvwarm_meta_init()
         path_sha256 = self._kvwarm_sha256(path)
-        logger.info("KVWARM: dataset path=%s sha256=%s", path, path_sha256)
+        source = os.environ.get(
+            "DYN_BENCH_KV_WARMUP_DATASET", self._KVWARM_DEFAULT_DATASET_URL
+        )
+        logger.info(
+            "KVWARM: dataset source=%s path=%s sha256=%s", source, path, path_sha256
+        )
         meta["dataset"] = {
             "path": path,
             "sha256": path_sha256,

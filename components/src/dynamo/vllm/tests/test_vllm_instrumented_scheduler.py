@@ -7037,21 +7037,32 @@ def test_kvwarm_dataset_rejects_non_https_url(
 ):
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_DATASET", url)
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_SHA256", _KVWARM_PAYLOAD_SHA256)
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(RuntimeError, match=match):
         InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
     assert kvwarm_dataset_env.opened == []
 
 
+@pytest.mark.parametrize("allow_http", ["1", " YES "])
 def test_kvwarm_dataset_allows_plain_http_with_opt_in_and_pinned_sha256(
-    kvwarm_dataset_env, monkeypatch
+    kvwarm_dataset_env, monkeypatch, allow_http
 ):
     url = "http://example.com/data.json"
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_DATASET", url)
-    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_ALLOW_HTTP", "1")
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_ALLOW_HTTP", allow_http)
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_SHA256", _KVWARM_PAYLOAD_SHA256)
     path = InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
     assert path == str(kvwarm_dataset_env.cache / "data.json")
     assert kvwarm_dataset_env.opened == [url]
+
+
+def test_kvwarm_dataset_rejects_misspelled_http_opt_in(kvwarm_dataset_env, monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_DATASET", "https://example.com/data.json")
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_SHA256", _KVWARM_PAYLOAD_SHA256)
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_ALLOW_HTTP", "ture")
+    with pytest.raises(RuntimeError, match="DYN_BENCH_KV_WARMUP_ALLOW_HTTP.*expected"):
+        InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
+    assert kvwarm_dataset_env.opened == []
+    assert list(kvwarm_dataset_env.cache.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -7068,7 +7079,7 @@ def test_kvwarm_dataset_requires_sha256_for_custom_url(
     if cached:
         # A file already in the cache is not trusted without a pinned digest.
         (kvwarm_dataset_env.cache / "data.json").write_bytes(_KVWARM_PAYLOAD)
-    with pytest.raises(ValueError, match="DYN_BENCH_KV_WARMUP_SHA256 is required"):
+    with pytest.raises(RuntimeError, match="DYN_BENCH_KV_WARMUP_SHA256 is required"):
         InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
     assert kvwarm_dataset_env.opened == []
 
@@ -7089,15 +7100,17 @@ def test_kvwarm_dataset_downloads_custom_https_url_with_pinned_sha256(
     url = "https://example.com/data.json?download=1"
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_DATASET", url)
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_SHA256", _KVWARM_PAYLOAD_SHA256)
+    path = InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
+    again = InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
     with caplog.at_level(logging.INFO, logger=instrumented_scheduler_module.__name__):
-        path = InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
-        again = InstrumentedScheduler._kvwarm_resolve_dataset(kvwarm_dataset_env.stub)
+        InstrumentedScheduler._kvwarm_load_texts(kvwarm_dataset_env.stub)
+        InstrumentedScheduler._kvwarm_load_texts(kvwarm_dataset_env.stub)
     assert path == again == str(kvwarm_dataset_env.cache / "data.json")
     assert kvwarm_dataset_env.opened == [url]
     expected_log = (
         f"KVWARM: dataset source={url} path={path} sha256={_KVWARM_PAYLOAD_SHA256}"
     )
-    assert [r.getMessage() for r in caplog.records].count(expected_log) == 2
+    assert [r.getMessage() for r in caplog.records].count(expected_log) == 1
 
 
 @pytest.mark.parametrize(
@@ -7126,7 +7139,7 @@ def test_kvwarm_dataset_download_checks_redirect_scheme(
         redirected = handler.redirect_request(req, None, 302, "Found", {}, target)
         assert redirected.full_url == target
     else:
-        with pytest.raises(ValueError, match="https"):
+        with pytest.raises(RuntimeError, match="https"):
             handler.redirect_request(req, None, 302, "Found", {}, target)
 
 
@@ -7155,9 +7168,10 @@ def test_kvwarm_dataset_local_path_needs_no_sha256(
     assert kvwarm_dataset_env.opened == []
     with caplog.at_level(logging.INFO, logger=instrumented_scheduler_module.__name__):
         InstrumentedScheduler._kvwarm_load_texts(stub)
-    assert f"KVWARM: dataset path={local} sha256={_KVWARM_PAYLOAD_SHA256}" in [
-        r.getMessage() for r in caplog.records
-    ]
+    assert (
+        f"KVWARM: dataset source={local} path={local} sha256={_KVWARM_PAYLOAD_SHA256}"
+        in [r.getMessage() for r in caplog.records]
+    )
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP_DATASET", str(tmp_path / "missing.json"))
     with pytest.raises(RuntimeError, match="path does not exist"):
         InstrumentedScheduler._kvwarm_resolve_dataset(stub)
