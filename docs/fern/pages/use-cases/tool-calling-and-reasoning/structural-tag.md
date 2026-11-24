@@ -117,6 +117,38 @@ A tag is attempted only when the parser has structural-tag support. The
 [`none` section](#tool_choicenone-and-token-banning) explains when the exclusion
 tag applies.
 
+### `tool_choice="none"` and Token Banning
+
+By default, Dynamo honors `tool_choice="none"` by removing tool definitions from
+the prompt and returning no structured `tool_calls`. The
+`--exclude-tools-when-tool-choice-none` worker flag (default `true`) controls
+whether tool definitions stay in the prompt.
+
+With the `dynamo` chat processor, when structural tags are enabled and tool
+definitions stay in the prompt, `none` also gets an exclusion tag. The tag bans
+parser-specific tool-call start tokens, for example `<tool_call>`, so the model
+cannot start native tool-call syntax. This applies in both scopes. The `vllm`
+and `sglang` chat processors never add the exclusion tag; they handle `none`
+through prompt and response shaping only.
+
+| `exclude-tools-when-tool-choice-none` | Structural tags | Effect |
+|---|---|---|
+| `true` (default) | off | Tool definitions removed from the prompt. Earlier tool calls in the conversation can still lead the model to attempt one. The prompt differs from turns that include tools, which reduces KV cache prefix reuse. |
+| `true` | on | Same as above; no exclusion tag is added. |
+| `false` | on | Tool definitions stay in the prompt; the exclusion tag blocks native tool-call markers. More of the prompt prefix matches turns that include tools. |
+| `false` | off | Tool definitions stay in the prompt; no token ban. Responses have no structured `tool_calls` for explicit `none`, but tool-like text can appear in `content`. |
+
+Keeping tool definitions in the prompt can improve KV cache reuse when
+`tool_choice` changes between turns, but it does not guarantee cache hits. With
+the exclusion tag, the model still sees the tools but cannot start a tool call,
+so answers can contain awkward phrasing or tool-like fragments. Removing tool
+definitions, the default, usually gives cleaner answers. The effect depends on
+the model and workload.
+
+For multi-turn conversations where `tool_choice` changes between turns and KV
+cache reuse matters, consider `--no-exclude-tools-when-tool-choice-none` with
+structural tags enabled, and check answer quality for your model.
+
 ### Argument Schemas
 
 Schema mode `auto` (default):
@@ -341,36 +373,6 @@ To avoid the rejection, set `strict: false` on the tool under schema mode
 strictness setting with the `sglang` chat processor. The workaround is not
 guaranteed on XGrammar 0.1.32. Disabling structural tags does not remove the
 native tags listed in [Disable Structural Tags](#disable-structural-tags).
-
-### `tool_choice="none"` and Token Banning
-
-With the `dynamo` chat processor, `tool_choice="none"` gets an exclusion tag
-only when structural tags are enabled and tool definitions stay in the prompt.
-The tag bans parser-specific tool-call start tokens, for example `<tool_call>`,
-so the model cannot start native tool-call syntax. This applies in both scopes.
-By default, tools are removed from the prompt for `none`, so no exclusion tag is
-added. The `vllm` and `sglang` chat processors handle `none` through prompt and
-response shaping only.
-
-The `--exclude-tools-when-tool-choice-none` worker flag (default `true`) controls
-whether tools stay in the prompt:
-
-| `exclude-tools-when-tool-choice-none` | Structural tags | Effect |
-|---|---|---|
-| `true` (default) | off | Tools removed from the prompt. The model does not know about tools. The prompt prefix changes with `tool_choice`, which breaks KV cache prefix sharing. |
-| `true` | on | Tools removed from the prompt; no exclusion tag. Same prefix change as above. |
-| `false` | on | Tools stay in the prompt; the exclusion tag blocks tool-call markers. The model sees tools but cannot open a native tool call. The prefix stays stable across `tool_choice` values. |
-| `false` | off | Tools stay in the prompt; no token ban. Responses have no structured `tool_calls` for explicit `none`, but tool-like text can appear in `content`. |
-
-Keeping tools in the prompt with the exclusion tag trades answer quality for KV
-cache reuse. The model still sees the tools but cannot complete a tool call, so
-answers can contain awkward phrasing or tool-like fragments. Removing tools,
-the default, usually gives cleaner answers but changes the prefix when
-`tool_choice` varies. The effect depends on the model and workload.
-
-For multi-turn conversations where `tool_choice` changes between turns and KV
-cache reuse matters, consider `--no-exclude-tools-when-tool-choice-none` with
-structural tags enabled.
 
 ## See Also
 
