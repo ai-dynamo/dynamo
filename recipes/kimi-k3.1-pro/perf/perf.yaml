@@ -17,8 +17,9 @@
 # Set ENDPOINT, CONCURRENCY, and DURATION for the selected target:
 #   ENDPOINT     <dgd-name>-frontend:8000 (Service of the deployed DynamoGraphDeployment).
 #                Example: kimi-k3-1-pro-vllm-gb300-agg-agentic-frontend:8000
-#   CONCURRENCY  Closed-loop users. Use 32 for vllm/agg-gb300-agentic and 48 for
-#                vllm/disagg-gb300-agentic (2P1D).
+#   CONCURRENCY  Closed-loop users. Use 32 for vllm/agg-gb300-agentic and
+#                vllm/agg-b300-agentic, and 48 for vllm/disagg-gb300-agentic
+#                (2P1D) and vllm/disagg-b300-agentic (1P1D).
 #   DURATION     Profiling duration in seconds (the reported runs use 1200).
 # The AgentX workload is the aiperf public dataset semianalysis_cc_traces_weka_062126
 # (scenario inferencex-agentx-mvp, 20-minute profiling phase, agentic warmup).

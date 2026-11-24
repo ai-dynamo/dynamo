@@ -163,6 +163,47 @@ targets:
   benchmark:
     tool: aiperf
     asset: recipes/kimi-k3.1-pro/perf/perf.yaml
+- id: vllm-agg-b300
+  recommended: false
+  hardware:
+    gpu: B300
+    count: 8
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - tp8
+  workload:
+    type: agentic-trace-replay
+    traffic: AgentX (semianalysis_cc_traces_weka_062126), 1200 s, concurrency 32
+  deploy:
+    asset: recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 33.9 output tok/s/GPU, 66.9 user tok/s P50, TTFT P50 380 ms at concurrency 32
+- id: vllm-disagg-b300
+  recommended: false
+  hardware:
+    gpu: B300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - tp8
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nixl
+  workload:
+    type: functional-validation
+    traffic: Functional, not tuned (prefill and transport bound at concurrency 48)
+  deploy:
+    asset: recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300.yaml
+  expected_performance:
+    available: false
 - id: vllm-agg-vr200
   recommended: false
   hardware:
