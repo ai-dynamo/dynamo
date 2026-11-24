@@ -38,6 +38,10 @@ use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
+use crate::request_trace::{
+    GenerateOutputParsers, RequestEndTraceState, build_request_end_trace_state,
+    wrap_engine_output_request_end_stream,
+};
 use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
 use dynamo_http_server::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector,
@@ -194,16 +198,8 @@ impl GenerateMetricCollector {
 
         self.observe_worker_info();
 
-        let cached_tokens = output
-            .completion_usage
-            .as_ref()
-            // Ignore usage that does not match the client's prompt and let
-            // the RequestTracker fallback run on drop.
-            .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
-            .and_then(|usage| usage.prompt_tokens_details.as_ref())
-            .and_then(|details| details.cached_tokens)
-            .map(|tokens| tokens as usize);
-        self.response.observe_cached_tokens(cached_tokens);
+        self.response
+            .observe_cached_tokens(output.cached_tokens_for_prompt(self.input_tokens));
 
         // Worker outputs contain newly generated token deltas.
         let chunk_tokens = output.token_ids.len();
@@ -371,6 +367,12 @@ async fn handler(
             Ok(context) => context,
             Err(response) => return reject(adapt_openai_error(format, response)),
         };
+    let trace_state = build_request_end_trace_state(
+        &context,
+        &context.tracker,
+        &context,
+        selection.kv_cache_block_size as usize,
+    );
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
         endpoint: dynamo_http_server::metrics::Endpoint::Generate.to_string(),
@@ -386,6 +388,8 @@ async fn handler(
     let dispatch = Dispatch {
         inflight_guard,
         collector,
+        trace_state,
+        output_parsers: selection.output_parsers,
         request_id,
         model,
         state: state.clone(),
@@ -458,6 +462,8 @@ fn events(
 struct Dispatch {
     inflight_guard: dynamo_http_server::metrics::InflightGuard,
     collector: GenerateMetricCollector,
+    trace_state: Option<RequestEndTraceState>,
+    output_parsers: Option<GenerateOutputParsers>,
     request_id: String,
     model: String,
     state: Arc<service_v2::State>,
@@ -476,6 +482,8 @@ impl Dispatch {
         let Self {
             mut inflight_guard,
             mut collector,
+            trace_state,
+            output_parsers,
             request_id,
             model,
             state,
@@ -530,6 +538,8 @@ impl Dispatch {
             collector.observe(&mut item);
             item
         });
+        let stream =
+            wrap_engine_output_request_end_stream(Box::pin(stream), trace_state, output_parsers);
         if !streaming {
             let fold = async {
                 pin_mut!(stream);
