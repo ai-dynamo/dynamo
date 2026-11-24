@@ -268,12 +268,13 @@ where
 const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 
-/// Give Tokio tasks a bounded chance to finish before CPython finalizes the interpreter.
+/// Give Tokio work a bounded chance to finish before CPython finalizes the interpreter.
 ///
-/// A Tokio worker resolving a `future_into_py` future is still inside `Python::with_gil` when
-/// the awaiting coroutine resumes, so the main thread can start finalizing while that worker
-/// still has Python objects to drop, and the process dies by `SIGSEGV`. The bounded wait only
-/// narrows that window: at the timeout, finalization continues regardless.
+/// pyo3-async-runtimes resolves a `future_into_py` future in a `spawn_blocking` closure that can
+/// still be attached to Python when the awaiting coroutine resumes, so the main thread can start
+/// finalizing while that closure still has Python objects to drop, and the process dies by
+/// `SIGSEGV`. The bounded wait only narrows that window: at the timeout, finalization continues
+/// regardless.
 ///
 /// Drains both runtimes a bridge task can be on: Dynamo's process runtime, and the runtime PyO3
 /// built for itself when something reached `future_into_py` before [`adopt_bridge_runtime`]
@@ -291,23 +292,24 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
     if runtimes.iter().all(Option::is_none) {
         return;
     }
-    let alive = || -> usize {
+    let busy = || -> usize {
         runtimes
             .iter()
             .flatten()
-            .map(|rt| rt.metrics().num_alive_tasks())
+            .copied()
+            .map(bridge_busy_work)
             .sum()
     };
     // An atexit callback holds the GIL and the tasks being waited on need it, so
     // waiting without releasing it would deadlock against those same threads.
     py.detach(|| {
         let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
-        while alive() > 0 {
+        while busy() > 0 {
             if std::time::Instant::now() >= deadline {
                 // At the default level, and once per process at most: it is the only thing
                 // that accounts for the extra exit delay the operator just waited through.
                 tracing::info!(
-                    alive_tasks = alive(),
+                    busy_work = busy(),
                     runtimes = runtimes.iter().flatten().count(),
                     "tasks still running at interpreter exit; continuing without them"
                 );
@@ -316,6 +318,58 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
             sleep(BRIDGE_DRAIN_POLL);
         }
     });
+}
+
+/// Work on `rt` that the exit hook waits for: alive tasks, plus queued and busy blocking-pool
+/// closures. `future_into_py` sets each Python result in a `spawn_blocking` closure that no task
+/// awaits, and `num_alive_tasks` does not count that closure.
+fn bridge_busy_work(rt: &tokio::runtime::Runtime) -> usize {
+    let metrics = rt.metrics();
+    metrics.num_alive_tasks()
+        + metrics.blocking_queue_depth()
+        + metrics
+            .num_blocking_threads()
+            .saturating_sub(metrics.num_idle_blocking_threads())
+}
+
+#[cfg(test)]
+mod bridge_drain_tests {
+    use super::bridge_busy_work;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting until {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Same shape as pyo3-async-runtimes 0.30: the task that resolves a Python future ends
+    /// without awaiting the `spawn_blocking` closure that sets the result.
+    #[test]
+    fn busy_work_counts_a_blocking_closure_that_no_task_awaits() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        rt.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        wait_until("the spawning task ends", || {
+            rt.metrics().num_alive_tasks() == 0
+        });
+        assert!(bridge_busy_work(&rt) > 0);
+        release_tx.send(()).unwrap();
+        wait_until("the blocking closure ends", || bridge_busy_work(&rt) == 0);
+    }
 }
 
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
