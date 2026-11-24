@@ -184,14 +184,18 @@ impl Case {
         }
     }
 
+    /// Whether the case installs a classifier.
+    fn classified(self) -> bool {
+        !matches!(self, Self::Shared | Self::Pinned | Self::Classes)
+    }
+
     fn classifier(self) -> Option<SessionLanes> {
         let gate = match self {
-            Self::SessionLanes | Self::ConstrainedLanes => None,
             Self::GateHeld => Some(HoldsHeldSessions::new(false)),
             Self::GateWake => Some(HoldsHeldSessions::new(true)),
-            Self::Shared | Self::Pinned | Self::Classes => return None,
+            _ => None,
         };
-        Some(SessionLanes { gate })
+        self.classified().then_some(SessionLanes { gate })
     }
 
     /// Whether the gate holds `backlog` lanes on top of the `backlog` that waits for capacity.
@@ -200,7 +204,7 @@ impl Case {
     }
 
     fn request(self, sequence: u64) -> ScheduleRequest {
-        let mut request = request(format!("request-{sequence}"), self.classifier().is_some());
+        let mut request = request(format!("request-{sequence}"), self.classified());
         match self {
             Self::Shared => {}
             Self::SessionLanes | Self::GateHeld | Self::GateWake => {
