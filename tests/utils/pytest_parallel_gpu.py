@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -266,6 +267,14 @@ _RETRYABLE_INIT_MARKERS = [
     "exited with code -9 while waiting for health check",  # SIGKILL (OOM killer) during init
 ]
 _MAX_RETRIES = 3
+
+# Lines a passing child prints when an in-session retry hid a failed attempt:
+# ddtrace retries print the FAILURES banner; pytest-rerunfailures puts "N rerun"
+# in the final summary, which -q prints without "=" fences.
+_RETRIED_FAILURE_RE = re.compile(
+    r"^(=+ FAILURES =+|(=+ )?.*\b\d+ rerun\b.* in [\d.]+s\b.*)$"
+)
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -815,14 +824,19 @@ def run_parallel(
                         passed = False
                         skipped = True
 
-                # Dump buffered output on failure only (matches pytest behavior).
-                # With -s, output was already streamed live.
+                # Dump buffered output on failure, or on a pass that hid a failed
+                # retried attempt. With -s, output was already streamed live.
+                failed = not passed and not skipped
+                passed_after_retry = passed and any(
+                    _RETRIED_FAILURE_RE.match(_ANSI_ESCAPE_RE.sub("", line))
+                    for line in run_info.captured
+                )
                 fail_reason = ""
-                if not passed and not skipped:
-                    if not stream:
-                        prefix = f"[w{w_id}]"
-                        for line in run_info.captured:
-                            _print(f"{prefix} {line}")
+                if (failed or passed_after_retry) and not stream:
+                    prefix = f"[w{w_id}]"
+                    for line in run_info.captured:
+                        _print(f"{prefix} {line}")
+                if failed:
                     for line in reversed(run_info.captured):
                         stripped = line.strip()
                         if stripped and not stripped.startswith("="):
@@ -831,6 +845,8 @@ def run_parallel(
 
                 if skipped:
                     status = "SKIPPED"
+                elif passed_after_retry:
+                    status = "PASSED (after in-session retry)"
                 elif passed:
                     status = "PASSED"
                 else:

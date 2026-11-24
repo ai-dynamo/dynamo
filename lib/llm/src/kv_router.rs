@@ -66,6 +66,7 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+pub(crate) mod role_routing;
 mod routing_host;
 pub(crate) use routing_host::hosted_picker;
 pub(crate) use routing_host::hosted_request;
@@ -1557,8 +1558,11 @@ impl KvRouter {
                     m.shared_cache_hit_rate
                         .observe(hits.total_hits as f64 / num_blocks as f64);
                 }
+                // What the scorer credits: the run past the worker's device, host and
+                // disk prefix. A multi-rank worker's snapshot holds its deepest rank.
+                let local_blocks = overlap_blocks.max(response.selected_worker_tiers.disk_blocks);
                 m.shared_cache_beyond_blocks
-                    .observe(hits.hits_beyond(overlap_blocks) as f64);
+                    .observe(hits.loadable_beyond(local_blocks) as f64);
             }
         }
 
@@ -1852,7 +1856,8 @@ impl KvRouter {
     ///
     /// Device, host-pinned, and disk values are keyed by `(worker_id, dp_rank)`.
     /// Shared-cache hits are global to the request, so each worker row reports
-    /// only the shared blocks beyond that rank's device-local prefix.
+    /// only the shared blocks that rank can load past its local prefix. LoRA
+    /// requests skip the shared cache, as worker selection does.
     pub async fn get_overlap_scores(
         &self,
         tokens: &[u32],
@@ -1872,7 +1877,7 @@ impl KvRouter {
 
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
 
-        let (shared_hits, shared_error) = if include_shared {
+        let (shared_hits, shared_error) = if include_shared && lora_name.is_none_or(str::is_empty) {
             if let Some(shared_cache) = self.shared_cache.as_ref() {
                 match shared_cache
                     .check_blocks(tokens, self.block_size, cache_namespace)
@@ -1978,7 +1983,7 @@ mod tests {
         assert!(error.downcast_ref::<UnknownPolicyClassRefusal>().is_some());
         assert_eq!(error.to_string(), dynamo_error.to_string());
         assert_eq!(
-            crate::http::service::error::find_canonical_error_in_chain(error.as_ref()),
+            dynamo_error::http::find_canonical_error_in_chain(error.as_ref()),
             Some(dynamo_error)
         );
     }
@@ -1991,7 +1996,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
         assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
         assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
-        assert!(crate::http::service::metrics::request_deadline_exceeded(
+        assert!(dynamo_http_server::metrics::request_deadline_exceeded(
             &decoded
         ));
     }
@@ -3599,6 +3604,20 @@ mod tests {
             assert_eq!(worker.disk_extension_blocks, 0);
             assert_eq!(worker.shared_beyond_device_blocks, Some(2));
         }
+
+        // Shared-cache keys carry no adapter, so a LoRA request reports no shared hits.
+        let scores = router
+            .get_overlap_scores(&[11, 12, 21, 22], None, Some("adapter-a"), None, true)
+            .await
+            .unwrap();
+        assert!(scores.shared_cache.enabled);
+        assert_eq!(scores.shared_cache.total_hit_blocks, 0);
+        assert!(
+            scores
+                .workers
+                .iter()
+                .all(|worker| worker.shared_beyond_device_blocks.is_none())
+        );
     }
 
     #[tokio::test]

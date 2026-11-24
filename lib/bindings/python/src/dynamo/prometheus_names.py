@@ -334,41 +334,6 @@ class kv_publisher:
     ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
 
 
-class kvbm:
-    """KVBM"""
-
-    # The number of offload blocks from device to host
-    OFFLOAD_BLOCKS_D2H = "offload_blocks_d2h"
-    # The number of offload blocks from host to disk
-    OFFLOAD_BLOCKS_H2D = "offload_blocks_h2d"
-    # The number of offload blocks from device to disk (bypassing host memory)
-    OFFLOAD_BLOCKS_D2D = "offload_blocks_d2d"
-    # The number of onboard blocks from host to device
-    ONBOARD_BLOCKS_H2D = "onboard_blocks_h2d"
-    # The number of onboard blocks from disk to device
-    ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
-    # The number of matched tokens
-    MATCHED_TOKENS = "matched_tokens"
-    # Host cache hit rate (0.0-1.0) from the sliding window
-    HOST_CACHE_HIT_RATE = "host_cache_hit_rate"
-    # Disk cache hit rate (0.0-1.0) from the sliding window
-    DISK_CACHE_HIT_RATE = "disk_cache_hit_rate"
-    # Object storage cache hit rate (0.0-1.0) from the sliding window
-    OBJECT_CACHE_HIT_RATE = "object_cache_hit_rate"
-    # Number of blocks offloaded from device to object storage
-    OFFLOAD_BLOCKS_D2O = "offload_blocks_d2o"
-    # Number of blocks onboarded from object storage to device
-    ONBOARD_BLOCKS_O2D = "onboard_blocks_o2d"
-    # Bytes transferred to object storage (offload)
-    OFFLOAD_BYTES_OBJECT = "offload_bytes_object"
-    # Bytes transferred from object storage (onboard)
-    ONBOARD_BYTES_OBJECT = "onboard_bytes_object"
-    # Number of failed object storage read operations (blocks)
-    OBJECT_READ_FAILURES = "object_read_failures"
-    # Number of failed object storage write operations (blocks)
-    OBJECT_WRITE_FAILURES = "object_write_failures"
-
-
 class kvindexer:
     """Standalone KV indexer HTTP service metrics"""
 
@@ -437,6 +402,14 @@ class lifecycle:
     DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
+class metrics_merge:
+    """Metrics about merging a DistributedRuntime's registry tree into one gather"""
+
+    # Metric families skipped because their help or type conflicted with an
+    # earlier family of the same name
+    CONFLICTS_TOTAL = "merge_conflicts_total"
+
+
 class model_info:
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
@@ -464,6 +437,8 @@ class name_prefix:
     WORK_HANDLER = "dynamo_work_handler"
     # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     TOKIO = "dynamo_tokio"
+    # Prefix for metrics about the metrics system itself (combined gathers).
+    METRICS = "dynamo_metrics"
     # Prefix for per-phase routing overhead latency (hashing, scheduling).
     # Raw Prometheus, not component-scoped.
     ROUTING_OVERHEAD = "dynamo_routing_overhead"

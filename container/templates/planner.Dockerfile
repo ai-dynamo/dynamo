@@ -40,9 +40,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libgomp1 \
         $EXTRA_PKGS && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 RUN useradd -m -s /bin/bash -g 0 dynamo \

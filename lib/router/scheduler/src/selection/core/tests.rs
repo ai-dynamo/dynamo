@@ -188,6 +188,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
         engine_owned_mm_identity: None,
+        idempotent_stores: None,
     }
 }
 
@@ -1602,6 +1603,13 @@ async fn shared_cache_hits_reach_worker_selection() {
     core.select(request).await.expect("select");
     assert_eq!(calls.lock().len(), 1);
     assert_eq!(observed.lock()[1].shared_beyond_device_blocks, vec![0]);
+
+    // Shared-cache keys carry no adapter, so a LoRA request skips the lookup.
+    let mut request = select_request();
+    request.prompt.lora_name = Some("adapter-a".to_string());
+    core.select(request).await.expect("select");
+    assert_eq!(calls.lock().len(), 1);
+    assert_eq!(observed.lock()[2].shared_beyond_device_blocks, vec![0]);
 }
 
 #[tokio::test]
@@ -2788,6 +2796,7 @@ async fn early_peer_accounting_follows_host_policy_without_granting_eligibility(
                         prefill_load_hint: None,
                     },
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 })
                 .await
@@ -2854,6 +2863,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
         worker: WorkerWithDpRank::new(1, 0),
         data,
         router_id: 99,
+        origin: Default::default(),
         lora_name: None,
     };
     let add = |request_id: &str| {
@@ -3697,6 +3707,60 @@ async fn free_releases_reservation_and_affinity_without_actor_progress() {
     core.select_and_reserve(session_reservation("r1", "s"))
         .await
         .expect("completed cleanup must not prevent ID reuse");
+}
+
+#[tokio::test]
+async fn worker_free_releases_the_local_booking_without_republishing() {
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    let (inbound_tx, inbound_rx) = mpsc::channel(16);
+    let channels = parking_lot::Mutex::new(Some(HostReplicaChannels {
+        outbound: Some(outbound_tx),
+        inbound_tx: inbound_tx.clone(),
+        inbound_rx,
+        process_id: 1,
+        ingress_observer: None,
+    }));
+    let core = core_with(
+        test_config(false),
+        SelectionHost {
+            replication: HostReplication {
+                channels: Some(Arc::new(move |_| channels.lock().take())),
+                ..HostReplication::default()
+            },
+            ..SelectionHost::default()
+        },
+        None,
+        WorkerType::Aggregated,
+        Some(SessionAffinityConfig::new(Duration::from_secs(10))),
+    );
+    core.upsert_worker(worker(1)).await.unwrap();
+    core.select_and_reserve(session_reservation("r1", "s"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        outbound_rx.recv().await.unwrap().data,
+        ActiveSequenceEventData::AddRequest { .. }
+    ));
+    let entry = core.entry(&default_key()).unwrap();
+
+    inbound_tx
+        .send(ActiveSequenceEvent {
+            request_id: "r1".to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::Free,
+            router_id: 1,
+            origin: dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Worker,
+            lora_name: None,
+        })
+        .await
+        .unwrap();
+    wait_until("worker free", || {
+        !entry.scheduler.has_request("r1") && !core.reservation_index.read().contains_key("r1")
+    })
+    .await;
+    assert_eq!(lease_count(&core, "s"), Some(0));
+    assert_eq!(bound_worker(&core, "s"), Some(1));
+    assert!(outbound_rx.try_recv().is_err());
 }
 
 #[tokio::test]

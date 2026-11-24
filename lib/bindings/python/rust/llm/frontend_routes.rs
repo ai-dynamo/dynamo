@@ -335,7 +335,7 @@ async fn call_python_frontend_route(
             "frontend extension handlers saturated; shedding request"
         );
         extension_error_response(
-            dynamo_llm::http::service::error::SanitizedError::Overloaded.status(),
+            dynamo_error::http::SanitizedError::Overloaded.status(),
             "frontend route extension busy",
         )
     };

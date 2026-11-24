@@ -667,6 +667,11 @@ impl<T> AddressedRequest<T> {
         Self::with_instance(request, address, instance)
     }
 
+    /// The worker this request was routed to, when the router knows it.
+    pub fn instance(&self) -> Option<&Instance> {
+        self.instance.as_ref()
+    }
+
     /// `(request, address, instance)` — public so an external [`StreamingDispatch`]
     /// impl can read the routed address + instance.
     pub fn into_parts(self) -> (T, String, Option<Instance>) {
@@ -1237,8 +1242,10 @@ where
 /// Transport seam beneath `PushRouter`: given an already-selected worker (typed
 /// request + resolved address), dispatch the final hop and return a typed stream.
 /// Selection, occupancy, fault detection, and migration stay in `PushRouter`
-/// above the seam; only the transport below it changes. [`AddressedPushRouter`]
-/// (the request plane) is the default impl.
+/// above the seam; only the transport below it changes. By default a router
+/// reaches `TransportType::Direct` instances through the runtime's registered
+/// direct dispatch and all others through [`AddressedPushRouter`] (the request
+/// plane).
 ///
 /// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
 /// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
@@ -1249,7 +1256,8 @@ where
 /// The removal watcher behind `on_instance_removed` / `on_instance_added` is
 /// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
 /// holding per-instance state must share it per endpoint (the default cleans up
-/// shared per-runtime state, so it is unaffected).
+/// shared per-runtime state and notifies every registered direct dispatch, so
+/// it is unaffected).
 #[async_trait::async_trait]
 pub trait StreamingDispatch<T, U>: Send + Sync
 where
@@ -1275,6 +1283,11 @@ where
     async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
 }
 
+// A router built without a dispatch does not call `generate` or
+// `generate_bidirectional` here: to save a boxed future per request, its
+// default dispatch (`TransportDispatch` in push_router.rs) calls what they
+// forward to. Keep them forwarding only: logic added to them would not run
+// for those routers. The lifecycle hooks are the ones it calls.
 #[async_trait::async_trait]
 impl<T, U> StreamingDispatch<T, U> for AddressedPushRouter
 where
