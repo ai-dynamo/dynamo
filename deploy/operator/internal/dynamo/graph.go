@@ -3477,10 +3477,11 @@ func determineBackendFramework(
 	return BackendFrameworkNoop, nil
 }
 
-// determineBackendFrameworkForComponent inspects every complete authored
+// DetermineBackendFrameworkForComponent inspects every complete authored
 // PodTemplate source. Role-template mode may omit the component-level template,
-// so backend detection must not depend on that legacy location.
-func determineBackendFrameworkForComponent(
+// so backend detection must not depend on that legacy location. A nil component
+// resolves to the noop backend.
+func DetermineBackendFrameworkForComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	explicitBackendFramework string,
 ) (BackendFramework, error) {
@@ -3536,12 +3537,12 @@ func getBackendFrameworkFromComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
-	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
+	return DetermineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
 }
 
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
 func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponentDeployment) (BackendFramework, error) {
-	return determineBackendFrameworkForComponent(
+	return DetermineBackendFrameworkForComponent(
 		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
 		dynComponent.Spec.BackendFramework,
 	)

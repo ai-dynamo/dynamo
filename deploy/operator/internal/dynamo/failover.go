@@ -421,7 +421,7 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 
 	// Resolve the backend exactly as rendering does, including command inference.
 	// TRT-LLM snapshot failover is not supported yet; reject it at admission.
-	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	backendFramework, err := DetermineBackendFrameworkForComponent(component, explicitBackendFramework)
 	if err != nil {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"))
 	} else if !snapshotFailoverBackendSupported(backendFramework) {
@@ -448,6 +448,26 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 
 func snapshotFailoverBackendSupported(backendFramework BackendFramework) bool {
 	return backendFramework == BackendFrameworkVLLM || backendFramework == BackendFrameworkSGLang
+}
+
+// ValidateColdStartFailover checks that intra-pod failover without a checkpoint
+// resolves to vLLM, the only engine buildColdStartFailoverPod renders.
+// component and fldPath must not be nil.
+func ValidateColdStartFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
+	// Apply this check only to cold-start intra-pod failover.
+	if GetCheckpoint(component) != nil || !IsIntraPodFailoverEnabled(component) || component.IsInterPodGMSEnabled() {
+		return nil
+	}
+
+	// Resolve the backend exactly as rendering does, including command inference.
+	backendFramework, err := DetermineBackendFrameworkForComponent(component, explicitBackendFramework)
+	if err != nil {
+		return field.ErrorList{field.Forbidden(fldPath.Child("experimental", "failover"), "Cold-start intra-pod failover requires a consistent vLLM backend")}
+	}
+	if backendFramework != BackendFrameworkVLLM {
+		return field.ErrorList{field.Forbidden(fldPath.Child("experimental", "failover"), fmt.Sprintf("Cold-start intra-pod failover supports only vLLM (detected: %s)", backendFramework))}
+	}
+	return nil
 }
 
 // IsIntraPodFailoverEnabled is true only when failover clones engine

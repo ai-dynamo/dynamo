@@ -163,6 +163,44 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			dgd.Spec.BackendFramework = sglangBackendFramework
 			worker.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicyImmediate
 		}), wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		// Cold-start intra-pod failover, with no checkpoint, renders only for vLLM.
+		{name: "vLLM cold-start failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Checkpoint = nil
+		})},
+		{name: "SGLang cold-start failover is rejected at admission", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, sglangBackendFramework)
+			worker.Experimental.Checkpoint = nil
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Cold-start intra-pod failover supports only vLLM (detected: sglang)"}},
+		{name: "inferred TRT-LLM cold-start failover is rejected at admission", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = ""
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, trtllmBackendFramework)
+			worker.Experimental.Checkpoint = nil
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Cold-start intra-pod failover supports only vLLM (detected: trtllm)"}},
+		{name: "cold-start failover rejects conflicting backend selection", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, sglangBackendFramework)
+			worker.Experimental.Checkpoint = nil
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Cold-start intra-pod failover requires a consistent vLLM backend"}},
+		{name: "removing the checkpoint from SGLang snapshot failover is rejected on update", oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
+		}), deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, sglangBackendFramework)
+			worker.Experimental.Checkpoint = nil
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Cold-start intra-pod failover supports only vLLM (detected: sglang)"}},
 		// Sidecar mode is derived from live init-container names in both API versions.
 		{name: "beta unrelated init container retains standard mode", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
@@ -863,6 +901,42 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: sglang)"},
+		},
+		{
+			name: "inter-pod GMS accepts vLLM inferred from the command",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = ""
+				worker := betaWorkerComponent(dgd)
+				enableBetaInterPodGMS(worker)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+			}),
+		},
+		{
+			name: "inter-pod GMS rejects SGLang inferred from the command",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = ""
+				worker := betaWorkerComponent(dgd)
+				enableBetaInterPodGMS(worker)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: sglang)"},
+		},
+		{
+			name: "inter-pod GMS rejects conflicting backend selection",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				enableBetaInterPodGMS(worker)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout requires a consistent vLLM backend"},
+		},
+		{
+			name: "inter-pod GMS rejects an unset backend",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = ""
+				enableBetaInterPodGMS(betaWorkerComponent(dgd))
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: <unset>)"},
 		},
 		{
 			name: "KV transfer policy selector is rejected by CEL before webhook validation",

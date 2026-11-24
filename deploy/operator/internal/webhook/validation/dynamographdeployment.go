@@ -444,9 +444,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			if !opts.grovePathway {
 				allErrs = append(allErrs, field.Forbidden(modePath, opts.grovePathwayRequirement))
 			}
-			if spec.BackendFramework != string(dynamo.BackendFrameworkVLLM) {
-				detected := spec.BackendFramework
-				if detected == "" {
+
+			// Resolve the backend as rendering does, so an unset backendFramework falls back to the command.
+			backendFramework, err := dynamo.DetermineBackendFrameworkForComponent(component, spec.BackendFramework)
+			if err != nil {
+				allErrs = append(allErrs, field.Invalid(modePath, gms.Mode, "the inter-pod GMS layout requires a consistent vLLM backend"))
+			} else if backendFramework != dynamo.BackendFrameworkVLLM {
+				detected := string(backendFramework)
+				if backendFramework == dynamo.BackendFrameworkNoop {
 					detected = unsetValue
 				}
 				allErrs = append(allErrs, field.Invalid(
@@ -462,6 +467,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
 		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework)...)
+		allErrs = append(allErrs, dynamo.ValidateColdStartFailover(component, componentPath, spec.BackendFramework)...)
 
 		// Allow existing LPX components to survive disablement without accepting new or changed specs.
 		allErrs = append(allErrs, lpxComponentGateErrors(
