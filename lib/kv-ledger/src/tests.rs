@@ -307,7 +307,11 @@ fn a_copy_cut_then_its_tail_equals_following_from_the_start() {
         source.apply(seq, event, fold);
         let ledger = source.state();
         assert_eq!(held(ledger), plain, "blocks held after batch {seq}");
-        assert_eq!(ledger.chains(), plain_chains(&plain), "chains after batch {seq}");
+        assert_eq!(
+            ledger.chains(),
+            plain_chains(&plain),
+            "chains after batch {seq}"
+        );
         assert_eq!(ledger.is_empty(), plain.is_empty(), "after batch {seq}");
 
         if below(7) == 0 {
