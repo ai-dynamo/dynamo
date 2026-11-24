@@ -3306,6 +3306,394 @@ data:
           "title": "Component Throughput (bytes/sec)",
           "type": "timeseries",
           "description": "Component-level request and response throughput in bytes per second, scoped to the `generate` endpoint. Useful for spotting payload-size regressions or unusually large prompts/responses."
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 72
+          },
+          "id": 120,
+          "panels": [],
+          "title": "Admission Pressure",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Requests waiting in each frontend's router policy queue, separated by role and class. Frontend targets apply only to this row. No data can mean queueing is disabled or the metric is unavailable; it does not mean zero. This is not the frontend's awaiting-first-token gauge.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 5,
+                "lineWidth": 1,
+                "spanNulls": false
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 73
+          },
+          "id": 121,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "dynamo_frontend_router_queue_pending_requests{model=\"$model\",instance=~\"$frontend_instance\"}",
+              "legendFormat": "{{job}} {{instance}} | {{worker_type}} | {{policy_class}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Router Queued Requests",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Rate of queue-limit rejections, by frontend, role, class, and reason. These are attempts, not unique client requests. Missing series are not zero-filled. Do not add these counts to another rejection metric that describes the same attempts.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 5,
+                "lineWidth": 1,
+                "spanNulls": false
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 73
+          },
+          "id": 122,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "rate(dynamo_frontend_router_queue_backpressure_total{model=\"$model\",instance=~\"$frontend_instance\"}[$__rate_interval])",
+              "legendFormat": "{{job}} {{instance}} | {{worker_type}} | {{policy_class}} | {{reason}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Router Queue Rejections",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Requests in each selected worker process's TCP work queue, plus its configured queue capacity. The dispatcher-held request waiting for a pool permit is not included in queue depth. Worker targets are discovered from the selected model, but these values cover the whole process, all models and endpoints. Missing or unsupported metrics remain No data.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 5,
+                "lineWidth": 1,
+                "spanNulls": false
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 81
+          },
+          "id": 123,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "dynamo_work_handler_queue_depth{instance=~\"$worker_instance\"}",
+              "legendFormat": "{{job}} {{instance}} | queued",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "dynamo_work_handler_queue_capacity{instance=~\"$worker_instance\"}",
+              "legendFormat": "{{job}} {{instance}} | capacity",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "TCP Work Queue",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Active TCP handler tasks and configured permit capacity in each selected worker process. Process-wide, not model-specific. This is TCP dispatch occupancy, not GPU utilization or the engine's batch size; backend admission is a separate layer in newer releases.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 5,
+                "lineWidth": 1,
+                "spanNulls": false
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 81
+          },
+          "id": 124,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "dynamo_work_handler_pool_active_tasks{instance=~\"$worker_instance\"}",
+              "legendFormat": "{{job}} {{instance}} | active",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "dynamo_work_handler_pool_capacity{instance=~\"$worker_instance\"}",
+              "legendFormat": "{{job}} {{instance}} | capacity",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "TCP Worker Pool",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Per-target p95 time spent acquiring a TCP worker-pool permit, in seconds, over the selected rate interval. It is observed when a permit is acquired, so a wait still in progress does not contribute yet. No observations, unsupported metrics, or an unavailable target are not a zero-latency measurement.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 5,
+                "lineWidth": 1,
+                "spanNulls": false
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 89
+          },
+          "id": 125,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (job, instance, le) (rate(dynamo_work_handler_permit_wait_seconds_bucket{instance=~\"$worker_instance\"}[$__rate_interval])))",
+              "legendFormat": "{{job}} {{instance}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "TCP Permit Wait (p95)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Engine-reported waiting requests for the selected model and worker targets, separate from TCP and router queues. vLLM and SGLang define these values; SGLang requires --enable-metrics. Other engines or unavailable metrics show No data. Do not sum across queue layers to infer unique requests or a root cause.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 5,
+                "lineWidth": 1,
+                "spanNulls": false
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 89
+          },
+          "id": 126,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "vllm:num_requests_waiting{model=\"$model\",instance=~\"$worker_instance\"}",
+              "legendFormat": "vLLM {{job}} {{instance}} | rank {{engine}}",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sglang:num_queue_reqs{model=\"$model\",instance=~\"$worker_instance\"}",
+              "legendFormat": "SGLang {{job}} {{instance}} | TP {{tp_rank}} PP {{pp_rank}} EP {{moe_ep_rank}}",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Engine Waiting Requests (vLLM / SGLang)",
+          "type": "timeseries"
         }
       ],
       "preload": false,
@@ -3352,6 +3740,58 @@ data:
             },
             "refresh": 1,
             "regex": "",
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "${datasource}"
+            },
+            "definition": "label_values(dynamo_frontend_router_queue_pending_requests{model=\"$model\"}, instance)",
+            "description": "Scrape instances exporting router queue metrics for the selected model. Filters the Admission Pressure router panels only.",
+            "includeAll": true,
+            "label": "Frontend Targets",
+            "multi": true,
+            "name": "frontend_instance",
+            "options": [],
+            "query": {
+              "qryType": 1,
+              "query": "label_values(dynamo_frontend_router_queue_pending_requests{model=\"$model\"}, instance)",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 2,
+            "regex": "",
+            "sort": 1,
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "${datasource}"
+            },
+            "definition": "label_values(dynamo_component_requests_total{model=\"$model\",dynamo_endpoint=\"generate\"}, instance)",
+            "description": "Scrape instances that expose generate request metrics for the selected model. Filters the Admission Pressure TCP and engine panels only. TCP values remain process-wide.",
+            "includeAll": true,
+            "label": "Worker Targets",
+            "multi": true,
+            "name": "worker_instance",
+            "options": [],
+            "query": {
+              "qryType": 1,
+              "query": "label_values(dynamo_component_requests_total{model=\"$model\",dynamo_endpoint=\"generate\"}, instance)",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 2,
+            "regex": "",
+            "sort": 1,
             "type": "query"
           }
         ]
