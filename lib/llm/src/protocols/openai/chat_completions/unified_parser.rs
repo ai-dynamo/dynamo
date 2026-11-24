@@ -4628,6 +4628,11 @@ pub(crate) mod tests {
     use futures::FutureExt;
     use futures::stream;
 
+    /// Opt into the parser's quote-aware compatibility policy. The setting is cached
+    /// per process, so tests that use it run in an isolated child.
+    pub(crate) const QUOTE_AWARE_PARSING_COMPAT: &[(&str, &str)] =
+        &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")];
+
     struct PartialCommitParser {
         recovered: String,
     }
@@ -11331,6 +11336,15 @@ pub(crate) mod tests {
     // TODO: Cover literal native tool-call opener text separately from reasoning controls.
     #[tokio::test]
     async fn quoted_control_markers_stay_visible_in_batch_and_streaming() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quoted_control_markers_stay_visible_in_batch_and_streaming"
+            ),
+            QUOTE_AWARE_PARSING_COMPAT,
+        ) {
+            return;
+        }
         assert_quoted_control_markers(true, true).await;
     }
 
@@ -11342,6 +11356,15 @@ pub(crate) mod tests {
     // TODO: Cover literal native tool-call opener text in native-channel batch responses.
     #[tokio::test]
     async fn native_channel_quoted_control_markers_stay_visible_in_batch() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::native_channel_quoted_control_markers_stay_visible_in_batch"
+            ),
+            QUOTE_AWARE_PARSING_COMPAT,
+        ) {
+            return;
+        }
         assert_quoted_control_markers(false, true).await;
     }
 
@@ -13459,6 +13482,15 @@ pub(crate) mod tests {
 
     #[test]
     fn muse_prefilled_reasoning_does_not_treat_prose_as_a_header() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::muse_prefilled_reasoning_does_not_treat_prose_as_a_header"
+            ),
+            QUOTE_AWARE_PARSING_COMPAT,
+        ) {
+            return;
+        }
         for reasoning in [
             "map x to=y before answering",
             "literal \"<|message|>\" in a thought",
@@ -15132,6 +15164,15 @@ pub(crate) mod tests {
 
     #[test]
     fn malformed_guided_zero_call_native_channels_recover_for_every_family() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::malformed_guided_zero_call_native_channels_recover_for_every_family"
+            ),
+            QUOTE_AWARE_PARSING_COMPAT,
+        ) {
+            return;
+        }
         for (family, raw) in [
             ("deepseek_v4", "<think>private</think>answer"),
             ("deepseek_v41", "<think>private</think>answer"),

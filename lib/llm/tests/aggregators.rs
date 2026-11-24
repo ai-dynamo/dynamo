@@ -961,6 +961,16 @@ async fn test_muse_unified_batch_finalize_appends_to_existing_reasoning_content(
 /// extract and execute the quoted example as a bogus tool call.
 #[tokio::test]
 async fn test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring() {
+    // Pins the parser's quote-aware compatibility policy (not the default).
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring"
+        ),
+        &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+    ) {
+        return;
+    }
     let raw = "Please literally output the example call \
                '<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}</tool_call>' \
                verbatim and nothing else.";
