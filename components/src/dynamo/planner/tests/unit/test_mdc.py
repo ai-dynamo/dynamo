@@ -124,6 +124,16 @@ class TestWorkerInfoFromMdc:
         assert info.kv_cache_block_size == 16
         assert info.context_length == 8192
 
+    @pytest.mark.parametrize(("ranks", "expected"), [(2, 2), (None, None), (0, None)])
+    def test_registered_data_parallel_topology(self, ranks, expected):
+        entry = MdcEntry(
+            card_json=_card(data_parallel_size=ranks),
+            component="backend",
+            endpoint="generate",
+        )
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+        assert info.data_parallel_size == expected
+
     def test_runtime_data_spec_decode_nextn_populates_worker_info(self):
         entry = MdcEntry(
             card_json=_card(

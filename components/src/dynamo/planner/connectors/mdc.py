@@ -133,6 +133,10 @@ def worker_info_from_mdc(
     if not isinstance(runtime_cfg, dict):
         runtime_cfg = {}
 
+    data_parallel_size = runtime_cfg.get("data_parallel_size")
+    if type(data_parallel_size) is not int or data_parallel_size < 1:
+        data_parallel_size = None
+
     component_name = entry.component or defaults.component_name
     endpoint = entry.endpoint or defaults.endpoint
 
@@ -163,4 +167,5 @@ def worker_info_from_mdc(
         max_num_batched_tokens=runtime_cfg.get("max_num_batched_tokens"),
         context_length=context_length,
         speculative_nextn=_parse_speculative_nextn(runtime_cfg),
+        data_parallel_size=data_parallel_size,
     )

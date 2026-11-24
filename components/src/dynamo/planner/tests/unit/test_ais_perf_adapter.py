@@ -586,6 +586,90 @@ def test_decode_capacity_respects_vllm_rank_budget(
     assert _largest_decode_batch(recorded_forward_passes) == expected
 
 
+@pytest.mark.parametrize(
+    ("registered_ranks", "rank_groups", "expected_shape"),
+    [(2, ((0, 1), (4, 5)), [64, 64]), (None, ((0, 1),), [128])],
+    ids=["two-hybrid-workers", "unknown-legacy-topology"],
+)
+def test_decode_capacity_respects_registered_topology_without_ais_profile(
+    recorded_forward_passes, registered_ranks, rank_groups, expected_shape
+):
+    config = _config()
+    config.ais_perf_model = None
+    config.backend = "vllm"
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=config,
+        capabilities=EngineCapabilities(
+            max_num_batched_tokens=64,
+            max_num_seqs=128,
+            max_kv_tokens=100_000,
+            data_parallel_size=registered_ranks,
+        ),
+    )
+    fpms = {
+        (f"w{worker}", rank): ForwardPassMetrics(
+            worker_id=f"w{worker}",
+            dp_rank=rank,
+            scheduled_requests=ScheduledRequestMetrics(
+                num_decode_requests=64, sum_decode_kv_tokens=640
+            ),
+        )
+        for worker, ranks in enumerate(rank_groups)
+        for rank in ranks
+    }
+    groups = model.query_groups(fpms)
+    if registered_ranks:
+        assert len(groups) == 2
+        for _, group in groups:
+            assert [fpm.dp_rank for fpm in group] == [0, 1]
+            assert model.estimate_scheduled_decode_itl(group) is not None
+        recorded_forward_passes.reset_mock()
+
+    capacity = model.find_engine_capacity_rps(isl=32, osl=32)
+    assert capacity is not None
+    assert _largest_decode_batch(recorded_forward_passes) == expected_shape
+    if registered_ranks:
+        first_ranks = recorded_forward_passes.call_args_list[0].args[0]
+        assert [
+            (
+                rank["scheduled_requests"]["num_decode_requests"],
+                rank["scheduled_requests"]["sum_decode_kv_tokens"],
+            )
+            for rank in first_ranks
+        ] == [(1, 48), (0, 0)]
+
+
+def test_registered_decode_topology_refresh_drops_single_rank_history(
+    recorded_forward_passes,
+):
+    config = _config()
+    config.ais_perf_model = None
+    config.backend = "vllm"
+    caps = EngineCapabilities(
+        max_num_batched_tokens=64, max_num_seqs=128, max_kv_tokens=100_000
+    )
+    model = PlannerEnginePerfModel(
+        worker_type="decode", config=config, capabilities=caps
+    )
+    model.add_observations({("w0", 0): _decode_fpm()})
+    assert model._retained_iterations
+
+    model.update_capabilities(
+        EngineCapabilities(
+            max_num_batched_tokens=64,
+            max_num_seqs=128,
+            max_kv_tokens=100_000,
+            data_parallel_size=2,
+        )
+    )
+
+    assert not model._retained_iterations
+    capacity = model.find_engine_capacity_rps(isl=32, osl=32)
+    assert capacity is not None
+    assert _largest_decode_batch(recorded_forward_passes) == [64, 64]
+
+
 def test_decode_capacity_refreshes_when_advertised_default_budget_disappears(
     recorded_forward_passes,
 ):

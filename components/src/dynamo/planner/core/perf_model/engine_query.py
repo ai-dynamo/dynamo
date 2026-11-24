@@ -522,7 +522,7 @@ class AISCoreEnginePerfModel:
         return self._estimate_forward_pass_seconds(
             _synthetic_decode_by_rank(
                 batch_size,
-                _saturating_mul_u32(batch_size, context_length),
+                context_length,
                 self._attention_dp_size,
             )
         )
@@ -683,16 +683,17 @@ def _synthetic_prefill_by_rank(tokens: int, ranks: int) -> list[ForwardPassMetri
 
 
 def _synthetic_decode_by_rank(
-    num_requests: int, kv_tokens: int, ranks: int
+    num_requests: int, context_length: int, ranks: int
 ) -> list[ForwardPassMetrics]:
     metrics_by_rank: list[ForwardPassMetrics] = []
     for dp_rank in range(max(1, ranks)):
+        requests = _split_total(num_requests, ranks, dp_rank)
         metrics_by_rank.append(
             _replace_scheduled(
                 _empty_fpm(dp_rank),
                 ScheduledRequestMetrics(
-                    num_decode_requests=_split_total(num_requests, ranks, dp_rank),
-                    sum_decode_kv_tokens=_split_total(kv_tokens, ranks, dp_rank),
+                    num_decode_requests=requests,
+                    sum_decode_kv_tokens=_saturating_mul_u32(requests, context_length),
                 ),
             )
         )

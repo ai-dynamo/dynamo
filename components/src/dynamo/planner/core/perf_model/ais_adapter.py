@@ -20,6 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
+import msgspec
 from aisim_core.datasets import prepare_execution_profile
 from aisim_core.sdk import ForwardPassPerfModelConfig
 
@@ -147,7 +148,14 @@ class PlannerEnginePerfModel:
     # ------------------------------------------------------------------
 
     def update_capabilities(self, capabilities: Optional[EngineCapabilities]) -> None:
+        held_profile = self._config.ais_perf_model is not None
+        previous_rank_count = None if held_profile else self._attention_dp_size()
         self._capabilities = capabilities
+        if not held_profile and (self._attention_dp_size() or 1) != (
+            previous_rank_count or 1
+        ):
+            self._retained_iterations.clear()
+            self._pending_iterations.clear()
         if self._engine_model is None:
             self._init_engine_model()
             return
@@ -263,6 +271,7 @@ class PlannerEnginePerfModel:
             or self._config.backend != "vllm"
             or caps is None
             or caps.max_num_batched_tokens is None
+            or self._attention_dp_size() is None
             or self._effective_speculative_nextn() > 0
         ):
             return False
@@ -338,6 +347,7 @@ class PlannerEnginePerfModel:
                     if self._config.backend == "mocker"
                     else self._config.backend,
                     worker_type=self._worker_type,
+                    attention_dp=self._attention_dp_size() or 1,
                     estimation_mode="fpm_regression",
                 )
             )
@@ -400,10 +410,12 @@ class PlannerEnginePerfModel:
         return max(0, int(self._config.speculative_nextn or 0))
 
     def _attention_dp_size(self) -> Optional[int]:
-        spec = self._config.ais_perf_model
-        if spec is None:
-            return None
-        return self._configured_role()["attention_dp"]
+        if self._config.ais_perf_model is not None:
+            return self._configured_role()["attention_dp"]
+        caps = self._capabilities
+        if self._worker_type == "decode" and caps is not None:
+            return caps.data_parallel_size
+        return None
 
     # ------------------------------------------------------------------
     # Observation and bootstrap
@@ -517,7 +529,7 @@ class PlannerEnginePerfModel:
                 for (worker_id, _dp_rank), fpm in fpm_stats.items():
                     by_worker.setdefault(worker_id, []).append(fpm)
                 return [
-                    sorted(group, key=lambda item: item.dp_rank)
+                    self._local_rank_group(group, dp_size)
                     for group in by_worker.values()
                 ]
         return [
@@ -526,6 +538,25 @@ class PlannerEnginePerfModel:
                 fpm_stats.items(), key=lambda item: item[0]
             )
         ]
+
+    @staticmethod
+    def _local_rank_group(
+        group: list[ForwardPassMetrics], dp_size: int
+    ) -> list[ForwardPassMetrics]:
+        ordered = sorted(group, key=lambda item: item.dp_rank)
+        start = ordered[0].dp_rank
+        # Hybrid workers report global ranks but AIS expects local indices.
+        # An incomplete or malformed group stays subject to AIS validation.
+        if (
+            start > 0
+            and len(ordered) == dp_size
+            and all(fpm.dp_rank == start + index for index, fpm in enumerate(ordered))
+        ):
+            return [
+                msgspec.structs.replace(fpm, dp_rank=index)
+                for index, fpm in enumerate(ordered)
+            ]
+        return ordered
 
     def _iteration_groups_from_list(
         self, fpms: list[ForwardPassMetrics]
