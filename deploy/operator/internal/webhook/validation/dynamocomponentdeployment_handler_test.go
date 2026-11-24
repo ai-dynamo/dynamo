@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -39,7 +40,7 @@ func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 	t.Log("Register the DCD validation webhook")
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
-	handler := NewDynamoComponentDeploymentHandler()
+	handler := NewDynamoComponentDeploymentHandler(configv1alpha1.DiscoveryBackendKubernetes)
 	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}

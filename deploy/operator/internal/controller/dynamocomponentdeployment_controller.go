@@ -849,7 +849,7 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 		Namespace: opt.dynamoComponentDeployment.Namespace,
 	}
 
-	if !hasIngressSpec || !ingressSpec.Enabled || ingressSpec.IngressControllerClassName == nil {
+	if !hasIngressSpec || !componentdeployment.IngressEnabled(ingressSpec.Enabled, ingressSpec.IngressControllerClassName) {
 		log.Info("Ingress is not enabled")
 		return ingress, true, nil
 	}

@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -41,18 +42,22 @@ const (
 type DynamoGraphDeploymentHandler struct {
 	mgr               manager.Manager
 	operatorPrincipal string
+	discoveryBackend  configv1alpha1.DiscoveryBackend
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
 // mgr must not be nil. operatorPrincipal is the full Kubernetes SA username
-// used to authorize operator-owned updates.
+// used to authorize operator-owned updates. discoveryBackend is the operator default
+// passed to pure Service rendering.
 func NewDynamoGraphDeploymentHandler(
 	mgr manager.Manager,
 	operatorPrincipal string,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
 ) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,
 		operatorPrincipal: operatorPrincipal,
+		discoveryBackend:  discoveryBackend,
 	}
 }
 
@@ -67,7 +72,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj *
 	logger.Info("validate create", "name", obj.Name, "namespace", obj.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidator(h.mgr)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.discoveryBackend)
 	warnings, err := validator.Validate(
 		ctx,
 		obj,
@@ -93,7 +98,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	logger.Info("validate update", "name", newObj.Name, "namespace", newObj.Namespace)
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidator(h.mgr)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.discoveryBackend)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
 	// Caller identity is decoded once for ordinary and terminating updates.
