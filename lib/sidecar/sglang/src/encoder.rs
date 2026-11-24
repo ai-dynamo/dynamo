@@ -593,7 +593,8 @@ impl Encoder {
                 if ack.into_inner().instance_id != expected {
                     Err(client::protocol_error("Release came from a different encoder instance"))?;
                 }
-                yield LLMEngineOutput::stop();
+                // Release uses the encode endpoint, whose terminal result must be an object.
+                yield LLMEngineOutput::encode_terminal(Default::default());
             }));
         }
         let request_id = ctx.id().to_string();

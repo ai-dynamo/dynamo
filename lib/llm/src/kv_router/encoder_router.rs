@@ -745,7 +745,7 @@ mod tests {
                 assert!(request.multi_modal_data.is_none() && request.token_ids.is_empty());
                 self.2.send((self.0, original_id.clone())).unwrap();
                 return Ok(stream_of(vec![Annotated::from_data(
-                    LLMEngineOutput::stop(),
+                    LLMEngineOutput::encode_terminal(Default::default()),
                 )]));
             }
             self.1.fetch_add(1, Ordering::SeqCst);
