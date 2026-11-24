@@ -2970,9 +2970,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.4.0"
+version = "8.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3105191d378178513e101572dedf09b5e171eec0371861ca8b303d9cb224aed"
+checksum = "834c27ac7acebd32a223e36eec6e17d39abb4b1fc4db7610748d245f51af6b26"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2989,9 +2989,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.2.0"
+version = "8.2.2-kimi-k3.1-pro-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9e6a7ebe51c63049c4088131c3e8bfe5687fafb699e659fda20728b34e4dc31"
+checksum = "72723558e30c624b8fefbd563ea10a8acc5ec0b255448ffeea1bee86cf970665"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3276,9 +3276,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "3.1.3"
+version = "3.1.4-kimi-k3.1-pro-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0088954e64cd5f8ff9db94d08d60f15caa4ec364391e37b15496cf926752528a"
+checksum = "ff8d07fee232982e80f57211f00ef4662f034aa7e8ad6c796f7124fd981e3685"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -5673,8 +5673,6 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61a58bbec7086006825c689d0c85c6f52a0ee0783d4eff7a1fa48cb27eb8d947"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -9429,7 +9427,6 @@ dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
- "symphonia-codec-aac",
  "symphonia-codec-adpcm",
  "symphonia-codec-alac",
  "symphonia-codec-pcm",
@@ -9463,18 +9460,6 @@ checksum = "98ea5ffc8716bff677dfb3b01b420c7b758de901a72b8c330bf2040ab74b4add"
 dependencies = [
  "lazy_static",
  "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-aac"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5bf8e39552d34a3c4c98333370e62f48c92456d2e814f273b5c3ad7c4a5f45c"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-common",
  "symphonia-core",
 ]
 

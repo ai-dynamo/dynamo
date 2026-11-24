@@ -50,6 +50,8 @@ members = [
     "deploy/inference-gateway/sidecar",
 ]
 resolver = "3"
+# Patched third-party crate (see [patch.crates-io] below); not a workspace member.
+exclude = ["lib/vendor/llm-multimodal"]
 
 [workspace.package]
 version = "1.7.0"
@@ -74,8 +76,9 @@ dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.7.0" }
 dynamo-vllm-generate = { path = "lib/generate-formats/vllm", version = "1.7.0" }
 dynamo-rl = { path = "lib/rl", version = "1.7.0" }
-dynamo-tokenizers = { version = "=3.1.3" }
-dynamo-renderer = { version = "=8.2.0" }
+# Published Kimi K3.1 release crates; keep their shared protocol types aligned.
+dynamo-tokenizers = { version = "=3.1.4-kimi-k3.1-pro-dev.1" }
+dynamo-renderer = { version = "=8.2.2-kimi-k3.1-pro-dev.1" }
 dynamo-tokens = { path = "lib/tokens", version = "1.7.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.7.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
@@ -86,7 +89,7 @@ dynamo-http-server = { path = "lib/http-server", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
-dynamo-protocols = { version = "=8.4.0" }
+dynamo-protocols = { version = "=8.5.0" }
 dynamo-decisions = { version = "=0.1.0", features = ["utoipa"] }
 dynamo-parsers = { version = "=10.2.2" }
 
@@ -218,6 +221,13 @@ sha2 = { version = "0.10" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
+
+# Keep `mm-routing` but build Symphonia without the AAC decoder. Upstream
+# llm-multimodal enables Symphonia's "all" feature; the vendored copy omits "aac".
+# See lib/vendor/llm-multimodal/VENDORED.md. lib/bindings/python is an excluded
+# workspace and carries the same patch.
+[patch.crates-io]
+llm-multimodal = { path = "lib/vendor/llm-multimodal" }
 
 [profile.dev.package]
 insta.opt-level = 3

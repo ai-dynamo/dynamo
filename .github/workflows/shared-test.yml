@@ -480,6 +480,7 @@ jobs:
         env:
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
           PYTEST_MARKS: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
+          ALLOW_EMPTY_TEST_SELECTION: ${{ inputs.run_gpu_parallel_tests && steps.gpu-parallel-tests.outcome == 'success' }}
           CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
           TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
           TEST_TYPE: pre_merge_gpu
