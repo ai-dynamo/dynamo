@@ -56,10 +56,7 @@ lpx:
   modelRegistryURL: ""
 
 dgdr:
-  # -- Complete image reference for the v1beta1 DGDR output-copier. Empty uses the
-  # operator's kubectl default. Per-DGDR container image overrides
-  # take precedence. The image must contain /bin/sh with set -o pipefail support,
-  # kubectl and the copier's shell utilities.
+  # -- Complete output-copier image reference for v1beta1 DGDR profiling Jobs. Empty uses the operator default; per-DGDR image overrides take precedence. See "DGDR Output-Copier Image" in the platform chart README for image requirements.
   outputCopierImage: ""
 
 # Environment variables to pass to operator Deployment.

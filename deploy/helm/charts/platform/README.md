@@ -935,7 +935,7 @@ Kubernetes: `>=1.30.0-0`
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | global.snapshot.install | bool | `false` | Whether this chart should install the bundled Snapshot subchart (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs. NOTE: For production environments, it is recommended to install Snapshot separately. |
-| dynamo-operator.dgdr.outputCopierImage | string | `""` | Complete output-copier image reference for v1beta1 DGDR profiling Jobs. Empty uses the operator's kubectl default; per-DGDR image overrides take precedence. The image must contain /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities. |
+| dynamo-operator.dgdr.outputCopierImage | string | `""` | Complete output-copier image reference for v1beta1 DGDR profiling Jobs. Empty uses the operator default; per-DGDR image overrides take precedence. See "DGDR Output-Copier Image" in the platform chart README for image requirements. |
 | dynamo-operator.grovePreflight.enabled | bool | `true` | Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate. |
 | dynamo-operator.grovePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
 | dynamo-operator.grovePreflight.imagePullSecrets | list | `[]` | Existing pull secrets for the Grove preflight image. |
@@ -1041,20 +1041,28 @@ dynamo-operator:
     outputCopierImage: registry.example.com/tools/kubectl:approved
 ```
 
-Replace the example reference with your image's repository and tag or digest. With the standalone
-operator chart, use `dgdr.outputCopierImage`. Both set `OperatorConfiguration.dgdr.outputCopierImage`.
+Replace the example reference with your image's repository and tag or digest. Copy the full
+manifest list and preserve its bytes to keep a multi-architecture digest; otherwise use the digest
+reported by your registry. With the [standalone operator chart](components/operator/README.md#installation),
+use `dgdr.outputCopierImage`. Both set `OperatorConfiguration.dgdr.outputCopierImage`.
 
 Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash),
-`kubectl`, and `date`, `grep`, `awk`, `tr`, `sed`, `cat`, and `sleep`.
-Choose a kubectl version compatible with your Kubernetes API server.
+`kubectl`, and `date`, `grep`, `awk`, `tr`, `sed`, `cat`, and `sleep`, all usable by the
+non-root UID/GID 1000 the container runs as. Choose a kubectl version compatible with your
+Kubernetes API server.
+
+For authenticated registries, create pull Secrets in the DGDR namespace and reference them through
+`spec.overrides.profilingJob.template.spec.imagePullSecrets`. The chart's `imagePullSecrets` apply
+only to the operator Pod. See the [profiler guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md).
 
 A per-request `spec.overrides.profilingJob.template.spec.containers` entry named `output-copier`
 takes precedence. Only `image` and `resources` are merged for that container; other fields remain
 controller-owned.
 
-New settings apply only to newly created profiling Jobs; existing Jobs retain their image.
-After profiling starts, create a new DGDR or delete and recreate the existing DGDR to change it.
-This setting does not affect v1beta2 Run publisher images.
+The profiling Job is created when profiling starts, and an existing Job keeps its image. To use a
+new image after profiling has started, create a new DGDR or delete and recreate the existing DGDR.
+This setting applies to v1beta1 profiling Jobs only. DGDR v1beta2 Runs use the operator image for
+their publisher, so they need no separate image.
 
 ### LPX Integration
 

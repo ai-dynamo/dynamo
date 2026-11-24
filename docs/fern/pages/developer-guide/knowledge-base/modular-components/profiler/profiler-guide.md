@@ -325,9 +325,9 @@ For supported DGD versions and merge behavior, see
 [Generated DGD overrides](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).
 
 Registry credentials are namespace-scoped. The operator chart's
-`imagePullSecrets` pull the operator Pod only. A profiling Job that needs
-credentials for the operator image must receive them from its ServiceAccount or
-from `overrides.profilingJob.template.spec.imagePullSecrets` in the DGDR namespace.
+`imagePullSecrets` pull the operator Pod only. For a profiling Job, create the pull
+Secrets in the DGDR namespace and reference them through
+`overrides.profilingJob.template.spec.imagePullSecrets`.
 
 ## Profiling Method
 
@@ -681,9 +681,9 @@ spec:
 
 The profiling job also runs an `output-copier` sidecar that relays profiler status and
 writes results to the output ConfigMap. By default it uses `bitnami/kubectl:latest`.
-For operator-wide image configuration, set `dynamo-operator.dgdr.outputCopierImage` in the [Helm chart](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image).
-In air-gapped or private-registry clusters, override the sidecar image via
-`overrides.profilingJob`:
+In air-gapped or private-registry clusters, configure all profiling Jobs with
+`dynamo-operator.dgdr.outputCopierImage` in the [Helm chart](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image).
+To use a different image for one DGDR, override it in `overrides.profilingJob`:
 
 ```yaml
 overrides:
@@ -692,7 +692,7 @@ overrides:
       spec:
         containers:
         - name: output-copier
-          image: internal-registry/kubectl:1.29
+          image: registry.example.com/tools/kubectl:approved
 ```
 
 The replacement image must include `kubectl` and a shell at `/bin/sh` that supports
