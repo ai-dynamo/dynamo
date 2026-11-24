@@ -735,9 +735,9 @@ fn error(error_type: ErrorType, message: impl Into<String>) -> DynamoError {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    use dynamo_http_server::metrics::Metrics;
     use dynamo_llm::discovery::{ModelManager, ModelWatcher};
     use dynamo_llm::entrypoint::RouterConfig;
-    use dynamo_llm::http::service::metrics::Metrics;
     use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_llm::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,

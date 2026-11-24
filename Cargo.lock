@@ -2371,6 +2371,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "clap",
+ "dynamo-http-server",
  "dynamo-kv-hints",
  "dynamo-llm",
  "dynamo-protocols 10.0.1",
