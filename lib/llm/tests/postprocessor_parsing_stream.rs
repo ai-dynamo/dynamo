@@ -3398,11 +3398,7 @@ async fn response_format_explicit_reasoning_without_prompt_prefill() {
             module_path!(),
             "::response_format_explicit_reasoning_without_prompt_prefill"
         ),
-        // Pins the parser's quote-aware compatibility policy (not the default).
-        &[
-            (env_llm::DYN_PARSER_VERSION, "2"),
-            ("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0"),
-        ],
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
     ) {
         return;
     }
@@ -3495,11 +3491,7 @@ async fn response_format_muse_quoted_channel_stays_literal() {
             module_path!(),
             "::response_format_muse_quoted_channel_stays_literal"
         ),
-        // Pins the parser's quote-aware compatibility policy (not the default).
-        &[
-            (env_llm::DYN_PARSER_VERSION, "2"),
-            ("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0"),
-        ],
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
     ) {
         return;
     }
