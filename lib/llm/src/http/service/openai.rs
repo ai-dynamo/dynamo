@@ -76,7 +76,9 @@ use crate::protocols::common::input_trigger::{
 };
 use crate::protocols::common::unique_json::UniqueJsonValue;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use crate::protocols::openai::chat_completions::allowed_tools::{AllowedToolsRequest, ToolAllowlist};
+use crate::protocols::openai::chat_completions::allowed_tools::{
+    AllowedToolsRequest, ToolAllowlist,
+};
 use crate::protocols::openai::chat_completions::tool_call_merge::{
     ToolCallMergeOutcome, merge_tool_call_chunk,
 };
