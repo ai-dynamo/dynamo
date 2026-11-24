@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: gemma4-31b
+title: Gemma-4-31B
+page: pages/recipes/model-recipes/gemma-4-31b.mdx
+provider: google
+model:
+  name: Gemma-4-31B
+  hf_id: nvidia/Gemma-4-31B-IT-NVFP4 (B200/GB200) / google/gemma-4-31B-it (H200)
+  precision: NVFP4 + FP8 KV (B200/GB200) / BF16 + 16-bit KV (H200)
+status: experimental
+targets:
+- id: agg-b200-agentic
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: trtllm
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
+  topology: aggregated
+  techniques:
+  - tp1
+  - nvfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - mtp-speculative-decoding
+  - cpu-kv-offload
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV-cache reuse, concurrency 192
+  deploy:
+    asset: recipes/gemma4-31b/trtllm/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gemma4-31b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,096.75 output tok/s/GPU, 57.22 user output tok/s P50, TTFT P50 3,052.24 ms at concurrency 192 over 8 TP1 workers
+- id: agg-gb200-agentic
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: trtllm
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
+  topology: aggregated
+  techniques:
+  - tp1
+  - nvfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - mtp-speculative-decoding
+  - cpu-kv-offload
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV-cache reuse, concurrency 192
+  deploy:
+    asset: recipes/gemma4-31b/trtllm/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gemma4-31b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,037.40 output tok/s/GPU, 49.98 user output tok/s P50, TTFT P50 2,893.94 ms at concurrency 192 over 8 TP1 workers
+- id: agg-h200-agentic
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: trtllm
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
+  topology: aggregated
+  techniques:
+  - tp4
+  - bf16
+  - kv-aware-routing
+  - cpu-kv-offload
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV-cache reuse, concurrency 32
+  deploy:
+    asset: recipes/gemma4-31b/trtllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gemma4-31b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 153.020 output tok/s/GPU, 63.02 user output tok/s P50, TTFT P50 979.09 ms at concurrency 32 over 2 TP4 workers
+related_benchmarks: []
+maintainer: null
+gaps:
+- maintainer unknown

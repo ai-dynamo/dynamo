@@ -1,0 +1,420 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Metrics Catalog
+subtitle: Every dynamo_* metric emitted by the frontend, backend workers, and router — name, type, and meaning.
+---
+
+Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix and carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx). This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards).
+
+## Metric types
+
+The `type` on each field below is a [Prometheus metric type](https://prometheus.io/docs/concepts/metric_types/):
+
+- **counter** — a cumulative value that only increases (or resets to zero on restart), e.g. total requests.
+- **gauge** — a single value that can go up or down, e.g. in-flight requests.
+- **histogram** — samples observations into configurable buckets and exposes `_bucket`, `_sum`, and `_count` series, e.g. request duration. Labeled histograms/counters/gauges register a metric *family*, not one series. The frontend latency and sequence-length histograms take their bucket ranges from environment variables — see [Histogram buckets](../components/frontend-configuration.mdx#histogram-buckets).
+
+<Info>
+  Labeled metrics (`HistogramVec`, `CounterVec`, `GaugeVec`) register a metric *family*, not individual time series. For request-populated metrics, a series for a given label combination appears at `/metrics` only after the first matching request. Other families create or remove series from runtime state; their entries below document those semantics.
+</Info>
+
+## Where each family is exposed
+
+| Family | Emitted by | Scrape endpoint |
+|--------|------------|-----------------|
+| `dynamo_frontend_*` | HTTP frontend (`python -m dynamo.frontend`) | `/metrics` on `DYN_HTTP_PORT` (default 8000) |
+| `dynamo_component_*` | Backend workers, standalone router | `/metrics` on `DYN_SYSTEM_PORT` (must be set) |
+| `dynamo_router_overhead_*` | Frontend with KV routing | `/metrics` on `DYN_HTTP_PORT` |
+| `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
+| `dynamo_operator_*` | Kubernetes operator | See [Operator Metrics](operator-metrics.mdx) |
+
+Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
+
+Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by the backend engines themselves and are cataloged separately — see [Metrics Comparison](metrics-comparison.md). NIXL transfer metrics are exposed on their own port and owned by the [upstream NIXL project](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
+
+## Frontend metrics
+
+Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a `model` label. For endpoints that canonicalize aliases, that label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
+
+<ParamField path="dynamo_frontend_active_requests" type="gauge">
+  Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown.
+</ParamField>
+
+<ParamField path="dynamo_frontend_stage_requests" type="gauge">
+  Requests currently in a given frontend pipeline stage. Labeled by `stage` and `phase` — see [Stage values](metric-labels.mdx#stage-values) and [Phase values](metric-labels.mdx#phase-values).
+</ParamField>
+
+<ParamField path="dynamo_frontend_inflight_requests" type="gauge" deprecated={true}>
+  Inflight requests. Kept for backward compatibility; prefer `dynamo_frontend_active_requests`, which has identical semantics with a clearer name.
+</ParamField>
+
+<ParamField path="dynamo_frontend_queued_requests" type="gauge" deprecated={true}>
+  Requests in the HTTP processing queue. Kept for backward compatibility; the "waiting for first token" window is now the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages.
+</ParamField>
+
+<ParamField path="dynamo_frontend_disconnected_clients" type="gauge">
+  Number of disconnected clients.
+</ParamField>
+
+<ParamField path="dynamo_frontend_input_sequence_tokens" type="histogram">
+  Input sequence length in tokens.
+</ParamField>
+
+<ParamField path="dynamo_frontend_cached_tokens" type="histogram">
+  Cached tokens (prefix cache hits) per request.
+</ParamField>
+
+<ParamField path="dynamo_frontend_tokenizer_cache_hits_total" type="counter">
+  L1 tokenizer prefix-cache hits across all models. One outcome is recorded per encode operation or batch item.
+</ParamField>
+
+<ParamField path="dynamo_frontend_tokenizer_cache_misses_total" type="counter">
+  L1 tokenizer prefix-cache misses across all models.
+</ParamField>
+
+<ParamField path="dynamo_frontend_tokenizer_cache_cached_tokens_total" type="counter">
+  Tokens returned from the L1 tokenizer prefix cache. Labeled by `model`.
+</ParamField>
+
+<ParamField path="dynamo_frontend_tokenizer_cache_uncached_tokens_total" type="counter">
+  Tokens freshly encoded after an L1 tokenizer cache lookup. Labeled by `model`.
+</ParamField>
+
+Use this PromQL expression to calculate the five-minute token reuse ratio by model:
+
+```promql
+sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+/
+(
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+  +
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_uncached_tokens_total[5m]))
+)
+```
+
+The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. When the cache is disabled with `DYN_TOKENIZER_CACHE=0`, the per-model series are never created, so they are absent from the scrape rather than reported as zero; detect that state with `absent()`, since a `== 0` comparison never matches a missing series. Only the literal value `0` disables the cache; values such as `false` or `off` leave it enabled. With the cache enabled, the counters remain zero when encoding fails or the tokenizer has no registered special-token boundaries.
+
+<ParamField path="dynamo_frontend_inter_token_latency_seconds" type="histogram">
+  Inter-token latency in seconds.
+</ParamField>
+
+<ParamField path="dynamo_frontend_output_sequence_tokens" type="histogram">
+  Output sequence length in tokens.
+</ParamField>
+
+<ParamField path="dynamo_frontend_output_tokens_total" type="counter">
+  Total output tokens generated.
+</ParamField>
+
+<ParamField path="dynamo_frontend_request_duration_seconds" type="histogram">
+  End-to-end LLM request duration in seconds.
+</ParamField>
+
+<ParamField path="dynamo_frontend_requests_total" type="counter">
+  Total LLM requests.
+</ParamField>
+
+<ParamField path="dynamo_frontend_time_to_first_token_seconds" type="histogram">
+  Time to first token in seconds.
+</ParamField>
+
+### Migration
+
+Metrics for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.
+
+<ParamField path="dynamo_frontend_model_migration_total" type="counter">
+  Total request migrations due to worker unavailability. Labeled by `model` and [`migration_type`](metric-labels.mdx#metric-specific-labels) (`new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection).
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_migration_duration_seconds" type="histogram">
+  Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. Labeled by `model`, [`migration_type`](metric-labels.mdx#metric-specific-labels), and [`outcome`](metric-labels.mdx#metric-specific-labels). Use the histogram's `_count` series to count completed migration events by outcome. The duration excludes work completed before the failure and generation after the replacement stream is established.
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_migration_max_seq_len_exceeded_total" type="counter">
+  Total times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. Labeled by `model`.
+</ParamField>
+
+### Cancellation and rejection
+
+Counters for requests that end early: [cancellations](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md) (the client or frontend aborts an in-flight request) and [rejections](../../kubernetes/fault-tolerance/request-rejection.md) (the Frontend sheds load with HTTP 529 by default when all workers are busy). The worker-side counterparts are under [Component metrics](#component-metrics).
+
+<ParamField path="dynamo_frontend_model_cancellation_total" type="counter">
+  Total request cancellations detected by the frontend (client disconnect or stream close). Labeled by `model`, `endpoint` (the API route — `chat_completions`, `completions`, `embeddings`, …), and [`request_type`](metric-labels.mdx#metric-specific-labels) (`unary` or `stream`).
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_rejection_total" type="counter">
+  Total overload responses surfaced to the client as HTTP 529 by default. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Labeled by `model` and `endpoint` (the API route).
+</ParamField>
+
+### Per-worker load and timing gauges
+
+`dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id`, `dp_rank`, and `worker_type`.
+
+<ParamField path="dynamo_frontend_worker_active_decode_blocks" type="gauge">
+  Active KV cache decode blocks per worker.
+</ParamField>
+
+<ParamField path="dynamo_frontend_worker_active_prefill_tokens" type="gauge">
+  Active prefill tokens queued per worker.
+</ParamField>
+
+<ParamField path="dynamo_frontend_worker_last_time_to_first_token_seconds" type="gauge">
+  Last observed time to first token per worker, in seconds.
+</ParamField>
+
+<ParamField path="dynamo_frontend_worker_last_input_sequence_tokens" type="gauge">
+  Last observed input sequence length per worker.
+</ParamField>
+
+<ParamField path="dynamo_frontend_worker_last_inter_token_latency_seconds" type="gauge">
+  Last observed inter-token latency per worker, in seconds.
+</ParamField>
+
+### Model metrics
+
+All `dynamo_frontend_model_*` gauges carry a `model` label.
+
+<ParamField path="dynamo_frontend_model_ready" type="gauge">
+  Whether the frontend can currently route at least one inference request for the model. A value of `1` means at least one complete serving topology with a live worker and serving engine is available; `0` means the model is registered but not currently routable. The frontend evaluates this gauge from its live routing catalog at scrape time, so worker registration and removal are reflected in the next scrape. Unlike request-populated metrics, the series appears when the model registers without requiring an inference request. The series is absent while the model is not registered, and the entire family is absent when no models are registered. Detect this state with `absent(dynamo_frontend_model_ready{model="<model>"})`; a `== 0` comparison does not match an absent series. Aliases get no series of their own: a deployment served under several names emits one series, labeled with its primary name, so query an alias through its primary. `/v1/models` still lists alias names, but only the primary has a readiness series. A LoRA adapter is a distinct model rather than a second name for one, and keeps its own series.
+</ParamField>
+
+The remaining model gauges are populated from worker backend registration. When multiple workers register the same model name, only the first instance's configuration is recorded.
+
+<ParamField path="dynamo_frontend_model_total_kv_blocks" type="gauge">
+  Total KV blocks available for a worker serving the model.
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_max_num_seqs" type="gauge">
+  Maximum number of sequences for a worker serving the model.
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_max_num_batched_tokens" type="gauge">
+  Maximum number of batched tokens for a worker serving the model.
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_context_length" type="gauge">
+  Maximum context length for a worker serving the model. Sourced from the Model Deployment Card.
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_kv_cache_block_size" type="gauge">
+  KV cache block size for a worker serving the model. Sourced from the Model Deployment Card.
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_migration_limit" type="gauge">
+  Request migration limit for a worker serving the model. Sourced from the Model Deployment Card.
+</ParamField>
+
+## Component metrics
+
+Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) at `/metrics` on `DYN_SYSTEM_PORT`. All carry the hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`) — see [Runtime-injected labels](metric-labels.mdx#runtime-injected-labels).
+
+<ParamField path="dynamo_component_inflight_requests" type="gauge">
+  Requests currently being processed by the component.
+</ParamField>
+
+<ParamField path="dynamo_component_request_bytes_total" type="counter">
+  Total bytes received in requests.
+</ParamField>
+
+<ParamField path="dynamo_component_request_duration_seconds" type="histogram">
+  Request processing time in seconds.
+</ParamField>
+
+<ParamField path="dynamo_component_requests_total" type="counter">
+  Total requests processed.
+</ParamField>
+
+<ParamField path="dynamo_component_errors_total" type="counter">
+  Total errors encountered while handling a request. Labeled by `error_type` — see [Component error types](metric-labels.mdx#component-error-types).
+</ParamField>
+
+<ParamField path="dynamo_component_response_bytes_total" type="counter">
+  Total bytes sent in responses.
+</ParamField>
+
+<ParamField path="dynamo_component_uptime_seconds" type="gauge">
+  DistributedRuntime uptime. Updated before each Prometheus scrape on both the frontend and the system-status server.
+</ParamField>
+
+<ParamField path="dynamo_component_cancellation_total" type="counter">
+  Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).
+</ParamField>
+
+The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
+
+<ParamField path="dynamo_rejection_request_total" type="counter">
+  Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full).
+</ParamField>
+
+<ParamField path="dynamo_engine_request" type="gauge">
+  Current requests being handled by the engine.
+</ParamField>
+
+<ParamField path="dynamo_request_queue" type="gauge">
+  Current requests queued in Dynamo, not yet in the engine.
+</ParamField>
+
+Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.
+
+## Router metrics
+
+The router exposes metrics for routing decisions and overhead. Not every metric appears in every deployment — see [Availability by configuration](#availability-by-configuration).
+
+### Router request metrics
+
+`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
+
+<ParamField path="dynamo_component_router_requests_started_total" type="counter">
+  Requests admitted by the router scheduler.
+</ParamField>
+
+<ParamField path="dynamo_component_router_requests_total" type="counter">
+  Total requests processed by the router.
+</ParamField>
+
+<ParamField path="dynamo_component_router_time_to_first_token_seconds" type="histogram">
+  Time to first token in seconds.
+</ParamField>
+
+<ParamField path="dynamo_component_router_inter_token_latency_seconds" type="histogram">
+  Average inter-token latency in seconds.
+</ParamField>
+
+<ParamField path="dynamo_component_router_input_sequence_tokens" type="histogram">
+  Input sequence length per routing attempt, excluding query-only lookups. Labeled by `phase` and `model`.
+</ParamField>
+
+<ParamField path="dynamo_component_router_output_sequence_tokens" type="histogram">
+  Output sequence length in tokens.
+</ParamField>
+
+<ParamField path="dynamo_component_router_kv_hit_rate" type="histogram">
+  Predicted KV cache hit rate at routing time (0.0–1.0).
+</ParamField>
+
+<ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+</ParamField>
+
+<ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
+  Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
+</ParamField>
+
+### KV-cache reuse telemetry
+
+The cache reuse funnel shows how much of the incoming prompt could be reused, and how much the worker reports reusing. Each step counts tokens, not requests.
+
+All metric names below start with `dynamo_component_router_`.
+
+| Step | Meaning | Metric suffix |
+| --- | --- | --- |
+| **F0 — Incoming tokens** | Tokens received by the router. | `input_sequence_tokens_sum` |
+| **F2 — Best available match** | Prefix the router estimates is cached on the best-matching eligible worker. | `kv_best_eligible_cached_prefix_tokens_total` |
+| **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `kv_selected_cached_prefix_tokens_total` |
+| **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `kv_worker_reused_tokens_total` |
+
+These counters need no enable flag.
+
+Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
+
+vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of each aggregated or prefill attempt, as `engine_data.kv_cache_hit` with `prompt_tokens` and `reused_tokens`. `reused_tokens` is the engine's per-request cached-token count, so it includes hits on host and storage tiers and KV connectors, the same tiers F2 and F3 count.
+
+- Disaggregated decode attempts do not report, because each engine counts the KV transferred from the prefill worker as cached; read worker reuse from the `prefill` phase. The exception is a decode attempt that prefills locally under conditional disaggregation, which reports under `phase="decode"`.
+- Attempts take their `phase` from the frontend's request tracker. A standalone router (`python -m dynamo.router`) does not set one, so all of its attempts are labeled `aggregated`.
+- The router counts a report only when its `prompt_tokens` equals the routed prompt length. Engines count multimodal prompts after placeholder expansion, so a multimodal report counts only when the router also routed on expanded tokens; TensorRT-LLM does not report multimodal requests. F2 and F3 count expanded routing tokens while F0 counts the unexpanded prompt, so multimodal ratios to F0 can exceed 100%.
+- With `n > 1`, vLLM and SGLang do not report. Later samples reuse the prompt blocks earlier samples just cached, vLLM keeps the first buffered sample's count when it merges outputs, and SGLang caches the prompt before running the samples.
+- Engines recompute the last prompt token, so a full-prefix hit reports at least one token less than F3, and up to one block less for vLLM.
+- Preemption, partial-block reuse in TensorRT-LLM, and KV loads that fail under a recompute policy can also make F4 differ from F3 when the router's estimate is accurate.
+
+### Per-request routing overhead
+
+`dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.
+
+<ParamField path="dynamo_router_overhead_block_hashing_ms" type="histogram">
+  Time computing block hashes.
+</ParamField>
+
+<ParamField path="dynamo_router_overhead_indexer_find_matches_ms" type="histogram">
+  Time in indexer `find_matches`.
+</ParamField>
+
+<ParamField path="dynamo_router_overhead_seq_hashing_ms" type="histogram">
+  Time computing sequence hashes.
+</ParamField>
+
+<ParamField path="dynamo_router_overhead_scheduling_ms" type="histogram">
+  Time in scheduler worker selection.
+</ParamField>
+
+<ParamField path="dynamo_router_overhead_total_ms" type="histogram">
+  Total routing overhead per request.
+</ParamField>
+
+### Router queue metrics
+
+The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+
+<ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
+  Requests pending in the router scheduler queue.
+</ParamField>
+
+<ParamField path="dynamo_frontend_router_queue_pending_isl_tokens" type="gauge">
+  Raw input-sequence tokens pending in the queue.
+</ParamField>
+
+<ParamField path="dynamo_frontend_router_queue_pending_cached_tokens" type="gauge">
+  Cached-token estimate captured when each request enters the queue.
+</ParamField>
+
+<ParamField path="dynamo_frontend_router_queue_backpressure_total" type="counter">
+  Queue rejections by configured limit reason. Also labeled by `reason`.
+</ParamField>
+
+### KV indexer metrics
+
+<ParamField path="dynamo_component_kv_cache_events_applied" type="counter">
+  KV cache events applied to the router's radix-tree index. Includes events applied to the device tier and lower tiers such as host-pinned memory and disk. Appears when the worker-selection policy requests `WorkerInputs::CACHE`, the router consumes KV events, and workers publish them. Labeled by `status` and `event_type` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
+</ParamField>
+
+<ParamField path="dynamo_component_ckf_mutation_total" type="counter">
+  CKF block-level mutation outcomes recorded by the router indexer, labeled by `outcome` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels). **Registered, always zero.** The series is created and exported, but no code path currently increments it, so it reads 0 in every deployment. Do not build alerts or dashboard panels on it. The standalone indexer exports the same counter as `dynamo_kvrouter_ckf_mutation_total`, with the same caveat.
+</ParamField>
+
+The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer](../../developer-guide/knowledge-base/modular-components/router/standalone-indexer.md).
+
+### Availability by configuration
+
+Not all router metrics appear in every deployment. This matrix shows which groups are **registered** and **populated** in each configuration.
+
+| Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router |
+|---|---|---|---|---|
+| `dynamo_component_router_*` | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
+| `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
+| `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
+| `dynamo_component_ckf_mutation_total` | Registered, **always zero** | Registered, **always zero** | **Not registered** | Registered, **always zero** |
+| `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | Registered and populated (`worker_type` = `decode`) | **Not created** |
+
+**Key:**
+
+- **Registered and populated** — the metric appears at `/metrics` with real values.
+- **Registered, always zero** — the metric appears at `/metrics` but is never incremented (useful for dashboards that expect it to exist).
+- **Not registered / Not created** — the metric does not appear at `/metrics` at all.
+
+## Endpoint picker metrics
+
+Emitted by the endpoint picker (EPP) when routing through the Gateway API Inference Extension, at `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090). Set the port to `0` to disable the endpoint.
+
+<ParamField path="dynamo_epp_cached_tokens" type="histogram">
+  Prompt tokens the model server served from its KV cache per request, read from `usage.prompt_tokens_details.cached_tokens` in the response body. This is the *observed* cache hit, as opposed to the overlap the KV router estimates at selection time. Buckets match `dynamo_frontend_cached_tokens` so the two can share a dashboard. The `model` label is the model the pool serves, resolved once at startup rather than from the request body.
+</ParamField>
+
+Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
+
+## Related
+
+- [Metric Labels](metric-labels.mdx) — the dimensions attached to these metrics.
+- [Environment Variables](environment-variables.mdx) — variables that enable and configure metric emission.
+- [Operator Metrics](operator-metrics.mdx) — Kubernetes operator metrics catalog.
+- [Metrics Comparison](metrics-comparison.md) — engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`).
