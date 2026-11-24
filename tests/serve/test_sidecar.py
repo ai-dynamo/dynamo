@@ -272,9 +272,7 @@ sidecar_configs = {
             pytest.mark.sglang,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
-            # TODO: revert to pytest.mark.post_merge after pre_merge validation
-            # on this PR (see .ai/ci-guidelines.md).
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -539,9 +537,7 @@ sidecar_configs = {
             pytest.mark.sglang,
             pytest.mark.router,
             pytest.mark.gpu_1,
-            # TODO: revert to pytest.mark.post_merge after pre_merge validation
-            # on this PR (see .ai/ci-guidelines.md).
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
         ],
