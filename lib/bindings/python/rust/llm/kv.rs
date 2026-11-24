@@ -76,7 +76,9 @@ mod demand_driven;
 #[cfg(feature = "select-service")]
 #[pyclass(frozen)]
 pub(crate) struct WorkerSequenceEventPublisher {
-    // Python threads take turns on this lock; no call holds it across Python code.
+    // Methods take this lock while attached to Python. Never call `py.detach` or
+    // run Python code while holding it: a thread that waits for the lock keeps
+    // the GIL, so the holder cannot attach again and both threads deadlock.
     inner: std::sync::Mutex<Option<selection::WorkerSequenceEventPublisher>>,
     endpoint: String,
 }
