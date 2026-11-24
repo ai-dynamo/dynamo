@@ -598,7 +598,7 @@ async fn wait_for_server_shutdown(
     Ok(())
 }
 
-/// Read peer controls and hand unexpected EOF accounting to the active writer.
+/// Read peer controls and count an unexpected EOF that cancels a live request.
 async fn handle_reader(
     framed_reader: FramedRead<BoxRead, TwoPartCodec>,
     context: Arc<dyn AsyncEngineContext>,
@@ -676,10 +676,9 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
-                        if !alive_tx.is_closed() && !context.is_stopped() {
+                        if !alive_tx.is_closed() && context.cancel_on_peer_eof() {
                             cancellation_seen = true;
                             record_upstream_cancellation(context.as_ref(), "eof");
-                            context.kill();
                         }
                         break;
                     }

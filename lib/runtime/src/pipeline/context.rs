@@ -316,6 +316,10 @@ impl AsyncEngineContext for StreamContext {
         self.controller.kill();
     }
 
+    fn cancel_on_peer_eof(&self) -> bool {
+        self.controller.cancel_on_peer_eof()
+    }
+
     fn stop_generating(&self) {
         self.controller.stop_generating();
     }
@@ -521,6 +525,26 @@ impl AsyncEngineContext for Controller {
         self.advance_to(KILLED);
     }
 
+    fn cancel_on_peer_eof(&self) -> bool {
+        if self
+            .state
+            .compare_exchange(LIVE, KILLED, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.state_changed.notify_waiters();
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .clone();
+        for child in children {
+            child.cancel_on_peer_eof();
+        }
+        true
+    }
+
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
         self.child_context
             .lock()
@@ -587,6 +611,26 @@ mod tests {
 
         child.stop_generating();
         assert!(child.is_killed());
+    }
+
+    #[test]
+    fn disconnect_kills_only_live_contexts() {
+        let parent = Controller::default();
+        let live = Arc::new(Controller::default());
+        let stopped = Arc::new(Controller::default());
+        parent.link_child(live.clone());
+        parent.link_child(stopped.clone());
+        stopped.stop();
+
+        assert!(parent.cancel_on_peer_eof());
+        assert!(!parent.cancel_on_peer_eof());
+        assert!(!stopped.cancel_on_peer_eof());
+        assert!(!stopped.is_killed());
+        assert!(live.is_killed());
+        assert!(parent.is_killed());
+
+        stopped.kill();
+        assert!(stopped.is_killed(), "an explicit Kill still upgrades Stop");
     }
 
     /// A waker that records whether it was woken.
