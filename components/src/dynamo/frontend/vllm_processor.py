@@ -376,19 +376,20 @@ def _parsed_step(
 ) -> dict[str, Any]:
     """One step of a choice for Dynamo to build a response chunk from.
 
-    ``choice`` is what the post-processor parsed. The reasoning-token count is
-    this choice's running total from its parser.
+    ``choice`` is what the post-processor parsed. The step that ends the choice
+    carries its reasoning-token count: the parser recounts every token the
+    choice generated, so it is asked once.
     """
     step = {
         "_dynamo_parsed": True,
         "index": choice["index"],
         "delta": choice["delta"],
         "logprobs": choice.get("logprobs"),
-        "reasoning_tokens": post.reasoning_token_total,
     }
     finish_reason = parsed_finish_reason(choice.get("finish_reason"), raw_finish_reason)
     if finish_reason is not None:
         step["finish_reason"] = finish_reason
+        step["reasoning_tokens"] = post.reasoning_token_total
         if stop_reason is not None:
             step["stop_reason"] = stop_reason
     return step
@@ -1252,7 +1253,6 @@ class VllmProcessor:
                 request_id,
                 request,
                 dynamo_preproc,
-                tokens,
                 vllm_preproc,
                 post_processors,
                 mm_routing_info=mm_routing_info,
@@ -1268,7 +1268,6 @@ class VllmProcessor:
         request_id: str,
         request: dict[str, Any],
         dynamo_preproc: dict[str, Any],
-        tokens: list[int],
         vllm_preproc: EngineCoreRequest,
         post_processors: dict[int, StreamingPostProcessor],
         mm_routing_info: dict[str, Any] | None = None,
@@ -1321,16 +1320,11 @@ class VllmProcessor:
                 output_request_ids[output_idx] = child_request_id
                 registered_request_ids.append(child_request_id)
 
-        # Each step yielded below is what vLLM parsed from the engine tokens it
-        # consumed. Dynamo builds the response chunk around it: id, usage,
-        # finish reason, metrics and nvext.
         locally_finished = False
         pending_choice_logprobs: dict[int, list[dict[str, Any]]] = {}
         emitted_choice_tokens: dict[int, list[int]] = {}
         choice_top_logprobs = _choice_top_logprobs(request)
         return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
-        # Tracks whether the worker still owes the prompt logprobs the client
-        # asked for; Dynamo reads them from the engine data a step carries.
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}
         locally_stopped_requests: set[str] = set()
@@ -1388,7 +1382,6 @@ class VllmProcessor:
                     break
 
                 prompt_logprobs.update(engine_response)
-                # The engine's own usage report and engine data, for Dynamo.
                 engine_report = {
                     key: engine_response[key]
                     for key in ("completion_usage", "engine_data")
@@ -1429,9 +1422,10 @@ class VllmProcessor:
                         if prompt_logprobs.needs_payload and pending_idx != output_idx:
                             continue
                         terminal = pending_terminals.pop(pending_idx)
-                        # The first step released carries the worker's report.
-                        terminal.update(engine_report)
-                        engine_report = {}
+                        # Another choice's report leaves below, on its own index.
+                        if pending_idx == output_idx:
+                            terminal.update(engine_report)
+                            engine_report = {}
                         yield terminal
 
                 if output_request_id in locally_stopped_requests:
@@ -1448,10 +1442,10 @@ class VllmProcessor:
 
                 # Count active choices before processing: tool/reasoning
                 # parsers may consume tokens without emitting a visible delta.
-                # Copied, because vLLM trims the engine's list in place when it
-                # matches a stop string.
+                # vLLM trims this list in place when it matches a stop string, so
+                # tokens after the stop are neither counted nor returned.
                 token_ids = (
-                    list(engine_response.get("token_ids") or [])
+                    engine_response.get("token_ids") or []
                     if output_request_id in self.output_processor.request_states
                     else []
                 )

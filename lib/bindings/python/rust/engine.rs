@@ -517,22 +517,21 @@ fn depythonize_annotated<Resp>(
 where
     Resp: for<'de> Deserialize<'de>,
 {
-    let is_envelope = bound
-        .downcast::<PyDict>()
-        .ok()
-        .and_then(|d| {
-            d.get_item(pyo3::intern!(bound.py(), "_dynamo_annotated"))
-                .ok()
-                .flatten()
-        })
-        .and_then(|v| v.is_truthy().ok())
-        .unwrap_or(false);
-
-    if is_envelope {
+    if dict_flag(bound, pyo3::intern!(bound.py(), "_dynamo_annotated")) {
         depythonize::<Annotated<Resp>>(bound)
     } else {
         depythonize::<Resp>(bound).map(Annotated::from_data)
     }
+}
+
+/// Whether `bound` is a dict whose `flag` entry is truthy.
+fn dict_flag(bound: &Bound<'_, PyAny>, flag: &Bound<'_, pyo3::types::PyString>) -> bool {
+    bound
+        .downcast::<PyDict>()
+        .ok()
+        .and_then(|dict| dict.get_item(flag).ok().flatten())
+        .and_then(|value| value.is_truthy().ok())
+        .unwrap_or(false)
 }
 
 /// Converts one object a Python generator yielded. The GIL is held.
@@ -544,18 +543,7 @@ type DecodeItem<Resp> =
 fn decode_chat_item(
     bound: &Bound<'_, PyAny>,
 ) -> Result<Annotated<ChatProcessorItem>, pythonize::PythonizeError> {
-    let is_parsed = bound
-        .downcast::<PyDict>()
-        .ok()
-        .and_then(|d| {
-            d.get_item(pyo3::intern!(bound.py(), "_dynamo_parsed"))
-                .ok()
-                .flatten()
-        })
-        .and_then(|v| v.is_truthy().ok())
-        .unwrap_or(false);
-
-    if is_parsed {
+    if dict_flag(bound, pyo3::intern!(bound.py(), "_dynamo_parsed")) {
         let parsed = depythonize::<ParsedOutput>(bound)?;
         Ok(Annotated::from_data(ChatProcessorItem::Parsed(Box::new(
             parsed,
@@ -713,15 +701,12 @@ where
                                 e
                             ))
                         }
-                        // As `Annotated::from_err`, which needs `Resp: Deserialize`.
                         ResponseProcessingError::Dynamo(dynamo_err) => Annotated {
                             data: None,
                             id: None,
                             event: Some("error".to_string()),
                             comment: None,
-                            error: Some(DynamoError::from(
-                                Box::new(dynamo_err) as Box<dyn std::error::Error + 'static>
-                            )),
+                            error: Some(dynamo_err),
                         },
                         ResponseProcessingError::Offload(e) => Annotated::from_error(format!(
                             "critical error: failed to offload the python async generator to a new thread: {}",

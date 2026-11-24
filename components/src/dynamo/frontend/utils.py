@@ -148,57 +148,14 @@ class PromptLogprobsAccumulator:
         return (self._include_root or self._include_nvext) and not self._received
 
     def update(self, engine_response: dict[str, Any]) -> None:
-        if not self.needs_payload:
-            return
         engine_data = engine_response.get("engine_data")
         if not isinstance(engine_data, dict) or "prompt_logprobs" not in engine_data:
             return
-        payload = engine_data["prompt_logprobs"]
-        if not isinstance(payload, list):
-            raise ValueError("invalid prompt_logprobs payload: expected a list")
-        # The root field is validated by Rust; nvext otherwise stays untyped JSON.
-        if not self._include_root:
-            self._validate_nvext_payload(payload)
+        if self._received:
+            # A worker repeats them on each choice's last frame. Dynamo returns
+            # the copy it has already been given.
+            del engine_data["prompt_logprobs"]
         self._received = True
-
-    @staticmethod
-    def _validate_nvext_payload(payload: list[Any]) -> None:
-        for position in payload:
-            if position is None:
-                continue
-            if not isinstance(position, dict):
-                raise ValueError(
-                    "invalid prompt_logprobs payload: expected a token map"
-                )
-            for token_id, entry in position.items():
-                if (
-                    not isinstance(token_id, str)
-                    or not token_id.isascii()
-                    or not token_id.removeprefix("+").isdecimal()
-                    or int(token_id) > 2**32 - 1
-                ):
-                    raise ValueError(
-                        "invalid prompt_logprobs payload: invalid token ID"
-                    )
-                if not isinstance(entry, dict):
-                    raise ValueError(
-                        "invalid prompt_logprobs payload: expected an entry"
-                    )
-                logprob = entry.get("logprob")
-                if not isinstance(logprob, (int, float)) or isinstance(logprob, bool):
-                    raise ValueError("invalid prompt_logprobs payload: invalid logprob")
-                rank = entry.get("rank")
-                if rank is not None and (
-                    not isinstance(rank, int)
-                    or isinstance(rank, bool)
-                    or not 0 <= rank <= 2**32 - 1
-                ):
-                    raise ValueError("invalid prompt_logprobs payload: invalid rank")
-                decoded_token = entry.get("decoded_token")
-                if decoded_token is not None and not isinstance(decoded_token, str):
-                    raise ValueError(
-                        "invalid prompt_logprobs payload: invalid decoded token"
-                    )
 
 
 def worker_warmup() -> bool:
@@ -318,6 +275,8 @@ def parsed_finish_reason(choice_finish: str | None, engine_finish: Any) -> Any:
         "eos",
         "stop",
         "content_filter",
+        "cancelled",
+        "abort",
     ):
         return "stop"
     return engine_finish if engine_finish is not None else choice_finish

@@ -98,7 +98,8 @@ fit raises `RoutedEngineError`, which the Frontend returns as a context-length e
 A processor can yield finished OpenAI chat completion chunks, which the Frontend sends on as they
 are. It can instead yield parsed steps and let Dynamo build the chunks: the id, the role, usage,
 the finish reason, `nvext` and the Frontend's metrics. The built-in `vllm` and `sglang` processors
-do this. A stream is one or the other from its first item on.
+do this. A stream is one or the other from its first item on. Yield parsed steps only after
+`routed_engine.generate` returns: Dynamo reads the prompt length when the first one arrives.
 
 A parsed step is a dict tagged `_dynamo_parsed`:
 
@@ -115,12 +116,12 @@ yield {
 | Field | Meaning |
 |---|---|
 | `delta` | The content, `reasoning_content` and `tool_calls` parsed in this step. Omit it for a step that only accounts for tokens. |
-| `token_ids` | The generated tokens the step accounts for. Dynamo counts them as completion tokens, so report each token once. |
+| `token_ids` | The generated tokens the step accounts for. Dynamo counts them as completion tokens, so report each token once, and leave out tokens that follow a stop the processor matched. |
 | `finish_reason` | The engine's `finish_reason` for the choice, or `"stop"` when the processor matched a stop itself. Dynamo reports `tool_calls` for a choice that called a tool and then stopped. |
 | `stop_reason` | The stop string or token ID that ended the choice. |
 | `logprobs` | The OpenAI `logprobs` object for the tokens behind `delta`. |
 | `completion_usage`, `engine_data` | The engine's own values from the item the step was parsed from. Dynamo reads the prompt token count, cached tokens and prompt logprobs from them. |
-| `reasoning_tokens` | The choice's running count of reasoning tokens, when the processor's parser counts them. |
+| `reasoning_tokens` | The choice's running count of reasoning tokens, when the processor's parser counts them. Sending it with the step that ends the choice is enough. |
 | `completion_token_ids` | The IDs to return as `nvext.completion_token_ids` with this step, when they differ from `token_ids`. |
 
 ## Register and run it

@@ -106,8 +106,7 @@ impl RoutedEngine {
         let preprocessed = preprocessed.bind(py);
         let mut request = fast_preprocessed_request(preprocessed)
             .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
-        let scope = context.as_ref().and_then(|c| c.request_scope()).cloned();
-        if let Some(scope) = &scope {
+        if let Some(scope) = context.as_ref().and_then(|c| c.request_scope()) {
             scope.complete_request(&mut request);
             scope.record_prompt(&request);
         }
@@ -169,11 +168,6 @@ impl RoutedEngine {
                         let Some(response) = response else {
                             break;
                         };
-                        if let Some(scope) = &scope
-                            && let Some(output) = response.data.as_ref()
-                        {
-                            scope.observe_engine_output(output);
-                        }
 
                         let py_response = Python::with_gil(|py| {
                             response.map_data(|data| {

@@ -10,6 +10,7 @@ from dynamo.frontend.utils import (
     handle_engine_error,
     make_backend_error,
     make_internal_error,
+    parsed_finish_reason,
     request_id_from_context,
     resolve_chat_template,
     validate_legacy_guided_decoding_constraints,
@@ -210,3 +211,22 @@ class TestBackendInvalidArgumentToHttpError:  # FRONTEND.8 — backend 4xx must 
     )
     def test_unrelated_errors_are_left_alone(self, text):
         assert backend_invalid_argument_to_http_error(ValueError(text)) is None
+
+
+@pytest.mark.parametrize(
+    ("choice_finish", "engine_finish", "expected"),
+    [
+        (None, "stop", None),  # the parser has not finished the choice
+        ("stop", "eos", "eos"),
+        ("tool_calls", "stop", "stop"),  # Dynamo names it `tool_calls`
+        ("length", "length", "length"),
+        # A worker's cancellation is not a stop the processor matched.
+        ("stop", "cancelled", "cancelled"),
+        ("stop", "abort", "abort"),
+        # The processor matched a stop itself, whatever the engine said.
+        ("stop", None, "stop"),
+        ("stop", "length", "stop"),
+    ],
+)
+def test_parsed_finish_reason(choice_finish, engine_finish, expected):
+    assert parsed_finish_reason(choice_finish, engine_finish) == expected

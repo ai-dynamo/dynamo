@@ -31,6 +31,13 @@ class FakeRoutedItem:
         return self._data
 
 
+def reported_tokens(items):
+    """Generated tokens the parsed steps account for; Dynamo's usage is their count."""
+    return sum(
+        len(item.get("token_ids", ())) for item in items if item.get("_dynamo_parsed")
+    )
+
+
 class FakeRoutedEngine:
     def __init__(self, items=None):
         if items is None:

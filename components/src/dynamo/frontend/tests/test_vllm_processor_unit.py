@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from _routed_engine_fakes import FakeRoutedItem
+from _routed_engine_fakes import reported_tokens as _reported_tokens
 from _thinking_parity import THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
@@ -2010,7 +2011,6 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         request_id,
         request,
         dynamo_preproc,
-        tokens,
         vllm_preproc,
         post_processors,
         *,
@@ -2302,7 +2302,7 @@ async def _capture_rendered_reasoning_processors(
     captured = {}
 
     async def capture_generate_and_stream(
-        request_id, request, dynamo_preproc, tokens, vllm_preproc, post_processors, **_
+        request_id, request, dynamo_preproc, vllm_preproc, post_processors, **_
     ):
         captured["dynamo_preproc"] = dynamo_preproc
         captured["post"] = post_processors[0]
@@ -2788,7 +2788,6 @@ async def _run_generate(
             request_id,
             request if request is not None else {"model": MODEL},
             preproc,
-            preproc["token_ids"],
             vllm_preproc,
             post_processors,
             mm_routing_info=mm_routing_info,
@@ -2808,11 +2807,6 @@ def _step_text(steps, index=0):
         for step in steps
         if step["index"] == index
     )
-
-
-def _reported_tokens(steps):
-    """Generated tokens the steps account for; Dynamo's usage is their count."""
-    return sum(len(step.get("token_ids", ())) for step in steps)
 
 
 class TestRoutedEnginePath:
@@ -3048,7 +3042,6 @@ class TestRoutedEnginePath:
                 "request-id",
                 {"model": MODEL, **request_options},
                 preproc,
-                preproc["token_ids"],
                 SimpleNamespace(
                     sampling_params=SimpleNamespace(n=1),
                     request_id="vllm-request",
@@ -3087,6 +3080,12 @@ class TestRoutedEnginePath:
             ),
             pytest.param(("hello STOP",), "close", id="single-close"),
             pytest.param(("hello STOP", "world"), "close", id="one-stop-close"),
+            pytest.param(
+                ("hello STOP", "world"),
+                "metadata-other-choice",
+                id="one-stop-metadata-other-choice",
+            ),
+            pytest.param(("hello STOP tail",), "empty", id="tokens-after-stop-empty"),
         ],
     )
     async def test_local_stop_preserves_late_backend_outcome(
@@ -3141,7 +3140,18 @@ class TestRoutedEnginePath:
             }
             for index, text in enumerate(texts)
         ]
-        output_tokens = sum(len(frame["token_ids"]) for frame in frames)
+        # vLLM drops the tokens after a stop string it matches inside a frame.
+        output_tokens = sum(
+            len(
+                tokenizer.encode(
+                    text[: text.index("STOP") + len("STOP")]
+                    if "STOP" in text
+                    else text,
+                    add_special_tokens=False,
+                )
+            )
+            for text in texts
+        )
         frames.append(
             {"token_ids": tokenizer.encode(" hidden", add_special_tokens=False)}
         )
@@ -3151,7 +3161,10 @@ class TestRoutedEnginePath:
             )
         elif backend_end != "eof":
             terminal = {"token_ids": [], "finish_reason": "length"}
-            if backend_end == "metadata":
+            if backend_end == "metadata-other-choice":
+                # The worker's report arrives on the other choice's last frame.
+                terminal["index"] = 1
+            if backend_end.startswith("metadata"):
                 terminal["engine_data"] = {"prompt_logprobs": payload}
                 terminal["completion_usage"] = {
                     "prompt_tokens": 7,
@@ -3165,13 +3178,13 @@ class TestRoutedEnginePath:
             elif backend_end == "abort":
                 terminal["finish_reason"] = "cancelled"
             frames.append(terminal)
-        if len(texts) == 2:
+        if len(texts) == 2 and backend_end != "metadata-other-choice":
             frames.append({"index": 1, "token_ids": [], "finish_reason": "length"})
         engine = _FakeRoutedEngine(frames)
         processor = _make_processor(module, engine)
         processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
         response_stream = processor._generate_and_stream(
-            "external", request, _base_preproc(), tokens, vllm_preproc, posts
+            "external", request, _base_preproc(), vllm_preproc, posts
         )
 
         # The stopped choice's last step waits for the worker's prompt logprobs;
@@ -3206,19 +3219,31 @@ class TestRoutedEnginePath:
             expected_frames -= len(texts) - 1
         assert engine.yielded == expected_frames
         for index, text in enumerate(texts):
-            assert _step_text(steps, index) == text.replace("STOP", "")
+            assert _step_text(steps, index) == text.partition("STOP")[0]
             assert [
                 step["finish_reason"]
                 for step in steps
                 if step["index"] == index and step.get("finish_reason")
             ] == ["stop" if "STOP" in text else "length"]
-        # The worker's late report reaches Dynamo once, as the worker sent it.
-        assert [step["engine_data"] for step in steps if "engine_data" in step] == (
-            [{"prompt_logprobs": payload}] if backend_end == "metadata" else []
+        # The worker's late report reaches Dynamo once, as the worker sent it,
+        # on the choice whose frame carried it.
+        metadata = backend_end.startswith("metadata")
+        assert [
+            (step["index"], step["engine_data"])
+            for step in steps
+            if "engine_data" in step
+        ] == (
+            [(terminal.get("index", 0), {"prompt_logprobs": payload})]
+            if metadata
+            else []
         )
         assert [
             step["completion_usage"] for step in steps if "completion_usage" in step
-        ] == ([terminal["completion_usage"]] if backend_end == "metadata" else [])
+        ] == ([terminal["completion_usage"]] if metadata else [])
+        # A choice's reasoning tokens are counted once, on the step that ends it.
+        assert all(
+            ("reasoning_tokens" in step) == ("finish_reason" in step) for step in steps
+        )
         # Tokens after a local stop are not reported.
         assert _reported_tokens(steps) == output_tokens
 
@@ -3267,7 +3292,6 @@ class TestRoutedEnginePath:
                 "prompt-logprobs",
                 {"model": MODEL, "prompt_logprobs": 0},
                 preproc,
-                preproc["token_ids"],
                 SimpleNamespace(
                     sampling_params=SimpleNamespace(n=1),
                     request_id="vllm-prompt-logprobs",
@@ -3414,7 +3438,7 @@ class TestRoutedEnginePath:
         chunks = [
             chunk
             async for chunk in processor._generate_and_stream(
-                "local-stop", request_data, {}, [1], vllm_request, posts
+                "local-stop", request_data, {}, vllm_request, posts
             )
         ]
 
@@ -3544,7 +3568,6 @@ class TestRoutedEnginePath:
                 "request-id",
                 {"model": MODEL},
                 preproc,
-                preproc["token_ids"],
                 vllm_preproc,
                 {0: _FakePostProcessor()},
                 mm_routing_info=None,
@@ -3595,7 +3618,6 @@ class TestRoutedEnginePath:
                 "index": 0,
                 "delta": {"content": "x"},
                 "logprobs": None,
-                "reasoning_tokens": 0,
                 "token_ids": [101],
             }
         ]

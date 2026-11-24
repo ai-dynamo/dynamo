@@ -7,7 +7,7 @@
 //! Dynamo message deltas instead of text. The rest of a response chunk (its id, usage, finish
 //! reason, metrics and `nvext`) is built here, by the code Dynamo's own preprocessor uses.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use dynamo_protocols::types::{
@@ -34,37 +34,28 @@ type Chunk = NvCreateChatCompletionStreamResponse;
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ParsedOutput {
     /// The choice this step belongs to.
-    #[serde(default)]
     pub index: Option<u32>,
     /// The content, reasoning and tool calls parsed in this step. The role is set here.
-    #[serde(default)]
     pub delta: Option<ChatCompletionStreamResponseDelta>,
     /// Log probabilities of the tokens behind `delta`, with the processor's token text.
-    #[serde(default)]
     pub logprobs: Option<ChatChoiceLogprobs>,
     /// The generated tokens this step accounts for. A token is reported once, and not at all
     /// when it follows a stop the processor matched.
     #[serde(default)]
     pub token_ids: Vec<TokenIdType>,
     /// Why the choice ended: the engine's reason, or `stop` for a stop the processor matched.
-    #[serde(default)]
     pub finish_reason: Option<FinishReason>,
     /// The stop string or token that ended the choice.
-    #[serde(default)]
     pub stop_reason: Option<StopReason>,
     /// The engine's usage report, as it sent it.
-    #[serde(default)]
     pub completion_usage: Option<CompletionUsage>,
     /// The engine's `engine_data`, as it sent it.
-    #[serde(default)]
     pub engine_data: Option<Box<serde_json::Value>>,
     /// Reasoning tokens this choice has generated so far, when the processor's parser counts
-    /// them. Used where the engine reports none.
-    #[serde(default)]
+    /// them. Used where the engine reports none. The step that ends the choice is enough.
     pub reasoning_tokens: Option<u32>,
     /// The ids to return as `nvext.completion_token_ids` with this step, when they are not
     /// `token_ids`: a processor that withholds text may release its ids with a later step.
-    #[serde(default)]
     pub completion_token_ids: Option<Vec<TokenIdType>>,
 }
 
@@ -256,9 +247,10 @@ impl ChatResponseStage {
             self.generator.update_isl(prompt_tokens);
         }
 
-        // The chunk for a step is built in the poll that reads the step, so this holds at
-        // most one entry: the parts of the step whose chunk is being built.
-        let pending = Arc::new(Mutex::new(VecDeque::<Option<MessageParts>>::new()));
+        // The transform builds a step's chunk in the poll that reads the step, so the slot
+        // holds the parts of the one step whose chunk is being built. Its only other chunks,
+        // the usage trailer, come after the steps end and find it empty.
+        let pending = Arc::new(Mutex::new(None::<MessageParts>));
         let outputs = {
             let pending = pending.clone();
             steps.map(move |step| {
@@ -273,7 +265,7 @@ impl ChatResponseStage {
                         "chat processor yielded a finished chunk after a parsed step".to_string(),
                     ),
                 });
-                pending.lock().unwrap().push_back(parts);
+                *pending.lock().unwrap() = parts;
                 output
             })
         };
@@ -289,7 +281,7 @@ impl ChatResponseStage {
             self.mm_counts,
         )
         .map(move |mut chunk| {
-            let parts = pending.lock().unwrap().pop_front().flatten();
+            let parts = pending.lock().unwrap().take();
             if let Some(data) = chunk.data.as_mut() {
                 writer.write(data, parts);
             }

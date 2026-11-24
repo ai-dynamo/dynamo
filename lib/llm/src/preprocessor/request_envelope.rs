@@ -21,7 +21,6 @@ use crate::protocols::common::extensions::{
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
     request_cache_salt, routing_constraints_to_kv,
 };
-use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::common::{
@@ -303,16 +302,6 @@ impl RequestScope {
                 .is_some_and(|facts| facts.wants_prompt_token_ids)
         {
             tracker.set_prompt_token_ids(request.token_ids.to_vec());
-        }
-    }
-
-    /// Take what the router reports about a request from an engine output before a chat
-    /// processor sees it. A standalone router sends its timing and worker this way.
-    pub fn observe_engine_output(&self, output: &LLMEngineOutput) {
-        if let Some(tracker) = &self.tracker
-            && let Some(routing_data) = output.routing_data.as_deref()
-        {
-            tracker.ingest_routing_data(routing_data.clone());
         }
     }
 

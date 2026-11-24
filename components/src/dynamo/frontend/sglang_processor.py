@@ -769,7 +769,7 @@ class SglangProcessor:
         )
 
         async for item in self._generate_and_stream(
-            request_id, request, dynamo_preproc, tokens, post, context=context
+            request_id, request, dynamo_preproc, post, context=context
         ):
             yield item
 
@@ -832,7 +832,6 @@ class SglangProcessor:
             request_id,
             request,
             preproc_result.dynamo_preproc,
-            preproc_result.prompt_token_ids,
             post,
             context=context,
         ):
@@ -843,21 +842,16 @@ class SglangProcessor:
         request_id: str,
         request: dict[str, Any],
         dynamo_preproc: dict[str, Any],
-        tokens: list[int],
         post: SglangStreamingPostProcessor,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths.
 
-        Each step yielded is what SGLang's parsers made of the engine tokens
-        consumed. Dynamo builds the response chunk around it: id, usage, finish
-        reason, metrics and nvext.
+        Yields parsed steps; Dynamo builds the response chunks from them.
         """
         token_count = 0
         post_proc_total_ms = 0.0
         stream_interval = self.stream_interval
-        # Tracks whether the worker still owes the prompt logprobs the client
-        # asked for; Dynamo reads them from the engine data a step carries.
         prompt_logprobs = PromptLogprobsAccumulator(request)
         logprobs_count = _request_logprobs_count(request)
         include_completion_ids = nvext_extra_field_requested(
@@ -878,7 +872,6 @@ class SglangProcessor:
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
             # Requested generated IDs wait here while parsing emits no chunk.
             completion_ids: list[int] = []
-            # The engine's own usage report and engine data since the last step.
             engine_report: dict[str, Any] = {}
             pending_terminal: dict[str, Any] | None = None
             first_chunk = True
@@ -1007,9 +1000,14 @@ class SglangProcessor:
                 finish_reason = _map_finish_reason(raw_finish_reason)
                 backend_finished = raw_finish_reason is not None
                 prompt_logprobs.update(engine_response)
+                # A worker's reports can be sparse, so one held for the next step
+                # keeps what a later one leaves out.
                 for key in ("completion_usage", "engine_data"):
-                    if engine_response.get(key) is not None:
-                        engine_report[key] = engine_response[key]
+                    report = engine_response.get(key)
+                    if isinstance(report, dict):
+                        engine_report.setdefault(key, {}).update(
+                            (k, v) for k, v in report.items() if v is not None
+                        )
                 if pending_terminal is not None:
                     if prompt_logprobs.needs_payload and not backend_finished:
                         continue
@@ -1098,6 +1096,7 @@ class SglangProcessor:
                         break
             else:
                 if pending_terminal is not None:
+                    pending_terminal.update(engine_report)
                     yield pending_terminal
         except (InvalidArgument, RoutedEngineError, Unknown, WorkerUnavailable):
             raise

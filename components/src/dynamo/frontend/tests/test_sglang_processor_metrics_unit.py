@@ -254,7 +254,6 @@ def test_step_carries_tokens_and_the_engine_usage_report(module_stubs):
                 "req-metrics",
                 {"model": "test-model"},
                 {},
-                list(range(10)),
                 _PostProcessor(),
             )
         ]
@@ -297,7 +296,14 @@ def test_engine_usage_reports_survive_flushes(module_stubs, stream_interval):
                         "prompt_tokens_details": {"cached_tokens": 2},
                     },
                 },
-                {"token_ids": [103]},
+                {
+                    "token_ids": [103],
+                    "completion_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 3,
+                        "total_tokens": 6,
+                    },
+                },
                 {"token_ids": [], "finish_reason": "stop"},
             ]
         ),
@@ -311,7 +317,7 @@ def test_engine_usage_reports_survive_flushes(module_stubs, stream_interval):
         return [
             item
             async for item in processor._generate_and_stream(
-                "req-sparse", {"model": "test-model"}, {}, [1, 2, 3], _PostProcessor()
+                "req-sparse", {"model": "test-model"}, {}, _PostProcessor()
             )
         ]
 
@@ -321,12 +327,14 @@ def test_engine_usage_reports_survive_flushes(module_stubs, stream_interval):
         [[101], [102], [103], []] if stream_interval == 1 else [[101], [102, 103], []]
     )
     assert [item["token_ids"] for item in items] == batches
-    cached = [
-        (item.get("completion_usage") or {}).get("prompt_tokens_details")
-        for item in items
-    ]
+    usages = [item.get("completion_usage") or {} for item in items]
+    cached = [usage.get("prompt_tokens_details") for usage in usages]
     assert cached[:2] == [{"cached_tokens": 0}, {"cached_tokens": 2}]
     assert not any(cached[2:])
+    if stream_interval == 2:
+        # Two reports in one batch: the later totals, with the cache count only
+        # the earlier one had.
+        assert usages[1]["completion_tokens"] == 3
 
 
 @pytest.mark.parametrize(

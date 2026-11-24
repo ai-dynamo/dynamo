@@ -31,35 +31,17 @@ def test_prompt_logprobs_are_owed_until_the_worker_sends_them(
     assert not accumulator.needs_payload
 
 
-@pytest.mark.parametrize("payload", [None, "invalid", {}])
-def test_invalid_prompt_logprobs_are_rejected_only_when_requested(payload):
-    response = {"engine_data": {"prompt_logprobs": payload}}
-    PromptLogprobsAccumulator({}).update(response)
-    PromptLogprobsAccumulator({"stream": True, "prompt_logprobs": 0}).update(response)
-    with pytest.raises(ValueError, match="invalid prompt_logprobs payload"):
-        PromptLogprobsAccumulator({"prompt_logprobs": 0}).update(response)
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        ["invalid"],
-        [{"-1": {"logprob": -0.25}}],
-        [{"4294967296": {"logprob": -0.25}}],
-        [{"17": None}],
-        [{"17": {"logprob": "invalid"}}],
-        [{"17": {"logprob": True}}],
-        [{"17": {"logprob": -0.25, "rank": -1}}],
-        [{"17": {"logprob": -0.25, "decoded_token": 17}}],
-    ],
-)
-def test_invalid_nvext_prompt_logprobs_entries_are_rejected(payload):
+def test_repeated_prompt_logprobs_are_dropped():
+    """A worker repeats them on each choice's last frame; Dynamo gets one copy."""
     accumulator = PromptLogprobsAccumulator(
-        {
-            "stream": True,
-            "prompt_logprobs": 0,
-            "nvext": {"extra_fields": ["prompt_logprobs"]},
-        }
+        {"stream": True, "nvext": {"extra_fields": ["prompt_logprobs"]}}
     )
-    with pytest.raises(ValueError, match="invalid prompt_logprobs payload"):
-        accumulator.update({"engine_data": {"prompt_logprobs": payload}})
+    payload = [None, {"17": {"logprob": -0.25}}]
+    first = {"engine_data": {"prompt_logprobs": payload, "routed_experts": [1]}}
+    second = {"engine_data": {"prompt_logprobs": payload, "routed_experts": [2]}}
+
+    accumulator.update(first)
+    accumulator.update(second)
+
+    assert first["engine_data"]["prompt_logprobs"] == payload
+    assert second["engine_data"] == {"routed_experts": [2]}
