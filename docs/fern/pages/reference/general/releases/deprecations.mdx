@@ -25,6 +25,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** If you pass a policy file with a `--router-mode` other than `kv`, remove one of the two. If you set `--router-policy-config` or `DYN_ROUTER_POLICY_CONFIG` with no `--router-mode` and want to keep `round-robin`, remove the file. `--router-mode kv --router-policy-config <file>` can drop `--router-mode kv`.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGDR v1beta2 is available without a feature gate.** The operator installs and serves the Request, Run, and Candidate APIs and starts their controllers by default. The API is not feature complete. Existing v1beta1 Requests keep their behavior and storage version. See the [DGDR API reference](../../kubernetes-api/dynamo-graph-deployment-request.mdx).
+
+  > **Migrate:** Remove `--dgdr-v1beta2-enabled` from custom operator or CRD-installer commands. The legacy `dynamo-operator.dgdrV1Beta2.enabled` Helm value no longer controls API availability and remains solely for the existing Planner live-retune RBAC condition. Ordinary Helm upgrades update the commands automatically. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, need matching CRDs installed by an administrator before upgrading the operator. Planner live retune behavior and its disabled defaults are unchanged.
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the separate AIS perf model inputs** in favor of one input per component: `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` on a command line, and `ais_perf_model` in a configuration. The value is one perf model config or a list of configs with one `worker_type` each; on a command line it is a path to a YAML or JSON file, or inline JSON. The old inputs still work, print one warning, and are scheduled for removal in v1.9.0. An old input together with the new one is an error.
 
 | Old | New |

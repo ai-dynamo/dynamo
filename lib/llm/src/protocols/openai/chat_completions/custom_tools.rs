@@ -24,6 +24,10 @@ pub(crate) struct ChatCustomToolAdapter {
     pending: BTreeMap<(u32, u32), PendingToolCall>,
     // Named function continuations can pass through without being buffered again.
     streamed: HashSet<(u32, u32)>,
+    // Mistral marks calls whose body it closed; unary keeps those on a `length` or
+    // `content_filter` finish too.
+    keep_parser_confirmed: bool,
+    parser_confirmed: HashSet<(u32, u32)>,
 }
 
 struct PendingToolCall {
@@ -42,7 +46,15 @@ impl ChatCustomToolAdapter {
             single_tool_call: request.inner.parallel_tool_calls == Some(false),
             pending: BTreeMap::new(),
             streamed: HashSet::new(),
+            keep_parser_confirmed: false,
+            parser_confirmed: HashSet::new(),
         })
+    }
+
+    /// Keep parser-confirmed calls on a `length` or `content_filter` finish, matching
+    /// unary aggregation.
+    pub(crate) fn keep_parser_confirmed_calls(&mut self, keep: bool) {
+        self.keep_parser_confirmed = keep;
     }
 
     pub(crate) fn project_response(
@@ -73,6 +85,15 @@ impl ChatCustomToolAdapter {
     ) -> anyhow::Result<()> {
         if self.names.is_empty() {
             return Ok(());
+        }
+        if self.keep_parser_confirmed {
+            self.parser_confirmed.extend(
+                response
+                    .tool_call_completion
+                    .iter()
+                    .filter(|evidence| evidence.complete)
+                    .map(|evidence| (evidence.choice_index, evidence.tool_index)),
+            );
         }
         for choice in &mut response.inner.choices {
             let mut output = Vec::new();
@@ -167,6 +188,7 @@ impl ChatCustomToolAdapter {
                         .pending
                         .remove(&key)
                         .expect("key belongs to pending call");
+                    let confirmed = self.parser_confirmed.remove(&key);
                     if let Some(custom) = &mut header.custom {
                         let input = match custom_input(&arguments) {
                             Ok(input) => input,
@@ -176,8 +198,9 @@ impl ChatCustomToolAdapter {
                                 if matches!(
                                     choice.finish_reason,
                                     Some(FinishReason::Length | FinishReason::ContentFilter)
-                                ) && serde_json::from_str::<serde_json::Value>(&arguments)
-                                    .is_err() =>
+                                ) && !confirmed
+                                    && serde_json::from_str::<serde_json::Value>(&arguments)
+                                        .is_err() =>
                             {
                                 continue;
                             }
@@ -559,6 +582,130 @@ mod tests {
                 );
             } else {
                 assert!(value["choices"][0]["delta"]["tool_calls"].is_null());
+            }
+        }
+    }
+
+    /// Unary aggregation keeps a Mistral call whose body the parser closed, even when
+    /// the body is not JSON, so the stream must not drop it on a cut-off finish either.
+    #[tokio::test]
+    async fn chat_custom_stream_cut_off_keeps_only_mistral_confirmed_invalid_input() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::chat_custom_stream_cut_off_keeps_only_mistral_confirmed_invalid_input"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for (finish, keep, complete, expected) in
+            ["length", "content_filter"].into_iter().flat_map(|finish| {
+                [
+                    (finish, true, true, Some(r#"{"workspace"}"#)),
+                    (finish, true, false, None),
+                    (finish, false, true, None),
+                ]
+            })
+        {
+            let mut adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
+            adapter.keep_parser_confirmed_calls(keep);
+            let mut data = chunk(
+                0,
+                json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":r#"{"workspace"}"#}}]),
+                json!(finish),
+            );
+            data.tool_call_completion
+                .push(super::super::ToolCallCompletion {
+                    choice_index: 0,
+                    tool_index: 0,
+                    complete,
+                });
+            let out: Vec<_> = adapter
+                .stream(futures::stream::iter([Annotated::from_data(data)]))
+                .collect()
+                .await;
+            assert!(out.iter().all(|item| !item.is_error()));
+            let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
+            assert_eq!(value["choices"][0]["finish_reason"], finish);
+            match expected {
+                Some(input) => assert_eq!(
+                    value["choices"][0]["delta"]["tool_calls"],
+                    json!([{"index":0,"id":"c1","type":"custom","custom":{"name":"run_python","input":input}}])
+                ),
+                None => assert!(value["choices"][0]["delta"]["tool_calls"].is_null()),
+            }
+        }
+
+        for finish in [FinishReason::Length, FinishReason::ContentFilter] {
+            for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
+            {
+                let mut adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
+                adapter.keep_parser_confirmed_calls(true);
+                let mut text = chunk(0, json!(null), json!(null));
+                text.inner.choices[0].delta.content = Some(
+                    dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        r#"[TOOL_CALLS]run_python[ARGS]{"workspace"}[TOOL_CALLS]run_python[ARGS]dir_na"#.into(),
+                    ),
+                );
+                let mut chunks = vec![Annotated::from_data(text)];
+                if separate_finish {
+                    let mut terminal = chunk(0, json!(null), json!(finish));
+                    if reasoning_finish {
+                        terminal.inner.choices[0].delta.reasoning_content = Some("done".into());
+                    }
+                    chunks.push(Annotated::from_data(terminal));
+                } else {
+                    chunks[0].data.as_mut().unwrap().inner.choices[0].finish_reason = Some(finish);
+                }
+                let parsed = super::super::unified_parser::apply_stream(
+                    futures::stream::iter(chunks),
+                    Some(vec![dynamo_parsers::tool_calling::ToolDefinition {
+                        name: "run_python".into(),
+                        parameters: Some(dynamo_protocols::types::custom_tool_parameters()),
+                        strict: None,
+                    }]),
+                    None,
+                    false,
+                    dynamo_parsers_v2::UnifiedParserStartingState::Response,
+                    super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
+                );
+                let out: Vec<_> = adapter.stream(parsed).collect().await;
+                assert!(out.iter().all(|item| !item.is_error()));
+                let calls: Vec<_> = out
+                    .iter()
+                    .filter_map(|item| item.data.as_ref())
+                    .flat_map(|data| &data.inner.choices)
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                    .collect();
+                assert_eq!(
+                    calls.len(),
+                    1,
+                    "{finish:?} separate_finish={separate_finish}"
+                );
+                assert_eq!(
+                    calls[0].custom.as_ref().unwrap().input.as_deref(),
+                    Some(r#"{"workspace"}"#)
+                );
+                let terminal = out
+                    .iter()
+                    .filter_map(|item| item.data.as_ref())
+                    .flat_map(|data| &data.inner.choices)
+                    .filter_map(|choice| choice.finish_reason)
+                    .collect::<Vec<_>>();
+                assert_eq!(terminal, [finish]);
+                if reasoning_finish {
+                    let reasoning: String = out
+                        .iter()
+                        .filter_map(|item| item.data.as_ref())
+                        .flat_map(|data| &data.inner.choices)
+                        .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                        .collect();
+                    assert_eq!(reasoning, "done");
+                }
             }
         }
     }

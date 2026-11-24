@@ -3456,9 +3456,10 @@ dependencies = [
  "dynamo-sglang-sidecar",
  "futures",
  "serde_json",
+ "sglang-api-types",
  "tokio",
  "tokio-stream",
- "tonic 0.13.1",
+ "tonic 0.14.6",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3476,16 +3477,16 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sglang-generate",
+ "dynamo-sglang-mocker",
  "dynamo-sidecar-common",
  "futures",
- "prost 0.13.5",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "serde_json",
+ "sglang-api-types",
  "tokio",
  "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic 0.14.6",
  "tracing",
  "url",
 ]
@@ -9449,6 +9450,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "sglang-api-types"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "445ae1031a16227c066c3e9dfb338407bed4d62994d0637c8b2fae05fa993344"
+dependencies = [
+ "bytes",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "tonic 0.14.6",
+ "tonic-prost",
 ]
 
 [[package]]

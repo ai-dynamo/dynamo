@@ -90,6 +90,8 @@ pub struct ResponseStreamConverter {
     active_reasoning_index: Option<usize>,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
+    keep_parser_confirmed: bool,
+    parser_confirmed: HashSet<usize>,
     // Hold custom calls and following tool headers until a completion boundary,
     // so dropping a partial custom input cannot leave an item or an index gap.
     deferred_tool_calls: Vec<usize>,
@@ -189,6 +191,8 @@ impl ResponseStreamConverter {
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
             function_call_items: Vec::new(),
+            keep_parser_confirmed: false,
+            parser_confirmed: HashSet::new(),
             deferred_tool_calls: Vec::new(),
             next_output_index: 0,
             usage: None,
@@ -201,6 +205,10 @@ impl ResponseStreamConverter {
         let mut converter = Self::new(model, params);
         converter.api_context = Some(context);
         converter
+    }
+
+    pub(crate) fn keep_parser_confirmed_calls(&mut self, keep: bool) {
+        self.keep_parser_confirmed = keep;
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -589,6 +597,16 @@ impl ResponseStreamConverter {
                 },
                 total_tokens: u.total_tokens,
             });
+        }
+
+        if self.keep_parser_confirmed {
+            self.parser_confirmed.extend(
+                chunk
+                    .tool_call_completion
+                    .iter()
+                    .filter(|evidence| evidence.choice_index == 0 && evidence.complete)
+                    .map(|evidence| evidence.tool_index as usize),
+            );
         }
 
         // Terminal status must be known before phase/text boundaries can flush
@@ -1001,6 +1019,7 @@ impl ResponseStreamConverter {
                 && (!only_terminal_is_incomplete || position == last);
             // A later interruption must preserve earlier completed raw-text calls.
             if state.custom
+                && !self.parser_confirmed.contains(&index)
                 && (incomplete || (interrupted && position == last))
                 && serde_json::from_str::<serde_json::Value>(&state.accumulated_args).is_err()
             {
@@ -1026,13 +1045,17 @@ impl ResponseStreamConverter {
         let mut pending: Vec<_> = self
             .function_call_items
             .iter_mut()
-            .filter(|fc| fc.started && fc.output_status.is_none())
-            .map(|fc| {
+            .enumerate()
+            .filter(|(_, fc)| fc.started && fc.output_status.is_none())
+            .map(|(index, fc)| {
                 fc.output_status = Some(
                     if Some(
                         fc.output_index
                             .expect("started function call is missing an output index"),
                     ) == terminal_output_index
+                        // A closed custom body uses the completed raw-input projection;
+                        // the response still reports the interrupted finish.
+                        && !(fc.custom && self.parser_confirmed.contains(&index))
                     {
                         output_status
                     } else {
@@ -2754,6 +2777,128 @@ mod tests {
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn mistral_custom_stream_keeps_confirmed_raw_input_on_interrupted_finish() {
+        use crate::protocols::openai::chat_completions::unified_parser;
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::mistral_custom_stream_keeps_confirmed_raw_input_on_interrupted_finish"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let complete = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}"#;
+        let cut_tail = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]cd[ARGS]{"input":"cut"#;
+        let raw_cut_tail = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]cd[ARGS]dir_na"#;
+        for (finish, text, keep, expected_count) in [
+            (FinishReason::Length, complete, true, 1),
+            (FinishReason::ContentFilter, complete, true, 1),
+            (FinishReason::Length, cut_tail, true, 1),
+            (FinishReason::Length, raw_cut_tail, true, 1),
+            (FinishReason::ContentFilter, raw_cut_tail, true, 1),
+            (FinishReason::Length, complete, false, 0),
+        ] {
+            for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
+            {
+                let params = ResponseParams {
+                    tools: Some(
+                        serde_json::from_value(serde_json::json!([
+                            {"type":"custom", "name":"cd", "format":{"type":"text"}}
+                        ]))
+                        .unwrap(),
+                    ),
+                    ..default_params()
+                };
+                let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+                conv.keep_parser_confirmed_calls(keep);
+                let chunks = if separate_finish {
+                    let mut terminal = finish_chunk(finish);
+                    if reasoning_finish {
+                        terminal.inner.choices[0].delta.reasoning_content = Some("done".into());
+                    }
+                    vec![text_chunk(text), terminal]
+                } else {
+                    vec![with_finish_reason(text_chunk(text), finish)]
+                };
+                let parsed = unified_parser::apply_stream(
+                    futures::stream::iter(chunks.into_iter().map(Annotated::from_data)),
+                    Some(vec![dynamo_parsers::tool_calling::ToolDefinition {
+                        name: "cd".into(),
+                        parameters: Some(super::super::custom_tool_parameters()),
+                        strict: None,
+                    }]),
+                    None,
+                    false,
+                    dynamo_parsers_v2::UnifiedParserStartingState::Response,
+                    unified_parser::MISTRAL_UNIFIED_FAMILY,
+                );
+                futures::pin_mut!(parsed);
+                let mut events = Vec::new();
+                let mut reasoning = String::new();
+                while let Some(chunk) = parsed.next().await {
+                    assert!(!chunk.is_error());
+                    if let Some(data) = chunk.data {
+                        for choice in &data.inner.choices {
+                            if let Some(text) = &choice.delta.reasoning_content {
+                                reasoning.push_str(text);
+                            }
+                        }
+                        events.extend(conv.process_chunk(&data));
+                    }
+                }
+                if reasoning_finish {
+                    assert_eq!(reasoning, "done");
+                }
+                events.extend(conv.emit_end_events());
+                let values: Vec<_> = events.iter().map(event_json).collect();
+                for kind in ["response.output_item.added", "response.output_item.done"] {
+                    let items: Vec<_> = values.iter().filter(|v| v["type"] == kind).collect();
+                    assert_eq!(items.len(), expected_count, "{finish:?} {text}");
+                    if let Some(item) = items.first() {
+                        assert_eq!(item["item"]["type"], "custom_tool_call");
+                        assert_eq!(item["output_index"], 0);
+                    }
+                }
+                for kind in [
+                    "response.custom_tool_call_input.delta",
+                    "response.custom_tool_call_input.done",
+                ] {
+                    let inputs: Vec<_> = values.iter().filter(|v| v["type"] == kind).collect();
+                    assert_eq!(inputs.len(), expected_count);
+                    if let Some(input) = inputs.first() {
+                        let field = if kind.ends_with(".delta") {
+                            "delta"
+                        } else {
+                            "input"
+                        };
+                        assert_eq!(input[field], r#"{"workspace"}"#);
+                    }
+                }
+                let terminal = values.last().unwrap();
+                assert_eq!(terminal["type"], "response.incomplete");
+                assert_eq!(terminal["response"]["status"], "incomplete");
+                let output = terminal["response"]["output"].as_array().unwrap();
+                assert_eq!(output.len(), expected_count);
+                if let Some(call) = output.first() {
+                    assert_eq!(call["input"], r#"{"workspace"}"#);
+                    let done = values
+                        .iter()
+                        .find(|v| v["type"] == "response.output_item.done")
+                        .unwrap();
+                    assert_eq!(&done["item"], call);
+                }
+            }
+        }
     }
 
     #[test]
