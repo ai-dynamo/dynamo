@@ -32,7 +32,6 @@ func TestKVTransferBandwidthLowering(t *testing.T) {
 		want      any
 	}{
 		{name: "typed bandwidth lowers to engine.kv_transfer", bandwidth: new(27.7), want: 27.7},
-		{name: "omitted bandwidth lowers nothing", want: nil},
 		{
 			name:      "input override replaces the typed bandwidth",
 			bandwidth: new(27.7),

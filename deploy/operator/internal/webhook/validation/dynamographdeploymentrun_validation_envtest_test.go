@@ -73,6 +73,19 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "interconnect-only hardware is not an empty hardware opt-out",
+			test: admissionTestCase{
+				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+					run := schemaRunForAdmission(`{"engine":{"hardware":"h200_sxm"}}`, nil)
+					run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
+						Interconnect: &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(25.0)},
+					}
+					return run
+				}(),
+				wantCELError: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+			},
+		},
+		{
 			name: "partial static workload is rejected",
 			test: admissionTestCase{
 				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
@@ -195,6 +208,42 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 				if got := v1beta2String(t, result, "spec", "model", "name"); got != v1beta2AdmissionModel {
 					t.Fatalf("typed model = %q, want %q; overrides must not rewrite the snapshot", got, v1beta2AdmissionModel)
 				}
+			},
+		},
+		{
+			name: "default modes without a KV-transfer bandwidth warn",
+			test: admissionTestCase{
+				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+					run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+					run.Spec.Hardware.Interconnect = nil
+					return run
+				}(),
+				wantWarnings: []string{kvTransferWarningForAdmission},
+			},
+		},
+		{
+			name: "aggregated-only search rejects the typed KV-transfer bandwidth",
+			test: admissionTestCase{
+				object:            schemaRunForAdmission(`{"engine":{"mode":"aggregated"}}`, nil),
+				wantWebhookErrors: kvTransferAggregatedErrorsForAdmission(kvTransferTypedPath),
+			},
+		},
+		{
+			name: "aggregated-only search rejects an override KV-transfer model",
+			test: admissionTestCase{
+				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+					run := schemaRunForAdmission(`{"engine":{"mode":"aggregated","kv_transfer":{"bandwidth_gb_per_second":10}}}`, nil)
+					run.Spec.Hardware.Interconnect = nil
+					return run
+				}(),
+				wantWebhookErrors: kvTransferAggregatedErrorsForAdmission(kvTransferOverridePath),
+			},
+		},
+		{
+			name: "aggregated-only search names both KV-transfer sources",
+			test: admissionTestCase{
+				object:            schemaRunForAdmission(`{"engine":{"mode":"aggregated","kv_transfer":{"bandwidth_gb_per_second":55}}}`, nil),
+				wantWebhookErrors: kvTransferAggregatedErrorsForAdmission(kvTransferTypedPath, kvTransferOverridePath),
 			},
 		},
 

@@ -121,13 +121,16 @@ candidates then report optimistic TTFT and goodput, and can win the search for t
 alone. Admission accepts such a Request but returns a warning whenever the effective search
 includes disaggregated candidates, which is the default.
 
-AISimulate applies the bandwidth to each prefill rank's sending link and each decode
-rank's receiving link, where a rank is one attention-data-parallel rank with all of its
-tensor- and pipeline-parallel GPUs. Concurrent transfers share those links. The same value
-applies to every candidate whatever its tensor-parallel size, so a measured per-GPU
-bandwidth, for example from a NIXL transfer benchmark, is conservative for candidates whose
-GPUs send their KV shards over separate NICs. Prefer a measured value to the nominal NIC
-rate. Setting `interconnect` does not opt out of hardware discovery.
+Enter the bandwidth of one GPU's link, for example from a NIXL transfer benchmark between
+one prefill GPU and one decode GPU, not the aggregate of a node or of a tensor-parallel
+group. With AISimulate's default `engine.kv_transfer.bytes_per_token` of `auto`, each
+transfer carries one GPU's KV shard for the prefill candidate's tensor- and
+pipeline-parallel shape, so the shards already move in parallel. An aggregate value, such
+as eight times the per-GPU bandwidth for a TP8 candidate, counts that parallelism twice and
+understates the transfer time. Concurrent transfers share the link. If `inputOverrides`
+sets `bytes_per_token` to a whole rank's KV size, enter the rank's aggregate bandwidth
+instead. Prefer a measured value to the nominal NIC rate. Setting `interconnect` does not
+opt out of hardware discovery.
 
 ```yaml
 spec:
@@ -141,7 +144,9 @@ spec:
 `inputOverrides.engine.kv_transfer` remains the final overlay: it can replace the typed
 bandwidth, set `bytes_per_token` or `timing_mode`, or delete the transfer model with
 `null`. Admission rejects a transfer model when the effective `engine.mode` searches
-no disaggregated candidates, because AISimulate would reject it when the Run starts.
+no disaggregated candidates, because AISimulate would reject it when the Run starts. The
+error names every field that sets the model, the typed bandwidth and the override, so
+remove all of them or include `disaggregated` in `engine.mode`.
 
 ### v1beta2 DGD Overrides
 

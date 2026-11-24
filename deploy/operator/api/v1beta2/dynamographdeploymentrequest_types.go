@@ -97,12 +97,13 @@ type InterconnectSpec struct {
 	// engine.kv_transfer.bandwidth_gb_per_second, which adds the transfer time to the TTFT of
 	// disaggregated candidates and keeps the KV cache reserved on the prefill worker until the
 	// transfer finishes. Aggregated candidates do not transfer KV and are unaffected.
-	// AISimulate applies the value to each prefill rank's sending link and each decode rank's
-	// receiving link, where a rank is one attention-data-parallel rank with all of its tensor-
-	// and pipeline-parallel GPUs, and concurrent transfers share those links. The same value
-	// applies to every candidate whatever its tensor-parallel size, so a per-GPU measurement,
-	// for example from a NIXL benchmark, is conservative for candidates whose GPUs send their
-	// KV shards over separate NICs.
+	// Set the bandwidth of one GPU's link, for example a NIXL benchmark between one prefill GPU
+	// and one decode GPU, not the aggregate of a node or of a tensor-parallel group. With
+	// AISimulate's default engine.kv_transfer.bytes_per_token of auto, each transfer carries one
+	// GPU's KV shard for the prefill candidate's tensor- and pipeline-parallel shape, so the
+	// shards of a rank already move in parallel; an aggregate would count that parallelism
+	// twice. Concurrent transfers share the link. If inputOverrides sets bytes_per_token to a
+	// whole rank's KV size, set the rank's aggregate bandwidth instead.
 	// When omitted, AISimulate models the transfer as instantaneous, so disaggregated candidates
 	// report optimistic TTFT and goodput; admission warns when such candidates are searched
 	// without a bandwidth. Admission rejects the field when the effective search is
