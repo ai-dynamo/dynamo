@@ -37,7 +37,7 @@ spec:
 
 ## Spec reference
 
-The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
+The DCD spec contains `backendFramework`, general environment defaults in `env`, and the [shared component spec](#shared-component-spec) inlined at the same level.
 
 <ParamField path="backendFramework" type="string">
   Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `spec.podTemplate.spec.containers[name=main]` container.
@@ -45,6 +45,55 @@ The DCD spec is `backendFramework` plus the [shared component spec](#shared-comp
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 
 </ParamField>
+
+<ParamField path="env" type="[]core/v1.EnvVar">
+  General environment defaults for the regular `main` container and any declared `runtime`
+  init container. Optional, with no default. Container-specific `env` replaces same-named
+  entries, including the complete `valueFrom` definition. Graph-generated DCDs preserve the
+  DGD's `spec.env` here rather than flattening it into PodTemplates.
+
+  For operator origins 1.8.0 and later, list order is preserved within each source and references
+  between sources are topologically ordered; cycles fail rendering. Operator-owned bindings retain
+  their generated values. Older or missing origins retain legacy sorted composition.
+  The field maps natively between `v1alpha1` and `v1beta1`, separately from alpha `envs`.
+  For origins 1.8.0 and later, admission requires unique names within this root list. An existing
+  duplicate list is rejected even when it is unchanged on update. Repair stored duplicates before
+  making unrelated updates; the operator does not silently de-duplicate them.
+  New or changed entries must not combine a non-empty `value` with `valueFrom`.
+  Names in different layers may still override one another. Standalone DCDs use their
+  immutable object origin; graph-owned DCDs use inherited PodTemplate origins, including role
+  templates. If any role uses semantic ordering, this root-list check applies. Older origins
+  retain their previous validation behavior. The root list's OpenAPI merge semantics are unchanged.
+  See [Environment Variable Order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order).
+
+  <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
+</ParamField>
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  name: worker
+spec:
+  backendFramework: vllm
+  env:
+    - name: BASE
+      value: /models
+    - name: MODEL
+      value: "$(BASE)/qwen"
+  type: worker
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+          env:
+            - name: BASE
+              value: /fast/models
+```
+
+For a semantic-origin DCD, the effective `BASE` precedes `MODEL`, which expands to
+`/fast/models/qwen`. `env` is a DCD root field, not an additional field on DGD components.
 
 ### Shared component spec
 
@@ -286,7 +335,7 @@ Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo 
 
 The operator injects Dynamo environment variables, identity, transport TLS, system port, and startup, liveness, and readiness probes into `spec.podTemplate.spec.initContainers[name=runtime]`. The `spec.podTemplate.spec.containers[name=main]` container runs the engine with user-provided launch configuration and probes. Graph-level environment variables apply to both containers; compilation cache and shared-memory configuration remain on `spec.podTemplate.spec.containers[name=main]`. A separate `frontendSidecar` is supported.
 
-Both containers use the existing environment merge behavior: merged entries are sorted by name and de-duplicated, with container-level values overriding graph-level values and runtime defaults. The operator origin version does not change this behavior. Backend-specific additions retain their existing placement; for example, `VLLM_CACHE_ROOT` is appended to the engine environment after merging.
+Both containers use the [environment composition contract](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order). For operator origins 1.8.0 and later, each source list retains its relative order, container-level definitions override general defaults, and cross-layer references are topologically ordered. Older or missing origins retain legacy sorting and de-duplication, including the existing placement of backend additions. `VLLM_CACHE_ROOT` applies only to the engine container.
 
 Backend inference inspects the engine in `main` for a Dynamo launcher (`python -m dynamo.<backend>`). It does not infer a backend from a native engine command such as `vllm-rs`, a shell wrapper, or an image entrypoint, because the resolved backend is part of the worker-generation hash and a new inference rule would roll existing workloads. Set `backendFramework` explicitly for native engines to receive backend and compilation-cache defaults. vLLM prefill LoRA fallback classification applies the same launcher detection to the running Pod, so native engine prefill Pods do not receive it; an explicit `backendFramework` does not enable it. Changing the runtime sidecar's launch does not change engine backend inference.
 
