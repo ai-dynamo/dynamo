@@ -535,10 +535,14 @@ struct PolicyClassQueue<T> {
     /// which runs on every worker free, never visits them. Empty without a gate, and every
     /// lookup checks that first: a router without a gate pays nothing for it.
     gate_held: FxHashSet<LaneId>,
-    /// Scratch for a full recheck: lanes the gate let go but that were refused for another
-    /// reason, filed once the other groups are asked. Kept between rechecks so a release into
-    /// a full fleet does not allocate.
-    gate_released: Vec<(LaneHead, BlockReason)>,
+    /// Scratch for a full recheck: lanes asked in place, among the gate's holds or the shared
+    /// group, that were refused for a reason another group files. They are filed once every
+    /// group is asked, so none is asked twice. Kept between rechecks so a full recheck into a
+    /// full fleet does not allocate.
+    refiled: Vec<(LaneHead, BlockReason)>,
+    /// Scratch for a full recheck: the heads of the lanes that left the shared group, until
+    /// they are dropped from its order. Kept between rechecks for the same reason.
+    departed: Vec<LaneHead>,
 }
 
 impl<T> PolicyClassQueue<T> {
@@ -735,25 +739,6 @@ impl<T> PolicyClassQueue<T> {
         }
     }
 
-    /// Re-asks one blocked lane's head and files it: a candidate again, or blocked anew.
-    fn reask<V: Into<LaneCheck>>(
-        &mut self,
-        lane: LaneId,
-        class_index: usize,
-        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> V,
-    ) {
-        let root = lane_root(&self.ready_by_lane, lane);
-        let head = LaneHead::new(lane, root);
-        match is_dispatchable(class_index, &self.config, root.payload()).into() {
-            LaneCheck::Dispatch => {
-                self.unblock(lane);
-                self.fallback_heads.remove(&head);
-                self.candidate_lane_heads.insert(head);
-            }
-            LaneCheck::Blocked(reason) => self.block_lane(head, reason),
-        }
-    }
-
     #[inline]
     fn next_dispatchable<V: Into<LaneCheck>>(
         &mut self,
@@ -800,7 +785,7 @@ impl<T> PolicyClassQueue<T> {
                     config,
                     ready_by_lane,
                     gate_held,
-                    gate_released,
+                    refiled,
                     candidate_lane_heads,
                     fallback_heads,
                     ..
@@ -816,7 +801,7 @@ impl<T> PolicyClassQueue<T> {
                             false
                         }
                         LaneCheck::Blocked(reason) => {
-                            gate_released.push((head, reason));
+                            refiled.push((head, reason));
                             false
                         }
                     }
@@ -868,11 +853,11 @@ impl<T> PolicyClassQueue<T> {
                     }
                 }
             });
-            let mut released = std::mem::take(&mut self.gate_released);
-            for (head, reason) in released.drain(..) {
+            let mut refiled = std::mem::take(&mut self.refiled);
+            for (head, reason) in refiled.drain(..) {
                 self.block_lane(head, reason);
             }
-            self.gate_released = released;
+            self.refiled = refiled;
         }
 
         // Fallback work competes on every pass; healthy targets stay event-driven.
@@ -953,7 +938,9 @@ impl<T> PolicyClassQueue<T> {
     /// Re-asks the shared-capacity group. Under a capacity recheck its best head answers for
     /// the whole group: refused, nothing is visited; allowed, that one lane is promoted and the
     /// rest stay blocked, since one free slot admits one head. Under a full recheck every lane
-    /// is asked on its own, since the gate answers per head.
+    /// is asked on its own, since the gate answers per head, and in place: a lane still refused
+    /// for the shared reason, which is every lane while the fleet is full, keeps its place in
+    /// both indexes. With a slot free every lane may go and leaves the group at once.
     fn recheck_shared<V: Into<LaneCheck>>(
         &mut self,
         plan: &RecheckPlan,
@@ -965,10 +952,46 @@ impl<T> PolicyClassQueue<T> {
         }
         if plan.all {
             self.promoted_shared = None;
-            self.shared_heads.clear();
-            for lane in std::mem::take(&mut self.shared_blocked).into_keys() {
-                self.reask(lane, class_index, is_dispatchable);
+            let Self {
+                config,
+                ready_by_lane,
+                shared_blocked,
+                shared_heads,
+                gate_held,
+                refiled,
+                departed,
+                candidate_lane_heads,
+                ..
+            } = self;
+            shared_blocked.retain(|&lane, head| {
+                let root = lane_root(ready_by_lane, lane);
+                match is_dispatchable(class_index, config, root.payload()).into() {
+                    LaneCheck::Blocked(BlockReason::SharedCapacity) => return true,
+                    LaneCheck::Dispatch => {
+                        candidate_lane_heads.insert(*head);
+                    }
+                    LaneCheck::Blocked(BlockReason::Gate) => {
+                        gate_held.insert(lane);
+                    }
+                    // Filed once the capacity lanes are asked, so it is not asked with them.
+                    LaneCheck::Blocked(reason) => refiled.push((*head, reason)),
+                }
+                departed.push(*head);
+                false
+            });
+            // Drop the lanes that left from the group's order by whichever is less work: one
+            // remove each, or the order rebuilt from the lanes that stayed, which is a plain
+            // clear when a free slot let every lane go.
+            if departed.len() > shared_blocked.len() {
+                shared_heads.clear();
+                shared_heads.extend(shared_blocked.values().copied());
+            } else {
+                for head in departed.iter() {
+                    let removed = shared_heads.remove(head);
+                    debug_assert!(removed);
+                }
             }
+            departed.clear();
             return;
         }
         let best = *self.shared_heads.last().expect("shared group is not empty");
@@ -1173,7 +1196,8 @@ impl<T> PolicyQueue<T> {
                     due_entries: BTreeSet::new(),
                     expiring_roots: BTreeSet::new(),
                     gate_held: FxHashSet::default(),
-                    gate_released: Vec::new(),
+                    refiled: Vec::new(),
+                    departed: Vec::new(),
                 })
                 .collect(),
             round_cursor: 0,

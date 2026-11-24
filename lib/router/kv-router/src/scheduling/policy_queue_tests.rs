@@ -564,6 +564,70 @@ fn full_recheck_asks_a_shared_lane_the_gate_now_holds_once() {
 }
 
 #[test]
+fn full_recheck_asks_each_shared_lane_once_and_leaves_the_rest_in_place() {
+    // Three lanes leave the group. With one lane staying its order is rebuilt from that lane;
+    // with four the three are dropped from it one by one.
+    for stayers in [1, 4] {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let stays: &[&'static str] = &["stays-1", "stays-2", "stays-3", "stays-4"][..stayers];
+        let leaves = ["goes", "held", "constrained"];
+        for (id, payload) in stays.iter().chain(&leaves).copied().enumerate() {
+            enqueue_due(&mut queue, None, None, lane_of(id as u64), payload);
+        }
+        let woke = std::cell::Cell::new(false);
+        let room = std::cell::Cell::new(false);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+            asked.borrow_mut().push(*payload);
+            match *payload {
+                "goes" if woke.get() => LaneCheck::Dispatch,
+                "held" if woke.get() => LaneCheck::Blocked(BlockReason::Gate),
+                "constrained" if woke.get() => LaneCheck::Blocked(BlockReason::Capacity),
+                name if name.starts_with("stays") && room.get() => LaneCheck::Dispatch,
+                _ => LaneCheck::Blocked(BlockReason::SharedCapacity),
+            }
+        };
+        assert!(queue.pop_next(predicate).is_none());
+        assert_eq!(queue.class_blocked_lane_count(0), stayers + 3);
+
+        // The gate's wake asks every shared lane once, the lane now blocked on its own
+        // capacity included: it is not asked again with the capacity lanes. The lane that may
+        // go is asked a second time at its dispatch.
+        woke.set(true);
+        asked.borrow_mut().clear();
+        queue.recheck_blocked_lanes(RecheckScope::All);
+        assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "goes");
+        let mut all = asked.borrow().clone();
+        all.sort_unstable();
+        let mut expected = [stays, &["goes", "goes", "held", "constrained"][..]].concat();
+        expected.sort_unstable();
+        assert_eq!(all, expected);
+        for id in 0..stayers {
+            assert_eq!(
+                queue.class_lane_block_reason(0, lane_of(id as u64)),
+                Some(BlockReason::SharedCapacity)
+            );
+        }
+        for (id, reason) in [(1, BlockReason::Gate), (2, BlockReason::Capacity)] {
+            assert_eq!(
+                queue.class_lane_block_reason(0, lane_of((stayers + id) as u64)),
+                Some(reason)
+            );
+        }
+
+        // The lanes left in place are the shared group, in its order: capacity admits them
+        // in turn, and nothing that left is promoted after them.
+        room.set(true);
+        queue.recheck_blocked_lanes(RecheckScope::Capacity);
+        for payload in stays {
+            assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), *payload);
+        }
+        assert!(queue.pop_next(predicate).is_none());
+        assert_eq!(queue.class_blocked_lane_count(0), 2);
+    }
+}
+
+#[test]
 fn full_recheck_asks_a_lane_the_gate_lets_go_once() {
     let mut queue = PolicyQueue::new(&edf_profile());
     enqueue_due(&mut queue, None, None, lane_of(1), "session");
