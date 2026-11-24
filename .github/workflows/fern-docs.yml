@@ -751,6 +751,10 @@ jobs:
       github.ref_type == 'tag' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.tag != null)
     runs-on: ubuntu-24.04
+    env:
+      # fern check and fern generate load every published version; Node's default
+      # heap ran out of memory on the v1.7.0 snapshot (exit 134).
+      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - name: Determine version tag
         id: version
