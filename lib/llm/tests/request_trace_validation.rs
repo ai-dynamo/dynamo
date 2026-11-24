@@ -75,7 +75,12 @@ async fn uuid_only_rejection_keeps_request_payload() {
                 ErrorType::InvalidArgument
             );
             let reason = error.to_string();
-            assert!(reason.contains("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS"));
+            let public_message = error
+                .downcast_ref::<DynamoError>()
+                .unwrap()
+                .public_message()
+                .unwrap();
+            assert!(public_message.contains("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS"));
             let record = tokio::time::timeout(Duration::from_secs(5), records.recv())
                 .await
                 .unwrap()
