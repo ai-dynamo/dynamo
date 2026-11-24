@@ -435,6 +435,8 @@ impl LLMEngine for SglangSidecarEngine {
                 native_model_type: node.engine.native_model_type.clone(),
                 audio_model_type: node.engine.staged_audio_model_type.clone(),
                 handoff_key_id: node.engine.encoder_handoff_key_id.clone(),
+                layout_id: node.engine.staged_layout_id.clone(),
+                transfer_backend: node.engine.staged_transfer_backend,
             };
             capabilities.advertise(&mut config);
             capabilities
@@ -1202,6 +1204,8 @@ mod tests {
             served_model_name: "chat-model".into(),
             instance_id: vec![1; 16],
             supports_staged_video: false,
+            staged_transfer_backend: "zmq_to_scheduler".into(),
+            staged_layout_id: "layout".into(),
             ..Default::default()
         };
         let (engine, config) =
@@ -1234,6 +1238,8 @@ mod tests {
             let info = discovery(|reported| {
                 reported.server.disaggregation_mode = mode.into();
                 reported.server.accepts_encoder_handoff = true;
+                reported.server.staged_layout_id = Some("layout".into());
+                reported.server.staged_transfer_backend = Some("nixl".into());
                 reported.deployment.disaggregation_bootstrap_port = Some(4100);
             });
             let result = SglangSidecarEngine::from_discovered(args, info);

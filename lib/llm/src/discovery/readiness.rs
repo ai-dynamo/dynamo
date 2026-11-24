@@ -10,17 +10,72 @@
 
 use std::collections::HashSet;
 
+use crate::local_model::runtime_config::{
+    ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE, ModelRuntimeConfig,
+};
 use crate::model_card::ModelDeploymentCard;
 use crate::worker_type::WorkerType;
+
+/// The backend owns both identities. Discovery compares the receipt contract on
+/// every hop and the embedding transport only where embeddings actually move.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EncoderHandoff<'a> {
+    contract: Option<&'a serde_json::Value>,
+    transfer_mode: Option<&'a str>,
+    route_to_encoder: bool,
+}
+
+impl<'a> From<&'a ModelRuntimeConfig> for EncoderHandoff<'a> {
+    fn from(config: &'a ModelRuntimeConfig) -> Self {
+        Self {
+            contract: config.runtime_data.get(ENCODER_HANDOFF_CONTRACT),
+            transfer_mode: config
+                .runtime_data
+                .get(ENCODER_HANDOFF_TRANSFER_MODE)
+                .and_then(serde_json::Value::as_str),
+            route_to_encoder: config
+                .runtime_data
+                .get("encoder_result_handoff")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
+        }
+    }
+}
+
+impl EncoderHandoff<'_> {
+    pub(super) fn accepts_encoder(self, encoder: Self) -> bool {
+        self.route_to_encoder
+            && self.contract == encoder.contract
+            && (self.contract.is_none() || self.transfer_mode.is_some())
+            && self.transfer_mode == encoder.transfer_mode
+    }
+
+    pub(super) fn accepts_prefill(self, prefill: Self) -> bool {
+        self.contract == prefill.contract
+    }
+}
 
 /// The readiness-relevant projection of one WorkerSet: one distinct worker card shape
 /// with the number of live workers behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadinessUnit {
+pub struct ReadinessUnit<'a> {
     /// `None` is a legacy card without a declared worker type.
     pub worker_type: Option<WorkerType>,
     pub live_count: usize,
     pub needs: Vec<Vec<WorkerType>>,
+    pub handoff: EncoderHandoff<'a>,
+    pub standalone_encoder: bool,
+}
+
+impl ReadinessUnit<'_> {
+    fn requires_encoder_target(&self) -> bool {
+        (self.handoff.route_to_encoder && self.handoff.contract.is_some())
+            || (!self.needs.is_empty()
+                && self
+                    .needs
+                    .iter()
+                    .all(|alternative| alternative.contains(&WorkerType::Encode)))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,6 +86,7 @@ pub struct ReadinessEval {
     pub present: HashSet<WorkerType>,
     pub missing: HashSet<WorkerType>,
     pub ambiguous: HashSet<WorkerType>,
+    pub incompatible: HashSet<WorkerType>,
 }
 
 /// Project the topology implicit in a pre-`worker_type` prefill card into the
@@ -50,19 +106,81 @@ pub fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
     }
 }
 
+/// A required handoff needs a unique compatible encoder for each receiving
+/// pipeline. Different receiver cohorts may use different encoders. Multiple
+/// compatible endpoints for the same receiver remain ambiguous.
+fn check_encoder_handoffs(units: &[ReadinessUnit<'_>], eval: &mut ReadinessEval) {
+    let live = || units.iter().filter(|unit| unit.live_count > 0);
+    let mut checked_receiver = false;
+    let mut ambiguous_encoder = false;
+    for receiver in live() {
+        match receiver.worker_type {
+            Some(WorkerType::Decode) => {
+                // Routers bind to a committed group until discovery removes it,
+                // even if its availability watch temporarily contains no workers.
+                for role in [WorkerType::Prefill, WorkerType::Decode] {
+                    if units
+                        .iter()
+                        .filter(|peer| peer.worker_type == Some(role))
+                        .count()
+                        > 1
+                    {
+                        eval.ambiguous.insert(role);
+                    }
+                }
+                let prefills =
+                    || live().filter(|peer| peer.worker_type == Some(WorkerType::Prefill));
+                if prefills().next().is_some()
+                    && !prefills().any(|p| receiver.handoff.accepts_prefill(p.handoff))
+                {
+                    eval.incompatible.insert(WorkerType::Prefill);
+                }
+            }
+            // A native worker may accept receipts without routing to Dynamo E.
+            // Only a receiver configured for that hop needs a compatible target.
+            _ if !receiver.standalone_encoder && receiver.requires_encoder_target() => {
+                checked_receiver = true;
+                let mut eligible = units.iter().filter(|peer| {
+                    peer.standalone_encoder && receiver.handoff.accepts_encoder(peer.handoff)
+                });
+                match (eligible.next(), eligible.next()) {
+                    (_, Some(_)) => ambiguous_encoder = true,
+                    (Some(encoder), None) if encoder.live_count > 0 => {}
+                    (None, None) if eval.present.contains(&WorkerType::Encode) => {
+                        eval.incompatible.insert(WorkerType::Encode);
+                    }
+                    _ => {
+                        eval.missing.insert(WorkerType::Encode);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if checked_receiver {
+        if ambiguous_encoder {
+            eval.ambiguous.insert(WorkerType::Encode);
+        } else {
+            eval.ambiguous.remove(&WorkerType::Encode);
+        }
+    }
+}
+
 /// Whether a namespace's units are ready to serve traffic.
-pub fn evaluate_readiness(units: &[ReadinessUnit]) -> ReadinessEval {
+pub fn evaluate_readiness(units: &[ReadinessUnit<'_>]) -> ReadinessEval {
     let mut present: HashSet<WorkerType> = HashSet::new();
     let mut missing: HashSet<WorkerType> = HashSet::new();
     let mut has_legacy = false;
     let mut legacy_live_workers = 0usize;
     let mut has_live_worker = false;
+    let mut has_handoff_contract = false;
     let mut live_units_by_type = std::collections::HashMap::new();
 
     // First pass: which worker types have a live worker (+ legacy detection).
     for unit in units {
         if unit.live_count > 0 {
             has_live_worker = true;
+            has_handoff_contract |= unit.handoff.contract.is_some();
         }
         match unit.worker_type {
             Some(worker_type) => {
@@ -79,16 +197,16 @@ pub fn evaluate_readiness(units: &[ReadinessUnit]) -> ReadinessEval {
         }
     }
 
-    // COMPAT branch: a legacy card disables strict gating; the disaggregated
-    // worker types can't be reconstructed, so ready iff any worker is live.
-    if has_legacy {
+    // Legacy cards lack declared roles. Apply their liveness fallback unless
+    // a live worker advertises an external handoff contract; that explicit
+    // protocol requires identifiable peers even during a rolling upgrade.
+    if has_legacy && !has_handoff_contract {
         return ReadinessEval {
             ready: has_live_worker,
             has_legacy,
             legacy_live_workers,
             present,
-            missing,
-            ambiguous: HashSet::new(),
+            ..Default::default()
         };
     }
 
@@ -127,14 +245,23 @@ pub fn evaluate_readiness(units: &[ReadinessUnit]) -> ReadinessEval {
         }
     }
 
-    ReadinessEval {
-        ready: has_live_worker && missing.is_empty() && ambiguous.is_empty(),
-        has_legacy,
+    let mut eval = ReadinessEval {
+        ready: false,
+        has_legacy: false,
         legacy_live_workers,
         present,
         missing,
         ambiguous,
+        incompatible: HashSet::new(),
+    };
+    if has_handoff_contract {
+        check_encoder_handoffs(units, &mut eval);
     }
+    eval.ready = has_live_worker
+        && eval.missing.is_empty()
+        && eval.ambiguous.is_empty()
+        && eval.incompatible.is_empty();
+    eval
 }
 
 #[cfg(test)]
@@ -145,11 +272,13 @@ mod tests {
         worker_type: Option<WorkerType>,
         live_count: usize,
         needs: Vec<Vec<WorkerType>>,
-    ) -> ReadinessUnit {
+    ) -> ReadinessUnit<'static> {
         ReadinessUnit {
             worker_type,
             live_count,
             needs,
+            handoff: Default::default(),
+            standalone_encoder: worker_type == Some(WorkerType::Encode),
         }
     }
 
@@ -205,6 +334,50 @@ mod tests {
         let unavailable = evaluate_readiness(&[unit(None, 0, vec![])]);
         assert!(!unavailable.ready);
         assert!(unavailable.has_legacy);
+    }
+
+    #[test]
+    fn staged_receipt_advertisement_respects_routing_opt_in_and_legacy_peers() {
+        use WorkerType::{Aggregated, Decode, Encode, Prefill};
+        let contract = serde_json::json!({"receipt":"a"});
+        let staged = |role, needs| ReadinessUnit {
+            worker_type: Some(role),
+            live_count: 1,
+            needs,
+            standalone_encoder: role == Encode,
+            handoff: EncoderHandoff {
+                contract: Some(&contract),
+                ..Default::default()
+            },
+        };
+        let mut pd = staged(Aggregated, vec![]);
+        // Native external mode also accepts pre-staged traffic without a Dynamo E.
+        assert!(evaluate_readiness(&[pd.clone()]).ready);
+        pd.needs = vec![vec![Encode]];
+        let mut encoder = staged(Encode, vec![vec![Aggregated]]);
+        assert!(!evaluate_readiness(&[pd.clone(), encoder.clone()]).ready);
+        pd.handoff.route_to_encoder = true;
+        // The transport was absent on old experimental sidecar advertisements.
+        assert!(!evaluate_readiness(&[pd.clone(), encoder.clone()]).ready);
+        for peer in [&mut pd, &mut encoder] {
+            peer.handoff.transfer_mode = Some("nixl");
+        }
+        assert!(evaluate_readiness(&[pd.clone(), encoder.clone()]).ready);
+        let mut unavailable_duplicate = encoder.clone();
+        unavailable_duplicate.live_count = 0;
+        let duplicate = evaluate_readiness(&[pd, encoder, unavailable_duplicate]);
+        assert!(!duplicate.ready);
+        assert!(duplicate.ambiguous.contains(&Encode));
+
+        let decode = staged(Decode, vec![vec![Prefill]]);
+        let legacy = unit(None, 1, vec![]);
+        let result = evaluate_readiness(&[decode.clone(), legacy]);
+        assert!(!result.ready);
+        assert!(result.missing.contains(&Prefill));
+        let inline_prefill = unit(Some(Prefill), 1, vec![vec![Decode]]);
+        let result = evaluate_readiness(&[decode, inline_prefill]);
+        assert!(!result.ready);
+        assert!(result.incompatible.contains(&Prefill));
     }
 
     #[test]

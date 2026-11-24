@@ -157,17 +157,6 @@ pub(crate) enum SystemOneSelectionError {
     Unavailable,
 }
 
-/// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
-/// Shared by the serving gate and the `/ready` endpoint so they can't diverge.
-struct NamespaceReadinessEval {
-    ready: bool,
-    has_legacy: bool,
-    legacy_live_workers: usize,
-    present: std::collections::HashSet<crate::worker_type::WorkerType>,
-    missing: std::collections::HashSet<crate::worker_type::WorkerType>,
-    ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
-}
-
 type WorkerSetMap = HashMap<String, Arc<WorkerSet>>;
 
 /// A named model backed by one or more WorkerSets.
@@ -440,21 +429,6 @@ impl Model {
             .collect()
     }
 
-    /// Return `(worker_type, needs)` for this WorkerSet, or `None` if the
-    /// card has no declared `worker_type` (a legacy card from an old,
-    /// pre-`worker_type` worker). The readiness path treats `None` as the
-    /// signal to fall back to the cross-version compat path — see
-    /// `is_workers_ready`.
-    fn ws_type_and_needs(
-        ws: &WorkerSet,
-    ) -> Option<(
-        crate::worker_type::WorkerType,
-        Vec<Vec<crate::worker_type::WorkerType>>,
-    )> {
-        let card = ws.card();
-        card.worker_type.map(|wt| (wt, card.needs.clone()))
-    }
-
     /// Whether the workers in the given namespace are ready to serve traffic.
     ///
     /// Iterates the WorkerSets sharing this namespace and checks that every
@@ -467,8 +441,9 @@ impl Model {
     /// binary), its disaggregated worker types cannot be reconstructed — old decode
     /// and old aggregated workers are indistinguishable on the wire. Rather than
     /// hide the model, we fall back to legacy behavior and report ready as long
-    /// as some worker is live. Strict worker-type readiness gating resumes automatically once
-    /// every worker in the namespace carries a `worker_type`.
+    /// as some worker is live. A live external-encoder contract requires explicit
+    /// compatible peers even in a mixed-version namespace. Other deployments resume
+    /// strict readiness gating once every worker declares a `worker_type`.
     ///
     /// TODO(v1.5): Remove this branch with the legacy MDC topology shims after
     /// the v1.2 compatibility window expires.
@@ -488,36 +463,29 @@ impl Model {
     /// registered worker type has a live worker, and every *live* WorkerSet's
     /// `needs` DNF is satisfied; anything absent goes in `missing`. A dead
     /// WorkerSet's needs are ignored (a live sibling of the same type carries
-    /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
-    /// check: ready iff any worker is live. Empty `wsets` is not ready.
-    fn evaluate_namespace(&self, wsets: &[&WorkerSet]) -> NamespaceReadinessEval {
+    /// the same `needs`). External-encoder routes also require compatible peers.
+    /// See `is_workers_ready` for the legacy liveness fallback.
+    fn evaluate_namespace(&self, wsets: &[&WorkerSet]) -> super::readiness::ReadinessEval {
         let units = wsets
             .iter()
-            .map(|ws| match Self::ws_type_and_needs(ws) {
-                Some((worker_type, needs)) => super::readiness::ReadinessUnit {
-                    worker_type: Some(worker_type),
+            .map(|ws| {
+                let card = ws.card();
+                super::readiness::ReadinessUnit {
+                    worker_type: card.worker_type,
                     live_count: ws.worker_count(),
-                    needs,
-                },
-                None => super::readiness::ReadinessUnit {
-                    worker_type: None,
-                    live_count: ws.worker_count(),
-                    needs: Vec::new(),
-                },
+                    needs: card.needs.clone(),
+                    handoff: (&card.runtime_config).into(),
+                    standalone_encoder: card.worker_type
+                        == Some(crate::worker_type::WorkerType::Encode)
+                        && card.model_type.is_empty(),
+                }
             })
             .collect::<Vec<_>>();
         let eval = super::readiness::evaluate_readiness(&units);
         if eval.has_legacy {
             warn_legacy_readiness_once(&self.name, wsets[0].namespace());
         }
-        NamespaceReadinessEval {
-            ready: eval.ready,
-            has_legacy: eval.has_legacy,
-            legacy_live_workers: eval.legacy_live_workers,
-            present: eval.present,
-            missing: eval.missing,
-            ambiguous: eval.ambiguous,
-        }
+        eval
     }
 
     /// Return the namespace identifier of the first ready set of workers (in
@@ -595,6 +563,17 @@ impl Model {
                 } else {
                     None
                 }
+            } else if !eval.incompatible.is_empty() {
+                let mut roles = eval
+                    .incompatible
+                    .iter()
+                    .map(|role| role.as_str())
+                    .collect::<Vec<_>>();
+                roles.sort_unstable();
+                Some(format!(
+                    "incompatible encoder handoff for worker types: {}",
+                    roles.join(", ")
+                ))
             } else if eval.has_legacy {
                 Some("legacy worker(s) present but no live worker".to_string())
             } else if !eval.ambiguous.is_empty() {

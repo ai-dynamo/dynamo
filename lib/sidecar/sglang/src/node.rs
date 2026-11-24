@@ -140,6 +140,8 @@ impl NodeInfo {
         let start = infos[0];
         if infos.iter().any(|info| {
             info.encoder_handoff_key_id != start.encoder_handoff_key_id
+                || info.staged_layout_id != start.staged_layout_id
+                || info.staged_transfer_backend != start.staged_transfer_backend
                 || info.accepts_encoder_handoff != start.accepts_encoder_handoff
                 || info.native_model_type != start.native_model_type
                 || info.staged_audio_model_type != start.staged_audio_model_type
@@ -394,11 +396,40 @@ mod tests {
             report(u32::from(external), 0..2, 2, |info| {
                 info.disaggregation_mode = "decode".into();
                 info.accepts_encoder_handoff = external;
+                info.staged_layout_id = external.then(|| "layout".into());
             })
             .unwrap()
         });
         let error = node_of(&infos, DisaggregationMode::Decode).unwrap_err();
         assert!(error.to_string().contains("external encoder mode"));
+    }
+
+    #[test]
+    fn external_receivers_require_a_known_transport_on_every_listener() {
+        let discover = |rank, mode: &str, backend: Option<&str>| {
+            report(rank, 0..2, 2, |info| {
+                info.accepts_encoder_handoff = true;
+                info.staged_layout_id = Some("layout".into());
+                info.disaggregation_mode = mode.into();
+                info.staged_transfer_backend = backend.map(str::to_owned);
+            })
+        };
+
+        for mode in ["null", "prefill"] {
+            for backend in [None, Some("auto")] {
+                let error = discover(0, mode, backend).unwrap_err();
+                assert!(error.to_string().contains("encoder transfer backend"));
+            }
+            let nixl = discover(0, mode, Some("nixl")).unwrap();
+            let zmq = discover(1, mode, Some("zmq_to_scheduler")).unwrap();
+            let role = nixl.disaggregation_mode;
+            assert!(node_of(&[nixl, zmq], role).is_err());
+        }
+
+        let decode = discover(0, "decode", None).unwrap();
+        let decode_with_transport = discover(1, "decode", Some("nixl")).unwrap();
+        let node = node_of(&[decode, decode_with_transport], DisaggregationMode::Decode).unwrap();
+        assert!(node.engine.staged_transfer_backend.is_none());
     }
 
     fn source(dp_rank: u32, port: u32) -> pb::KvEventSource {

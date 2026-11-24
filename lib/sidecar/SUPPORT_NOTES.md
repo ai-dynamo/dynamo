@@ -26,7 +26,7 @@ Run one Dynamo sidecar per native SGLang encoder. Enable `--route-to-encoder` on
 
 The local launcher creates a temporary, private receipt key shared by its SGLang workers. Across hosts, generate 32 random bytes once with `(umask 077 && openssl rand 32 > encoder-handoff.key)`. Mount the file on each native worker and set `SGLANG_ENCODER_HANDOFF_KEY_FILE` to its path. Set `SGLANG_ENCODER_HANDOFF_ENDPOINT=grpc://host:port` on E if it binds a wildcard or P/PD reaches it at a different address. An explicit sidecar `--encoder-advertise-endpoint` must match that signed endpoint.
 
-Discovery groups workers by their encoder handoff contract, including the shared key fingerprint. Restart workers with a new key to rotate it. E signs the descriptor and its address. P/PD and D verify the receipt before using it. SGLang processor declarations own the media types and layout rules. On a deployment that requires E, a Stage failure ends the request before language generation.
+Discovery matches the processor layout and receipt key fingerprint across E, P/PD and D. E and P/PD also have to advertise the same embedding transport (NIXL or ZMQ). D consumes metadata and can use either setup. Restart workers with a new key to rotate it. E signs the descriptor and its address. P/PD and D verify the receipt before using it. Each worker validates its available media types on the request. An image-capable encoder can serve images even when only the language worker has video support. On a deployment that requires E, a Stage failure ends the request before language generation.
 
 After Stage, the router directs cleanup for a cancelled or definitively rejected request to the selected E. Lost or ambiguous handoffs expire in E's native request registry. Once P/PD claims a transfer, it owns the receive buffer and its completion fence.
 
@@ -80,9 +80,9 @@ For requests with audio, E and the language worker must advertise the same audio
 
 The launcher defaults to NIXL/UCX. P or PD registers host memory for the encoder to write into. Install NIXL with its UCX plugin on both ends, or select ZMQ with `--encoder-transfer-backend zmq_to_scheduler`. In E/P/D, D receives the layout and video timing to reconstruct token positions. The P→D KV transfer backend is configured separately. See the [E/PD and E/P/D launcher](sglang/launch/encoded.sh).
 
-To serve video, deploy video-capable builds on every E and every participating language worker for the model in its Dynamo namespace. EncoderRouter binds one encoder worker set and selects replicas round-robin. A mixed rollout can leave the router without a unique encoder set or send a video to an image-only encoder, which rejects it.
+EncoderRouter selects replicas round-robin within a compatible worker set. Multiple eligible encoder sets make the target ambiguous.
 
-For encoders that advertise their media policy, the E sidecar fetches remote media under Dynamo's DNS and redirect checks and the native encoder's allowed domains, size limit, and timeout. The complete Stage request, including base64 expansion, must fit the 64 MiB gRPC limit. On older image-only encoders the native process fetches its own image URLs.
+For encoders that advertise their media policy, the E sidecar fetches remote media under Dynamo's DNS and redirect checks and the native encoder's allowed domains, size limit, and timeout. The complete Stage request, including base64 expansion, must fit the 64 MiB gRPC limit. When E omits the media policy, its native process fetches the source URLs.
 
 Deploy a native encoder that reports its 16-byte instance ID in both GetEncoderInfo and Stage. A replacement encoder registers a new ID. The sidecar rejects a receipt from an unexpected instance and attempts to release it on the producing endpoint.
 

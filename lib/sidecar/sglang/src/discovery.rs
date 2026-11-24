@@ -102,6 +102,8 @@ pub(crate) struct EngineInfo {
     pub supports_staged_video: bool,
     pub staged_audio_model_type: String,
     pub encoder_handoff_key_id: String,
+    pub staged_layout_id: String,
+    pub staged_transfer_backend: Option<&'static str>,
     pub native_model_type: String,
     /// Reported prefill bootstrap port, validated only for prefill workers.
     pub disaggregation_bootstrap_port: Option<u64>,
@@ -252,6 +254,21 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
             "" => "null",
             mode => mode,
         })?;
+    let staged_layout_id = server_info.staged_layout_id.clone().unwrap_or_default();
+    if server_info.accepts_encoder_handoff {
+        crate::encoder::require_staged_layout_id(&staged_layout_id)?;
+    }
+    let staged_transfer_backend =
+        if server_info.accepts_encoder_handoff && !disaggregation_mode.is_decode() {
+            Some(crate::encoder::staged_transfer_backend(
+                server_info
+                    .staged_transfer_backend
+                    .as_deref()
+                    .unwrap_or_default(),
+            )?)
+        } else {
+            None
+        };
     let non_empty = |value: &Option<String>| value.clone().filter(|entry| !entry.is_empty());
 
     Ok(EngineInfo {
@@ -261,6 +278,8 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         context_length: max_model_len,
         disaggregation_mode,
         accepts_encoder_handoff: server_info.accepts_encoder_handoff,
+        staged_transfer_backend,
+        staged_layout_id,
         supports_staged_images: server_info.supports_staged_images.unwrap_or(true),
         supports_staged_video: server_info.supports_staged_video,
         staged_audio_model_type: server_info.staged_audio_model_type.clone(),

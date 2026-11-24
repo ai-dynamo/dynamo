@@ -17,7 +17,9 @@ use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, KvQuerySemantics, ModelTarget,
     PoolCatalogSnapshot, WorkerRole,
 };
-use crate::discovery::readiness::{ReadinessUnit, evaluate_readiness};
+use crate::discovery::readiness::{EncoderHandoff, ReadinessUnit, evaluate_readiness};
+use crate::local_model::runtime_config::ENCODER_HANDOFF_CAPABILITIES;
+#[cfg(test)]
 use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
 
@@ -62,13 +64,13 @@ pub struct TopologySnapshot {
 }
 
 #[derive(Default)]
-struct AdapterAggregate {
-    units: Vec<ReadinessUnit>,
+struct AdapterAggregate<'a> {
+    units: Vec<ReadinessUnit<'a>>,
     availability_authoritative: bool,
     initialized: bool,
 }
 
-impl AdapterAggregate {
+impl AdapterAggregate<'_> {
     fn observe_authority(&mut self, authoritative: bool) {
         if !self.initialized {
             self.availability_authoritative = true;
@@ -79,15 +81,15 @@ impl AdapterAggregate {
 }
 
 #[derive(Default)]
-struct TopologyAggregate {
-    units: Vec<ReadinessUnit>,
+struct TopologyAggregate<'a> {
+    units: Vec<ReadinessUnit<'a>>,
     members: Vec<TopologyMember>,
-    adapters: BTreeMap<CanonicalModelId, AdapterAggregate>,
+    adapters: BTreeMap<CanonicalModelId, AdapterAggregate<'a>>,
     availability_authoritative: bool,
     initialized: bool,
 }
 
-impl TopologyAggregate {
+impl TopologyAggregate<'_> {
     fn observe_authority(&mut self, authoritative: bool) {
         if !self.initialized {
             self.availability_authoritative = true;
@@ -311,9 +313,11 @@ fn derive_topology(
                 roles: endpoint_membership.roles.clone(),
                 pool_id: compatible_pool_id(endpoint_membership, &base_model, pools),
             });
-            group
-                .units
-                .extend(topology_units(endpoint_membership, endpoint_availability));
+            group.units.extend(topology_units(
+                endpoint_membership,
+                endpoint_membership.worker_topology.keys(),
+                endpoint_availability,
+            ));
             collect_adapter_membership(
                 group,
                 endpoint_membership,
@@ -384,35 +388,48 @@ fn compatible_pool_id(
         .then_some(link.pool_id)
 }
 
-fn topology_units(
-    membership: &EndpointMembership,
+fn topology_units<'a>(
+    membership: &'a EndpointMembership,
+    worker_ids: impl Iterator<Item = &'a WorkerId>,
     live_workers: Option<&HashSet<WorkerId>>,
-) -> Vec<ReadinessUnit> {
-    let mut groups = HashMap::<(Option<WorkerType>, ModelType, Vec<Vec<WorkerType>>), usize>::new();
-    for (&worker_id, topology) in &membership.worker_topology {
-        let live = live_workers.is_some_and(|workers| workers.contains(&worker_id));
-        let live_count = groups
+) -> Vec<ReadinessUnit<'a>> {
+    let mut groups = HashMap::new();
+    for worker_id in worker_ids {
+        let Some(topology) = membership.worker_topology.get(worker_id) else {
+            continue;
+        };
+        let config = membership.runtime_configs.get(worker_id);
+        let handoff = config.map(EncoderHandoff::from).unwrap_or_default();
+        let capabilities = config.and_then(|c| c.runtime_data.get(ENCODER_HANDOFF_CAPABILITIES));
+        let live = live_workers.is_some_and(|workers| workers.contains(worker_id));
+        *groups
             .entry((
                 topology.worker_type,
                 topology.model_type,
-                topology.needs.clone(),
+                &topology.needs,
+                handoff,
+                capabilities,
             ))
-            .or_default();
-        *live_count += usize::from(live);
+            .or_insert(0usize) += usize::from(live);
     }
     groups
         .into_iter()
-        .map(|((worker_type, _, needs), live_count)| ReadinessUnit {
-            worker_type,
-            live_count,
-            needs,
-        })
+        .map(
+            |((worker_type, model_type, needs, handoff, _), live_count)| ReadinessUnit {
+                worker_type,
+                live_count,
+                needs: needs.clone(),
+                handoff,
+                standalone_encoder: worker_type == Some(WorkerType::Encode)
+                    && model_type.is_empty(),
+            },
+        )
         .collect()
 }
 
-fn collect_adapter_membership(
-    group: &mut TopologyAggregate,
-    membership: &EndpointMembership,
+fn collect_adapter_membership<'a>(
+    group: &mut TopologyAggregate<'a>,
+    membership: &'a EndpointMembership,
     base_model: &CanonicalModelId,
     live_workers: Option<&HashSet<WorkerId>>,
 ) {
@@ -427,36 +444,16 @@ fn collect_adapter_membership(
         // apply to adapters unchanged (an adapter on a live Aggregated route is ready
         // even when a disaggregated route also exists, and a Decode-only adapter still
         // needs an adapter-carrying Prefill peer).
-        let mut units =
-            HashMap::<(Option<WorkerType>, ModelType, Vec<Vec<WorkerType>>), usize>::new();
-        for worker_id in adapter_membership.workers.keys() {
-            let Some(topology) = membership.worker_topology.get(worker_id) else {
-                continue;
-            };
-            let live = live_workers.is_some_and(|workers| workers.contains(worker_id));
-            let live_count = units
-                .entry((
-                    topology.worker_type,
-                    topology.model_type,
-                    topology.needs.clone(),
-                ))
-                .or_default();
-            *live_count += usize::from(live);
-        }
-        aggregate.units.extend(
-            units
-                .into_iter()
-                .map(|((worker_type, _, needs), live_count)| ReadinessUnit {
-                    worker_type,
-                    live_count,
-                    needs,
-                }),
-        );
+        aggregate.units.extend(topology_units(
+            membership,
+            adapter_membership.workers.keys(),
+            live_workers,
+        ));
     }
 }
 
 fn derive_adapters(
-    adapters: &BTreeMap<CanonicalModelId, AdapterAggregate>,
+    adapters: &BTreeMap<CanonicalModelId, AdapterAggregate<'_>>,
 ) -> Vec<AdapterReadiness> {
     adapters
         .iter()
@@ -1158,6 +1155,67 @@ mod tests {
         // The core COMPAT branch does not evaluate ambiguity for legacy namespaces,
         // so the fact list stays empty rather than reporting the duplicate prefill.
         assert!(topology.duplicate_role_endpoints.is_empty());
+    }
+
+    #[test]
+    fn relay_readiness_compares_encoder_handoffs_from_discovery() {
+        use crate::local_model::runtime_config::{
+            ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE, ModelRuntimeConfig,
+        };
+        for (encoder_key, expected) in [
+            ("other", TopologyReadinessState::Unavailable),
+            ("key", TopologyReadinessState::Ready),
+        ] {
+            let staged = |role: WorkerType, needs, id, key: &str| {
+                let mut member = endpoint(
+                    &format!("production.{}.generate", role.as_str()),
+                    "llama",
+                    id,
+                    Some(role),
+                    needs,
+                );
+                let mut config = ModelRuntimeConfig::default();
+                config
+                    .set_engine_specific(ENCODER_HANDOFF_CONTRACT, serde_json::json!({"key":key}))
+                    .unwrap();
+                config
+                    .set_engine_specific(ENCODER_HANDOFF_TRANSFER_MODE, "nixl")
+                    .unwrap();
+                // This E stages images while the receiver also supports video.
+                config
+                    .set_engine_specific(
+                        ENCODER_HANDOFF_CAPABILITIES,
+                        serde_json::json!({"images":true,"video":role != WorkerType::Encode}),
+                    )
+                    .unwrap();
+                if role == WorkerType::Encode {
+                    member.worker_topology.get_mut(&id).unwrap().model_type = ModelType::empty();
+                } else {
+                    config
+                        .set_engine_specific("encoder_result_handoff", true)
+                        .unwrap();
+                }
+                member.runtime_configs.insert(id, config);
+                member
+            };
+            let view = view(vec![
+                staged(
+                    WorkerType::Aggregated,
+                    vec![vec![WorkerType::Encode]],
+                    1,
+                    "key",
+                ),
+                staged(
+                    WorkerType::Encode,
+                    vec![vec![WorkerType::Aggregated]],
+                    2,
+                    encoder_key,
+                ),
+            ]);
+            let publisher = publisher(&view);
+            publish_live(&publisher, &view);
+            assert_eq!(entry(&publisher.snapshot(), "llama").state, expected);
+        }
     }
 
     #[test]

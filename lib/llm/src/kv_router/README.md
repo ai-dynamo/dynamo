@@ -223,7 +223,9 @@ newer booking that reused the same request id and worker.
 - **Untargeted**: no prefill target. Pass through to the next stage.
 
 `ModelManager::reconcile_discovery_topology` sets the target only when the namespace has
-exactly one prefill worker set and one decode worker set. The encoder target follows the
-`encoder_result_handoff` rules there. In Direct mode the prefill hop requires
+exactly one prefill worker set and one decode worker set with compatible encoder receipt
+contracts. When the receiver routes to E, Dynamo binds a unique compatible standalone encoder
+worker set. E and P/PD must agree on the embedding transport. D consumes the receipt metadata.
+In Direct mode the prefill hop requires
 `routing.prefill_worker_id`. See [`../discovery/AGENTS.md`](../discovery/AGENTS.md) for worker-set
 admission and succession.

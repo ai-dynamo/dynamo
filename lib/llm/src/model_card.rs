@@ -53,9 +53,7 @@ fn append_runtime_contract_checksum(
     canonicalize_json_object_keys(&mut value);
     let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
 
-    // This contract controls model-visible media prompt expansion. Workers
-    // with different contracts must not share a cohort whose preprocessor is
-    // built from one representative card.
+    // Each cohort uses one representative card to build its request pipeline.
     bytes.extend_from_slice(b"\0dynamo/model-card/runtime-contract/v1\0");
     bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
     bytes.extend_from_slice(key.as_bytes());
@@ -1548,6 +1546,17 @@ impl ModelDeploymentCard {
                     &mut bytes_to_hash,
                     &self.runtime_config,
                     crate::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT,
+                );
+
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::ENCODER_HANDOFF_CAPABILITIES,
+                );
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::ENCODER_HANDOFF_TRANSFER_MODE,
                 );
 
                 // The Qwen video contract is resolved per cohort, not per card.
@@ -4150,7 +4159,9 @@ mod ownership_tests {
 
     #[test]
     fn only_matching_encoder_handoff_contracts_share_a_worker_set() {
-        use crate::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
+        use crate::local_model::runtime_config::{
+            ENCODER_HANDOFF_CAPABILITIES, ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE,
+        };
 
         let card = |contract: Option<serde_json::Value>| {
             let mut card = ModelDeploymentCard::with_name_only("model");
@@ -4176,6 +4187,31 @@ mod ownership_tests {
             external.mdcsum(),
             card(Some(serde_json::json!({"protocol":"a", "video":false}))).mdcsum()
         );
+        let with_transport = |transport: &str| {
+            let mut worker = card(Some(serde_json::json!({"protocol":"a", "video":true})));
+            worker
+                .runtime_config
+                .set_engine_specific(ENCODER_HANDOFF_TRANSFER_MODE, transport)
+                .unwrap();
+            worker
+        };
+        assert_ne!(
+            with_transport("nixl").mdcsum(),
+            with_transport("zmq_to_scheduler").mdcsum()
+        );
+        assert_ne!(with_transport("nixl").mdcsum(), external.mdcsum());
+        let with_video = |video: bool| {
+            let mut worker = with_transport("nixl");
+            worker
+                .runtime_config
+                .set_engine_specific(
+                    ENCODER_HANDOFF_CAPABILITIES,
+                    serde_json::json!({"images": true, "video": video}),
+                )
+                .unwrap();
+            worker
+        };
+        assert_ne!(with_video(true).mdcsum(), with_video(false).mdcsum());
     }
 
     #[test]

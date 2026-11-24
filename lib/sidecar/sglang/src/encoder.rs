@@ -10,7 +10,9 @@ use dynamo_backend_common::{
     DynamoError, EngineConfig, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
 use dynamo_llm::kv_router::encoder_router::ENCODER_RELEASE;
-use dynamo_llm::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
+use dynamo_llm::local_model::runtime_config::{
+    ENCODER_HANDOFF_CAPABILITIES, ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE,
+};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
@@ -71,16 +73,48 @@ pub(crate) struct StagedCapabilities {
     pub(crate) video: bool,
     pub(crate) native_model_type: String,
     pub(crate) audio_model_type: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(skip)]
     pub(crate) handoff_key_id: String,
+    #[serde(skip)]
+    pub(crate) layout_id: String,
+    // Only E and P/PD participate in embedding transfer.
+    #[serde(skip)]
+    pub(crate) transfer_backend: Option<&'static str>,
+}
+
+pub(crate) fn require_staged_layout_id(id: &str) -> Result<(), DynamoError> {
+    if id.is_empty() {
+        return Err(client::protocol_error(
+            "staged SGLang worker must report its descriptor layout ID",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn staged_transfer_backend(backend: &str) -> Result<&'static str, DynamoError> {
+    match backend {
+        "nixl" => Ok("nixl"),
+        "zmq_to_scheduler" => Ok("zmq_to_scheduler"),
+        _ => Err(client::protocol_error(format!(
+            "staged SGLang worker must report its resolved encoder transfer backend (nixl or zmq_to_scheduler), got {backend:?}"
+        ))),
+    }
 }
 
 impl StagedCapabilities {
     pub(crate) fn advertise(&self, config: &mut EngineConfig) {
         config.runtime_data.insert(
             ENCODER_HANDOFF_CONTRACT.into(),
-            serde_json::json!({ "sglang": self }),
+            serde_json::json!({ "sglang": { "layout_id": self.layout_id, "handoff_key_id": self.handoff_key_id } }),
         );
+        config
+            .runtime_data
+            .insert(ENCODER_HANDOFF_CAPABILITIES.into(), serde_json::json!(self));
+        if let Some(backend) = self.transfer_backend {
+            config
+                .runtime_data
+                .insert(ENCODER_HANDOFF_TRANSFER_MODE.into(), backend.into());
+        }
     }
 
     fn model_for(&self, [images, videos, audios]: [usize; 3]) -> Result<&str, DynamoError> {
@@ -402,6 +436,7 @@ impl Encoder {
                 "GetEncoderInfo must identify the staged encoder with a 16-byte instance_id",
             ));
         }
+        require_staged_layout_id(&info.staged_layout_id)?;
         let peer = if info.handoff_key_id.is_empty() {
             advertised_peer(advertised.unwrap_or(endpoint.as_str()))?
         } else {
@@ -432,6 +467,8 @@ impl Encoder {
                 native_model_type: info.native_model_type.clone(),
                 audio_model_type: info.staged_audio_model_type.clone(),
                 handoff_key_id: info.handoff_key_id.clone(),
+                layout_id: info.staged_layout_id.clone(),
+                transfer_backend: Some(staged_transfer_backend(&info.staged_transfer_backend)?),
             },
             info,
             media,
@@ -663,6 +700,8 @@ mod tests {
             instance_id: vec![1; 16],
             handoff_peer: "grpc://worker:9100".into(),
             handoff_key_id: key.clone(),
+            staged_transfer_backend: "nixl".into(),
+            staged_layout_id: "vision-layout".into(),
             ..Default::default()
         };
         let connect =
@@ -675,6 +714,44 @@ mod tests {
             config.runtime_data[ENCODER_HANDOFF_CONTRACT]["sglang"]["handoff_key_id"],
             key
         );
+        assert_eq!(config.runtime_data[ENCODER_HANDOFF_TRANSFER_MODE], "nixl");
+        assert!(
+            connect(
+                pb::GetEncoderInfoResponse {
+                    staged_layout_id: String::new(),
+                    ..info.clone()
+                },
+                None
+            )
+            .is_err()
+        );
+        let video_encoder = connect(
+            pb::GetEncoderInfoResponse {
+                supports_staged_video: true,
+                ..info.clone()
+            },
+            None,
+        )
+        .unwrap();
+        let mut with_video = EngineConfig::default();
+        video_encoder.capabilities.advertise(&mut with_video);
+        assert_eq!(
+            config.runtime_data[ENCODER_HANDOFF_CONTRACT],
+            with_video.runtime_data[ENCODER_HANDOFF_CONTRACT]
+        );
+        assert_ne!(
+            config.runtime_data[ENCODER_HANDOFF_CAPABILITIES],
+            with_video.runtime_data[ENCODER_HANDOFF_CAPABILITIES]
+        );
+        assert!(encoder.capabilities.model_for([1, 0, 0]).is_ok());
+        assert!(encoder.capabilities.model_for([0, 1, 0]).is_err());
+        for backend in ["", "auto", "zmq_to_tokenizer"] {
+            let incompatible = pb::GetEncoderInfoResponse {
+                staged_transfer_backend: backend.into(),
+                ..info.clone()
+            };
+            assert!(connect(incompatible, None).is_err());
+        }
         assert!(connect(info.clone(), Some("other:9100")).is_err());
         assert!(
             connect(

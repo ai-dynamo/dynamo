@@ -20,6 +20,7 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
+use super::readiness::EncoderHandoff;
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
@@ -2685,14 +2686,6 @@ impl ModelManager {
         })
     }
 
-    fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
-        card.runtime_config
-            .runtime_data
-            .get("encoder_result_handoff")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    }
-
     fn clear_worker_set_targets(worker_set: &WorkerSet) {
         if let Some(router) = &worker_set.prefill_router {
             router.set_target(None);
@@ -2724,13 +2717,20 @@ impl ModelManager {
             .iter()
             .filter(|worker_set| worker_set.card().worker_type == Some(WorkerType::Decode))
             .collect::<Vec<_>>();
-        let prefill_target = (prefill_providers.len() == 1 && decode_consumers.len() == 1)
-            .then(|| prefill_providers[0].clone());
+        let prefill_target = match (prefill_providers.as_slice(), decode_consumers.as_slice()) {
+            ([prefill], [decode])
+                if EncoderHandoff::from(&decode.card().runtime_config)
+                    .accepts_prefill((&prefill.card.runtime_config).into()) =>
+            {
+                Some(prefill)
+            }
+            _ => None,
+        };
         for worker_set in &decode_consumers {
             if let Some(router) = &worker_set.prefill_router {
                 router.set_target(
                     prefill_target
-                        .clone()
+                        .cloned()
                         .map(super::WorkerSetTarget::Committed),
                 );
             }
@@ -2744,30 +2744,24 @@ impl ModelManager {
             })
             .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
-        let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
-        let capable_prefill = (prefill_providers.len() == 1)
-            && worker_sets.iter().any(|worker_set| {
-                worker_set.card().worker_type == Some(WorkerType::Prefill)
-                    && Self::supports_encoder_result_handoff(worker_set.card())
-            });
-
         for worker_set in &worker_sets {
             let Some(router) = &worker_set.encoder_router else {
                 continue;
             };
-            let routing_enabled = match worker_set.card().worker_type {
-                Some(WorkerType::Decode) => capable_prefill && decode_consumers.len() == 1,
-                Some(WorkerType::Prefill) => false,
-                Some(WorkerType::Aggregated | WorkerType::Encode) | None => {
-                    Self::supports_encoder_result_handoff(worker_set.card())
-                }
+            let receiver = match worker_set.card().worker_type {
+                Some(WorkerType::Decode) => prefill_target.map(|p| p.card.as_ref()),
+                Some(WorkerType::Prefill) => None,
+                Some(WorkerType::Aggregated | WorkerType::Encode) | None => Some(worker_set.card()),
             };
-            router.set_target(
-                routing_enabled
-                    .then(|| unique_encode.clone())
-                    .flatten()
-                    .map(super::WorkerSetTarget::Committed),
-            );
+            let target = receiver.and_then(|card| {
+                let receiver = EncoderHandoff::from(&card.runtime_config);
+                let mut eligible = encode_providers.iter().filter(|encoder| {
+                    receiver.accepts_encoder((&encoder.card.runtime_config).into())
+                });
+                let encoder = eligible.next()?;
+                eligible.next().is_none().then(|| encoder.clone())
+            });
+            router.set_target(target.map(super::WorkerSetTarget::Committed));
         }
     }
 
@@ -4524,14 +4518,14 @@ mod tests {
 
     fn topology_worker_set(
         manager: Arc<ModelManager>,
-        role: WorkerType,
+        card: ModelDeploymentCard,
         endpoint: Endpoint,
     ) -> (
         WorkerSet,
         Option<Arc<crate::kv_router::PrefillRouter>>,
         Option<Arc<crate::kv_router::EncoderRouter>>,
     ) {
-        let card = topology_card(role);
+        let role = card.worker_type.unwrap();
         let mut worker_set = WorkerSet::new(
             endpoint.id().namespace,
             card.mdcsum().to_string(),
@@ -4544,10 +4538,17 @@ mod tests {
             card: Arc::new(card),
             admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
         });
-        if role != WorkerType::Decode {
+        if !matches!(role, WorkerType::Aggregated | WorkerType::Decode) {
             return (worker_set, None, None);
         }
-
+        let encoder = crate::kv_router::EncoderRouter::new(
+            "topology-model".to_string(),
+            worker_set.namespace().to_string(),
+        );
+        if role == WorkerType::Aggregated {
+            worker_set.encoder_router = Some(encoder.clone());
+            return (worker_set, None, Some(encoder));
+        }
         let (_activation_tx, activation_rx) = tokio::sync::oneshot::channel();
         let prefill = crate::kv_router::PrefillRouter::new(
             activation_rx,
@@ -4563,14 +4564,19 @@ mod tests {
             crate::discovery::LoadThresholdHandle::new(Default::default()),
             CancellationToken::new(),
         );
-        let encoder = crate::kv_router::EncoderRouter::new(
-            "topology-model".to_string(),
-            worker_set.namespace().to_string(),
-        );
         worker_set.prefill_router = Some(prefill.clone());
         worker_set.encoder_router = Some(encoder.clone());
         (worker_set, Some(prefill), Some(encoder))
     }
+
+    const EPD_ORDERS: [[WorkerType; 3]; 6] = [
+        [WorkerType::Encode, WorkerType::Prefill, WorkerType::Decode],
+        [WorkerType::Encode, WorkerType::Decode, WorkerType::Prefill],
+        [WorkerType::Prefill, WorkerType::Encode, WorkerType::Decode],
+        [WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
+        [WorkerType::Decode, WorkerType::Encode, WorkerType::Prefill],
+        [WorkerType::Decode, WorkerType::Prefill, WorkerType::Encode],
+    ];
 
     #[tokio::test]
     async fn committed_topology_converges_for_every_epd_startup_order() {
@@ -4579,16 +4585,7 @@ mod tests {
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                 .await
                 .unwrap();
-        let orders = [
-            [WorkerType::Encode, WorkerType::Prefill, WorkerType::Decode],
-            [WorkerType::Encode, WorkerType::Decode, WorkerType::Prefill],
-            [WorkerType::Prefill, WorkerType::Encode, WorkerType::Decode],
-            [WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
-            [WorkerType::Decode, WorkerType::Encode, WorkerType::Prefill],
-            [WorkerType::Decode, WorkerType::Prefill, WorkerType::Encode],
-        ];
-
-        for (index, order) in orders.into_iter().enumerate() {
+        for (index, order) in EPD_ORDERS.into_iter().enumerate() {
             let manager = Arc::new(ModelManager::new());
             let namespace = format!("epd-order-{index}");
             let component = distributed
@@ -4610,7 +4607,7 @@ mod tests {
                     WorkerType::Aggregated => unreachable!(),
                 };
                 let (worker_set, prefill, encoder) =
-                    topology_worker_set(manager.clone(), role, endpoint);
+                    topology_worker_set(manager.clone(), topology_card(role), endpoint);
                 prefill_router = prefill.or(prefill_router);
                 encoder_router = encoder.or(encoder_router);
                 let card = worker_set.card().clone();
@@ -4656,7 +4653,7 @@ mod tests {
                 let duplicate_endpoint = component.endpoint("prefill-duplicate".to_string());
                 let (duplicate, _, _) = topology_worker_set(
                     manager.clone(),
-                    WorkerType::Prefill,
+                    topology_card(WorkerType::Prefill),
                     duplicate_endpoint.clone(),
                 );
                 let duplicate_card = duplicate.card().clone();
@@ -4698,6 +4695,180 @@ mod tests {
                 );
                 assert_eq!(prefill_router.target_endpoint_id(), Some(expected));
             }
+        }
+        runtime.shutdown();
+    }
+
+    fn register_staged_role(
+        manager: &Arc<ModelManager>,
+        endpoint: Endpoint,
+        role: WorkerType,
+        key: &str,
+        transfer_mode: Option<&str>,
+    ) -> (
+        Option<Arc<crate::kv_router::PrefillRouter>>,
+        Option<Arc<crate::kv_router::EncoderRouter>>,
+    ) {
+        use crate::local_model::runtime_config::{
+            ENCODER_HANDOFF_CONTRACT, ENCODER_HANDOFF_TRANSFER_MODE,
+        };
+        let mut card = topology_card(role);
+        if role == WorkerType::Aggregated {
+            card.needs = vec![vec![WorkerType::Encode]];
+            card.runtime_config
+                .set_engine_specific("encoder_result_handoff", true)
+                .unwrap();
+        }
+        // An E can serve either split P/D or aggregated PD.
+        if role == WorkerType::Encode {
+            card.needs = vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ];
+        }
+        card.runtime_config
+            .set_engine_specific(
+                ENCODER_HANDOFF_CONTRACT,
+                serde_json::json!({"sglang": {"handoff_key_id": key}}),
+            )
+            .unwrap();
+        if let Some(mode) = transfer_mode {
+            card.runtime_config
+                .set_engine_specific(ENCODER_HANDOFF_TRANSFER_MODE, mode)
+                .unwrap();
+        }
+        let group = endpoint.id().to_string();
+        let (set, prefill, encoder) = topology_worker_set(manager.clone(), card.clone(), endpoint);
+        manager
+            .commit_discovery_group(&group, &group, set, vec![(group.clone(), card)], Vec::new())
+            .unwrap();
+        (prefill, encoder)
+    }
+
+    #[tokio::test]
+    async fn staged_encoder_contract_gates_all_epd_orders_and_replacements() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        for (index, order) in EPD_ORDERS.into_iter().enumerate() {
+            let manager = Arc::new(ModelManager::new());
+            let component = distributed
+                .namespace(format!("staged-order-{index}"))
+                .unwrap()
+                .component("workers")
+                .unwrap();
+            let endpoint = |role: WorkerType| component.endpoint(role.as_str());
+            let ready = || {
+                manager
+                    .get_committed_model("topology-model")
+                    .unwrap()
+                    .namespace_readiness()
+                    .ready
+            };
+            let mut routers = (None, None);
+            for role in order {
+                let (key, mode) = match role {
+                    WorkerType::Encode => ("other-key", Some("nixl")),
+                    WorkerType::Prefill => ("key", Some("nixl")),
+                    WorkerType::Decode => ("key", None),
+                    _ => unreachable!(),
+                };
+                let (prefill, encoder) =
+                    register_staged_role(&manager, endpoint(role), role, key, mode);
+                if encoder.is_some() {
+                    routers = (prefill, encoder);
+                }
+                assert!(!ready(), "order {order:?} after {role:?}");
+                if let Some(router) = &routers.1 {
+                    assert_eq!(router.target_endpoint_id(), None);
+                }
+            }
+
+            // One matching encoder is selectable even while an incompatible endpoint is live.
+            let good = component.endpoint("replacement");
+            register_staged_role(
+                &manager,
+                good.clone(),
+                WorkerType::Encode,
+                "key",
+                Some("nixl"),
+            );
+            let (prefill, encoder) = (routers.0.unwrap(), routers.1.unwrap());
+            assert!(ready());
+            assert_eq!(encoder.target_endpoint_id(), Some(good.id()));
+            assert_eq!(
+                prefill.target_endpoint_id(),
+                Some(endpoint(WorkerType::Prefill).id())
+            );
+
+            manager
+                .remove_discovery_group(&good.id().to_string())
+                .unwrap();
+            assert!(!ready());
+            assert_eq!(encoder.target_endpoint_id(), None);
+            register_staged_role(
+                &manager,
+                good.clone(),
+                WorkerType::Encode,
+                "key",
+                Some("nixl"),
+            );
+            assert!(ready());
+            let decode = endpoint(WorkerType::Decode);
+            manager
+                .remove_discovery_group(&decode.id().to_string())
+                .unwrap();
+            let (prefill, encoder) =
+                register_staged_role(&manager, decode, WorkerType::Decode, "other-key", None);
+            assert!(!ready());
+            assert_eq!(prefill.unwrap().target_endpoint_id(), None);
+            assert_eq!(encoder.unwrap().target_endpoint_id(), None);
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn staged_encoder_contract_requires_matching_aggregated_transport() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("staged-aggregated")
+            .unwrap()
+            .component("workers")
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let ready = || {
+            manager
+                .get_committed_model("topology-model")
+                .unwrap()
+                .namespace_readiness()
+                .ready
+        };
+        let (_, router) = register_staged_role(
+            &manager,
+            component.endpoint("aggregated"),
+            WorkerType::Aggregated,
+            "key",
+            Some("zmq_to_scheduler"),
+        );
+        let router = router.unwrap();
+        let encoder = component.endpoint("encode");
+        for mode in [Some("nixl"), None, Some("zmq_to_scheduler")] {
+            register_staged_role(&manager, encoder.clone(), WorkerType::Encode, "key", mode);
+            let compatible = mode == Some("zmq_to_scheduler");
+            assert_eq!(ready(), compatible);
+            assert_eq!(
+                router.target_endpoint_id(),
+                compatible.then(|| encoder.id())
+            );
+            manager
+                .remove_discovery_group(&encoder.id().to_string())
+                .unwrap();
         }
         runtime.shutdown();
     }
