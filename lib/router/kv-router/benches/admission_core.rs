@@ -24,20 +24,28 @@
 //! - `pinned`: every request is pinned to a worker, so the backlog is one lane per worker.
 //! - `classes`: four classes of weights 1:2:3:4 share the backlog and take deficit-round-robin
 //!   turns.
+//! - `constrained_lanes`: as `session_lanes`, but each session may run on one worker only, as a
+//!   caller allow-list, a LoRA, or a required taint restricts it. Such a lane has its own
+//!   capacity answer, so a worker that frees re-asks every one of them.
 //! - `gate_held`: as `session_lanes`, with a dispatch gate that holds `backlog` further lanes
 //!   for good. A worker that frees must not re-ask them, so this should cost what
 //!   `session_lanes` does.
+//! - `gate_wake`: as `gate_held`, but the gate wakes the queue on every completion, as
+//!   ThunderAgent does when its ledger changes. Each wake re-asks every held lane and every
+//!   waiting lane, so this is the cost that grows with the backlog.
 //!
 //! Run with: `cargo bench -p dynamo-kv-router --bench admission_core --features bench`
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use dynamo_admission::{
-    ClassifierError, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, PolicyProfile,
-    RequestClassifier, RequestLifecycle, RouterQueuePolicy, WorkerView,
+    ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
+    DispatchRecheck, PolicyProfile, RequestClassifier, RequestLifecycle, RouterQueuePolicy,
+    WorkerView,
 };
 use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
 use dynamo_router_protocol::session::SessionContext;
@@ -57,12 +65,12 @@ const WORKERS: u64 = 64;
 const BUSY_THRESHOLD: f64 = 0.5;
 const CLASSES: [&str; 4] = ["weight1", "weight2", "weight3", "weight4"];
 
-/// Keys each request's lane by its session, as ThunderAgent does. With `gate` it also installs
-/// a dispatch gate that holds every session whose id starts with `held`.
+/// Keys each request's lane by its session, as ThunderAgent does, and installs `gate` if any.
 struct SessionLanes {
-    gate: bool,
+    gate: Option<Arc<HoldsHeldSessions>>,
 }
 
+#[async_trait]
 impl RequestClassifier for SessionLanes {
     fn classify(
         &mut self,
@@ -75,13 +83,40 @@ impl RequestClassifier for SessionLanes {
         Ok(request)
     }
 
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        if let (Some(gate), ClassifyEvent::Completed { .. }) = (&self.gate, &event) {
+            gate.completed();
+        }
+    }
+
     fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
-        self.gate
-            .then(|| Arc::new(HoldsHeldSessions) as Arc<dyn DispatchGate>)
+        self.gate.clone().map(|gate| gate as Arc<dyn DispatchGate>)
     }
 }
 
-struct HoldsHeldSessions;
+/// Holds every session whose id starts with `held`. With `wakes` it asks the queue to re-ask
+/// its held heads whenever a request completes.
+struct HoldsHeldSessions {
+    wakes: bool,
+    recheck: OnceLock<DispatchRecheck>,
+}
+
+impl HoldsHeldSessions {
+    fn new(wakes: bool) -> Arc<Self> {
+        Arc::new(Self {
+            wakes,
+            recheck: OnceLock::new(),
+        })
+    }
+
+    fn completed(&self) {
+        if self.wakes
+            && let Some(recheck) = self.recheck.get()
+        {
+            recheck.notify();
+        }
+    }
+}
 
 impl DispatchGate for HoldsHeldSessions {
     fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
@@ -94,6 +129,10 @@ impl DispatchGate for HoldsHeldSessions {
             DispatchDecision::Go { target: None }
         }
     }
+
+    fn attach(&self, recheck: DispatchRecheck) {
+        let _ = self.recheck.set(recheck);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -102,7 +141,9 @@ enum Case {
     SessionLanes,
     Pinned,
     Classes,
+    ConstrainedLanes,
     GateHeld,
+    GateWake,
 }
 
 impl Case {
@@ -112,7 +153,9 @@ impl Case {
             Self::SessionLanes => "session_lanes",
             Self::Pinned => "pinned",
             Self::Classes => "classes",
+            Self::ConstrainedLanes => "constrained_lanes",
             Self::GateHeld => "gate_held",
+            Self::GateWake => "gate_wake",
         }
     }
 
@@ -142,23 +185,34 @@ impl Case {
     }
 
     fn classifier(self) -> Option<SessionLanes> {
-        match self {
-            Self::SessionLanes => Some(SessionLanes { gate: false }),
-            Self::GateHeld => Some(SessionLanes { gate: true }),
-            Self::Shared | Self::Pinned | Self::Classes => None,
-        }
+        let gate = match self {
+            Self::SessionLanes | Self::ConstrainedLanes => None,
+            Self::GateHeld => Some(HoldsHeldSessions::new(false)),
+            Self::GateWake => Some(HoldsHeldSessions::new(true)),
+            Self::Shared | Self::Pinned | Self::Classes => return None,
+        };
+        Some(SessionLanes { gate })
+    }
+
+    /// Whether the gate holds `backlog` lanes on top of the `backlog` that waits for capacity.
+    fn holds_lanes(self) -> bool {
+        matches!(self, Self::GateHeld | Self::GateWake)
     }
 
     fn request(self, sequence: u64) -> ScheduleRequest {
         let mut request = request(format!("request-{sequence}"), self.classifier().is_some());
         match self {
             Self::Shared => {}
-            Self::SessionLanes | Self::GateHeld => {
+            Self::SessionLanes | Self::GateHeld | Self::GateWake => {
                 request.session_context = Some(session(format!("session-{sequence}")));
             }
             // Frees go round the workers in booking order, so each lane's head is next in turn.
             Self::Pinned => {
                 request.pinned_worker = Some(WorkerWithDpRank::new(sequence % WORKERS, 0));
+            }
+            Self::ConstrainedLanes => {
+                request.session_context = Some(session(format!("session-{sequence}")));
+                request.allowed_worker_ids = Some(HashSet::from([sequence % WORKERS]));
             }
             Self::Classes => {
                 request.policy_class = Some(CLASSES[sequence as usize % CLASSES.len()].to_string());
@@ -241,7 +295,7 @@ impl Loaded {
             let booked = loaded.admitted_rx.recv().await.expect("fill admitted");
             loaded.booked.push_back(booked);
         }
-        if matches!(case, Case::GateHeld) {
+        if case.holds_lanes() {
             for held in 0..backlog {
                 let mut request = request(format!("held-{held}"), true);
                 request.session_context = Some(session(format!("held-{held}")));
@@ -252,7 +306,7 @@ impl Loaded {
             loaded.submit_next();
         }
         // The admission channel is bounded, so a backlog takes several actor turns to queue.
-        let waiting = backlog * if matches!(case, Case::GateHeld) { 2 } else { 1 };
+        let waiting = backlog * if case.holds_lanes() { 2 } else { 1 };
         for _ in 0..waiting {
             if loaded.scheduler.pending_count() as u64 == waiting {
                 break;
@@ -329,7 +383,9 @@ fn bench_admission(c: &mut Criterion) {
         Case::SessionLanes,
         Case::Pinned,
         Case::Classes,
+        Case::ConstrainedLanes,
         Case::GateHeld,
+        Case::GateWake,
     ] {
         for backlog in [1_000u64, 10_000] {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -342,7 +398,7 @@ fn bench_admission(c: &mut Criterion) {
             });
             // The backlog is still there: every cycle admitted one request and queued one.
             runtime.block_on(loaded.settle());
-            let held = if matches!(case, Case::GateHeld) { 2 } else { 1 };
+            let held = if case.holds_lanes() { 2 } else { 1 };
             assert_eq!(loaded.scheduler.pending_count() as u64, backlog * held);
         }
     }
