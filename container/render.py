@@ -274,6 +274,13 @@ def _inject_python_index_mounts(dockerfile: str) -> str:
     return "".join(instructions)
 
 
+def _dynamo_version() -> str:
+    """Return the project version from the repository's pyproject.toml."""
+    text = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
 def _render_context(args, context=None):
     # device_key is the lookup key into context.yaml's per-device dict
     # (e.g. "cuda12.9", "xpu"). Computed here so it's available to every
@@ -305,6 +312,7 @@ def _render_context(args, context=None):
         compliance_baseline_sbom=compliance_baseline_sbom,
         compliance_ecosystems=compliance_ecosystems,
         compliance_source_ecosystem_flags=compliance_source_ecosystem_flags,
+        dynamo_version=_dynamo_version(),
     )
 
 

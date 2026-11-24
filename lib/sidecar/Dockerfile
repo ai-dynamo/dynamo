@@ -15,8 +15,6 @@
 # container/compliance/base_sboms/manifest.json; refresh that baseline before
 # advancing the image tag.
 ARG BASE_IMAGE=nvcr.io/nvidia/base/ubuntu:noble-20250619
-# Used only by the upstream-nightly test artifact target. CI supplies its digest.
-ARG TRTLLM_TEST_IMAGE=${BASE_IMAGE}
 
 # ---- common builder ---------------------------------------------------------
 FROM ${BASE_IMAGE} AS builder-base
@@ -228,6 +226,7 @@ ARG TARGETARCH
 
 USER root
 COPY container/compliance/ /src/container/compliance/
+COPY pyproject.toml /src/pyproject.toml
 
 # Scan the filesystem that actually ships, rather than the build-tool packages
 # present in this helper stage. The Rust SBOM contains only dependencies linked
@@ -246,6 +245,7 @@ RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \
         --output-dir /legal \
         --policy /src/container/compliance/policy/licenses.toml \
         --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
+        --source-version "$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' /src/pyproject.toml | head -n1)" \
         --verbose \
     && python3 -m compliance.policy.validate \
         --policy /src/container/compliance/policy/licenses.toml \
@@ -261,37 +261,6 @@ COPY --from=licenses /legal/ /
 # daemon (see shared-build-sidecar.yml). Not used for any shipped image.
 FROM scratch AS sidecar-binaries
 COPY --from=sidecar-builder /out/bin/ /
-
-# ---- CI-only: standard serve tests in the exact upstream engine image ---------
-# Keep the wheel and executable ABI compatible with the resolved stock image;
-# this stage and its build tools are never part of a shipped sidecar image.
-FROM ${TRTLLM_TEST_IMAGE} AS trtllm-serve-test-builder
-ARG TARGETARCH
-ARG DYNAMO_SOURCE_COMMIT
-ARG TRTLLM_TEST_IMAGE
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake clang libclang-dev protobuf-compiler git curl perl \
-        libprotobuf-dev pkg-config python3-dev python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=builder-base /usr/local/rustup /usr/local/rustup
-COPY --from=builder-base /usr/local/cargo /usr/local/cargo
-COPY --from=builder-base /src /src
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
-WORKDIR /src
-RUN python3 -m venv --system-site-packages /opt/dynamo-ci-build \
-    && /opt/dynamo-ci-build/bin/python -m pip install 'maturin>=1.0,<2.0'
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    PATH=/opt/dynamo-ci-build/bin:$PATH \
-    DYNAMO_SOURCE_COMMIT=${DYNAMO_SOURCE_COMMIT} \
-    TRTLLM_TEST_IMAGE=${TRTLLM_TEST_IMAGE} \
-    bash lib/sidecar/trtllm/ci/build.sh
-
-FROM scratch AS sidecar-trtllm-serve-tests
-COPY --from=trtllm-serve-test-builder /out/serve-runtime/ /
 
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime

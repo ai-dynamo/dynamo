@@ -586,6 +586,8 @@ fn status_error(status: StatusCode, detail: String) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
+    use tonic_v14 as tonic;
+
     use std::time::Duration;
 
     use dynamo_backend_common::engine::RoutingHints;
@@ -1399,87 +1401,88 @@ mod tests {
     /// Records the rid of every Abort RPC; every other RPC is unimplemented.
     struct AbortRecorder(tokio::sync::mpsc::UnboundedSender<String>);
 
-    #[tonic::async_trait]
-    impl pb::sglang_service_server::SglangService for AbortRecorder {
-        type GenerateStream =
-            futures::stream::BoxStream<'static, Result<pb::GenerateStreamItem, tonic::Status>>;
+    dynamo_sglang_mocker::impl_sglang_service! {
+        impl AbortRecorder {
+            type GenerateStream =
+                futures::stream::BoxStream<'static, Result<pb::GenerateStreamItem, tonic::Status>>;
 
-        async fn generate(
-            &self,
-            _: tonic::Request<pb::GenerateRequest>,
-        ) -> Result<tonic::Response<Self::GenerateStream>, tonic::Status> {
-            Err(tonic::Status::unimplemented("Generate"))
-        }
+            async fn generate(
+                &self,
+                _: tonic::Request<pb::GenerateRequest>,
+            ) -> Result<tonic::Response<Self::GenerateStream>, tonic::Status> {
+                Err(tonic::Status::unimplemented("Generate"))
+            }
 
-        async fn health_check(
-            &self,
-            _: tonic::Request<pb::HealthCheckRequest>,
-        ) -> Result<tonic::Response<pb::HealthCheckResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("HealthCheck"))
-        }
+            async fn health_check(
+                &self,
+                _: tonic::Request<pb::HealthCheckRequest>,
+            ) -> Result<tonic::Response<pb::HealthCheckResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("HealthCheck"))
+            }
 
-        async fn get_model_info(
-            &self,
-            _: tonic::Request<pb::GetModelInfoRequest>,
-        ) -> Result<tonic::Response<pb::GetModelInfoResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("GetModelInfo"))
-        }
+            async fn get_model_info(
+                &self,
+                _: tonic::Request<pb::GetModelInfoRequest>,
+            ) -> Result<tonic::Response<pb::GetModelInfoResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("GetModelInfo"))
+            }
 
-        async fn get_server_info(
-            &self,
-            _: tonic::Request<pb::GetServerInfoRequest>,
-        ) -> Result<tonic::Response<pb::GetServerInfoResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("GetServerInfo"))
-        }
+            async fn get_server_info(
+                &self,
+                _: tonic::Request<pb::GetServerInfoRequest>,
+            ) -> Result<tonic::Response<pb::GetServerInfoResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("GetServerInfo"))
+            }
 
-        async fn list_models(
-            &self,
-            _: tonic::Request<pb::ListModelsRequest>,
-        ) -> Result<tonic::Response<pb::ListModelsResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("ListModels"))
-        }
+            async fn list_models(
+                &self,
+                _: tonic::Request<pb::ListModelsRequest>,
+            ) -> Result<tonic::Response<pb::ListModelsResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("ListModels"))
+            }
 
-        async fn detokenize(
-            &self,
-            _: tonic::Request<pb::DetokenizeRequest>,
-        ) -> Result<tonic::Response<pb::DetokenizeResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("Detokenize"))
-        }
+            async fn detokenize(
+                &self,
+                _: tonic::Request<pb::DetokenizeRequest>,
+            ) -> Result<tonic::Response<pb::DetokenizeResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("Detokenize"))
+            }
 
-        async fn abort(
-            &self,
-            request: tonic::Request<pb::AbortRequest>,
-        ) -> Result<tonic::Response<pb::AbortResponse>, tonic::Status> {
-            let _ = self.0.send(request.into_inner().rid);
-            Ok(tonic::Response::new(pb::AbortResponse { success: true }))
-        }
+            async fn abort(
+                &self,
+                request: tonic::Request<pb::AbortRequest>,
+            ) -> Result<tonic::Response<pb::AbortResponse>, tonic::Status> {
+                let _ = self.0.send(request.into_inner().rid);
+                Ok(tonic::Response::new(pb::AbortResponse { success: true }))
+            }
 
-        async fn get_hi_cache_storage(
-            &self,
-            _: tonic::Request<pb::GetHiCacheStorageRequest>,
-        ) -> Result<tonic::Response<pb::HiCacheStatus>, tonic::Status> {
-            Err(tonic::Status::unimplemented("GetHiCacheStorage"))
-        }
+            async fn get_hi_cache_storage(
+                &self,
+                _: tonic::Request<pb::GetHiCacheStorageRequest>,
+            ) -> Result<tonic::Response<pb::HiCacheStatus>, tonic::Status> {
+                Err(tonic::Status::unimplemented("GetHiCacheStorage"))
+            }
 
-        async fn attach_hi_cache_storage(
-            &self,
-            _: tonic::Request<pb::AttachHiCacheStorageRequest>,
-        ) -> Result<tonic::Response<pb::HiCacheStorageResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("AttachHiCacheStorage"))
-        }
+            async fn attach_hi_cache_storage(
+                &self,
+                _: tonic::Request<pb::AttachHiCacheStorageRequest>,
+            ) -> Result<tonic::Response<pb::HiCacheStorageResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("AttachHiCacheStorage"))
+            }
 
-        async fn detach_hi_cache_storage(
-            &self,
-            _: tonic::Request<pb::DetachHiCacheStorageRequest>,
-        ) -> Result<tonic::Response<pb::HiCacheStorageResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("DetachHiCacheStorage"))
-        }
+            async fn detach_hi_cache_storage(
+                &self,
+                _: tonic::Request<pb::DetachHiCacheStorageRequest>,
+            ) -> Result<tonic::Response<pb::HiCacheStorageResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("DetachHiCacheStorage"))
+            }
 
-        async fn clear_hi_cache_storage(
-            &self,
-            _: tonic::Request<pb::ClearHiCacheStorageRequest>,
-        ) -> Result<tonic::Response<pb::HiCacheStorageResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("ClearHiCacheStorage"))
+            async fn clear_hi_cache_storage(
+                &self,
+                _: tonic::Request<pb::ClearHiCacheStorageRequest>,
+            ) -> Result<tonic::Response<pb::HiCacheStorageResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented("ClearHiCacheStorage"))
+            }
         }
     }
 

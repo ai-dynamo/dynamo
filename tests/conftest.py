@@ -243,11 +243,6 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "upstream_trtllm: runs against the resolved official TRT-LLM nightly, "
-        "independently of the in-process runtime image",
-    )
-    config.addinivalue_line(
-        "markers",
         "engine_ports: dynamo_dynamic_ports also allocates per-worker engine "
         "HTTP/gRPC and vLLM KV replay ports, exported as "
         "DYN_ENGINE_{HTTP,GRPC}_PORT{N} and DYN_VLLM_KV_REPLAY_PORT{N}",
