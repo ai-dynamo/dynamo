@@ -718,6 +718,16 @@ where
         self.slots.publish_prefill_completed_if_booking(booking)
     }
 
+    /// A sender that re-publishes the prefill-completion event for a booking this
+    /// router made and that is past prefill, so peer routers keep their copy of it
+    /// alive. It does nothing for any other booking.
+    pub fn prefill_keepalive(
+        &self,
+    ) -> impl Fn(&SchedulerBookingDescriptor) + Send + Sync + 'static {
+        let slots = Arc::clone(&self.slots);
+        move |booking| slots.publish_prefill_keepalive_if_booking(booking)
+    }
+
     /// Wait for an admission recheck when a class queues on capacity or a dispatch gate is
     /// installed, and the actor is running. This does not wait for blocked requests to finish
     /// or for the queue to empty. Otherwise return immediately without an admission barrier.

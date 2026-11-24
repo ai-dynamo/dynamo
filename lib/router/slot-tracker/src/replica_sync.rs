@@ -100,7 +100,7 @@ impl PendingWorkerEvents {
 }
 
 #[derive(Default)]
-struct ReplicaBatchEffects {
+pub(super) struct ReplicaBatchEffects {
     worker_loads: FxHashMap<WorkerWithDpRank, PendingLoadPublication>,
     wake_scheduler: bool,
     cleanup_prompt_trie: bool,
@@ -271,17 +271,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     self.pending_worker_events
                         .lock()
                         .take(&request_id, event_worker, decay_now);
-                if pending_event == Some(PendingWorkerEvent::Free) {
-                    return;
-                }
                 // The same router only re-books an id after its own copy is gone, so its
-                // Add replaces the mirror left here (its `Free` was lost or never sent).
+                // Add replaces the mirror left here (its `Free` was lost or never sent),
+                // even when the new attempt is already over and is not booked below.
                 // An Add from another router, or onto a local booking, is still ignored.
-                if let Some(stale) = self
-                    .request_index
-                    .mirrored_booking_from(&request_id, router_id)
+                if let Some((stale, replica_router)) =
+                    self.request_index.booking_and_replica_router(&request_id)
+                    && replica_router == Some(router_id)
                 {
                     self.free_replica_booking(&request_id, stale, decay_now, effects);
+                }
+                if pending_event == Some(PendingWorkerEvent::Free) {
+                    return;
                 }
                 let Ok(attempt_id) = self.request_index.try_insert_request(
                     request_id.clone(),
@@ -344,11 +345,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 effects.record_worker_load(event_worker, load, true);
                 effects.cleanup_prompt_trie = true;
                 if let Some(booking) = prefilled_booking {
-                    self.apply_prefill_completed(&booking, decay_now, effects);
+                    self.apply_prefill_completed(&booking, decay_now, false, effects);
                 }
             }
+            // In both arms below, a worker's event for a worker other than the one booked
+            // waits like one with no booking: it may belong to a retry whose Add has yet
+            // to replace the stale mirror here.
             ActiveSequenceEventData::Free => {
-                let Some(current) = self.request_index.booking_for(&request_id) else {
+                let Some(current) = self
+                    .request_index
+                    .booking_for(&request_id)
+                    .filter(|current| current.worker == event_worker)
+                else {
                     if can_defer_worker_event {
                         self.pending_worker_events.lock().record(
                             request_id,
@@ -359,13 +367,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     }
                     return;
                 };
-                if current.worker != event_worker {
-                    return;
-                }
                 self.free_replica_booking(&request_id, current, decay_now, effects);
             }
             ActiveSequenceEventData::MarkPrefillCompleted => {
-                let Some(current) = self.request_index.booking_for(&request_id) else {
+                let Some((current, replica_router)) = self
+                    .request_index
+                    .booking_and_replica_router(&request_id)
+                    .filter(|(current, _)| current.worker == event_worker)
+                else {
                     if can_defer_worker_event {
                         self.pending_worker_events.lock().record(
                             request_id,
@@ -376,21 +385,21 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     }
                     return;
                 };
-                if current.worker != event_worker {
-                    return;
-                }
                 let booking = SchedulerBookingDescriptor {
                     request_id,
                     worker: current.worker,
                     attempt_id: current.attempt_id,
                 };
-                self.apply_prefill_completed(&booking, decay_now, effects);
+                let from_owner = origin == ActiveSequenceEventOrigin::Router
+                    && replica_router == Some(router_id);
+                self.apply_prefill_completed(&booking, decay_now, from_owner, effects);
             }
         }
     }
 
-    /// Free the live booking `current` of `request_id`. Returns with no table guard held.
-    fn free_replica_booking(
+    /// Free `current` if it is still the live booking of `request_id`. Returns with no
+    /// table guard held.
+    pub(super) fn free_replica_booking(
         &self,
         request_id: &RequestId,
         current: RequestBooking,
@@ -409,6 +418,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let load = {
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
+            // Recheck under the sequence lock: since the caller read `current`, it may
+            // have expired and the id been booked again on this worker.
+            if self.request_index.booking_for(request_id) != Some(current) {
+                return;
+            }
             let Some(delta) = seq.free(request_id, decay_now) else {
                 return;
             };
@@ -435,6 +449,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         booking: &SchedulerBookingDescriptor,
         now: Instant,
+        from_owner: bool,
         effects: &mut ReplicaBatchEffects,
     ) {
         let table = self.workers.read();
@@ -456,9 +471,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         if let Some(load) = load {
             effects.record_worker_load(booking.worker, load, false);
         }
-        // Every mark for a live booking is progress, including one that changes
-        // nothing: the owner re-sends the mark as a keepalive while it decodes.
-        if let Some(observer) = self.replica_request_lease_observer() {
+        // A mark from the router this booking mirrors is progress even when it changes
+        // nothing: that router re-sends it as a keepalive while it decodes. Any other
+        // repeated mark is not, or two routers that both booked the id would keep
+        // each other's lease alive.
+        if (from_owner || completion == PrefillCompletion::LoadReleased)
+            && let Some(observer) = self.replica_request_lease_observer()
+        {
             observer.progressed(booking);
         }
         if completion == PrefillCompletion::LoadReleased {

@@ -350,9 +350,9 @@ enum BookingReleaseVisibility {
 /// Observes request attempts mirrored from another router so their local
 /// scheduler state can share the router's request-liveness reaper.
 ///
-/// `progressed` runs for every prefill-completed event that matches a live
-/// booking, including one that changes nothing: the owning router re-sends that
-/// event as a keepalive, and this call is what keeps the mirrored lease alive.
+/// `progressed` runs for every prefill-completed event from the router a booking
+/// mirrors, including one that changes nothing: that router re-sends the event as
+/// a keepalive, and this call is what keeps the mirrored lease alive.
 pub trait ReplicaRequestLeaseObserver: Send + Sync {
     fn admitted(&self, booking: SchedulerBookingDescriptor);
     fn progressed(&self, booking: &SchedulerBookingDescriptor);
@@ -912,23 +912,26 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         true
     }
 
-    /// Re-send the idempotent completion event for `booking` while it is live and
-    /// already past prefill, so peer routers keep its mirrored lease alive. A booking
-    /// still in prefill is skipped: the mark would move it to decode on peers.
-    pub fn publish_prefill_keepalive_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-    ) -> bool {
-        if !self.replica_sync {
-            return false;
-        }
+    /// Re-send the idempotent completion event for `booking` so peer routers keep
+    /// its mirrored lease alive. Skips a booking that is gone, that mirrors a peer's,
+    /// or that is still in prefill (the mark would move it to decode on peers).
+    pub fn publish_prefill_keepalive_if_booking(&self, booking: &SchedulerBookingDescriptor) {
         let table = self.workers.read();
         let Some(&idx) = table.index.get(&booking.worker) else {
-            return false;
+            return;
         };
         let seq = table.slots[idx].sequences.read();
-        if !self.has_booking(booking) || !seq.is_prefill_completed(&booking.request_id) {
-            return false;
+        let own_booking = RequestBooking {
+            worker: booking.worker,
+            attempt_id: booking.attempt_id,
+        };
+        if self
+            .request_index
+            .booking_and_replica_router(&booking.request_id)
+            != Some((own_booking, None))
+            || !seq.is_prefill_completed(&booking.request_id)
+        {
+            return;
         }
         // Enqueued under the sequence lock: the mark carries no attempt id, so it must
         // not follow this booking's `Free` onto a later attempt of the same request.
@@ -940,7 +943,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             origin: Default::default(),
             lora_name: self.request_index.lora_for(&booking.request_id),
         });
-        true
     }
 
     /// Free all blocks associated with a request.
@@ -3480,10 +3482,21 @@ mod tests {
                 ObservedReplicaLeaseEvent::Progressed(booking),
             ]
         );
+
+        // A peer's repeated mark for a booking this router made is not progress.
+        let now = Instant::now();
+        let attempt_id = sequences
+            .add_request_admitted(local_sequence_request("local", worker), now)
+            .unwrap();
+        sequences
+            .mark_prefill_completed_if_booking(&"local".to_string(), worker, attempt_id, now)
+            .unwrap();
+        sequences.apply_replica_batch(vec![replica_mark("local", worker)]);
+        assert_eq!(observer.events.lock().unwrap().len(), 3);
     }
 
     #[test]
-    fn keepalive_publishes_mark_only_for_live_booking_past_prefill() {
+    fn keepalive_publishes_mark_only_for_own_live_booking_past_prefill() {
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "req-1".to_string();
         let now = Instant::now();
@@ -3492,15 +3505,24 @@ mod tests {
             .add_request_admitted(local_sequence_request(&request_id, worker), now)
             .unwrap();
         let booking = sequences.request_booking(&request_id).unwrap();
+        sequences.apply_replica_batch(vec![
+            replica_add("mirrored", worker, vec![4, 5, 6]),
+            replica_mark("mirrored", worker),
+        ]);
+        let mirrored = sequences.request_booking("mirrored").unwrap();
+        state.clear();
 
         // Still in prefill: the mark would move the request to decode on peers.
-        assert!(!sequences.publish_prefill_keepalive_if_booking(&booking));
+        sequences.publish_prefill_keepalive_if_booking(&booking);
+        // Mirrored and past prefill: only the router that made a booking sends for it.
+        sequences.publish_prefill_keepalive_if_booking(&mirrored);
+        assert!(state.events.lock().unwrap().is_empty());
 
         sequences
             .mark_prefill_completed_if_booking(&request_id, worker, attempt_id, now)
             .unwrap();
         state.clear();
-        assert!(sequences.publish_prefill_keepalive_if_booking(&booking));
+        sequences.publish_prefill_keepalive_if_booking(&booking);
         assert!(matches!(
             state.events.lock().unwrap().as_slice(),
             [ActiveSequenceEventData::MarkPrefillCompleted]
@@ -3510,19 +3532,52 @@ mod tests {
             .free_if_booking(&request_id, worker, attempt_id, now)
             .unwrap();
         state.clear();
-        assert!(!sequences.publish_prefill_keepalive_if_booking(&booking));
+        sequences.publish_prefill_keepalive_if_booking(&booking);
         assert!(state.events.lock().unwrap().is_empty());
+    }
 
-        let (unsynced, _) =
-            make_recording_sequences_without_replica_sync(HashMap::from([(1, (0, 1))]));
-        let attempt_id = unsynced
-            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+    #[test]
+    fn replica_free_of_a_superseded_attempt_leaves_the_new_booking() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "req-1".to_string();
+        let now = Instant::now();
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker, vec![1, 2, 3])]);
+        let mirror = sequences.request_index.booking_for("req-1").unwrap();
+
+        // After the replica task read `mirror`, the reaper expires it and a local
+        // admission books the same id on the same worker.
+        sequences
+            .expire_if_booking(&request_id, worker, mirror.attempt_id, now)
             .unwrap();
-        unsynced
-            .mark_prefill_completed_if_booking(&request_id, worker, attempt_id, now)
+        sequences
+            .add_request(local_sequence_request("req-1", worker), now)
             .unwrap();
-        let booking = unsynced.request_booking(&request_id).unwrap();
-        assert!(!unsynced.publish_prefill_keepalive_if_booking(&booking));
+        let rebooked = sequences.request_index.booking_for("req-1");
+
+        sequences.free_replica_booking(&request_id, mirror, now, &mut Default::default());
+
+        assert_eq!(sequences.request_index.booking_for("req-1"), rebooked);
+        assert_eq!(sequences.active_request_counts()[&worker], 1);
+        assert_eq!(sequences.active_blocks()[&worker], 3);
+    }
+
+    #[test]
+    fn worker_free_before_a_retry_add_drops_the_stale_mirror() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1)), (2, (0, 1))]));
+        // The owner expired this booking without a `Free`, then retried on worker B.
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_a, vec![1, 2, 3])]);
+
+        // The retry finishes on B before its Add arrives here.
+        sequences.apply_replica_batch(vec![from_worker(replica_free("req-1", worker_b))]);
+        assert_eq!(sequences.request_worker("req-1"), Some(worker_a));
+        sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
+
+        assert_eq!(sequences.request_worker("req-1"), None);
+        assert_eq!(sequences.active_request_counts()[&worker_a], 0);
+        assert_eq!(sequences.active_request_counts()[&worker_b], 0);
     }
 
     #[test]

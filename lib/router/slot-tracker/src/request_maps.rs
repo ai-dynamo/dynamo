@@ -95,16 +95,15 @@ impl RequestIndex {
             .map(|entry| entry.booking)
     }
 
-    /// The booking for `request_id`, only when it mirrors one from `router_id`.
-    pub(super) fn mirrored_booking_from(
+    /// The booking for `request_id` and the peer router it mirrors; the router is
+    /// `None` for a booking this router made.
+    pub(super) fn booking_and_replica_router(
         &self,
         request_id: &str,
-        router_id: u64,
-    ) -> Option<RequestBooking> {
+    ) -> Option<(RequestBooking, Option<u64>)> {
         self.request_to_booking
             .get(request_id)
-            .filter(|entry| entry.replica_router_id == Some(router_id))
-            .map(|entry| entry.booking)
+            .map(|entry| (entry.booking, entry.replica_router_id))
     }
 
     pub(super) fn lora_for(&self, request_id: &RequestId) -> Option<String> {
