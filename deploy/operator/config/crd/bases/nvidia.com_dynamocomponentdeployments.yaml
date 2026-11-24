@@ -834,6 +834,160 @@ spec:
                     DynamoNamespace is deprecated and will be removed in a future version.
                     The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                   type: string
+                env:
+                  description: |-
+                    Env supplies general environment defaults, distinct from component Envs
+                    and extraPodSpec.mainContainer.env. It maps directly to v1beta1 spec.env.
+                    Container-specific definitions take precedence. Semantic ordering is
+                    selected by the immutable operator origin; older origins retain legacy
+                    composition. No default is applied.
+                    For origins >= 1.8.0, admission requires unique names within this list,
+                    even when the list is unchanged on update. Component overrides remain allowed.
+                  items:
+                    description: EnvVar represents an environment variable present in a Container.
+                    properties:
+                      name:
+                        description: |-
+                          Name of the environment variable.
+                          May consist of any printable ASCII characters except '='.
+                        type: string
+                      value:
+                        description: |-
+                          Variable references $(VAR_NAME) are expanded
+                          using the previously defined environment variables in the container and
+                          any service environment variables. If a variable cannot be resolved,
+                          the reference in the input string will be unchanged. Double $$ are reduced
+                          to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                          "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                          Escaped references will never be expanded, regardless of whether the variable
+                          exists or not.
+                          Defaults to "".
+                        type: string
+                      valueFrom:
+                        description: Source for the environment variable's value. Cannot be used if value is not empty.
+                        properties:
+                          configMapKeyRef:
+                            description: Selects a key of a ConfigMap.
+                            properties:
+                              key:
+                                description: The key to select.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap or its key must be defined
+                                type: boolean
+                            required:
+                              - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fieldRef:
+                            description: |-
+                              Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                              spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                            properties:
+                              apiVersion:
+                                description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
+                                type: string
+                              fieldPath:
+                                description: Path of the field to select in the specified API version.
+                                type: string
+                            required:
+                              - fieldPath
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fileKeyRef:
+                            description: |-
+                              FileKeyRef selects a key of the env file.
+                              Requires the EnvFiles feature gate to be enabled.
+                            properties:
+                              key:
+                                description: |-
+                                  The key within the env file. An invalid key will prevent the pod from starting.
+                                  The keys defined within a source may consist of any printable ASCII characters except '='.
+                                  During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                type: string
+                              optional:
+                                default: false
+                                description: |-
+                                  Specify whether the file or its key must be defined. If the file or key
+                                  does not exist, then the env var is not published.
+                                  If optional is set to true and the specified key does not exist,
+                                  the environment variable will not be set in the Pod's containers.
+
+                                  If optional is set to false and the specified key does not exist,
+                                  an error will be returned during Pod creation.
+                                type: boolean
+                              path:
+                                description: |-
+                                  The path within the volume from which to select the file.
+                                  Must be relative and may not contain the '..' path or start with '..'.
+                                type: string
+                              volumeName:
+                                description: The name of the volume mount containing the env file.
+                                type: string
+                            required:
+                              - key
+                              - path
+                              - volumeName
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          resourceFieldRef:
+                            description: |-
+                              Selects a resource of the container: only resources limits and requests
+                              (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                            properties:
+                              containerName:
+                                description: 'Container name: required for volumes, optional for env vars'
+                                type: string
+                              divisor:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                description: Specifies the output format of the exposed resources, defaults to "1"
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              resource:
+                                description: 'Required: resource to select'
+                                type: string
+                            required:
+                              - resource
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          secretKeyRef:
+                            description: Selects a key of a secret in the pod's namespace
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key must be defined
+                                type: boolean
+                            required:
+                              - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                    required:
+                      - name
+                    type: object
+                  type: array
                 envFromSecret:
                   description: |-
                     EnvFromSecret references a Secret whose key/value pairs will be exposed as
@@ -11269,8 +11423,6 @@ spec:
                       format: int32
                       minimum: 2
                       type: integer
-                  required:
-                    - nodeCount
                   type: object
                 readinessProbe:
                   description: ReadinessProbe to signal when the container is ready to receive traffic.
@@ -11513,9 +11665,9 @@ spec:
                     preserves the implicit multinode role layout.
 
                     LPX components each require an agent role. A DGD may contain independent
-                    LPX components, each with its own conductor role, or a shared draft and
-                    target pair with a conductor role only on the target. Every LPX role
-                    requires its own podTemplate.
+                    LPX components, each serving through its own conductor role or agent
+                    runtime init container, or a draft and target pair in which only the
+                    target serves. Every LPX role requires its own podTemplate.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -19701,9 +19853,10 @@ spec:
                     runtime image. Paths below are relative to the component spec.
                     Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar
                     is present, otherwise extraPodSpec.mainContainer.image, or the main image in each
-                    selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable
-                    semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
-                    not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+                    selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,
+                    DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
+                    controller-generated DCDs may omit it. Untyped components and custom component types do not require it.
+                    Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
                     It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
                     later may trigger a rollout. Keep it consistent with every selected template's runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
@@ -20083,6 +20236,162 @@ spec:
                   required:
                     - pvcName
                   type: object
+                env:
+                  description: |-
+                    env supplies general environment defaults for main and declared runtime
+                    containers. Container-specific env overrides entries with the same name.
+                    For origins using semantic environment composition, source-list order is
+                    preserved and cross-layer references are topologically ordered; cycles
+                    fail rendering. Graph-generated DCDs carry the DGD spec.env here so the
+                    original layers remain separate until operator defaults are available.
+                    Older origins retain legacy sorted composition. No default is applied.
+                    For origins >= 1.8.0, admission requires unique names within this list,
+                    even when the list is unchanged on update. Container overrides remain allowed.
+                  items:
+                    description: EnvVar represents an environment variable present in a Container.
+                    properties:
+                      name:
+                        description: |-
+                          Name of the environment variable.
+                          May consist of any printable ASCII characters except '='.
+                        type: string
+                      value:
+                        description: |-
+                          Variable references $(VAR_NAME) are expanded
+                          using the previously defined environment variables in the container and
+                          any service environment variables. If a variable cannot be resolved,
+                          the reference in the input string will be unchanged. Double $$ are reduced
+                          to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                          "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                          Escaped references will never be expanded, regardless of whether the variable
+                          exists or not.
+                          Defaults to "".
+                        type: string
+                      valueFrom:
+                        description: Source for the environment variable's value. Cannot be used if value is not empty.
+                        properties:
+                          configMapKeyRef:
+                            description: Selects a key of a ConfigMap.
+                            properties:
+                              key:
+                                description: The key to select.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap or its key must be defined
+                                type: boolean
+                            required:
+                              - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fieldRef:
+                            description: |-
+                              Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                              spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                            properties:
+                              apiVersion:
+                                description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
+                                type: string
+                              fieldPath:
+                                description: Path of the field to select in the specified API version.
+                                type: string
+                            required:
+                              - fieldPath
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fileKeyRef:
+                            description: |-
+                              FileKeyRef selects a key of the env file.
+                              Requires the EnvFiles feature gate to be enabled.
+                            properties:
+                              key:
+                                description: |-
+                                  The key within the env file. An invalid key will prevent the pod from starting.
+                                  The keys defined within a source may consist of any printable ASCII characters except '='.
+                                  During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                type: string
+                              optional:
+                                default: false
+                                description: |-
+                                  Specify whether the file or its key must be defined. If the file or key
+                                  does not exist, then the env var is not published.
+                                  If optional is set to true and the specified key does not exist,
+                                  the environment variable will not be set in the Pod's containers.
+
+                                  If optional is set to false and the specified key does not exist,
+                                  an error will be returned during Pod creation.
+                                type: boolean
+                              path:
+                                description: |-
+                                  The path within the volume from which to select the file.
+                                  Must be relative and may not contain the '..' path or start with '..'.
+                                type: string
+                              volumeName:
+                                description: The name of the volume mount containing the env file.
+                                type: string
+                            required:
+                              - key
+                              - path
+                              - volumeName
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          resourceFieldRef:
+                            description: |-
+                              Selects a resource of the container: only resources limits and requests
+                              (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                            properties:
+                              containerName:
+                                description: 'Container name: required for volumes, optional for env vars'
+                                type: string
+                              divisor:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                description: Specifies the output format of the exposed resources, defaults to "1"
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              resource:
+                                description: 'Required: resource to select'
+                                type: string
+                            required:
+                              - resource
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          secretKeyRef:
+                            description: Selects a key of a secret in the pod's namespace
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key must be defined
+                                type: boolean
+                            required:
+                              - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                    required:
+                      - name
+                    type: object
+                  type: array
                 eppConfig:
                   description: |-
                     eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
@@ -20617,27 +20926,34 @@ spec:
                   type: string
                 podTemplate:
                   description: |-
-                    podTemplate defines the complete Pod configuration shared by every role. It
-                    is mutually exclusive with roles[].podTemplate. New components using this template must
-                    include podTemplate.spec.containers[name=main] with a non-empty image. Existing components
-                    created without a podTemplate may remain unchanged.
-                    By default the operator merges Dynamo defaults into podTemplate.spec.containers[name=main].
-                    Declaring podTemplate.spec.initContainers[name=runtime] activates Dynamo sidecar mode:
-                    podTemplate.spec.containers[name=main] runs the user-configured engine, and
-                    podTemplate.spec.initContainers[name=runtime] receives Dynamo env, identity,
-                    system port, and probe defaults.
-                    Users must declare podTemplate.spec.initContainers[name=runtime]; the operator merges defaults into it but does not create it. It must have a non-empty
-                    image and restartPolicy: Always.
-                    This mode supports worker, prefill, and decode components only. Multinode,
-                    enabled checkpoint, GPU memory service, and failover are rejected because
-                    they are not currently supported in this mode. Support for these features
-                    is planned for a future release.
-                    Graph-level env applies to podTemplate.spec.containers[name=main] and
-                    podTemplate.spec.initContainers[name=runtime]; compilationCache and shared memory
-                    remain on podTemplate.spec.containers[name=main]. All other containers are
-                    user-managed and must specify their required fields, including image.
-                    For DGD components whose runtime image tag is not a Dynamo semantic version,
-                    set runtimeVersionOverride explicitly.
+                    PodTemplate supplies the Pod configuration shared by this component's roles.
+                    It is mutually exclusive with roles[].podTemplate. New components using this
+                    template must include podTemplate.spec.containers[name=main] with a non-empty
+                    image. Existing components without a podTemplate may retain that omission
+                    on update.
+
+                    By default, the operator merges Dynamo defaults into
+                    podTemplate.spec.containers[name=main]. Declaring
+                    podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode.
+                    The main container runs the inference engine, and the runtime init container
+                    receives Dynamo environment, identity, system port, and probe defaults.
+                    The operator does not create the runtime init container. Its declaration must
+                    include a non-empty image and restartPolicy: Always.
+
+                    Sidecar mode supports worker, prefill, and decode components.
+                    Multinode sidecars support backendFramework: sglang, vllm, and trtllm.
+                    Multinode sidecars require complete leader and worker roles[].podTemplate
+                    definitions instead of this shared template.
+                    The leader must declare a runtime init container. The worker may omit it.
+                    Each role's template supplies the engine command and topology arguments.
+                    Declared runtime init containers still receive Dynamo defaults.
+                    Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode.
+
+                    Graph-level env applies to podTemplate.spec.containers[name=main] and any
+                    declared podTemplate.spec.initContainers[name=runtime]. Compilation cache
+                    and shared memory apply to the main container. Other containers require
+                    their own configuration, including an image.
+                    See runtimeVersionOverride for runtime image version requirements.
                   properties:
                     metadata:
                       description: |-
@@ -28806,9 +29122,9 @@ spec:
                     preserves the implicit multinode role layout.
 
                     LPX components each require an agent role. A DGD may contain independent
-                    LPX components, each with its own conductor role, or a shared draft and
-                    target pair with a conductor role only on the target. Every LPX role
-                    requires its own podTemplate.
+                    LPX components, each serving through its own conductor role or agent
+                    runtime init container, or a draft and target pair in which only the
+                    target serves. Every LPX role requires its own podTemplate.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -36998,15 +37314,24 @@ spec:
                   x-kubernetes-list-type: map
                 runtimeVersionOverride:
                   description: |-
-                    RuntimeVersionOverride declares the Dynamo runtime compatibility version in
-                    podTemplate.spec.containers[name=main].image by default, or
-                    podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present.
-                    With role PodTemplates, it applies to the main image in every selected template.
-                    DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
-                    controller-generated DCDs may omit it.
-                    Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical
-                    MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to
-                    version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
+                    RuntimeVersionOverride overrides the Dynamo runtime compatibility version
+                    inferred from podTemplate.spec.containers[name=main].image.
+                    In sidecar mode, it instead overrides the version inferred from
+                    podTemplate.spec.initContainers[name=runtime].image.
+                    The same rules apply to roles[].podTemplate. For non-LPX components in
+                    sidecar mode, main container images are not used to infer Dynamo versions,
+                    including for roles without a runtime init container.
+                    This field does not change container images.
+
+                    For frontend, worker, prefill, decode, planner, and epp components, DGD
+                    admission requires this field when any runtime image tag lacks a parseable
+                    semantic version. Components without a type and controller-generated DCDs
+                    may omit it. An override is also needed when the parsed tag differs from
+                    the Dynamo runtime version.
+
+                    The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",
+                    and match the Dynamo version in every affected runtime container.
+                    Setting or changing an override of 1.5.0 or later may trigger a rollout.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 scalingAdapter:

@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path"
-	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -353,9 +351,10 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		if container == nil {
 			return fmt.Errorf("restore destination container %q not found", mapping.Destination)
 		}
-		if !usesSupportedDynamoRestoreEntrypoint(container) {
+		if !checkpoint.HasSupportedRestoreEntrypoint(container) {
 			return fmt.Errorf(
-				"restore destination container %q must directly invoke python -m dynamo.vllm, python -m dynamo.sglang, or python -m dynamo.trtllm; command=%q args=%q",
+				"restore destination container %q must directly invoke python -m <module>, "+
+					"and the module must call maybe_run_restore_standby_mode(); command=%q args=%q",
 				mapping.Destination,
 				container.Command,
 				container.Args,
@@ -388,49 +387,4 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		checkpoint.EnsureRestoreStartupProbe(container)
 	}
 	return nil
-}
-
-// usesSupportedDynamoRestoreEntrypoint recognizes only direct Python module
-// invocations that are known to consume SNAPSHOT_RESTORE_STANDBY. Shell and
-// custom wrappers are rejected because admission cannot prove they honor it.
-func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
-	if len(container.Command) == 0 {
-		return false
-	}
-	python := path.Base(container.Command[0])
-	if python != "python" && python != "python3" && !strings.HasPrefix(python, "python3.") {
-		return false
-	}
-
-	arguments := make([]string, 0, len(container.Command)+len(container.Args))
-	arguments = append(arguments, container.Command...)
-	arguments = append(arguments, container.Args...)
-
-	// Skip only operand-free interpreter options so -m remains unambiguous.
-	moduleFlagIndex := 1
-	for moduleFlagIndex < len(arguments) && isOperandFreePythonInterpreterFlag(arguments[moduleFlagIndex]) {
-		moduleFlagIndex++
-	}
-	if moduleFlagIndex+1 >= len(arguments) || arguments[moduleFlagIndex] != "-m" {
-		return false
-	}
-
-	switch arguments[moduleFlagIndex+1] {
-	case "dynamo.vllm", "dynamo.sglang", "dynamo.trtllm":
-		return true
-	default:
-		return false
-	}
-}
-
-// isOperandFreePythonInterpreterFlag recognizes options that cannot consume
-// the following -m argument. Operand-taking and execution-selector options
-// remain fail-closed.
-func isOperandFreePythonInterpreterFlag(argument string) bool {
-	switch argument {
-	case "-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-vv", "-x":
-		return true
-	default:
-		return false
-	}
 }

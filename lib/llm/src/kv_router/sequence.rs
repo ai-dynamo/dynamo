@@ -9,16 +9,18 @@
 
 mod direct_zmq;
 
-pub use dynamo_kv_router::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError,
-    SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
-};
-use dynamo_kv_router::protocols::{
+use dynamo_kv_router::services::selection::SelectionService;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_scheduler::host::ModelLoadResponse;
+use dynamo_slot_tracker::host::{
     ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, SchedulerGroup, SchedulerLoad, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS, SchedulerGroup, SchedulerLoad,
 };
-pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
-use dynamo_kv_router::services::selection::{ModelLoadResponse, SelectionService};
+pub use dynamo_slot_tracker::host::{
+    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, RequestId, SchedulerLoadSnapshot,
+    SequenceError, SequencePublishQueueError, SequencePublisher, SequenceRequest,
+    SequenceSubscriber,
+};
 
 use anyhow::Result;
 use dynamo_runtime::component::Endpoint;
@@ -136,7 +138,7 @@ impl ActiveSequenceEventPublisher {
         Ok(event_sender)
     }
 
-    /// Emit a worker-origin completion mark. `router_id` carries the worker's source DRT identity.
+    /// Emit a worker-origin prefill completion mark.
     pub fn mark_prefill_completed(
         &self,
         request_id: String,
@@ -147,8 +149,9 @@ impl ActiveSequenceEventPublisher {
         self.enqueue(ActiveSequenceEvent {
             request_id,
             worker,
-            data: dynamo_kv_router::protocols::ActiveSequenceEventData::MarkPrefillCompleted,
+            data: dynamo_slot_tracker::host::ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: worker.worker_id,
+            origin: dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Worker,
             lora_name: None,
         })
     }
@@ -363,10 +366,7 @@ pub(crate) async fn host_replica_channels(
     router_id: u64,
     publishes_outbound: bool,
     cancellation_token: CancellationToken,
-) -> Result<(
-    dynamo_kv_router::services::selection::HostReplicaChannels,
-    ReplicaIngress,
-)> {
+) -> Result<(dynamo_scheduler::host::HostReplicaChannels, ReplicaIngress)> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let (event_sender, local_publisher_id) = if publishes_outbound {
         let (event_sender, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
@@ -407,7 +407,7 @@ pub(crate) async fn host_replica_channels(
         cancellation_token,
     };
     Ok((
-        dynamo_kv_router::services::selection::HostReplicaChannels {
+        dynamo_scheduler::host::HostReplicaChannels {
             outbound: event_sender,
             inbound_tx,
             inbound_rx,
@@ -493,7 +493,7 @@ pub(crate) fn start_scheduler_load_publisher(
     replica_sync: bool,
     cancellation_token: CancellationToken,
 ) {
-    if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+    if !crate::pool_relay::serving_load_publishing_enabled() {
         return;
     }
     let group = if replica_sync {
@@ -605,7 +605,7 @@ async fn run_scheduler_load_publisher(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::protocols::ActiveSequenceEventData;
+    use dynamo_slot_tracker::host::ActiveSequenceEventData;
     use tokio::time::Instant;
 
     fn free_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
@@ -614,6 +614,7 @@ mod tests {
             worker: WorkerWithDpRank::new(1, 0),
             data: ActiveSequenceEventData::Free,
             router_id: 7,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -629,6 +630,7 @@ mod tests {
                 prefill_load_hint: None,
             },
             router_id: 7,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -639,6 +641,7 @@ mod tests {
             worker: WorkerWithDpRank::new(1, 0),
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: 7,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -972,6 +975,7 @@ mod tests {
                     worker: WorkerWithDpRank::new(42, 0),
                     data: ActiveSequenceEventData::MarkPrefillCompleted,
                     router_id: 1,
+                    origin: Default::default(),
                     lora_name: None,
                 })?;
                 peer.mark_prefill_completed("peer-mark".to_string(), 42, 0)?;
@@ -1074,7 +1078,7 @@ mod tests {
         let model = |name: &str, worker_id, blocks, tokens| ModelLoadResponse {
             model_name: name.into(),
             routing_group: "default".into(),
-            loads: vec![dynamo_kv_router::protocols::PotentialLoad {
+            loads: vec![dynamo_scheduler::host::PotentialLoad {
                 worker_id,
                 dp_rank: 0,
                 potential_decode_blocks: blocks,
@@ -1109,7 +1113,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn scheduler_publisher_batches_live_loads_and_removes_departed_ranks() -> Result<()> {
-        use dynamo_kv_router::services::selection::{SelectionServiceBuilder, WorkerRequest};
+        use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+        use dynamo_scheduler::host::WorkerRequest;
 
         let distributed = dynamo_runtime::DistributedRuntime::new(
             dynamo_runtime::Runtime::from_current()?,
@@ -1127,8 +1132,8 @@ mod tests {
                     router_queue_threshold: None,
                     ..Default::default()
                 },
-                dynamo_kv_router::WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
+                dynamo_router_protocol::worker_type::WorkerType::Aggregated,
+                dynamo_router_policies::default_registry(),
             )
             .indexer_threads(1)
             .build()

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
 use crate::grpc::service::kserve::inference::ModelOutput;
-use crate::http::service::Metrics;
 use crate::http::service::service_v2 as http_service;
+use dynamo_http_server::metrics::Metrics;
 
 use crate::discovery::ModelManager;
 use crate::protocols::tensor::TensorModelConfig;
@@ -190,7 +190,7 @@ pub struct KserveServiceConfig {
     #[builder(default = "None")]
     http_cancel_token: Option<CancellationToken>,
 
-    /// Distributed runtime used to publish frontend load to the KV DC Relay.
+    /// Distributed runtime used to publish frontend load to the Pool Relay.
     #[builder(default = "None")]
     runtime: Option<dynamo_runtime::DistributedRuntime>,
 

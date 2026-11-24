@@ -9,8 +9,15 @@ import math
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, NumericRange
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from aisim.config.common import Choices, NumericRange
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 from dynamo.aisimulate.domains import (
     CHOICE_FORM,
@@ -20,6 +27,7 @@ from dynamo.aisimulate.domains import (
     SCALAR,
     stepped_numeric_values,
 )
+from dynamo.common.ais_perf_model import has_relative_paths
 
 MODES = frozenset({"kv_router", "round_robin"})
 OVERLAP_SCORE_CREDIT_DEFAULTS = (0.0, 0.5, 1.0)
@@ -75,7 +83,8 @@ ROUTER_NOT_RETUNABLE: dict[str, str] = {
     "host_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "disk_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "shared_cache_multiplier": (
-        "replay reports no shared cache hits, so every value would score the same"
+        "a router started with it at 0 builds no KV fetch inputs and a runtime "
+        "update cannot add them, so retune keeps it at its startup value"
     ),
 }
 
@@ -94,34 +103,94 @@ class PrefillLoadRecommendationModel(BaseModel):
     )
 
 
+class ConversationAffinityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["session", "sibling_group"] = "session"
+    ttl_seconds: float = Field(
+        default=300.0, ge=1.0, le=31_536_000, allow_inf_nan=False
+    )
+
+
+# ``router.ais_perf_model`` written this way: the router reads the perf model
+# of the engine it routes to.
+USE_ENGINE_PERF_MODEL = {"use": "engine"}
+
+
+def _check_ais_perf_model(value: Any) -> Any:
+    """Check the value written at ``router.ais_perf_model``; return it as written."""
+    if value is None:
+        return value
+    if isinstance(value, str):
+        raise ValueError(
+            "router.ais_perf_model must be {use: engine}, a perf model config or "
+            "a list of configs, not a string"
+        )
+    if isinstance(value, Mapping) and value == USE_ENGINE_PERF_MODEL:
+        return value
+    # {use: engine} is a value of its own: the key use is wrong in a config and
+    # in an entry of a list, where it would fail only once a deployment mode
+    # selects that entry.
+    entries = value if isinstance(value, list) else [value]
+    if any(isinstance(entry, Mapping) and "use" in entry for entry in entries):
+        raise ValueError(
+            "router.ais_perf_model: write {use: engine} alone, or a perf model "
+            "config without the key use"
+        )
+    # The adapter does not know the folder of the config file, so a relative
+    # path has no folder to start at.
+    if has_relative_paths(value):
+        raise ValueError(
+            "router.ais_perf_model: relative paths are not allowed here; write "
+            "absolute paths"
+        )
+    return value
+
+
 class RouterPredictionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     policy: Policy = "round_robin"
     prefill_load_model: PrefillLoadModel = Field(default_factory=PrefillLoadModel)
+    ais_perf_model: dict[str, Any] | list[dict[str, Any]] | None = None
     overlap_score_credit: StrictFiniteFloat | None = None
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
+    # --no-router-kv-events: the router indexes its own routing decisions instead.
+    use_kv_events: StrictBool | None = None
+    conversation_affinity: ConversationAffinityConfig | None = None
+    # Router policy YAML, the file the live router takes as ``--router-policy-config``.
+    # A worker-selection policy it selects replaces the default cost function.
+    policy_config: str | None = None
+
+    @field_validator("ais_perf_model", mode="before")
+    @classmethod
+    def _validate_ais_perf_model(cls, value: Any) -> Any:
+        return _check_ais_perf_model(value)
 
     @field_validator(
         "overlap_score_credit",
         "prefill_load_scale",
         "temperature",
+        "use_kv_events",
         mode="before",
     )
     @classmethod
     def _reject_explicit_null(cls, value: Any) -> Any:
         if value is None:
-            raise ValueError("Router numeric knobs do not accept null")
+            raise ValueError("Router knobs do not accept null")
         return value
 
     @model_validator(mode="after")
     def _validate_policy(self) -> RouterPredictionConfig:
         if self.policy == "round_robin":
             conflicts = {
+                "conversation_affinity",
                 "overlap_score_credit",
+                "policy_config",
                 "prefill_load_scale",
                 "temperature",
+                "use_kv_events",
             }.intersection(self.model_fields_set)
             if self.prefill_load_model.type != "none" or conflicts:
                 raise ValueError(
@@ -135,6 +204,10 @@ class RouterPredictionConfig(BaseModel):
                 self.prefill_load_scale = 1.0
             if self.temperature is None:
                 self.temperature = 0.0
+        if self.ais_perf_model is not None and self.prefill_load_model.type != "ais":
+            raise ValueError(
+                "router.ais_perf_model requires router.prefill_load_model.type: ais"
+            )
         return self
 
 
@@ -147,9 +220,15 @@ class RouterRecommendationConfig(BaseModel):
     prefill_load_model: PrefillLoadRecommendationModel = Field(
         default_factory=PrefillLoadRecommendationModel
     )
+    ais_perf_model: dict[str, Any] | list[dict[str, Any]] | None = None
     overlap_score_credit: RouterKnobDomain | None = None
     prefill_load_scale: RouterKnobDomain | None = None
     temperature: RouterKnobDomain | None = None
+
+    @field_validator("ais_perf_model", mode="before")
+    @classmethod
+    def _validate_ais_perf_model(cls, value: Any) -> Any:
+        return _check_ais_perf_model(value)
 
     @field_validator(
         "overlap_score_credit",
@@ -227,6 +306,17 @@ class RouterRecommendationConfig(BaseModel):
             domain = getattr(self, name)
             if isinstance(domain, NumericRange) and domain.range.min < 0:
                 raise ValueError(f"router.{name} range requires min >= 0")
+        if self.ais_perf_model is not None:
+            load_types = (
+                set(self.prefill_load_model.type.choices)
+                if isinstance(self.prefill_load_model.type, Choices)
+                else {self.prefill_load_model.type}
+            )
+            if "ais" not in load_types:
+                raise ValueError(
+                    "router.ais_perf_model requires ais among the "
+                    "router.prefill_load_model.type choices"
+                )
         return self
 
 
@@ -272,6 +362,11 @@ class RouterRetuneConfig(RouterRecommendationConfig):
         for name, reason in ROUTER_NOT_RETUNABLE.items():
             if name in value:
                 raise ValueError(f"retune.router.{name} is not retunable: {reason}")
+        if "ais_perf_model" in value:
+            raise ValueError(
+                "retune.router.ais_perf_model is not supported: a running router "
+                "keeps the perf model it started with"
+            )
         policy = value.get("policy", "kv_router")
         if policy != "kv_router" and policy != {"choices": ["kv_router"]}:
             raise ValueError(

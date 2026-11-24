@@ -126,6 +126,28 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		assert.Equal(t, pod.Spec.Containers[0].LivenessProbe, shaped.Spec.Containers[0].LivenessProbe)
 	})
 
+	t.Run("admits a custom python module with standby injected", func(t *testing.T) {
+		t.Log("Given a native restore candidate whose engine runs a custom python module")
+		t.Log("And autovllm.dynamo_server stands in for a wrapper that calls maybe_run_restore_standby_mode() before importing runtime or backend code")
+		pod := nativeRestoreCandidatePod(snapshot)
+		pod.Spec.Containers[1].Command = []string{"python3", "-m", "autovllm.dynamo_server"}
+		original := mustMarshalPod(t, pod)
+		req := admission.Request{
+			Operation: admissionv1.Create,
+			Namespace: pod.Namespace,
+			Object:    runtime.RawExtension{Raw: original}}
+
+		t.Log("When the Dynamo admission webhook shapes the Pod")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then the Pod is admitted and every destination still receives standby mode")
+		require.True(t, resp.Allowed)
+		shaped := applyAdmissionPatches(t, original, resp)
+		for _, container := range shaped.Spec.Containers {
+			assert.Contains(t, container.Env, corev1.EnvVar{Name: podcontract.RestoreStandbyModeEnv, Value: "1"})
+		}
+	})
+
 	t.Run("denies stale or unsafe native candidates", func(t *testing.T) {
 		tests := []struct {
 			name    string
@@ -353,61 +375,6 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 		require.NotNil(t, resp.Result)
 		assert.Contains(t, resp.Result.Message, "not marked as a Dynamo automatic checkpoint")
 	})
-}
-
-func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
-	tests := []struct {
-		name      string
-		command   []string
-		args      []string
-		supported bool
-	}{
-		{
-			name:      "vLLM module in command",
-			command:   []string{"python3", "-m", "dynamo.vllm"},
-			supported: true,
-		},
-		{
-			name:      "SGLang module split across command and args",
-			command:   []string{"python"},
-			args:      []string{"-m", "dynamo.sglang", "--model", "test"},
-			supported: true,
-		},
-		{
-			name:      "TensorRT-LLM module with versioned Python path",
-			command:   []string{"/usr/bin/python3.11", "-m", "dynamo.trtllm"},
-			supported: true,
-		},
-		{
-			name:      "vLLM module after operand-free interpreter flags",
-			command:   []string{"python3", "-u", "-O", "-m", "dynamo.vllm"},
-			supported: true,
-		},
-		{
-			name:    "shell wrapper",
-			command: []string{"/bin/sh", "-c"},
-			args:    []string{"python3 -m dynamo.vllm"},
-		},
-		{
-			name:    "custom wrapper with module arguments",
-			command: []string{"serve-model"},
-			args:    []string{"-m", "dynamo.vllm"},
-		},
-		{
-			name:    "unsupported Dynamo module",
-			command: []string{"python3", "-m", "dynamo.frontend"},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Given a restore destination with an explicit container entrypoint")
-			container := &corev1.Container{Command: test.command, Args: test.args}
-
-			t.Log("Then only a direct invocation of a standby-aware engine is accepted")
-			assert.Equal(t, test.supported, usesSupportedDynamoRestoreEntrypoint(container))
-		})
-	}
 }
 
 func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {

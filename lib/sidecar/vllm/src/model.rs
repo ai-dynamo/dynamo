@@ -6,7 +6,10 @@ use std::ops::Range;
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
-use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use dynamo_llm::local_model::runtime_config::{
+    TOKEN_BUDGET_RUNTIME_KEY, TokenBudget, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+};
+use pep440_rs::Version;
 
 use crate::client;
 use crate::proto as pb;
@@ -133,6 +136,16 @@ impl DiscoveredModel {
         parse_proto_version(&self.server.proto_version).is_some_and(|version| version >= PROTO_0_6)
     }
 
+    /// Whether vLLM reports version 0.33 or later, including its pre-releases and
+    /// nightlies, whose gRPC server compiles structural tags with xgrammar
+    /// (vllm-project/vllm#61892).
+    pub(crate) fn compiles_structural_tags(&self) -> bool {
+        self.server
+            .engine_version
+            .parse::<Version>()
+            .is_ok_and(|version| version.only_release() >= Version::new([0, 33]))
+    }
+
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
         self.server.rl_capabilities.as_ref()
     }
@@ -222,6 +235,18 @@ impl DiscoveredModel {
                 ),
             ]
             .into_iter()
+            .chain(nonzero(self.server.max_model_len).map(|combined_limit| {
+                (
+                    TOKEN_BUDGET_RUNTIME_KEY.to_string(),
+                    // vLLM rejects prompt overflow but caps oversized output budgets.
+                    serde_json::to_value(TokenBudget {
+                        combined_limit,
+                        reject_prompt_overflow: true,
+                        reject_total_overflow: false,
+                    })
+                    .expect("token budget is serializable"),
+                )
+            }))
             .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
@@ -397,6 +422,19 @@ mod tests {
                 .runtime_data
                 .get(dynamo_llm::lora::LORA_REQUIRES_REGISTRATION),
             Some(&json!(true))
+        );
+        // The frontend rejects over-long prompts itself only when this budget is published.
+        assert_eq!(
+            model
+                .engine_config(true)
+                .unwrap()
+                .runtime_data
+                .get(TOKEN_BUDGET_RUNTIME_KEY),
+            Some(&json!({
+                "combined_limit": 8192,
+                "reject_prompt_overflow": true,
+                "reject_total_overflow": false,
+            }))
         );
     }
 

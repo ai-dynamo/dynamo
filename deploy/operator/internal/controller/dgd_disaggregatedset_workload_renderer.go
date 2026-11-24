@@ -23,7 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -43,25 +43,15 @@ func (r *disaggregatedSetWorkloadRenderer) Render(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (*unstructured.Unstructured, error) {
-	ds := newDisaggregatedSetObject()
-	ds.SetName(disaggregatedSetName(dgd))
-	ds.SetNamespace(dgd.Namespace)
-	ds.SetLabels(map[string]string{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-		consts.KubeLabelDynamoSelector:            disaggregatedSetName(dgd),
-	})
-	if ownerRef := dgdControllerOwnerReference(dgd); ownerRef != nil {
-		ds.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
-	}
 
-	roles := make([]any, 0, len(selection.componentToRole))
+	roles := make([]any, 0, len(selection.ComponentToRole))
 	for i := range dgd.Spec.Components {
 		componentName := dgd.Spec.Components[i].ComponentName
-		roleName, ok := selection.componentToRole[componentName]
+		roleName, ok := selection.ComponentToRole[componentName]
 		if !ok {
 			continue
 		}
@@ -93,7 +83,10 @@ func (r *disaggregatedSetWorkloadRenderer) Render(
 	if len(roles) < 2 {
 		return nil, fmt.Errorf("DisaggregatedSet requires at least two roles, got %d", len(roles))
 	}
-	ds.Object["spec"] = map[string]any{"roles": roles}
+	ds := disaggregatedset.Render(dgd, roles)
+	if ownerRef := dgdControllerOwnerReference(dgd); ownerRef != nil {
+		ds.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
+	}
 	return ds, nil
 }
 

@@ -7,8 +7,9 @@ subtitle: Generation, worker discovery, administration, and compatibility contra
 
 Use this reference when implementing or reviewing a Dynamo rollout adapter. It defines the shared serving contract once; framework guides describe only what differs for that integration.
 
-> [!NOTE]
-> This reference tracks the current `dev` documentation and Dynamo `main`. For a released version, use the matching versioned documentation and confirm that the selected backend advertises the required routes.
+<Note>
+This reference tracks the current `dev` documentation and Dynamo `main`. For a released version, use the matching versioned documentation and confirm that the selected backend advertises the required routes.
+</Note>
 
 ## Separate the Three Planes
 
@@ -20,8 +21,9 @@ Use this reference when implementing or reviewing a Dynamo rollout adapter. It d
 
 Send rollout inference through the shared frontend. Send mutating operations only to selected workers. The discovery endpoint is read-only and does not create a fleet-wide transaction.
 
-> [!WARNING]
-> Discovery and worker administration do not add a separate authentication layer. Keep them on a trusted orchestrator network and expose only the backend methods the integration requires.
+<Warning>
+Discovery and worker administration do not add a separate authentication layer. Keep them on a trusted orchestrator network and expose only the backend methods the integration requires.
+</Warning>
 
 ## Choose a Request Interface
 
@@ -192,8 +194,8 @@ The backends do not share one administration schema. Use the exact route returne
 |---|---|---|
 | Generation | OpenAI-compatible frontend routes; a native unary path is also experimental | Native streaming `/generate` or OpenAI-compatible frontend routes |
 | Worker discovery | RL-enabled Python workers and the native sidecar register with `/v1/rl/workers` | Not currently registered; obtain trusted worker URLs from the framework or deployment |
-| Administration route family | Python workers advertise names such as `/engine/pause_generation`; the native sidecar advertises `/engine/control/*` and `/engine/update/*` | Built-in controls use `/engine/control/*` |
-| Stop and resume work | Python `pause_generation` / `resume_generation`; native-sidecar control routes reflect the installed vLLM RL API | `release_memory_occupation` unregisters and drains the worker; `resume_memory_occupation` restores it |
+| Administration route family | Python workers advertise names such as `/engine/pause_generation`; the native sidecar advertises `/engine/control/*` and `/engine/update/*` | Generation and memory routes use `/engine/<name>`, such as `/engine/pause_generation`; weight-update and profiling routes use `/engine/control/*` |
+| Stop and resume work | Python `pause_generation` / `resume_generation`; native-sidecar control routes reflect the installed vLLM RL API | `pause_generation` / `continue_generation` also remove / register the worker in discovery. Between them, `release_memory_occupation` / `resume_memory_occupation` free and restore GPU memory. |
 | Clear KV state | Python `flush_cache`; native-sidecar behavior follows the advertised lifecycle route and vLLM configuration | `clear_kv_blocks` is a Dynamo worker request-plane endpoint, not a built-in `/engine/control/*` route, and rejects active requests |
 | Apply weights | Python disk or distributed update routes and group lifecycle; native sidecar init/start/update/finish routes when weight transfer is enabled | Built-in disk, tensor, distributed, or IPC update routes using the installed SGLang request schemas |
 | Weight version | Python `get_weight_version` reads the last declared version; `set_weight_version` declares metadata without loading weights; native sidecar exposes get/update controls | `update_weight_version` changes metadata and can abort requests; it does not replace tensors |
@@ -224,8 +226,9 @@ Version declarations accept any JSON value, including `null`. An explicit `{"wei
 
 A successful weight-update reply includes `version_declared` to indicate whether that update declared a version. If the request omits `weight_version`, the reply contains `"version": "unknown"` and `"version_declared": false`, and the previous declaration remains unchanged. An explicit `{"weight_version": "unknown"}` returns the same version with `"version_declared": true`. In an update reply, this flag describes the update; in `get_weight_version`, it describes the stored declaration. A worker with no previous declaration remains undeclared after an update that omits the version. Pass `weight_version` on every update whose version you want the worker to report.
 
-> [!WARNING]
-> A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes weight updates that traverse its own `/engine/` routes and supported ModelExpress RL startup. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.
+<Warning>
+A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes weight updates that traverse its own `/engine/` routes and supported ModelExpress RL startup. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.
+</Warning>
 
 When an RL framework loads weights outside Dynamo, declare the resulting version so the worker reports it. `set_weight_version` records the version without loading weights:
 

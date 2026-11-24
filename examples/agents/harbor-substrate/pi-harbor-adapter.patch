@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+diff --git a/pi-plugin/harbor/dynamo_pi.py b/pi-plugin/harbor/dynamo_pi.py
+index ddf7b57..cd640e6 100644
+--- a/pi-plugin/harbor/dynamo_pi.py
++++ b/pi-plugin/harbor/dynamo_pi.py
+@@ -11,6 +11,10 @@ from harbor.agents.installed.pi import Pi
+ from harbor.environments.base import BaseEnvironment
+ from harbor.models.agent.context import AgentContext
+ 
++# Written by a prepared task image. Records the baked Node and Pi versions and
++# the provider location, so install() can skip the runtime installation.
++PREPARED_RUNTIME_MARKER = "/opt/pi-runtime.json"
++
+ 
+ class DynamoPi(Pi):
+     """Pi with the local Dynamo provider and Harbor's per-trial session ID."""
+@@ -22,10 +26,33 @@ class DynamoPi(Pi):
+         **kwargs,
+     ):
+         self._provider_path = provider_path
++        self._prepared = False
+         super().__init__(*args, **kwargs)
+ 
+     @override
+     async def install(self, environment: BaseEnvironment) -> None:
++        marker = await self._read_prepared_runtime(environment)
++        if marker is not None:
++            baked = marker.get("pi")
++            if not isinstance(baked, str) or not baked:
++                raise RuntimeError(
++                    f"{PREPARED_RUNTIME_MARKER} does not record a Pi version"
++                )
++            if self._version and self._version != baked:
++                raise RuntimeError(
++                    f"Prepared image has Pi {baked} but the job pins {self._version}"
++                )
++            self._version = baked
++            self._prepared = True
++            self.logger.info("Using the prepared Pi %s runtime", baked)
++            await self._start_tool_trace_tls(environment, install_package=False)
++            return
++
++        self.logger.warning(
++            "%s not found; installing Pi and the provider. This needs egress to "
++            "GitHub, nodejs.org, the npm registry, and the image's apt mirrors.",
++            PREPARED_RUNTIME_MARKER,
++        )
+         await super().install(environment)
+         await self.exec_as_agent(
+             environment,
+@@ -38,6 +65,50 @@ class DynamoPi(Pi):
+                 'cd "$work"; npm ci; npm run build; pi install "$work"'
+             ),
+         )
++        await self._start_tool_trace_tls(environment, install_package=True)
++
++    async def _read_prepared_runtime(
++        self, environment: BaseEnvironment
++    ) -> dict | None:
++        """Return the prepared-runtime marker, or None when the image has none."""
++        result = await self.exec_as_agent(
++            environment,
++            command=f"cat {PREPARED_RUNTIME_MARKER} 2>/dev/null || true",
++        )
++        text = (result.stdout or "").strip()
++        if not text:
++            return None
++        try:
++            marker = json.loads(text)
++        except json.JSONDecodeError as exc:
++            raise RuntimeError(f"{PREPARED_RUNTIME_MARKER} is not valid JSON") from exc
++        if not isinstance(marker, dict):
++            raise RuntimeError(f"{PREPARED_RUNTIME_MARKER} must hold a JSON object")
++        return marker
++
++    async def _start_tool_trace_tls(
++        self, environment: BaseEnvironment, install_package: bool
++    ) -> None:
++        """Start the TLS client for tool events when the job configures one.
++
++        Substrate's egress gateway forwards only HTTP and TLS, and Pi publishes
++        tool events over ZMQ, so stunnel wraps that stream in TLS.
++        """
++        tls_config = self._get_env("DYN_TOOL_TRACE_TLS_CONFIG")
++        if not tls_config:
++            return
++        command = f"stunnel {shlex.quote(tls_config)}"
++        if install_package:
++            command = (
++                "apt-get update -qq && "
++                "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq stunnel4 && "
++                + command
++            )
++        await self.exec_as_root(
++            environment,
++            command=command,
++            timeout_sec=180 if install_package else None,
++        )
+ 
+     def _dynamo_env(self) -> dict[str, str]:
+         base_url = self._get_env("DYNAMO_BASE_URL")
+@@ -97,10 +168,12 @@ class DynamoPi(Pi):
+                 f"--data {final_body} >/dev/null || exit 70; "
+                 'exit "$rc"'
+             )
++        # A prepared image puts node and pi on PATH; the installed path needs nvm.
++        shell_prefix = "" if self._prepared else ". ~/.nvm/nvm.sh; "
+         await self.exec_as_agent(
+             environment,
+             command=(
+-                ". ~/.nvm/nvm.sh; "
++                f"{shell_prefix}"
+                 "pi --print --mode json --no-session "
+                 f"--provider dynamo --model {shlex.quote(model_name)} {cli_flags}"
+                 f"{shlex.quote(instruction)} "

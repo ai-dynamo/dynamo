@@ -45,6 +45,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// validateEnvVars requires unique names and valid value/source combinations.
+// Only unchanged lists ratchet; semantic ordering never ratchets duplicate names.
+// fldPath must not be nil; nil oldEnv means there is no previously eligible list.
+func (v *sharedValidation) validateEnvVars(env, oldEnv []corev1.EnvVar, fldPath *field.Path, orderedEnvironment bool) field.ErrorList {
+	unchanged := apiequality.Semantic.DeepEqual(env, oldEnv)
+	if unchanged && !orderedEnvironment {
+		return nil
+	}
+
+	// Check each source independently; equal names in different layers are valid overrides.
+	var allErrs field.ErrorList
+	seen := make(map[string]bool, len(env))
+	for i, entry := range env {
+		if seen[entry.Name] {
+			allErrs = append(allErrs, field.Duplicate(fldPath.Index(i).Child("name"), entry.Name))
+		}
+		seen[entry.Name] = true
+		if !unchanged && entry.Value != "" && entry.ValueFrom != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Index(i).Child("valueFrom"), "may not be specified when value is non-empty"))
+		}
+	}
+	return allErrs
+}
+
 // validatePodTemplateSpec checks LPX role templates beyond the admitted Pod schema.
 // template and fldPath are non-nil; hostsEngine is whether the role's Pods host the engine.
 func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateSpec, fldPath *field.Path, role string, hostsEngine bool) field.ErrorList {
@@ -343,7 +367,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	allErrs = append(allErrs, dynamo.ValidateDynamoSidecar(spec, fldPath)...)
+	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 
@@ -705,17 +729,14 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	hostsEngine := lpx && role.Name == dynamolpx.RuntimeSidecarRole(options.component)
 
 	// Only the LPX role whose Pods host the engine may run the Dynamo sidecar; reconciliation checks the build.
-	if role.PodTemplate != nil && !hostsEngine {
+	if lpx && role.PodTemplate != nil && !hostsEngine {
 		for i, container := range role.PodTemplate.Spec.InitContainers {
 			if container.Name != consts.RuntimeContainerName {
 				continue
 			}
 
-			// Only LPX authors have a role that may host the sidecar, so only they are pointed to it.
-			detail := "Dynamo sidecar mode is not supported in multinode or LPX role pod templates"
-			if lpx {
-				detail = "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
-			}
+			// Point to the LPX role that may host the sidecar.
+			detail := "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("podTemplate", "spec", "initContainers").Index(i).Child("name"), detail))
 		}
 	}
@@ -1242,7 +1263,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(newComponent.ComponentType)) &&
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
-			(newImage != oldImage || overrideChanged) {
+			(newImage != oldImage || overrideChanged || newComponent.ComponentType != oldComponent.ComponentType) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
@@ -1272,13 +1293,14 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdate(
 
 	oldImages := make(map[string]string, len(oldComponent.Roles))
 	for i := range oldComponent.Roles {
-		oldImages[oldComponent.Roles[i].Name] = rolePodTemplateMainImage(&oldComponent.Roles[i])
+		oldImages[oldComponent.Roles[i].Name] = rolePodTemplateRuntimeImage(&oldComponent.Roles[i], dynamo.GetComponentDynamoSidecar(oldComponent) != nil)
 	}
 	for i := range newComponent.Roles {
 		role := &newComponent.Roles[i]
-		newImage := rolePodTemplateMainImage(role)
+		newImage := rolePodTemplateRuntimeImage(role, dynamo.GetComponentDynamoSidecar(newComponent) != nil)
 		if newImage != "" && runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
-			(newImage != oldImages[role.Name] || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			(newImage != oldImages[role.Name] || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride ||
+				newComponent.ComponentType != oldComponent.ComponentType) {
 			return field.ErrorList{field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
@@ -1288,8 +1310,16 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdate(
 	return nil
 }
 
-func rolePodTemplateMainImage(role *nvidiacomv1beta1.ComponentRoleSpec) string {
+func rolePodTemplateRuntimeImage(role *nvidiacomv1beta1.ComponentRoleSpec, sidecarMode bool) string {
 	if role == nil || role.PodTemplate == nil {
+		return ""
+	}
+	if sidecarMode {
+		for _, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				return container.Image
+			}
+		}
 		return ""
 	}
 	index := mainContainerIndex(role.PodTemplate.Spec.Containers)
@@ -1307,7 +1337,7 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersion(
 		return nil
 	}
 	for i := range component.Roles {
-		image := rolePodTemplateMainImage(&component.Roles[i])
+		image := rolePodTemplateRuntimeImage(&component.Roles[i], dynamo.GetComponentDynamoSidecar(component) != nil)
 		if image != "" && runtimeVersionOverrideRequired(image, component.RuntimeVersionOverride) {
 			return field.ErrorList{field.Required(
 				fldPath.Child("runtimeVersionOverride"),

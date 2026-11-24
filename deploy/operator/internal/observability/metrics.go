@@ -70,13 +70,16 @@ var (
 	)
 )
 
-// InitMetrics registers all custom metrics with the controller-runtime metrics registry
-func InitMetrics() {
+// InitMetrics registers all custom metrics with the controller-runtime metrics
+// registry. operatorVersion is the value of the --operator-version flag,
+// exposed as the version label on dynamo_operator_build_info.
+func InitMetrics(operatorVersion string) {
 	ctrlmetrics.Registry.MustRegister(
 		resourcesTotal,
 		webhookDuration,
 		webhookRequestsTotal,
 		webhookDenialsTotal,
+		buildInfoCollector(operatorVersion),
 	)
 }
 

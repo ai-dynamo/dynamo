@@ -113,6 +113,7 @@ class OmniStageRouter:
         request: dict,
         context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
+        """Run the request through each stage and format the final output."""
         request_id = str(uuid.uuid4())
         parsed_request, request_type = parse_request_type(
             request, self.config.output_modalities
@@ -121,6 +122,10 @@ class OmniStageRouter:
         if request_type == RequestType.IMAGE_GENERATION:
             if not isinstance(parsed_request, NvCreateImageRequest):
                 raise InvalidArgument("Invalid image-generation request")
+            if parsed_request.input_reference:
+                raise InvalidArgument(
+                    "Image edits are not supported by the Omni stage router"
+                )
             try:
                 image_output_format = _normalize_image_output_options(
                     parsed_request.output_format,
@@ -195,6 +200,8 @@ class OmniStageRouter:
             fmt_ctx["fps"] = nvext["fps"]
         if nvext.get("speed") is not None:
             fmt_ctx["speed"] = nvext["speed"]
+        if nvext.get("num_inference_steps") is not None:
+            fmt_ctx["num_inference_steps"] = nvext["num_inference_steps"]
         # If the request type is AUDIO_GENERATION,
         # we need to normalize the data_source and response_format to
         # align with other modalities.
@@ -344,6 +351,8 @@ async def init_omni_stage_router(
         # Aggregated with no peer dependencies.
         worker_type=WorkerType.Aggregated,
         needs=[],
+        # Stage 0 does not load input_reference into the image prompt.
+        user_data={"image_edits": {"schema_version": 1, "max_input_images": 0}},
     )
     register_model_taint_route(runtime, generate_endpoint)
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)

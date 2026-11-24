@@ -618,11 +618,7 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
         let collected =
             tokio::task::spawn_blocking(move || collector.metric_families_combined()).await;
         let families = match collected {
-            Ok(Ok(families)) => families,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "OTLP metrics collection failed");
-                continue;
-            }
+            Ok(families) => families,
             Err(error) => {
                 tracing::warn!(%error, "OTLP metrics collection task failed");
                 continue;
@@ -864,7 +860,7 @@ mod tests {
             .register(Box::new(histogram))
             .expect("register histogram");
 
-        let collected = registry.metric_families_combined().expect("combined");
+        let collected = registry.metric_families_combined();
         let metrics = to_resource_metrics(&collected, &[], UNIX_EPOCH)
             .scope_metrics
             .into_iter()

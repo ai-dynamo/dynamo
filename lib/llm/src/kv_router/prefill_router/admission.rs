@@ -126,7 +126,7 @@ impl PrefillRouter {
                 "Prefill router output has no data field".to_string(),
             ));
         };
-        let Some(disaggregated_params) = output.disaggregated_params.clone() else {
+        let Some(disaggregated_params) = output.disaggregated_params.as_deref().cloned() else {
             return Err(PrefillError::NoDisaggregatedParams(
                 "Prefill router output missing disaggregated_params".to_string(),
             ));
@@ -156,7 +156,7 @@ impl PrefillRouter {
                 disaggregated_params,
                 prompt_tokens_details,
             },
-            worker_link: output.worker_trace_link.clone(),
+            worker_link: output.worker_trace_link.as_deref().cloned(),
             completion,
         })
     }
@@ -197,9 +197,13 @@ mod tests {
     use futures::stream;
     use serde_json::json;
 
-    use dynamo_runtime::pipeline::{AsyncEngineContext, ResponseStream, context::Controller};
+    use dynamo_runtime::pipeline::{
+        AsyncEngineContext, AsyncEngineContextProvider, Context, ResponseStream,
+        context::Controller,
+    };
 
     use super::*;
+    use crate::kv_router::prefill_router::cancellation::arm_for;
 
     fn prefill_stream(
         items: Vec<Annotated<LLMEngineOutput>>,
@@ -212,7 +216,7 @@ mod tests {
 
     fn valid_prefill_output() -> Annotated<LLMEngineOutput> {
         Annotated::from_data(LLMEngineOutput {
-            disaggregated_params: Some(json!({})),
+            disaggregated_params: Some(Box::new(json!({}))),
             ..Default::default()
         })
     }
@@ -270,14 +274,15 @@ mod tests {
                             })
                         });
                         let levels = Arc::new(Mutex::new(Vec::new()));
+                        let _interest_guard = crate::test_utils::tracing_interest_guard();
                         let subscriber =
                             tracing_subscriber::registry().with(Levels(levels.clone()));
                         let run = async {
                             let context = Arc::new(Controller::default());
                             let first = Annotated::from_data(LLMEngineOutput {
-                                disaggregated_params: Some(json!({
+                                disaggregated_params: Some(Box::new(json!({
                                     "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
-                                })),
+                                }))),
                                 ..Default::default()
                             });
                             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -348,9 +353,9 @@ mod tests {
             Annotated::from_data(LLMEngineOutput::cancelled()),
         ] {
             let first = Annotated::from_data(LLMEngineOutput {
-                disaggregated_params: Some(json!({
+                disaggregated_params: Some(Box::new(json!({
                     "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
-                })),
+                }))),
                 ..Default::default()
             });
             let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -399,12 +404,12 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_drain_retains_teardown_guard_until_stream_finishes() {
         let first = Annotated::from_data(LLMEngineOutput {
-            disaggregated_params: Some(json!({
+            disaggregated_params: Some(Box::new(json!({
                 "bootstrap_host": "127.0.0.1",
                 "bootstrap_port": 1,
                 "bootstrap_room": "test",
                 "ctx_request_id": 42,
-            })),
+            }))),
             ..Default::default()
         });
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -412,16 +417,27 @@ mod tests {
             let _ = release_rx.await;
             Annotated::from_data(LLMEngineOutput::default())
         }));
-        let response = ResponseStream::new(Box::pin(stream), Arc::new(Controller::default()));
         let teardown = Arc::new(());
         let teardown_weak = Arc::downgrade(&teardown);
         let task_guard: dynamo_runtime::engine::EngineContextGuard = teardown.clone();
+        let client_context = Context::new(());
+        let prefill_context = Context::new(());
+        let client = client_context.context();
+        let prefill = prefill_context.context();
+        let response = ResponseStream::new(Box::pin(stream), prefill.clone());
+        let cancel_guard = arm_for(true, true, client.clone(), Arc::downgrade(&prefill)).unwrap();
+        prefill.retain(cancel_guard);
         drop(teardown);
 
         PrefillRouter::consume_prefill_stream(response, None, Some(task_guard))
             .await
             .unwrap();
         assert!(teardown_weak.upgrade().is_some());
+
+        client.stop_generating();
+        tokio::time::timeout(std::time::Duration::from_secs(1), prefill.stopped())
+            .await
+            .expect("bootstrap drain did not retain cancellation propagation");
 
         release_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -508,7 +524,7 @@ mod tests {
     async fn length_limited_prefill_still_requires_handoff() {
         let output = LLMEngineOutput {
             finish_reason: Some(FinishReason::Length),
-            disaggregated_params: Some(json!({"ctx_request_id": 42})),
+            disaggregated_params: Some(Box::new(json!({"ctx_request_id": 42}))),
             ..Default::default()
         };
         let result = PrefillRouter::consume_prefill_stream(
@@ -529,7 +545,7 @@ mod tests {
     async fn unfinished_prefill_still_requires_handoff() {
         let output = LLMEngineOutput {
             finish_reason: None,
-            disaggregated_params: Some(json!({"ctx_request_id": 42})),
+            disaggregated_params: Some(Box::new(json!({"ctx_request_id": 42}))),
             ..Default::default()
         };
         let result = PrefillRouter::consume_prefill_stream(
@@ -554,7 +570,7 @@ mod tests {
         ] {
             let output = LLMEngineOutput {
                 finish_reason: None,
-                disaggregated_params: Some(disaggregated_params),
+                disaggregated_params: Some(Box::new(disaggregated_params)),
                 ..Default::default()
             };
             let result = PrefillRouter::consume_prefill_stream(

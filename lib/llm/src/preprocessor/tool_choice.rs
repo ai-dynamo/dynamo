@@ -4,12 +4,15 @@
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
+use crate::preprocessor::mistral_grammar::CallMode;
 use crate::preprocessor::structural_tag::{
-    SelectedStructuralTagBuilder, requires_native_tool_call_format,
+    SelectedStructuralTagBuilder, is_beam_parser, requires_native_tool_call_format,
 };
-use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
-use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest, PromptReasoningPrefill};
+use crate::protocols::openai::chat_completions::{NvCreateChatCompletionRequest, unified_parser};
+use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::protocols::openai::tools::{
     ToolChoiceGuidance, get_tool_choice_guidance_from_tools, validate_openai_tool_choice,
 };
@@ -19,7 +22,9 @@ use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest, ResponseFormat,
 };
+use dynamo_renderer::OAIChatLikeRequest;
 use dynamo_runtime::error::{DynamoError, ErrorType};
+use serde_json::Value;
 
 fn invalid_argument(message: impl Into<String>, public_message: Option<&str>) -> DynamoError {
     let mut error = DynamoError::builder()
@@ -64,21 +69,75 @@ impl OpenAIPreprocessor {
     ///
     /// Structural tags are preferred when enabled and supported by the configured
     /// tool-call parser. When disabled or unavailable, ordinary forced choices
-    /// retain the legacy JSON-schema fallback. Kimi's marker-delimited forced
+    /// retain the legacy JSON-schema fallback. Native marker-delimited forced
     /// formats cannot be represented by that fallback and remain on their
-    /// prompt/parser best-effort path instead.
+    /// prompt/parser best-effort path instead. Muse Spark Open forced choices
+    /// install its native ATEM structural tag without operator opt-in. The Unified
+    /// `mistral_4` family gets mistral-common's native-format grammar for forced
+    /// choices, for `auto` with tools, and for a JSON schema on the reply, as vLLM's
+    /// Mistral tool parser installs it.
     pub(super) fn apply_tool_choice_guided_decoding(
         &self,
         request: &NvCreateChatCompletionRequest,
         common_request: &mut PreprocessedRequest,
-        prompt_injected_reasoning: bool,
+        prompt_prefill: impl Into<PromptReasoningPrefill>,
+    ) -> Result<GuidedToolConstraint, DynamoError> {
+        let tools = request
+            .validated_effective_tools()
+            .map_err(|error| invalid_argument(error.to_string(), None))?;
+        let constraint = self.try_apply_tool_choice_guided_decoding(
+            request,
+            common_request,
+            prompt_prefill.into(),
+            tools.as_ref(),
+        )?;
+        // Beam: a forced choice, an applicable `strict` tool, or explicit single-call mode
+        // promises enforcement. When preprocessing could not install a tool grammar (the
+        // prompt left the final channel open, the schema is outside the grammar, explicit
+        // guided decoding owns the output), the request is rejected instead of served
+        // with that promise silently dropped.
+        let choice = request
+            .inner
+            .tool_choice
+            .as_ref()
+            .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
+        let requires_enforcement = self.is_beam()
+            && (matches!(
+                choice,
+                ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
+            ) || (request.inner.parallel_tool_calls == Some(false)
+                && !tools.is_empty()
+                && !matches!(choice, ChatCompletionToolChoiceOption::None))
+                || tools.iter().any(|tool| {
+                    tool.function.strict == Some(true)
+                        && match choice {
+                            ChatCompletionToolChoiceOption::None => false,
+                            ChatCompletionToolChoiceOption::Named(named) => {
+                                tool.function.name == named.function.name
+                            }
+                            _ => true,
+                        }
+                }));
+        if requires_enforcement && constraint == GuidedToolConstraint::None {
+            // Static text, safe to show the client: it names the request shape, not internals.
+            const MESSAGE: &str = "Beam cannot enforce the requested tool constraints with this schema and prompt configuration";
+            return Err(invalid_argument(MESSAGE, Some(MESSAGE)));
+        }
+        Ok(constraint)
+    }
+
+    fn try_apply_tool_choice_guided_decoding(
+        &self,
+        request: &NvCreateChatCompletionRequest,
+        common_request: &mut PreprocessedRequest,
+        prompt_prefill: PromptReasoningPrefill,
+        tools: &[ChatCompletionTool],
     ) -> Result<GuidedToolConstraint, DynamoError> {
         let tool_choice = request
             .inner
             .tool_choice
             .as_ref()
             .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-        let tools = effective_tools(&request.inner)?;
         let is_forced_tool_choice = matches!(
             tool_choice,
             ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
@@ -87,7 +146,7 @@ impl OpenAIPreprocessor {
         let has_response_format_constraint = has_response_format_constraint(request);
         let parser_tool_choice = convert_tool_choice(tool_choice);
 
-        self.validate_structured_output_composition(request, tool_choice, tools.as_ref())?;
+        self.validate_structured_output_composition(request, tool_choice, tools)?;
 
         if is_forced_tool_choice && has_explicit_guided_decoding {
             return Err(invalid_argument(
@@ -99,9 +158,65 @@ impl OpenAIPreprocessor {
             ));
         }
 
+        // Beam: the parsers crate's turn grammar holds the whole turn to the response
+        // template over the Harmony wire — a non-empty analysis channel, then calls
+        // whose arguments keep their schema types (unheld, Beam writes integers as
+        // `N.0`) or the answer — so forced choices are enforced and the response keeps
+        // its reasoning. Dynamo only decides when it applies (`beam_turn_grammar_constraint`)
+        // and from which channel the rendered prompt leaves open.
+        let beam_constraint = if self.is_beam() {
+            beam_turn_grammar_constraint(request)
+        } else {
+            GuidedToolConstraint::None
+        };
+
+        // Present only when the Unified mistral_4 family serves this model. As vLLM's
+        // Mistral tool parser does, a JSON schema for the reply joins the Mistral
+        // grammar, so the backend sees lark for every request the grammar
+        // constrains and resolves them all to one structured-output backend. A
+        // forced choice may then answer with JSON instead of a call. Regex, choice,
+        // grammar and whitespace-pattern constraints keep their own path.
+        if let Some(grammar) = &self.mistral_tool_call_grammar
+            && !has_non_json_guided_decoding(request)
+            && let Some(reply_schema) = reply_json_schema(request)?
+        {
+            validate_openai_tool_choice(Some(tool_choice), Some(tools))
+                .map_err(|error| invalid_argument(error.to_string(), None))?;
+            let rendered = match mistral_call_mode(&parser_tool_choice, !tools.is_empty()) {
+                Some(mode) => grammar.render(
+                    mode,
+                    convert_tools(tools),
+                    request.inner.parallel_tool_calls.unwrap_or(true),
+                    Some(&reply_schema),
+                ),
+                None => grammar.render_json(&reply_schema),
+            };
+            return install_mistral_grammar(common_request, rendered);
+        }
+
         // Explicit guided decoding constrains assistant content and cannot be
         // composed with structural-tag tool calls.
         if !is_forced_tool_choice && has_explicit_guided_decoding {
+            return Ok(GuidedToolConstraint::None);
+        }
+
+        // Beam's `response_format` is held inside the final channel behind the
+        // analysis (beside the calls under automatic choice), the way the model
+        // builder's serving layer derives it, instead of a bare JSON document from
+        // the first token that loses the reasoning and the channel structure.
+        if !is_forced_tool_choice && beam_constraint.frames_structured_answer() {
+            if let Some(schema) = request.get_guided_json()
+                && let Some(structural_tag) = beam_turn_structural_tag(
+                    tools,
+                    &parser_tool_choice,
+                    request.inner.parallel_tool_calls,
+                    prompt_prefill.beam_channel,
+                    Some(&schema),
+                )
+            {
+                install_structural_tag(common_request, structural_tag);
+                return Ok(beam_constraint);
+            }
             return Ok(GuidedToolConstraint::None);
         }
 
@@ -113,14 +228,49 @@ impl OpenAIPreprocessor {
             gd.json = None;
         }
 
-        if self.apply_tool_choice_structural_tag(
-            &parser_tool_choice,
-            &convert_tools(tools.as_ref()),
-            request.inner.parallel_tool_calls,
-            prompt_injected_reasoning,
-            request.inner.response_format.as_ref(),
-            common_request,
-        )? {
+        // Beam's grammar is built here, BEFORE the generic structural-tag path, and the
+        // generic path is skipped on the Beam route: the registered builder behind it
+        // knows nothing about the channel the rendered prompt leaves open, so with
+        // structural tags on it would install a fresh-turn grammar (analysis, then the
+        // answer) for an assistant prefill that already opened the final channel
+        // (`continue_final_message`), and the parser, started in `Response`, would show
+        // the reasoning and its channel markup as content. `beam_turn_structural_tag`
+        // builds for `prompt_prefill.beam_channel` instead; and when the operator opted
+        // out of the turn grammar, nothing may reinstall one.
+        if matches!(
+            beam_constraint,
+            GuidedToolConstraint::BeamTurnGrammar { .. }
+        ) {
+            if let Some(structural_tag) = beam_turn_structural_tag(
+                tools,
+                &parser_tool_choice,
+                request.inner.parallel_tool_calls,
+                prompt_prefill.beam_channel,
+                None,
+            ) {
+                install_structural_tag(common_request, structural_tag);
+                return Ok(beam_constraint);
+            }
+            if is_forced_tool_choice {
+                tracing::debug!(
+                    tool_choice = ?parser_tool_choice,
+                    "Beam grammar could not hold this forced choice; using prompt/parser compatibility fallback"
+                );
+                return Ok(GuidedToolConstraint::None);
+            }
+        }
+
+        let tool_definitions = convert_tools(tools);
+        if !self.is_beam()
+            && self.apply_tool_choice_structural_tag(
+                &parser_tool_choice,
+                &tool_definitions,
+                request.inner.parallel_tool_calls,
+                prompt_prefill.unified,
+                request.inner.response_format.as_ref(),
+                common_request,
+            )?
+        {
             return Ok(GuidedToolConstraint::StructuralTag);
         }
 
@@ -148,7 +298,7 @@ impl OpenAIPreprocessor {
                     parser_name,
                     builder,
                     &schema,
-                    prompt_injected_reasoning,
+                    prompt_prefill.unified,
                     common_request,
                 )? {
                     return Ok(GuidedToolConstraint::StructuralTag);
@@ -157,13 +307,27 @@ impl OpenAIPreprocessor {
             return Ok(GuidedToolConstraint::None);
         }
 
-        let requires_native_format =
-            requires_native_tool_call_format(self.tool_call_parser.as_deref(), &parser_tool_choice)
-                || requires_native_tool_call_format(
-                    self.runtime_config.reasoning_parser.as_deref(),
-                    &parser_tool_choice,
-                );
-        if is_forced_tool_choice && requires_native_format {
+        // Present only when the Unified mistral_4 family serves this model.
+        if let Some(grammar) = &self.mistral_tool_call_grammar
+            && let Some(mode) = mistral_call_mode(&parser_tool_choice, !tool_definitions.is_empty())
+        {
+            let rendered = grammar.render(
+                mode,
+                tool_definitions,
+                request.inner.parallel_tool_calls.unwrap_or(true),
+                None,
+            );
+            return install_mistral_grammar(common_request, rendered);
+        }
+
+        if is_forced_tool_choice
+            && forced_choice_keeps_native_format(
+                self.tool_call_parser.as_deref(),
+                self.runtime_config.reasoning_parser.as_deref(),
+                self.unified_family(),
+                &parser_tool_choice,
+            )
+        {
             tracing::debug!(
                 tool_choice = ?parser_tool_choice,
                 "Structural tag was not applied and the parser uses a native tool-call format; using prompt/parser compatibility fallback"
@@ -173,7 +337,7 @@ impl OpenAIPreprocessor {
 
         match get_tool_choice_guidance_from_tools(
             Some(tool_choice),
-            Some(tools.as_ref()),
+            Some(tools),
             request.inner.parallel_tool_calls,
         ) {
             Ok(Some(guidance)) => {
@@ -196,7 +360,7 @@ impl OpenAIPreprocessor {
                         parser_name,
                         builder,
                         schema,
-                        prompt_injected_reasoning,
+                        prompt_prefill.unified,
                         common_request,
                     )?
                 {
@@ -274,6 +438,311 @@ pub(super) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionReque
         || request.common.guided_grammar.is_some()
 }
 
+/// Constraints the Mistral grammar does not carry, as vLLM's Mistral tool
+/// parser leaves them out of it: regex, choice, a grammar and a whitespace
+/// pattern.
+fn has_non_json_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
+    let common = &request.common;
+    common.guided_regex.is_some()
+        || common.guided_choice.as_ref().is_some_and(|v| !v.is_empty())
+        || common.guided_grammar.is_some()
+        || common.guided_whitespace_pattern.is_some()
+}
+
+/// What vLLM's Mistral tool parser constrains a `json_object` reply to.
+static ANY_OBJECT_OR_ARRAY: LazyLock<Value> =
+    LazyLock::new(|| serde_json::json!({"anyOf": [{"type": "object"}, {"type": "array"}]}));
+
+/// The JSON schema a request sets for the reply, read as vLLM's Mistral tool
+/// parser reads it: `guided_json` first, parsed when sent as text, then
+/// `response_format`, where `json_object` allows any object or array.
+fn reply_json_schema(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<Option<Cow<'_, Value>>, DynamoError> {
+    match &request.common.guided_json {
+        Some(Value::String(text)) => serde_json::from_str(text)
+            .map(|schema| Some(Cow::Owned(schema)))
+            .map_err(|error| invalid_argument(format!("invalid guided_json: {error}"), None)),
+        Some(schema) => Ok(Some(Cow::Borrowed(schema))),
+        None => Ok(match request.inner.response_format.as_ref() {
+            None | Some(ResponseFormat::Text) => None,
+            Some(ResponseFormat::JsonObject) => Some(Cow::Borrowed(&*ANY_OBJECT_OR_ARRAY)),
+            Some(ResponseFormat::JsonSchema { json_schema }) => {
+                Some(Cow::Borrowed(&json_schema.schema))
+            }
+        }),
+    }
+}
+
+/// The Mistral grammar's mode for a `tool_choice`, or `None` for `none` and for
+/// `auto` without tools.
+fn mistral_call_mode(tool_choice: &ToolChoice, has_tools: bool) -> Option<CallMode<'_>> {
+    match tool_choice {
+        ToolChoice::Named(name) => Some(CallMode::Named(name)),
+        ToolChoice::Required => Some(CallMode::Required),
+        ToolChoice::Auto if has_tools => Some(CallMode::Auto),
+        ToolChoice::Auto | ToolChoice::None => None,
+    }
+}
+
+/// Install a Mistral grammar as the request's only structured-output constraint.
+fn install_mistral_grammar(
+    common_request: &mut PreprocessedRequest,
+    grammar: String,
+) -> Result<GuidedToolConstraint, DynamoError> {
+    let guided = common_request
+        .sampling_options
+        .guided_decoding
+        .get_or_insert_default();
+    // The grammar carries any reply schema, and the backend takes one
+    // constraint kind per request.
+    guided.json = None;
+    guided.grammar = Some(grammar);
+    // The grammar owns whether a thought is allowed; apply it from the first token.
+    let Value::Object(extra_args) = common_request
+        .extra_args
+        .get_or_insert_with(|| Value::Object(Default::default()))
+    else {
+        return Err(DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message("preprocessed extra_args must be an object")
+            .build());
+    };
+    extra_args.insert("reasoning_ended".to_string(), Value::Bool(true));
+    Ok(GuidedToolConstraint::None)
+}
+
+impl OpenAIPreprocessor {
+    fn is_beam(&self) -> bool {
+        is_beam_parser(self.tool_call_parser.as_deref())
+            || is_beam_parser(self.runtime_config.reasoning_parser.as_deref())
+    }
+
+    /// Whether the Beam turn grammar holds this request's `response_format` inside the
+    /// final channel behind the analysis (automatic or `none` tool choice, no explicit
+    /// guided decoding, grammar enabled) instead of a bare JSON document.
+    pub(crate) fn beam_frames_structured_response<R: OAIChatLikeRequest + CommonExtProvider>(
+        &self,
+        request: &R,
+    ) -> bool {
+        self.is_beam() && beam_turn_grammar_constraint(request).frames_structured_answer()
+    }
+
+    /// Whether Beam's output is a bare `response_format` document the engine's grammar
+    /// owns in full, with no channel structure and so no end-of-turn marker for the
+    /// parser to see. A forced choice ignores `response_format` and generates native
+    /// calls; a framed `response_format` keeps the channel structure.
+    pub(crate) fn beam_output_is_bare_document<R: OAIChatLikeRequest + CommonExtProvider>(
+        &self,
+        request: &R,
+    ) -> bool {
+        Self::has_structured_response_format(request)
+            && !Self::has_guided_tool_choice(request)
+            && !self.beam_frames_structured_response(request)
+    }
+
+    /// Whether Beam's output is bare text an explicit `guided_json` / `guided_regex` /
+    /// `guided_choice` / `guided_grammar` constraint owns in full: with no
+    /// `response_format` and no forced tool choice the turn grammar is skipped, so no
+    /// channel framing ever arrives. The parser must read the stream as the final
+    /// answer (`Response`); under `None` the bare bytes are debris between messages and
+    /// are dropped (`guided_regex: "yes"` lost its `yes`).
+    pub(crate) fn beam_output_is_bare_guidance<R: OAIChatLikeRequest + CommonExtProvider>(
+        &self,
+        request: &R,
+    ) -> bool {
+        self.is_beam()
+            && has_explicit_guided_decoding_ext(request)
+            && !Self::has_guided_tool_choice(request)
+            && !Self::has_structured_response_format(request)
+    }
+}
+
+/// Beam route only: a `builtin_tools` entry given as a declaration object (the legacy
+/// form; the 1.0 template takes names) that the request does not also declare in
+/// `tools` is added to `tools`, so the prompt, the turn grammar and the parser all see
+/// one tool set. Entries that are names, or objects already declared, are left to the
+/// renderer, which validates them. Returns how many tools were added.
+pub(crate) fn declare_legacy_builtin_tools_for_beam(
+    request: &mut NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> usize {
+    if !(is_beam_parser(tool_call_parser) || is_beam_parser(reasoning_parser)) {
+        return 0;
+    }
+    let Some(entries) = request
+        .chat_template_args
+        .as_ref()
+        .and_then(|args| args.get("builtin_tools"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return 0;
+    };
+    let mut added: Vec<ChatCompletionTool> = Vec::new();
+    for entry in entries.iter().filter(|entry| entry.is_object()) {
+        let declaration = if entry.get("function").is_some() {
+            entry.clone()
+        } else {
+            serde_json::json!({"type": "function", "function": entry})
+        };
+        // A malformed declaration is left for the renderer's error message.
+        let Ok(tool) = serde_json::from_value::<ChatCompletionTool>(declaration) else {
+            continue;
+        };
+        let declared = request
+            .inner
+            .tools
+            .iter()
+            .flatten()
+            .chain(added.iter())
+            .any(|existing| existing.function.name == tool.function.name);
+        if !declared {
+            added.push(tool);
+        }
+    }
+    let count = added.len();
+    if count > 0 {
+        request
+            .inner
+            .tools
+            .get_or_insert_with(Vec::new)
+            .extend(added);
+    }
+    count
+}
+
+fn install_structural_tag(
+    common_request: &mut PreprocessedRequest,
+    structural_tag: serde_json::Value,
+) {
+    let gd = common_request
+        .sampling_options
+        .guided_decoding
+        .get_or_insert_default();
+    gd.json = None;
+    gd.regex = None;
+    gd.structural_tag = Some(structural_tag);
+}
+
+/// The constraint the Beam turn grammar implies for a request, decided from request
+/// facts alone so a reconstructing frontend reports what preprocessing installed:
+/// every turn is held unless `DYN_BEAM_TURN_GRAMMAR=0` opts automatic choice out or an
+/// explicit guided-decoding field constrains the answer itself; a `response_format` on
+/// an unforced choice is framed inside the final channel. (A forced choice with
+/// explicit guided decoding is rejected at request time.)
+/// Plain `ignore_eos` requests skip the turn grammar to avoid grammar-driven early stops.
+fn beam_turn_grammar_constraint<R: OAIChatLikeRequest + CommonExtProvider>(
+    request: &R,
+) -> GuidedToolConstraint {
+    let explicit = has_explicit_guided_decoding_ext(request);
+    match (
+        OpenAIPreprocessor::has_guided_tool_choice(request),
+        explicit,
+    ) {
+        (true, true) => GuidedToolConstraint::None,
+        (true, false) => GuidedToolConstraint::BeamTurnGrammar {
+            frames_answer: false,
+        },
+        (false, _) if explicit || !beam_turn_grammar_enabled() => GuidedToolConstraint::None,
+        (false, _)
+            if request.common_ext().and_then(|common| common.ignore_eos) == Some(true)
+                && !OpenAIPreprocessor::has_structured_response_format(request)
+                && (request
+                    .tool_choice()
+                    .is_some_and(|choice| choice.as_str() == Some("none"))
+                    || !OpenAIPreprocessor::request_has_effective_tools(request)) =>
+        {
+            GuidedToolConstraint::None
+        }
+        (false, _) => GuidedToolConstraint::BeamTurnGrammar {
+            frames_answer: OpenAIPreprocessor::has_structured_response_format(request),
+        },
+    }
+}
+
+/// Environment variable that opts a deployment out of the per-turn Beam grammar for
+/// automatic tool choice (`0`, `false`, `off` or `no`). Forced tool choices keep theirs:
+/// without a grammar, `required` and named choices are not enforced on Beam's wire.
+pub(crate) const BEAM_TURN_GRAMMAR_ENV: &str = "DYN_BEAM_TURN_GRAMMAR";
+
+fn beam_turn_grammar_enabled() -> bool {
+    !dynamo_runtime::config::env_is_falsey(BEAM_TURN_GRAMMAR_ENV)
+}
+
+/// The Beam turn grammar from the parsers crate's family registry, built for the channel
+/// the rendered prompt leaves open (`None` = the bare header slot) and, with
+/// `answer_schema`, holding the answer in the final channel to that JSON schema. `None`
+/// where the grammar derives nothing (see
+/// `dynamo_parsers_v2::structural_tag::builders::beam`).
+fn beam_turn_structural_tag(
+    tools: &[ChatCompletionTool],
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+    prompt_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
+    answer_schema: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    use dynamo_parsers_v2::UnifiedParserStartingState as State;
+    use dynamo_parsers_v2::structural_tag::{
+        PromptChannel, StructuralTagContext, StructuralTagSchemaMode, StructuralTagToolChoice,
+    };
+    let builder = dynamo_parsers_v2::structural_tag_builder_for_family(
+        crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
+    )?;
+    let v2_tools: Vec<dynamo_parsers_v2::Tool> = tools
+        .iter()
+        .map(|tool| dynamo_parsers_v2::Tool {
+            name: tool.function.name.clone(),
+            description: None,
+            parameters: tool
+                .function
+                .parameters
+                .clone()
+                .unwrap_or(serde_json::Value::Null),
+            strict: tool.function.strict,
+        })
+        .collect();
+    let context = StructuralTagContext {
+        tool_choice: match tool_choice {
+            ToolChoice::None => StructuralTagToolChoice::None,
+            ToolChoice::Auto => StructuralTagToolChoice::Auto,
+            ToolChoice::Required => StructuralTagToolChoice::Required,
+            ToolChoice::Named(name) => StructuralTagToolChoice::Named(name.as_str()),
+        },
+        tools: &v2_tools,
+        parallel_tool_calls,
+        schema_mode: StructuralTagSchemaMode::Auto,
+        structured_output_schema: answer_schema,
+        starts_in_reasoning: false,
+    };
+    let channel = match prompt_channel {
+        Some(State::Reasoning) => PromptChannel::OpenReasoning,
+        Some(State::Response) => PromptChannel::OpenAnswer,
+        Some(State::None) | None => PromptChannel::MessageStart,
+    };
+    match builder.build_turn(&context, channel) {
+        Ok(tag) => tag,
+        Err(error) => {
+            tracing::warn!(%error, "Beam turn grammar failed to build; leaving the turn unconstrained");
+            None
+        }
+    }
+}
+
+/// [`has_explicit_guided_decoding`] for any request type carrying the common extension
+/// (the Beam turn-grammar decision runs on chat-like requests, not only the OpenAI
+/// chat request); `get_guided_json` is not consulted because it also derives a schema
+/// from `response_format`.
+pub(super) fn has_explicit_guided_decoding_ext<R: CommonExtProvider>(request: &R) -> bool {
+    request
+        .common_ext()
+        .is_some_and(|common| common.guided_json.is_some() || common.guided_grammar.is_some())
+        || request.get_guided_regex().is_some()
+        || request
+            .get_guided_choice()
+            .is_some_and(|choices| !choices.is_empty())
+}
+
 fn has_response_format_constraint(request: &NvCreateChatCompletionRequest) -> bool {
     request
         .inner
@@ -319,34 +788,59 @@ pub(crate) fn effective_tools(
 }
 
 pub(crate) fn effective_tool_definitions(
-    request: &CreateChatCompletionRequest,
+    request: &NvCreateChatCompletionRequest,
 ) -> Result<Vec<ToolDefinition>, DynamoError> {
-    effective_tools(request).map(|tools| convert_tools(tools.as_ref()))
+    request
+        .validated_effective_tools()
+        .map(|tools| convert_tools(tools.as_ref()))
+        .map_err(|error| invalid_argument(error.to_string(), None))
 }
 
-/// The guided-tool constraint a request implies, given what the structural-tag stage
-/// already decided.
-///
-/// Direct postprocessor callers and remote frontends use this compatibility helper
-/// when they did not run request preprocessing. The worker streaming path carries the
-/// enum returned by `apply_tool_choice_guided_decoding`; topology-B aggregation may
-/// reconstruct a structural-tag request as guided JSON, so its complete-output parser
-/// also checks the generated wire shape.
+/// [`guided_tool_constraint_for_model`] with the Unified family selected from the
+/// parser names alone.
+#[cfg(test)]
 pub(crate) fn guided_tool_constraint(
     request: &NvCreateChatCompletionRequest,
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
     uses_structural_tag: bool,
 ) -> Result<GuidedToolConstraint, DynamoError> {
-    if uses_structural_tag {
-        return Ok(GuidedToolConstraint::StructuralTag);
-    }
-    let tools = effective_tools(&request.inner)?;
-    guided_tool_constraint_with_effective_tools(
+    guided_tool_constraint_for_model(
         request,
         tool_call_parser,
         reasoning_parser,
-        false,
+        unified_parser::selected_family(tool_call_parser, reasoning_parser),
+        uses_structural_tag,
+    )
+}
+
+/// The guided-tool constraint a request implies, given what the structural-tag stage
+/// already decided and the Unified family that serves the model, which setup
+/// resolves with its tokenizer.
+///
+/// Direct postprocessor callers and remote frontends use this compatibility helper
+/// when they did not run request preprocessing. The worker streaming path carries the
+/// enum returned by `apply_tool_choice_guided_decoding`; topology-B aggregation may
+/// reconstruct a structural-tag request as guided JSON, so its complete-output parser
+/// also checks the generated wire shape.
+pub(crate) fn guided_tool_constraint_for_model(
+    request: &NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    unified_family: Option<&str>,
+    uses_structural_tag: bool,
+) -> Result<GuidedToolConstraint, DynamoError> {
+    if uses_structural_tag {
+        return Ok(GuidedToolConstraint::StructuralTag);
+    }
+    let tools = request
+        .validated_effective_tools()
+        .map_err(|error| invalid_argument(error.to_string(), None))?;
+    effective_tools_constraint(
+        request,
+        tool_call_parser,
+        reasoning_parser,
+        unified_family,
         tools.as_ref(),
     )
 }
@@ -357,12 +851,29 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
     request: &NvCreateChatCompletionRequest,
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
+    unified_family: Option<&str>,
     uses_structural_tag: bool,
     tools: &[ChatCompletionTool],
 ) -> Result<GuidedToolConstraint, DynamoError> {
     if uses_structural_tag {
         return Ok(GuidedToolConstraint::StructuralTag);
     }
+    effective_tools_constraint(
+        request,
+        tool_call_parser,
+        reasoning_parser,
+        unified_family,
+        tools,
+    )
+}
+
+fn effective_tools_constraint(
+    request: &NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    unified_family: Option<&str>,
+    tools: &[ChatCompletionTool],
+) -> Result<GuidedToolConstraint, DynamoError> {
     let tool_choice = request
         .inner
         .tool_choice
@@ -370,6 +881,12 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     validate_openai_tool_choice(Some(tool_choice), Some(tools))
         .map_err(|error| invalid_argument(error.to_string(), None))?;
+    // Beam holds every turn with its grammar (`apply_tool_choice_guided_decoding`); a
+    // reconstructing frontend reports the same so parsing frames the arguments and a
+    // `response_format` answer the way that grammar shaped them.
+    if is_beam_parser(tool_call_parser) || is_beam_parser(reasoning_parser) {
+        return Ok(beam_turn_grammar_constraint(request));
+    }
     let is_forced_tool_choice = matches!(
         tool_choice,
         ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
@@ -385,12 +902,15 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
         return Ok(GuidedToolConstraint::None);
     }
     let parser_tool_choice = convert_tool_choice(tool_choice);
-    // Kimi forced requests use marker-delimited native formats that generic JSON
-    // guidance cannot represent. Keep this compatibility path aligned with
-    // request preprocessing for either configured parser slot.
-    if requires_native_tool_call_format(tool_call_parser, &parser_tool_choice)
-        || requires_native_tool_call_format(reasoning_parser, &parser_tool_choice)
-    {
+    // Kimi, Beam and Unified Mistral forced requests use native wire formats that
+    // generic JSON guidance cannot represent. Keep this compatibility path aligned
+    // with request preprocessing.
+    if forced_choice_keeps_native_format(
+        tool_call_parser,
+        reasoning_parser,
+        unified_family,
+        &parser_tool_choice,
+    ) {
         return Ok(GuidedToolConstraint::None);
     }
     // Validate the forced choice against the actual tools the same way
@@ -406,6 +926,33 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
         Ok(None) => Ok(GuidedToolConstraint::None),
         Err(e) => Err(invalid_argument(e.to_string(), None)),
     }
+}
+
+/// Whether a forced choice keeps the model's native tool-call format instead of
+/// the generic JSON-schema fallback. Kimi and Beam are matched on either parser
+/// slot. The v1 Mistral parsers share the `mistral` name, so Mistral is matched on
+/// the model's Unified family.
+fn forced_choice_keeps_native_format(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    unified_family: Option<&str>,
+    tool_choice: &ToolChoice,
+) -> bool {
+    requires_native_tool_call_format(tool_call_parser, tool_choice)
+        || requires_native_tool_call_format(reasoning_parser, tool_choice)
+        || (matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))
+            && unified_family == Some(unified_parser::MISTRAL_UNIFIED_FAMILY))
+}
+
+/// Whether either configured parser selects the Muse Spark native grammar.
+pub(super) fn uses_muse_spark_parser(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> bool {
+    crate::protocols::openai::chat_completions::unified_parser::configured_family(
+        tool_call_parser,
+        reasoning_parser,
+    ) == Some("muse_spark")
 }
 
 /// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.
@@ -430,10 +977,13 @@ mod tests {
     use std::{path::PathBuf, sync::Arc};
 
     use super::*;
-    use crate::local_model::runtime_config::StructuralTagMode;
+    use crate::local_model::runtime_config::{
+        LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, StructuralTagMode,
+    };
     use crate::model_card::ModelDeploymentCard;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{ChatCompletionNamedToolChoice, FunctionName};
+    use dynamo_runtime::config::environment_names::llm as env_llm;
     use serde_json::{Value, json};
 
     fn request(extra: Value) -> NvCreateChatCompletionRequest {
@@ -460,6 +1010,10 @@ mod tests {
                 }
             }
         }])
+    }
+
+    fn preprocessor_for(parser: &str) -> Arc<OpenAIPreprocessor> {
+        preprocessor(parser, StructuralTagMode::Off)
     }
 
     fn preprocessor(parser: &str, mode: StructuralTagMode) -> Arc<OpenAIPreprocessor> {
@@ -863,6 +1417,384 @@ mod tests {
         })
     }
 
+    fn spark_preprocessor(
+        tool_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> std::sync::Arc<OpenAIPreprocessor> {
+        let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = tool_parser.map(str::to_owned);
+        mdc.runtime_config.reasoning_parser = reasoning_parser.map(str::to_owned);
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[tokio::test]
+    async fn muse_spark_open_forced_requests_keep_native_atem() {
+        let preprocessor = spark_preprocessor(Some("muse_spark_open"), Some("muse_spark_open"));
+        for choice in [
+            json!("required"),
+            serde_json::to_value(named("get_weather")).unwrap(),
+        ] {
+            let request = request(json!({"tools": tools(), "tool_choice": choice}));
+            let (mut common, _, reasoning) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .unwrap(),
+                GuidedToolConstraint::StructuralTag,
+                "forced choices must install native ATEM guidance"
+            );
+            let guidance = common.sampling_options.guided_decoding.as_ref().unwrap();
+            assert!(guidance.structural_tag.is_some());
+            assert!(guidance.json.is_none());
+        }
+    }
+
+    #[test]
+    fn muse_spark_required_constraint_is_native() {
+        let request = request(json!({"tools": tools(), "tool_choice": "required"}));
+        for (tool_parser, reasoning_parser) in [
+            (Some("muse_spark"), None),
+            (None, Some("muse_spark")),
+            (Some("muse_spark"), Some("muse_spark")),
+        ] {
+            assert_eq!(
+                guided_tool_constraint(&request, tool_parser, reasoning_parser, false).unwrap(),
+                GuidedToolConstraint::None,
+                "Muse Spark required output must use the native ATEM parser",
+            );
+        }
+    }
+
+    #[test]
+    fn muse_spark_named_constraint_is_native_including_zero_arg_tools() {
+        for parameters in [
+            json!({"type": "object", "properties": {"location": {"type": "string"}}}),
+            json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        ] {
+            let request = request(json!({
+                "tools": [{"type": "function", "function": {
+                    "name": "get_weather", "parameters": parameters
+                }}],
+                "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+            }));
+            assert_eq!(
+                guided_tool_constraint(&request, Some("muse_spark"), None, false).unwrap(),
+                GuidedToolConstraint::None,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_spark_forced_choices_install_native_tool_grammars() {
+        let preprocessor = spark_preprocessor(Some("muse_spark"), Some("muse_spark"));
+        for choice in [
+            json!("required"),
+            serde_json::to_value(named("get_weather")).unwrap(),
+        ] {
+            for parallel in [Value::Null, json!(true), json!(false)] {
+                let request = request(json!({
+                    "tools": tools(), "tool_choice": choice, "parallel_tool_calls": parallel
+                }));
+                let (mut common, _, reasoning) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .unwrap();
+                assert!(
+                    common
+                        .sampling_options
+                        .guided_decoding
+                        .as_ref()
+                        .is_some_and(|gd| gd.json.is_none()
+                            && gd.regex.is_none()
+                            && gd.structural_tag.is_some()),
+                    "Muse Spark must generate native ATEM with structural guidance: {:?}",
+                    common.sampling_options.guided_decoding,
+                );
+                assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                assert_eq!(
+                    request.inner.tool_choice.as_ref(),
+                    Some(&serde_json::from_value(choice.clone()).unwrap())
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_spark_bypass_preserves_invalid_tool_choice_errors() {
+        let preprocessor = spark_preprocessor(Some("muse_spark"), None);
+        for extra in [
+            json!({"tool_choice": "required"}),
+            json!({"tools": [], "tool_choice": "required"}),
+            json!({"tools": tools(), "tool_choice": {"type": "function", "function": {"name": "missing"}}}),
+        ] {
+            let request = request(extra);
+            assert!(guided_tool_constraint(&request, Some("muse_spark"), None, false).is_err());
+            let (mut common, _, reasoning) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert!(
+                preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_spark_bypass_preserves_assistant_json_schema() {
+        let preprocessor = spark_preprocessor(Some("muse_spark"), None);
+        let schema = json!({"type": "object", "properties": {"answer": {"type": "integer"}}, "required": ["answer"]});
+        for choice in [json!("auto"), json!("none")] {
+            let request = request(json!({
+                "tools": tools(), "tool_choice": choice,
+                "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
+            }));
+            let (mut common, _, reasoning) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .unwrap(),
+                GuidedToolConstraint::None
+            );
+            assert_eq!(
+                common
+                    .sampling_options
+                    .guided_decoding
+                    .as_ref()
+                    .and_then(|gd| gd.json.as_ref()),
+                Some(&schema)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn other_parsers_keep_forced_tool_guidance() {
+        for parser in [None, Some("hermes"), Some("muse_glimmer")] {
+            let preprocessor = spark_preprocessor(parser, None);
+            for choice in [
+                json!("required"),
+                serde_json::to_value(named("get_weather")).unwrap(),
+            ] {
+                let request = request(json!({"tools": tools(), "tool_choice": choice}));
+                let (mut common, _, reasoning) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                let expected =
+                    installed_json_constraint(request.inner.tool_choice.as_ref().unwrap());
+                assert_eq!(
+                    preprocessor
+                        .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                        .unwrap(),
+                    expected
+                );
+                assert!(
+                    common
+                        .sampling_options
+                        .guided_decoding
+                        .as_ref()
+                        .and_then(|gd| gd.json.as_ref())
+                        .is_some()
+                );
+                assert_eq!(
+                    guided_tool_constraint(&request, parser, None, false).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn muse_spark_named_prompt_exposes_only_selected_tool() {
+        let template =
+            serde_json::from_value(json!({"chat_template": "{{ tools | tojson }}"})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        let mut request = request(json!({
+            "tools": [
+                {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}}},
+                {"type": "function", "function": {"name": "get_time", "parameters": {"type": "object", "properties": {}}}}
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+        }));
+        for parser in ["muse_spark", "hermes"] {
+            let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.runtime_config.tool_call_parser = Some(parser.to_owned());
+            let tokenizer = mdc.tokenizer().unwrap();
+            let preprocessor =
+                OpenAIPreprocessor::new_with_parts(mdc, formatter.clone(), tokenizer).unwrap();
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+            assert_eq!(
+                tools.as_array().unwrap().len(),
+                if parser == "muse_spark" { 1 } else { 2 }
+            );
+            assert_eq!(tools[0]["function"]["name"], "get_weather");
+            assert_eq!(request.inner.tool_choice, Some(named("get_weather")));
+            request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(
+                prompt.as_str().contains("get_time"),
+                "required must retain the whole registry"
+            );
+            request.inner.tool_choice = Some(named("get_weather"));
+        }
+        assert_eq!(
+            request.inner.tools.as_ref().unwrap().len(),
+            2,
+            "prompt filtering must not mutate the request registry"
+        );
+    }
+
+    #[test]
+    fn muse_spark_named_responses_prompt_keeps_qualified_name_and_full_schema() {
+        let response: crate::protocols::openai::responses::NvCreateResponse = serde_json::from_value(json!({
+            "model": "test-model", "input": "Get the weather",
+            "tools": [{"type": "namespace", "name": "weather", "defer_loading": true, "tools": [
+                {"type": "function", "name": "get_weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}},
+                {"type": "function", "name": "get_time", "parameters": {"type": "object", "properties": {}}}
+            ]}],
+            "tool_choice": {"type": "function", "name": "weather.get_weather"}
+        })).unwrap();
+        let mut request: NvCreateChatCompletionRequest = response.try_into().unwrap();
+        request.normalize_responses_tools(true).unwrap();
+        let template = serde_json::from_value(json!({"chat_template": "{% set deferred_render_mode = deferred_render_mode | default('tool_name_and_description') %}{{ tools | tojson }}"})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark".to_owned());
+        let tokenizer = mdc.tokenizer().unwrap();
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+        assert_eq!(tools.as_array().unwrap().len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "weather.get_weather");
+        assert_eq!(
+            tools[0]["function"]["parameters"]["required"],
+            json!(["location"])
+        );
+        assert_eq!(request.inner.tools.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn muse_spark_named_chat_prompt_renders_deferred_function_eagerly() {
+        let template =
+            serde_json::from_value(json!({"chat_template": "{{ tools | tojson }}"})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark".to_owned());
+        let tokenizer = mdc.tokenizer().unwrap();
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        for nested in [true, false] {
+            let mut tool = json!({"type": "function", "function": {
+                "name": "get_weather", "parameters": {"type": "object", "properties": {}}
+            }});
+            if nested {
+                tool["function"]["defer_loading"] = json!(true);
+            } else {
+                tool["defer_loading"] = json!(true);
+            }
+            let mut request =
+                request(json!({"tools": [tool], "tool_choice": named("get_weather")}));
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+            assert!(tools[0].get("defer_loading").is_none());
+            assert!(
+                tools[0]["function"].get("defer_loading").is_none(),
+                "a forced function renders eagerly, as on the Responses path"
+            );
+            request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Auto);
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+            assert_eq!(tools[0]["function"]["defer_loading"], json!(true));
+            assert_eq!(
+                request.inner.tools.as_ref().unwrap()[0]
+                    .function
+                    .defer_loading,
+                Some(true),
+                "prompt filtering must not mutate the request registry"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_spark_named_deferred_chat_prompt_includes_parameter_schema() {
+        let source = include_str!("../../tests/data/muse_spark_open_deferred_tools.jinja");
+        let template = serde_json::from_value(json!({"chat_template": source})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        for parser in ["muse_spark", "muse_spark_open"] {
+            let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.runtime_config.tool_call_parser = Some(parser.to_owned());
+            let tokenizer = mdc.tokenizer().unwrap();
+            let preprocessor =
+                OpenAIPreprocessor::new_with_parts(mdc, formatter.clone(), tokenizer).unwrap();
+            for nested in [false, true] {
+                let mut tool = json!({"type": "function", "function": {
+                    "name": "get_weather", "parameters": {"type": "object", "properties": {
+                        "forecast_location": {"type": "string", "description": "City to look up"}
+                    }, "required": ["forecast_location"]}
+                }});
+                if nested {
+                    tool["function"]["defer_loading"] = json!(true);
+                } else {
+                    tool["defer_loading"] = json!(true);
+                }
+                let mut request =
+                    request(json!({"tools": [tool], "tool_choice": named("get_weather")}));
+                let named_prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(named_prompt.as_str().contains("forecast_location"));
+                assert!(named_prompt.as_str().contains("City to look up"));
+                assert!(!named_prompt.as_str().contains("[deferred:"));
+                request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Auto);
+                let auto_prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(auto_prompt.as_str().contains("[deferred:"));
+                assert!(!auto_prompt.as_str().contains("forecast_location"));
+                assert_eq!(
+                    request.inner.tools.as_ref().unwrap()[0]
+                        .function
+                        .defer_loading,
+                    Some(true)
+                );
+            }
+        }
+    }
+
     #[test]
     fn only_structural_tag_reports_a_structural_tag() {
         assert!(GuidedToolConstraint::StructuralTag.uses_structural_tag());
@@ -982,6 +1914,633 @@ mod tests {
     }
 
     #[test]
+    fn beam_forced_choices_install_the_harmony_wire_structural_tag_and_no_json_schema() {
+        // Single tool, `required`, parallel calls allowed by default: the turn grammar the
+        // parsers crate derives for the same tools (asserted there against the model
+        // builder's own fixtures) is what the policy installs, and nothing else.
+        let first = request(json!({"tools": tools(), "tool_choice": "required"}));
+        let blueprint = beam_turn_structural_tag(
+            effective_tools(&first.inner).unwrap().as_ref(),
+            &ToolChoice::Required,
+            None,
+            None,
+            None,
+        )
+        .expect("the parsers crate derives the Beam turn grammar");
+        let preprocessor = preprocessor("beam", StructuralTagMode::Off);
+        let mut common_request = preprocessed_request();
+
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&first, &mut common_request, false)
+            .unwrap();
+
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false
+            }
+        );
+        let guided = common_request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .expect("beam forced choice installs guided decoding");
+        assert!(guided.json.is_none() && guided.regex.is_none());
+        assert_eq!(
+            guided.structural_tag.as_ref().expect("structural tag"),
+            &blueprint
+        );
+
+        // A named choice among several tools forces that tool only; `required` offers each
+        // tool, and `parallel_tool_calls: false` drops the repeated-call group.
+        let mut tools = tools();
+        tools.as_array_mut().unwrap().push(json!({
+            "type": "function",
+            "function": {"name": "get-time", "parameters": {"type": "object", "properties": {}}}
+        }));
+        for (tool_choice, expected, unexpected) in [
+            (
+                json!({"type": "function", "function": {"name": "get-time"}}),
+                vec!["to=get-time<"],
+                vec!["to=get_weather<"],
+            ),
+            (
+                json!("required"),
+                vec!["to=get_weather<", "to=get-time<"],
+                vec![],
+            ),
+        ] {
+            let forced = request(json!({
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "parallel_tool_calls": false
+            }));
+            let mut common_request = preprocessed_request();
+            preprocessor
+                .apply_tool_choice_guided_decoding(&forced, &mut common_request, false)
+                .unwrap();
+            let tag = common_request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.structural_tag.as_ref())
+                .expect("structural tag")
+                .to_string();
+            for needle in expected {
+                assert!(tag.contains(needle), "{tag}");
+            }
+            for needle in unexpected {
+                assert!(!tag.contains(needle), "{tag}");
+            }
+            assert!(
+                !tag.contains(
+                    r#""type":"star","content":{"type":"sequence","elements":[{"type":"or""#
+                ),
+                "{tag}"
+            );
+        }
+    }
+
+    fn installed_structural_tag(common_request: &PreprocessedRequest) -> Option<&Value> {
+        common_request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .and_then(|guided| guided.structural_tag.as_ref())
+    }
+
+    #[test]
+    fn beam_ignore_eos_skips_only_the_plain_chat_turn_grammar() {
+        for mode in [StructuralTagMode::Off, StructuralTagMode::On] {
+            let preprocessor = preprocessor("beam", mode);
+            for extra in [
+                json!({}),
+                json!({"tools": tools(), "tool_choice": "none"}),
+                json!({"tool_choice": "auto", "response_format": {"type": "text"}}),
+            ] {
+                for ignore_eos in [None, Some(false), Some(true)] {
+                    let mut request = request(extra.clone());
+                    request.common.ignore_eos = ignore_eos;
+                    let mut common_request = preprocessed_request();
+                    let applied = preprocessor
+                        .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+                        .unwrap();
+                    let expected = if ignore_eos == Some(true) {
+                        GuidedToolConstraint::None
+                    } else {
+                        GuidedToolConstraint::BeamTurnGrammar {
+                            frames_answer: false,
+                        }
+                    };
+                    assert_eq!(applied, expected, "{mode:?} {extra} {ignore_eos:?}");
+                    assert_eq!(
+                        installed_structural_tag(&common_request).is_some(),
+                        ignore_eos != Some(true)
+                    );
+                    // Reconstructed response policy must match preprocessing with either parser slot.
+                    for parsers in [(Some("beam"), None), (None, Some("beam"))] {
+                        assert_eq!(
+                            guided_tool_constraint(&request, parsers.0, parsers.1, false).unwrap(),
+                            expected,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn beam_ignore_eos_preserves_tool_and_output_constraints() {
+        let preprocessor = preprocessor_for("beam");
+        for extra in [
+            json!({"tools": tools()}),
+            json!({"messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup", "parameters": {"type": "object"}}]},
+                {"role": "user", "content": "hi"}
+            ]}),
+            json!({"response_format": {"type": "json_object"}}),
+            json!({"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}}),
+        ] {
+            let mut request = request(extra.clone());
+            let mut normal = preprocessed_request();
+            let expected = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut normal, false)
+                .unwrap();
+            assert!(installed_structural_tag(&normal).is_some(), "{extra}");
+            request.common.ignore_eos = Some(true);
+            let mut ignored = preprocessed_request();
+            let applied = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut ignored, false)
+                .unwrap();
+            assert_eq!(applied, expected, "{extra}");
+            assert_eq!(
+                installed_structural_tag(&ignored),
+                installed_structural_tag(&normal),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn beam_automatic_choice_installs_the_turn_grammar_and_keeps_the_parser_route() {
+        let preprocessor = preprocessor("beam", StructuralTagMode::Off);
+        let auto = request(json!({"tools": tools()}));
+        let blueprint = beam_turn_structural_tag(
+            effective_tools(&auto.inner).unwrap().as_ref(),
+            &ToolChoice::Auto,
+            None,
+            None,
+            None,
+        )
+        .expect("the parsers crate derives the Beam turn grammar");
+        let mut common_request = preprocessed_request();
+
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, false)
+            .unwrap();
+
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false
+            }
+        );
+        let guided = common_request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .expect("automatic choice installs the turn grammar");
+        assert!(guided.json.is_none() && guided.regex.is_none());
+        assert_eq!(
+            guided.structural_tag.as_ref().expect("structural tag"),
+            &blueprint
+        );
+
+        // Plain chat and `tool_choice: none` hold the reasoning, then the answer.
+        let answer_only = beam_turn_structural_tag(&[], &ToolChoice::Auto, None, None, None)
+            .expect("plain chat is held to analysis then the answer");
+        for extra in [json!({}), json!({"tools": tools(), "tool_choice": "none"})] {
+            let mut common_request = preprocessed_request();
+            preprocessor
+                .apply_tool_choice_guided_decoding(&request(extra), &mut common_request, false)
+                .unwrap();
+            assert_eq!(
+                installed_structural_tag(&common_request),
+                Some(&answer_only)
+            );
+        }
+
+        // An explicit guided-decoding field constrains the answer instead of the turn.
+        let mut constrained = request(json!({"tools": tools()}));
+        constrained.common.guided_regex = Some("[a-z]+".to_string());
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&constrained, &mut common_request, false)
+            .unwrap();
+        assert_eq!(applied, GuidedToolConstraint::None);
+        assert!(installed_structural_tag(&common_request).is_none());
+
+        // Other parsers see no Beam grammar.
+        let hermes = preprocessor_for("hermes");
+        let mut common_request = preprocessed_request();
+        hermes
+            .apply_tool_choice_guided_decoding(
+                &request(json!({"tools": tools()})),
+                &mut common_request,
+                false,
+            )
+            .unwrap();
+        assert!(installed_structural_tag(&common_request).is_none());
+    }
+
+    #[test]
+    fn beam_response_format_is_held_in_the_final_channel_behind_the_analysis() {
+        let preprocessor = preprocessor("beam", StructuralTagMode::Off);
+        let schema = json!({
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"]
+        });
+        let format = json!({
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": schema}
+        });
+
+        // Automatic choice: the calls stay available beside the framed answer, and the
+        // bare JSON constraint `response_format` arrived as is replaced.
+        let auto = request(json!({"tools": tools(), "response_format": format}));
+        assert!(preprocessor.beam_frames_structured_response(&auto));
+        assert!(!preprocessor.beam_output_is_bare_document(&auto));
+        let blueprint = beam_turn_structural_tag(
+            effective_tools(&auto.inner).unwrap().as_ref(),
+            &ToolChoice::Auto,
+            None,
+            None,
+            Some(&schema),
+        )
+        .expect("the parsers crate derives the framed answer");
+        let mut common_request = preprocessed_request();
+        common_request
+            .sampling_options
+            .guided_decoding
+            .get_or_insert_default()
+            .json = Some(schema.clone());
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, false)
+            .unwrap();
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: true
+            }
+        );
+        let guided = common_request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .expect("the framed answer is a structural tag");
+        assert!(guided.json.is_none() && guided.regex.is_none());
+        assert_eq!(guided.structural_tag.as_ref().expect("tag"), &blueprint);
+        let tag = blueprint.to_string();
+        assert!(
+            tag.contains("<|channel|>final<|message|>")
+                && tag.contains(r#""type":"json_schema""#)
+                && tag.contains(r#""ok""#)
+                && tag.contains("to=get_weather<"),
+            "{tag}"
+        );
+
+        // `json_object` is any object; `tool_choice: none` and no tools frame the
+        // answer only.
+        for extra in [
+            json!({"response_format": {"type": "json_object"}}),
+            json!({
+                "tools": tools(),
+                "tool_choice": "none",
+                "response_format": {"type": "json_object"}
+            }),
+        ] {
+            let answer_only = request(extra);
+            let mut common_request = preprocessed_request();
+            let applied = preprocessor
+                .apply_tool_choice_guided_decoding(&answer_only, &mut common_request, false)
+                .unwrap();
+            assert_eq!(
+                applied,
+                GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: true
+                }
+            );
+            let tag = installed_structural_tag(&common_request)
+                .expect("framed answer")
+                .to_string();
+            assert!(
+                tag.contains(r#""json_schema":{"type":"object"}"#)
+                    && !tag.contains("to=get_weather<"),
+                "{tag}"
+            );
+        }
+
+        // A forced choice ignores `response_format` (it governs content, not calls) and
+        // still generates native calls that end on a marker.
+        let forced = request(json!({
+            "tools": tools(),
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"}
+        }));
+        assert!(!preprocessor.beam_frames_structured_response(&forced));
+        assert!(!preprocessor.beam_output_is_bare_document(&forced));
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&forced, &mut common_request, false)
+            .unwrap();
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false
+            }
+        );
+        let tag = installed_structural_tag(&common_request)
+            .expect("forced calls")
+            .to_string();
+        assert!(
+            !tag.contains("json_schema") && tag.contains("to=get_weather<"),
+            "{tag}"
+        );
+
+        // Explicit guided decoding stays a bare constraint from the first token.
+        let mut explicit = request(json!({
+            "tools": tools(),
+            "response_format": {"type": "json_object"}
+        }));
+        explicit.common.guided_json = Some(schema.clone());
+        assert!(!preprocessor.beam_frames_structured_response(&explicit));
+        assert!(preprocessor.beam_output_is_bare_document(&explicit));
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&explicit, &mut common_request, false)
+            .unwrap();
+        assert_eq!(applied, GuidedToolConstraint::None);
+        assert!(installed_structural_tag(&common_request).is_none());
+
+        // Other parsers leave `response_format` to the engine.
+        let hermes = preprocessor_for("hermes");
+        assert!(!hermes.beam_frames_structured_response(&auto));
+        let mut common_request = preprocessed_request();
+        let applied = hermes
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, false)
+            .unwrap();
+        assert_eq!(applied, GuidedToolConstraint::None);
+        assert!(installed_structural_tag(&common_request).is_none());
+
+        // A reconstructing frontend reports what preprocessing installed.
+        for (request, parsers, expected) in [
+            (
+                &auto,
+                (Some("beam"), None),
+                GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: true,
+                },
+            ),
+            (
+                &forced,
+                (Some("beam"), Some("beam")),
+                GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: false,
+                },
+            ),
+            (&explicit, (None, Some("beam")), GuidedToolConstraint::None),
+            (&auto, (Some("hermes"), None), GuidedToolConstraint::None),
+        ] {
+            assert_eq!(
+                guided_tool_constraint(request, parsers.0, parsers.1, false).unwrap(),
+                expected,
+                "{parsers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn beam_route_declares_legacy_builtin_declarations_as_tools() {
+        let weather = json!({"type": "function", "function": {
+            "name": "weather", "parameters": {"type": "object", "properties": {}}}});
+        let mut beam = request(json!({"tools": [weather.clone()]}));
+        beam.chat_template_args = Some(std::collections::HashMap::from([(
+            "builtin_tools".to_string(),
+            json!([
+                "weather",
+                {"name": "bash", "parameters": {"type": "object", "properties": {
+                    "cmd": {"type": "string"}}}},
+                {"type": "function", "function": {"name": "weather"}},
+                {"type": "function", "function": {"name": "python",
+                    "parameters": {"type": "object", "properties": {}}}}
+            ]),
+        )]));
+
+        // Names and already-declared objects add nothing; undeclared objects join `tools`
+        // in OpenAI form, once each.
+        assert_eq!(
+            declare_legacy_builtin_tools_for_beam(&mut beam, Some("beam"), None),
+            2
+        );
+        let names: Vec<&str> = beam
+            .inner
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tool| tool.function.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["weather", "bash", "python"]);
+        assert_eq!(
+            declare_legacy_builtin_tools_for_beam(&mut beam, Some("beam"), None),
+            0
+        );
+
+        // Other routes do not read `builtin_tools`.
+        let mut hermes = request(json!({"tools": [weather]}));
+        hermes.chat_template_args = beam.chat_template_args.clone();
+        assert_eq!(
+            declare_legacy_builtin_tools_for_beam(&mut hermes, Some("hermes"), None),
+            0
+        );
+        assert_eq!(hermes.inner.tools.as_ref().unwrap().len(), 1);
+    }
+
+    /// With structural tags on (the default-on deployment shape), the open final
+    /// channel still gets Beam's channel-aware grammar — only the answer — not the
+    /// generic builder's fresh-turn grammar, which would make the model emit an analysis
+    /// channel that a parser started in `Response` shows as content.
+    #[test]
+    fn beam_open_final_channel_keeps_only_the_answer_with_structural_tags_on() {
+        let preprocessor = preprocessor("beam", StructuralTagMode::On);
+        let open_answer = PromptReasoningPrefill {
+            legacy: false,
+            unified: false,
+            unified_starting_state: None,
+            prefix: None,
+            reasoning_closed_by_prompt: None,
+            response: true,
+            beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+        };
+        let auto = request(json!({"tools": tools()}));
+        let blueprint = beam_turn_structural_tag(
+            effective_tools(&auto.inner).unwrap().as_ref(),
+            &ToolChoice::Auto,
+            None,
+            Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+            None,
+        )
+        .expect("the open answer derives a grammar");
+
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, open_answer.clone())
+            .unwrap();
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false
+            }
+        );
+        let tag = installed_structural_tag(&common_request).expect("answer rest");
+        assert_eq!(tag, &blueprint);
+        let text = tag.to_string();
+        assert!(
+            !text.contains("<|channel|>analysis<|message|>") && !text.contains("to=get_weather"),
+            "{text}"
+        );
+
+        // A fresh turn under the same configuration still gets the whole turn grammar.
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, false)
+            .unwrap();
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false
+            }
+        );
+        let text = installed_structural_tag(&common_request)
+            .expect("turn grammar")
+            .to_string();
+        assert!(
+            text.contains("<|channel|>analysis<|message|>") && text.contains("to=get_weather"),
+            "{text}"
+        );
+
+        let mut common_request = preprocessed_request();
+        let error = preprocessor
+            .apply_tool_choice_guided_decoding(
+                &request(json!({"tools": tools(), "tool_choice": "required"})),
+                &mut common_request,
+                open_answer,
+            )
+            .expect_err("a forced call cannot be enforced inside the final answer");
+        assert!(error.to_string().contains("cannot enforce"), "{error}");
+        assert!(installed_structural_tag(&common_request).is_none());
+    }
+
+    #[test]
+    fn beam_open_final_channel_holds_only_the_answer_and_forces_no_call() {
+        let preprocessor = preprocessor("beam", StructuralTagMode::Off);
+        let open_answer = PromptReasoningPrefill {
+            legacy: false,
+            unified: false,
+            unified_starting_state: None,
+            prefix: None,
+            reasoning_closed_by_prompt: None,
+            response: true,
+            beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+        };
+
+        let mut common_request = preprocessed_request();
+        preprocessor
+            .apply_tool_choice_guided_decoding(
+                &request(json!({"tools": tools()})),
+                &mut common_request,
+                open_answer.clone(),
+            )
+            .unwrap();
+        let tag = installed_structural_tag(&common_request).expect("answer rest");
+        assert_eq!(tag["format"]["elements"][0]["type"], "any_text");
+        assert!(!tag.to_string().contains("to=get_weather"));
+
+        let mut common_request = preprocessed_request();
+        let error = preprocessor
+            .apply_tool_choice_guided_decoding(
+                &request(json!({"tools": tools(), "tool_choice": "required"})),
+                &mut common_request,
+                open_answer,
+            )
+            .expect_err("a forced call cannot be enforced inside the final answer");
+        assert!(error.to_string().contains("cannot enforce"), "{error}");
+        assert!(installed_structural_tag(&common_request).is_none());
+    }
+
+    #[test]
+    fn beam_rejects_missing_mandatory_tool_grammar() {
+        let preprocessor = preprocessor("beam", StructuralTagMode::Off);
+        let name = "search";
+        let named = json!({"type": "function", "function": {"name": name}});
+        for (strict, choice, required) in [
+            (false, json!("auto"), false),
+            (false, json!("none"), false),
+            (false, json!("required"), false),
+            (false, named, false),
+            (true, json!("auto"), true),
+            (true, json!("none"), false),
+        ] {
+            let request = request(json!({
+                "tools": [{"type": "function", "function": {
+                    "name": name, "strict": strict,
+                    "parameters": {"type": "object", "properties": {
+                        "query": {"type": "string", "pattern": "^a+$"}
+                    }, "required": ["query"], "additionalProperties": false}
+                }}],
+                "tool_choice": choice,
+            }));
+            let mut output = preprocessed_request();
+            let result =
+                preprocessor.apply_tool_choice_guided_decoding(&request, &mut output, false);
+            assert_eq!(
+                result.is_err(),
+                required,
+                "strict={strict}, choice={choice}"
+            );
+            if let Err(error) = result {
+                assert!(error.to_string().contains("cannot enforce"));
+            }
+        }
+        for (choice, with_tools, required) in [
+            ("auto", true, true),
+            ("none", true, false),
+            ("auto", false, false),
+        ] {
+            let request = request(json!({
+                "tools": if with_tools { tools() } else { json!(null) },
+                "tool_choice": choice,
+                "parallel_tool_calls": false,
+                "guided_json": {"type": "object"},
+            }));
+            let result = preprocessor.apply_tool_choice_guided_decoding(
+                &request,
+                &mut preprocessed_request(),
+                false,
+            );
+            assert_eq!(
+                result.is_err(),
+                required,
+                "parallel=false choice={choice} tools={with_tools}"
+            );
+            if let Err(error) = result {
+                assert!(error.to_string().contains("cannot enforce"));
+            }
+        }
+    }
+
+    #[test]
     fn structural_tag_off_preserves_kimi_k2_required_native_tag() {
         let request = request(json!({
             "tools": tools(),
@@ -1054,6 +2613,69 @@ mod tests {
                 .and_then(|guided| guided.json.as_ref())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn minimax_m3_native_tags_and_relaxed_schema_fallback() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::minimax_m3_native_tags_and_relaxed_schema_fallback"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let preprocessor = preprocessor("minimax_m3", StructuralTagMode::On);
+        for strict in [None, Some(true), Some(false)] {
+            for named in [false, true] {
+                let mut definitions = tools();
+                definitions[0]["function"]["parameters"]["additionalProperties"] = json!(false);
+                definitions[0]["function"]["parameters"]["properties"]["location"]["enum"] =
+                    json!(["Paris", "Tokyo"]);
+                if let Some(strict) = strict {
+                    definitions[0]["function"]["strict"] = json!(strict);
+                }
+                let choice = if named {
+                    json!({"type": "function", "function": {"name": "get_weather"}})
+                } else {
+                    json!("required")
+                };
+                let request = request(json!({"tools": definitions, "tool_choice": choice}));
+                let mut common = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                    .unwrap();
+                let grammar = common.sampling_options.guided_decoding.unwrap();
+                if strict == Some(false) {
+                    assert_eq!(
+                        constraint,
+                        if named {
+                            GuidedToolConstraint::GuidedJsonNamed {
+                                tool_name: "get_weather".into(),
+                            }
+                        } else {
+                            GuidedToolConstraint::GuidedJsonRequired
+                        }
+                    );
+                    assert!(grammar.json.is_some());
+                    assert!(grammar.structural_tag.is_none());
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    assert!(
+                        grammar
+                            .structural_tag
+                            .unwrap()
+                            .to_string()
+                            .contains("minimax_m3_xml")
+                    );
+                    assert!(grammar.json.is_none());
+                }
+            }
+        }
     }
 
     #[test]
@@ -1134,5 +2756,337 @@ mod tests {
                 "K3 forced choices use native XTML rather than guided JSON"
             );
         }
+    }
+
+    fn mistral_preprocessor(llguidance_lark_grammar: bool) -> Arc<OpenAIPreprocessor> {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-mistral-tekken");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
+        mdc.runtime_config.tool_call_parser = Some("mistral".to_string());
+        mdc.runtime_config.reasoning_parser = Some("mistral".to_string());
+        if llguidance_lark_grammar {
+            mdc.runtime_config
+                .set_engine_specific(LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, true)
+                .unwrap();
+        }
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[test]
+    fn unified_mistral_forced_choices_install_the_native_grammar() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_mistral_forced_choices_install_the_native_grammar"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let preprocessor = mistral_preprocessor(true);
+        for (tool_choice, name) in [
+            (json!("required"), "/.+/"),
+            (
+                json!({"type": "function", "function": {"name": "get_weather"}}),
+                "\"get_weather\"",
+            ),
+        ] {
+            let request = request(json!({"tools": tools(), "tool_choice": tool_choice}));
+            let mut common_request = preprocessed_request();
+
+            let applied = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+                .unwrap();
+
+            assert_eq!(applied, GuidedToolConstraint::None);
+            let guided = common_request.sampling_options.guided_decoding.unwrap();
+            assert!(guided.json.is_none());
+            let grammar = guided.grammar.unwrap();
+            assert!(
+                grammar.starts_with("start: body\nbody: think? fcalls\n")
+                    && grammar.contains(&format!("(<[9]> SAFE_WS? {name} <[32]>")),
+                "{grammar}"
+            );
+            assert_eq!(common_request.extra_args.unwrap()["reasoning_ended"], true);
+            assert_eq!(
+                guided_tool_constraint(&request, Some("mistral"), Some("mistral"), false).unwrap(),
+                GuidedToolConstraint::None
+            );
+        }
+
+        // A backend without llguidance lark grammars gets no grammar and keeps
+        // native parsing instead of the JSON schema the parser cannot read.
+        let request = request(json!({"tools": tools(), "tool_choice": "required"}));
+        let mut common_request = preprocessed_request();
+        let applied = mistral_preprocessor(false)
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .unwrap();
+        assert_eq!(applied, GuidedToolConstraint::None);
+        assert!(common_request.sampling_options.guided_decoding.is_none());
+    }
+
+    /// vLLM's Mistral tool parser constrains `auto` with the same grammar, so call arguments
+    /// stay JSON objects.
+    #[test]
+    fn unified_mistral_auto_with_tools_installs_the_native_grammar() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_mistral_auto_with_tools_installs_the_native_grammar"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let preprocessor = mistral_preprocessor(true);
+        for extra in [
+            json!({"tools": tools(), "tool_choice": "auto"}),
+            json!({"tools": tools()}),
+        ] {
+            let request = request(extra);
+            let mut common_request = preprocessed_request();
+
+            let applied = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+                .unwrap();
+
+            assert_eq!(applied, GuidedToolConstraint::None);
+            let guided = common_request.sampling_options.guided_decoding.unwrap();
+            assert!(guided.json.is_none());
+            let expected = preprocessor.mistral_tool_call_grammar.unwrap().render(
+                CallMode::Auto,
+                convert_tools(request.inner.tools.as_deref().unwrap()),
+                true,
+                None,
+            );
+            assert_eq!(guided.grammar.unwrap(), expected);
+            assert_eq!(common_request.extra_args.unwrap()["reasoning_ended"], true);
+        }
+    }
+
+    /// Requests without tools or a reply schema, `none` without one, and
+    /// constraints the grammar does not carry get no grammar.
+    #[test]
+    fn unified_mistral_leaves_unconstrained_requests_alone() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_mistral_leaves_unconstrained_requests_alone"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let preprocessor = mistral_preprocessor(true);
+        for extra in [
+            json!({}),
+            json!({"tools": tools(), "tool_choice": "none"}),
+            json!({"tools": tools(), "guided_regex": "[a-z]+"}),
+            json!({
+                "tools": tools(),
+                "guided_json": {"type": "object"},
+                "guided_whitespace_pattern": " "
+            }),
+        ] {
+            let request = request(extra.clone());
+            let mut common_request = preprocessed_request();
+            preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+                .unwrap();
+            assert!(
+                common_request
+                    .sampling_options
+                    .guided_decoding
+                    .and_then(|guided| guided.grammar)
+                    .is_none(),
+                "{extra}"
+            );
+            assert!(common_request.extra_args.is_none(), "{extra}");
+        }
+
+        let request = request(json!({"tools": tools(), "tool_choice": "auto"}));
+        let mut common_request = preprocessed_request();
+        mistral_preprocessor(false)
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .unwrap();
+        assert!(common_request.sampling_options.guided_decoding.is_none());
+    }
+
+    /// `guided_json` as preprocessing sets it from the request's reply schema.
+    fn guided_json(schema: &Value) -> Option<crate::protocols::common::GuidedDecodingOptions> {
+        crate::protocols::common::GuidedDecodingOptions::from_optional(
+            Some(schema.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A JSON schema for the reply joins the Mistral grammar, as vLLM's Mistral
+    /// tool parser folds it, instead of reaching the backend as a separate `guided_json`.
+    #[test]
+    fn unified_mistral_folds_reply_schemas_into_the_grammar() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_mistral_folds_reply_schemas_into_the_grammar"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let preprocessor = mistral_preprocessor(true);
+        let grammar = preprocessor.mistral_tool_call_grammar.unwrap();
+        let event = json!({"type": "object", "properties": {"name": {"type": "string"}}});
+        let schema_format = json!({
+            "type": "json_schema",
+            "json_schema": {"name": "event", "schema": event}
+        });
+        let tool_definitions = convert_tools(
+            request(json!({"tools": tools()}))
+                .inner
+                .tools
+                .as_deref()
+                .unwrap(),
+        );
+        for (extra, expected) in [
+            (
+                json!({"response_format": schema_format}),
+                grammar.render_json(&event),
+            ),
+            (
+                json!({"response_format": {"type": "json_object"}}),
+                grammar.render_json(&ANY_OBJECT_OR_ARRAY),
+            ),
+            (
+                json!({"tools": tools(), "guided_json": event.to_string()}),
+                grammar.render(CallMode::Auto, tool_definitions.clone(), true, Some(&event)),
+            ),
+            (
+                json!({"tools": tools(), "tool_choice": "required", "response_format": schema_format}),
+                grammar.render(
+                    CallMode::Required,
+                    tool_definitions.clone(),
+                    true,
+                    Some(&event),
+                ),
+            ),
+            (
+                json!({
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "anything", "schema": {}}
+                    }
+                }),
+                grammar.render_json(&json!({})),
+            ),
+        ] {
+            let request = request(extra.clone());
+            let mut common_request = preprocessed_request();
+            common_request.sampling_options.guided_decoding = guided_json(&event);
+
+            let applied = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+                .unwrap();
+
+            assert_eq!(applied, GuidedToolConstraint::None, "{extra}");
+            let guided = common_request.sampling_options.guided_decoding.unwrap();
+            assert!(guided.json.is_none(), "{extra}");
+            assert_eq!(
+                guided.grammar.as_deref(),
+                Some(expected.as_str()),
+                "{extra}"
+            );
+            assert_eq!(
+                common_request.extra_args.unwrap()["reasoning_ended"],
+                true,
+                "{extra}"
+            );
+        }
+
+        // A forced choice still rejects explicit guided decoding.
+        let forced = request(json!({
+            "tools": tools(),
+            "tool_choice": "required",
+            "guided_json": event
+        }));
+        let error = preprocessor
+            .apply_tool_choice_guided_decoding(&forced, &mut preprocessed_request(), false)
+            .unwrap_err();
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+
+        // A whitespace pattern keeps the forced call's grammar without a reply
+        // schema.
+        let forced = request(json!({
+            "tools": tools(),
+            "tool_choice": "required",
+            "guided_whitespace_pattern": " "
+        }));
+        let mut common_request = preprocessed_request();
+        preprocessor
+            .apply_tool_choice_guided_decoding(&forced, &mut common_request, false)
+            .unwrap();
+        assert_eq!(
+            common_request
+                .sampling_options
+                .guided_decoding
+                .unwrap()
+                .grammar,
+            Some(grammar.render(CallMode::Required, tool_definitions, true, None))
+        );
+
+        // A backend without llguidance lark grammars keeps the reply schema as
+        // `guided_json`.
+        let auto = request(json!({"tools": tools(), "response_format": schema_format}));
+        let mut common_request = preprocessed_request();
+        common_request.sampling_options.guided_decoding = guided_json(&event);
+        mistral_preprocessor(false)
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, false)
+            .unwrap();
+        let guided = common_request.sampling_options.guided_decoding.unwrap();
+        assert_eq!(guided.json, Some(event));
+        assert!(guided.grammar.is_none());
+    }
+
+    /// `mistral` also names the v1 parsers, which keep the JSON-schema fallback.
+    #[test]
+    fn v1_mistral_forced_choices_keep_the_json_schema_fallback() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::v1_mistral_forced_choices_keep_the_json_schema_fallback"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "1")],
+        ) {
+            return;
+        }
+        let preprocessor = mistral_preprocessor(true);
+        let request = request(json!({"tools": tools(), "tool_choice": "required"}));
+        let mut common_request = preprocessed_request();
+
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .unwrap();
+
+        assert_eq!(applied, GuidedToolConstraint::GuidedJsonRequired);
+        let guided = common_request.sampling_options.guided_decoding.unwrap();
+        assert!(guided.json.is_some() && guided.grammar.is_none());
+        assert!(common_request.extra_args.is_none());
+        assert_eq!(
+            guided_tool_constraint(&request, Some("mistral"), Some("mistral"), false).unwrap(),
+            GuidedToolConstraint::GuidedJsonRequired
+        );
+
+        let auto = self::request(json!({"tools": tools(), "tool_choice": "auto"}));
+        let mut common_request = preprocessed_request();
+        preprocessor
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, false)
+            .unwrap();
+        assert!(common_request.sampling_options.guided_decoding.is_none());
     }
 }

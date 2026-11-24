@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+FROM python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
+ARG TARGETARCH
+ARG SUBSTRATE_VERSION=v1.0.0-rc.1
+ARG AGENT_PLUGINS_REVISION=223a0b8823610d042e7479bfff9b93eeac4a23ec
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+RUN case "$TARGETARCH" in amd64|arm64) ;; *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac \
+    && release="https://github.com/agent-substrate/substrate/releases/download/${SUBSTRATE_VERSION}" \
+    && curl -fL --retry 3 "$release/kubectl-ate-linux-$TARGETARCH" -o /tmp/kubectl-ate \
+    && curl -fL --retry 3 "$release/kubectl-ate-linux-$TARGETARCH.sha256" -o /tmp/kubectl-ate.sha256 \
+    && cd /tmp \
+    && printf '%s  kubectl-ate\n' "$(cut -d ' ' -f1 kubectl-ate.sha256)" | sha256sum -c - \
+    && install -m 0755 kubectl-ate /usr/local/bin/kubectl-ate \
+    && rm kubectl-ate kubectl-ate.sha256
+
+COPY requirements.txt /opt/harbor/requirements.txt
+RUN pip install --no-cache-dir -r /opt/harbor/requirements.txt
+COPY pi-provider-limits.patch pi-harbor-adapter.patch /tmp/patches/
+RUN git init /opt/harbor/agent-plugins \
+    && git -C /opt/harbor/agent-plugins remote add origin https://github.com/ai-dynamo/agent-plugins \
+    && git -C /opt/harbor/agent-plugins fetch --depth 1 origin "$AGENT_PLUGINS_REVISION" \
+    && git -C /opt/harbor/agent-plugins checkout --detach FETCH_HEAD \
+    && git -C /opt/harbor/agent-plugins apply /tmp/patches/pi-provider-limits.patch /tmp/patches/pi-harbor-adapter.patch \
+    && rm -rf /opt/harbor/agent-plugins/.git /tmp/patches
+COPY substrate_environment.py /opt/harbor/substrate_environment.py
+ENV PYTHONPATH=/opt/harbor:/opt/harbor/agent-plugins/pi-plugin/harbor \
+    PYTHONUNBUFFERED=1 \
+    KUBECONFIG=/etc/harbor/kubeconfig
+RUN python -c "from substrate_environment import SubstrateEnvironment; from dynamo_pi import DynamoPi"
+WORKDIR /work
+CMD ["harbor", "run", "--config", "/etc/harbor/harbor-job.yaml", "-y"]

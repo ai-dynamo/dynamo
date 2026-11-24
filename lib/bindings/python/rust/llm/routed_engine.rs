@@ -1,18 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 use pythonize::{depythonize, pythonize};
 use tokio_stream::StreamExt;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
+use dynamo_llm::protocols::common::extensions::SESSION_AFFINITY_CONTEXT_KEY;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::timing::RequestTracker;
 use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_distributed};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
 
+use super::py_convert;
 use crate::errors::routed_error_to_pyerr;
 use crate::to_pyerr;
 
@@ -27,9 +33,72 @@ impl RoutedEngine {
     }
 }
 
+/// The request with `token_ids` and `extra_args` read by [`py_convert`] and the rest by
+/// pythonize; `None` unless it is an exact `dict` whose two fields both read.
+fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedRequest> {
+    let py = obj.py();
+    let token_ids_key = pyo3::intern!(py, "token_ids");
+    let extra_args_key = pyo3::intern!(py, "extra_args");
+    let dict = obj.downcast_exact::<PyDict>().ok()?;
+    let token_ids = py_convert::read_exact_u32_list(&dict.get_item(token_ids_key).ok()??)?;
+    let extra_args = match dict.get_item(extra_args_key).ok()? {
+        Some(value) if !value.is_none() => Some(py_convert::exact_json_value(&value)?),
+        _ => None,
+    };
+    // `token_ids` is required, so the copy keeps an empty one for pythonize to read.
+    let rest = dict.copy().ok()?;
+    rest.set_item(token_ids_key, PyList::empty(py)).ok()?;
+    rest.set_item(extra_args_key, py.None()).ok()?;
+    let mut request: PreprocessedRequest = depythonize(rest.as_any()).ok()?;
+    request.token_ids = Arc::new(token_ids);
+    request.extra_args = extra_args;
+    Some(request)
+}
+
+/// Test hook: the fast path's request (`None` if it declines) or pythonize's, pythonized back.
+#[pyfunction]
+#[pyo3(signature = (preprocessed, fast_path))]
+pub fn _convert_preprocessed_request(
+    py: Python<'_>,
+    preprocessed: &Bound<'_, PyAny>,
+    fast_path: bool,
+) -> PyResult<Option<PyObject>> {
+    let request = if fast_path {
+        fast_preprocessed_request(preprocessed)
+    } else {
+        Some(depythonize::<PreprocessedRequest>(preprocessed).map_err(to_pyerr)?)
+    };
+    request
+        .map(|request| Ok(pythonize(py, &request).map_err(to_pyerr)?.unbind()))
+        .transpose()
+}
+
+fn copy_session_affinity(
+    parent_context: &crate::context::Context,
+    child_context: &mut SingleIn<PreprocessedRequest>,
+) {
+    if let Some(session_affinity) = parent_context.session_affinity() {
+        child_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+    }
+}
+
+/// Give the routed request its parent request's agent context, unless it carries its own. The
+/// router and workers read the session only from this field.
+fn inherit_agent_context(
+    parent_context: &crate::context::Context,
+    request: &mut PreprocessedRequest,
+) {
+    if request.agent_context.is_none() {
+        request.agent_context = parent_context.agent_context().cloned();
+    }
+}
+
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
+    ///
+    /// With `context`, the routed request inherits the parent request's session affinity and,
+    /// unless `preprocessed` sets `agent_context`, its agent context.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
@@ -37,20 +106,27 @@ impl RoutedEngine {
         preprocessed: PyObject,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
+        let preprocessed = preprocessed.bind(py);
+        let mut request = fast_preprocessed_request(preprocessed)
+            .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
+        if request.tracker.is_none() {
+            request.tracker = Some(Arc::new(RequestTracker::new()));
+        }
         let request_context = if let Some(parent_context) = context.as_ref() {
+            inherit_agent_context(parent_context, &mut request);
             let parent_metadata = parent_context.metadata_snapshot();
-            let parent_context = parent_context.inner();
-            let child_context = SingleIn::with_id_and_metadata(
+            let parent_controller = parent_context.inner();
+            let mut child_context = SingleIn::with_id_and_metadata(
                 request,
-                parent_context.id().to_string(),
+                parent_controller.id().to_string(),
                 parent_metadata,
             );
+            copy_session_affinity(parent_context, &mut child_context);
             let child_controller = child_context.context();
-            parent_context.link_child(child_controller.clone());
-            if parent_context.is_killed() {
+            parent_controller.link_child(child_controller.clone());
+            if parent_controller.is_killed() {
                 child_controller.kill();
-            } else if parent_context.is_stopped() {
+            } else if parent_controller.is_stopped() {
                 child_controller.stop_generating();
             }
             child_context
@@ -105,7 +181,7 @@ impl RoutedEngine {
                     }
                 });
 
-                Ok(crate::AsyncResponseStream::new(rx, true))
+                Ok(crate::AsyncResponseStream::routed_engine(rx))
             }
             .instrument(dispatch_span),
         )
@@ -140,9 +216,61 @@ fn dispatch_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_llm::protocols::common::extensions::{
+        AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SessionAffinityId, session_affinity_from_headers,
+    };
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
     use tracing_subscriber::layer::SubscriberExt;
+
+    fn preprocessed_request() -> PreprocessedRequest {
+        serde_json::from_value(serde_json::json!({
+            "token_ids": []
+        }))
+        .expect("minimal preprocessed request")
+    }
+
+    #[test]
+    fn request_context_preserves_session_affinity_across_python_boundary() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let session_affinity =
+            session_affinity_from_headers(&headers).expect("session affinity header");
+        let mut source = SingleIn::new(());
+        source.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+        let python_context =
+            crate::context::Context::new(source.context(), None, None, Default::default())
+                .with_session_affinity_from(&source)
+                .expect("pipeline context converts to Python binding context");
+        let mut routed_context = SingleIn::new(preprocessed_request());
+        copy_session_affinity(&python_context, &mut routed_context);
+
+        let session_affinity = routed_context
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity restored after Python boundary");
+        assert_eq!(session_affinity.as_str(), "session-123");
+    }
+
+    #[test]
+    fn processor_agent_context_is_not_overwritten() {
+        let agent_context = |session_id: &str| -> AgentContext {
+            serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap()
+        };
+        let mut source = SingleIn::new(());
+        source.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context("from-headers"));
+        let python_context =
+            crate::context::Context::new(source.context(), None, None, Default::default())
+                .with_agent_context_from(&source)
+                .expect("pipeline context converts to Python binding context");
+
+        let mut request = preprocessed_request();
+        inherit_agent_context(&python_context, &mut request);
+        assert_eq!(request.agent_context, Some(agent_context("from-headers")));
+
+        request.agent_context = Some(agent_context("from-processor"));
+        inherit_agent_context(&python_context, &mut request);
+        assert_eq!(request.agent_context, Some(agent_context("from-processor")));
+    }
 
     fn make_trace_context(
         trace_id: &str,

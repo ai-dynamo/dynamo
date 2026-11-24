@@ -56,7 +56,14 @@ fn encode_response_enforces_terminal_contract() {
 
 #[test]
 fn early_prompt_frames_retain_exact_native_metadata() {
-    for (has_prompt_logprobs, has_output) in [(false, false), (true, false), (true, true)] {
+    for (has_prompt_logprobs, has_output, has_mask) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (true, true, true),
+    ] {
         let mut request = request();
         request.output_options.prompt_logprobs = has_prompt_logprobs.then_some(1);
         let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
@@ -89,7 +96,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             // ends the stream before vLLM's terminal cannot drop them.
             let first = first.unwrap();
             assert!(first.finish_reason.is_none());
-            assert_eq!(first.engine_data, expected);
+            assert_eq!(first.engine_data.as_deref(), expected.as_ref());
         } else {
             assert!(first.is_none());
         }
@@ -102,9 +109,78 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             .as_mut()
             .unwrap()
             .num_output_tokens = 1 + u32::from(has_output);
-        let result = state.convert(response).unwrap().unwrap();
+        if has_mask {
+            response.outputs.as_mut().unwrap().sampling_mask =
+                vec![pb::TokenIds { ids: vec![7, 11] }; 1 + usize::from(has_output)];
+        }
+        let mut result = state.convert(response).unwrap().unwrap();
         assert!(result.finish_reason.is_some());
-        assert_eq!(result.engine_data, if has_output { None } else { expected });
+        if has_mask {
+            let data = result
+                .engine_data
+                .as_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            assert_eq!(
+                data.remove("sampling_mask"),
+                Some(json!(vec![vec![7, 11]; 1 + usize::from(has_output)]))
+            );
+            if data.is_empty() {
+                result.engine_data = None;
+            }
+        }
+        assert_eq!(
+            result.engine_data.as_deref(),
+            if has_output { None } else { expected.as_ref() }
+        );
+    }
+}
+
+#[test]
+fn prompt_logprob_arrays_allow_only_complete_rows_or_unscored_single_tokens() {
+    for count in [1, 2] {
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+            for arrays in 0..8 {
+                let mut request = request();
+                request.token_ids = request.token_ids[..count].to_vec().into();
+                let mut state = ResponseState::new(&request, mode);
+                let result = state.convert(pb::GenerateResponse {
+                    prompt_info: Some(pb::PromptInfo {
+                        num_prompt_tokens: count as u32,
+                        token_ids: request.token_ids.to_vec(),
+                        logprobs: vec![-0.5; if arrays & 1 == 0 { 0 } else { count }],
+                        ranks: vec![1; if arrays & 2 == 0 { 0 } else { count }],
+                        candidate_tokens: vec![
+                            pb::CandidateTokenInfo::default();
+                            if arrays & 4 == 0 { 0 } else { count }
+                        ],
+                    }),
+                    outputs: None,
+                });
+                if arrays != 7 && !(count == 1 && arrays == 0) {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("prompt logprob array lengths")
+                    );
+                    continue;
+                }
+                assert!(result.unwrap().is_none());
+                let terminal = state
+                    .convert(sequence_response(true, true, Some(Default::default())))
+                    .unwrap()
+                    .unwrap();
+                let data = terminal.engine_data.unwrap();
+                let positions = data["prompt_logprobs"].as_array().unwrap();
+                assert_eq!(positions.len(), count);
+                assert!(positions[0].is_null());
+                if count == 2 {
+                    assert_eq!(positions[1]["22"], json!({"logprob": -0.5, "rank": 1}));
+                }
+            }
+        }
     }
 }
 
@@ -132,7 +208,9 @@ fn negative_infinity_logprobs_are_normalized() {
     });
     let output = response.outputs.as_mut().unwrap();
     output.logprobs[0] = f32::NEG_INFINITY;
-    output.candidate_tokens[0].tokens[0].logprob = f32::NEG_INFINITY;
+    for token in &mut output.candidate_tokens[0].tokens {
+        token.logprob = f32::NEG_INFINITY;
+    }
 
     let mapped = state
         .convert(response)
@@ -261,11 +339,18 @@ fn output_logprobs_preserve_native_ranks_and_token_metadata() {
     output.logprobs = vec![-0.25, -0.75];
     output.ranks = vec![1, 3];
     output.candidate_tokens.push(pb::CandidateTokenInfo {
-        tokens: vec![pb::candidate_token_info::TokenInfo {
-            id: 51,
-            logprob: -0.5,
-            rank: 1,
-        }],
+        tokens: vec![
+            pb::candidate_token_info::TokenInfo {
+                id: 51,
+                logprob: -0.5,
+                rank: 1,
+            },
+            pb::candidate_token_info::TokenInfo {
+                id: 52,
+                logprob: -0.625,
+                rank: 2,
+            },
+        ],
     });
     output.finish_info.as_mut().unwrap().num_output_tokens = 2;
     let result = state.convert(response).unwrap().unwrap();
@@ -286,7 +371,7 @@ fn output_logprobs_preserve_native_ranks_and_token_metadata() {
             .collect::<Vec<_>>(),
         vec![
             vec![(42, 1, -0.25), (43, 2, -0.5)],
-            vec![(50, 3, -0.75), (51, 1, -0.5)],
+            vec![(51, 1, -0.5), (52, 2, -0.625)],
         ]
     );
 }
@@ -308,7 +393,7 @@ fn nonfinite_and_underflowing_logprobs_keep_associations() {
             top.iter()
                 .map(|t| (t.token_id, t.rank, t.logprob))
                 .collect::<Vec<_>>(),
-            vec![(42, 1, -9999.0), (43, 2, -9999.0)]
+            vec![(42, 1, -9999.0), (43, 2, -0.5)]
         );
     }
 }
@@ -358,11 +443,11 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                 assert!(terminal.disaggregated_params.is_none());
                 assert_eq!(
                     terminal.engine_data,
-                    Some(json!({"prompt_logprobs": [
+                    Some(Box::new(json!({"prompt_logprobs": [
                         null,
                         {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}},
                         {"33": {"logprob": -0.5, "rank": 2}}
-                    ]}))
+                    ]})))
                 );
                 if !include_handoff {
                     assert!(terminal.token_ids.is_empty());
@@ -378,7 +463,7 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                     );
                 }
             } else {
-                assert_eq!(terminal.disaggregated_params, Some(handoff));
+                assert_eq!(terminal.disaggregated_params, Some(Box::new(handoff)));
             }
         }
     }
@@ -500,18 +585,25 @@ fn output_logprobs_preserve_opt_in_alignment_and_values() {
         output.logprobs = vec![-0.25, -0.75];
         output.ranks = vec![1, 1];
         output.candidate_tokens.push(pb::CandidateTokenInfo {
-            tokens: vec![pb::candidate_token_info::TokenInfo {
-                id: 51,
-                logprob: -0.5,
-                rank: 2,
-            }],
+            tokens: vec![
+                pb::candidate_token_info::TokenInfo {
+                    id: 50,
+                    logprob: -0.75,
+                    rank: 1,
+                },
+                pb::candidate_token_info::TokenInfo {
+                    id: 51,
+                    logprob: -1.0,
+                    rank: 2,
+                },
+            ],
         });
         output.finish_info.as_mut().unwrap().num_output_tokens = 3;
         let result = state.convert(response).unwrap().unwrap();
         assert_eq!(result.log_probs, requested.map(|_| vec![-0.25, -0.75]));
         let expected = (requested == Some(2)).then_some(vec![
             vec![(42, -0.25), (43, -0.5)],
-            vec![(50, -0.75), (51, -0.5)],
+            vec![(50, -0.75), (51, -1.0)],
         ]);
         assert_eq!(
             result.top_logprobs.map(|rows| rows

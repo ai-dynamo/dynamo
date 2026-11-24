@@ -8,6 +8,7 @@
 //! the Jinja template for non-last assistant turns). We render it, tokenize it,
 //! and send a `max_tokens=1` request through the pipeline to warm the KV cache.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -102,17 +103,37 @@ impl Drop for PrefillTasks {
     }
 }
 
-/// A minimal `OAIChatLikeRequest` for speculative next-turn prefill.
-/// Holds the full conversation (including a new assistant message) and
-/// renders with `add_generation_prompt = false` so the result is the
-/// exact prefix the next user turn will see.
+/// Completed conversation and rendering settings for speculative next-turn prefill.
+/// Requests a history-only prompt with `add_generation_prompt = false`.
+#[derive(Default)]
 pub struct SpeculativePrefillRequest {
     messages: Vec<ChatCompletionRequestMessage>,
+    tools: Option<Value>,
+    raw_tools: Option<Value>,
+    template_tools: Option<Value>,
+    tool_choice: Option<Value>,
+    response_format: Option<Value>,
+    chat_template_args: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl SpeculativePrefillRequest {
     pub fn new(messages: Vec<ChatCompletionRequestMessage>) -> Self {
-        Self { messages }
+        Self {
+            messages,
+            ..Default::default()
+        }
+    }
+
+    fn from_request(request: &NvCreateChatCompletionRequest) -> Self {
+        Self {
+            messages: request.inner.messages.clone(),
+            tools: request.tools(),
+            raw_tools: request.raw_tools(),
+            template_tools: request.template_tools(),
+            tool_choice: request.tool_choice(),
+            response_format: request.response_format(),
+            chat_template_args: request.chat_template_args.clone(),
+        }
     }
 }
 
@@ -128,6 +149,30 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 
     fn typed_messages(&self) -> Option<&[ChatCompletionRequestMessage]> {
         Some(&self.messages)
+    }
+
+    fn tools(&self) -> Option<Value> {
+        self.tools.clone()
+    }
+
+    fn raw_tools(&self) -> Option<Value> {
+        self.raw_tools.clone()
+    }
+
+    fn template_tools(&self) -> Option<Value> {
+        self.template_tools.clone()
+    }
+
+    fn tool_choice(&self) -> Option<Value> {
+        self.tool_choice.clone()
+    }
+
+    fn response_format(&self) -> Option<Value> {
+        self.response_format.clone()
+    }
+
+    fn chat_template_args(&self) -> Option<&HashMap<String, serde_json::Value>> {
+        self.chat_template_args.as_ref()
     }
 
     fn should_add_generation_prompt(&self) -> bool {
@@ -164,7 +209,7 @@ pub(super) fn maybe_wrap_stream(
         .and_then(|hints| hints.speculative_prefill)
         .unwrap_or(false);
 
-    if !enabled {
+    if !enabled || super::has_custom_content(request) {
         return stream;
     }
 
@@ -172,7 +217,7 @@ pub(super) fn maybe_wrap_stream(
 
     let next = next.clone();
     let preprocessing = tasks.preprocessing(formatter.clone(), tokenizer.clone());
-    let messages = request.inner.messages.clone();
+    let prefill_request = SpeculativePrefillRequest::from_request(request);
     let cancel = tasks.cancel.clone();
     let request_id = request_id.to_string();
     let model = request.inner.model.clone();
@@ -205,7 +250,7 @@ pub(super) fn maybe_wrap_stream(
         let mut warmup = std::pin::pin!(prefill_task(
             next,
             preprocessing,
-            messages,
+            prefill_request,
             response_text,
             &context_slot,
             &warmup_cancel,
@@ -313,7 +358,7 @@ async fn prefill_task(
         dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
     >,
     preprocessing: PrefillPreprocessing,
-    original_messages: Vec<ChatCompletionRequestMessage>,
+    mut prefill_request: SpeculativePrefillRequest,
     response_text: String,
     context_slot: &PrefillContextSlot,
     cancel: &CancellationToken,
@@ -339,10 +384,7 @@ async fn prefill_task(
             ..Default::default()
         });
 
-    let mut messages = original_messages;
-    messages.push(assistant_msg);
-
-    let prefill_request = SpeculativePrefillRequest::new(messages);
+    prefill_request.messages.push(assistant_msg);
     let preprocessing_cancel = cancel.clone();
     // The tracker token and permit belong to the closure, not its JoinHandle.
     // Cancelling the async warmup cannot free admission while this work continues.
@@ -414,13 +456,16 @@ mod tests {
         ChatCompletionRequestUserMessageContent, ChatCompletionStreamResponseDelta,
         CreateChatCompletionRequest, CreateChatCompletionStreamResponse, FinishReason,
     };
-    use dynamo_renderer::PromptFormatter;
+    use dynamo_renderer::deepseek::v41::DeepSeekV41Formatter;
+    use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
     use dynamo_runtime::pipeline::ResponseStream;
+    use serde_json::json;
     use tokio::time::Instant;
 
     use crate::model_card::ModelDeploymentCard;
     use crate::preprocessor::prompt::prompt_formatter_from_mdc;
     use crate::protocols::common::extensions::{AgentHints, NvExt};
+    use crate::protocols::openai::responses::NvCreateResponse;
 
     use super::*;
 
@@ -488,6 +533,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct WindDownBackend {
         generate_calls: AtomicUsize,
+        token_ids: Mutex<Arc<Vec<u32>>>,
         dispatched: tokio::sync::Notify,
         stream_dropped: Arc<AtomicBool>,
         cleanup_ran: Arc<AtomicBool>,
@@ -521,7 +567,8 @@ mod tests {
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
             self.generate_calls.fetch_add(1, Ordering::SeqCst);
-            let (_request, context) = request.transfer(());
+            let (request, context) = request.transfer(());
+            *self.token_ids.lock() = request.token_ids;
             let ctx = context.context();
             *self.context.lock() = Some(ctx.clone());
 
@@ -611,6 +658,9 @@ mod tests {
         });
 
         NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "mock-llama".to_string(),
                 messages,
@@ -645,6 +695,7 @@ mod tests {
         };
 
         Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "chatcmpl-test".to_string(),
                 object: "chat.completion.chunk".to_string(),
@@ -659,6 +710,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         })
     }
 
@@ -705,6 +757,222 @@ mod tests {
         let mut tasks = PrefillTasks::new(parent);
         tasks.preprocessing_admission = Arc::new(Semaphore::new(1));
         tasks
+    }
+
+    fn byte_fallback_tokenizer() -> Arc<dyn Tokenizer> {
+        let vocab: serde_json::Map<_, _> = (0..256)
+            .map(|byte| (format!("<0x{byte:02X}>"), json!(byte)))
+            .collect();
+        let hf: tokenizers::Tokenizer = serde_json::from_value(json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [], "normalizer": null, "pre_tokenizer": null,
+            "post_processor": null, "decoder": null,
+            "model": {"type": "BPE", "vocab": vocab, "merges": [], "byte_fallback": true}
+        }))
+        .unwrap();
+        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+    }
+
+    #[tokio::test]
+    async fn warmup_tokens_preserve_deepseek_rendering_settings() {
+        let tokenizer = byte_fallback_tokenizer();
+        let formatter: Arc<dyn OAIPromptFormatter> = Arc::new(DeepSeekV41Formatter);
+        let tool = json!({"type":"function", "function":{
+            "name":"lookup", "parameters":{"type":"object", "properties":{}}
+        }});
+
+        for settings in [
+            json!({"thinking": false}),
+            json!({"reasoning_effort":"low", "response_format":{"type":"json_object"}}),
+            json!({"tools":[tool.clone()]}),
+            json!({"tools":[tool], "tool_choice":"none"}),
+        ] {
+            let mut payload = serde_json::to_value(chat_request(true)).unwrap();
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(settings.as_object().unwrap().clone());
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(payload).unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+            let mut completed = request.clone();
+            completed
+                .inner
+                .messages
+                .push(ChatCompletionRequestMessage::Assistant(
+                    ChatCompletionRequestAssistantMessage {
+                        content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                            "everest is 8849 m tall.".into(),
+                        )),
+                        ..Default::default()
+                    },
+                ));
+            completed.common.add_generation_prompt = Some(false);
+            let expected = tokenizer
+                .encode(&formatter.render(&completed).unwrap())
+                .unwrap();
+            assert!(!expected.token_ids().is_empty());
+
+            let backend = Arc::new(WindDownBackend::default());
+            let engine: Arc<BackendEngine> = backend.clone();
+            let tasks = test_tasks(None);
+            let tracker = tasks.tracker.clone();
+            let wrapped = maybe_wrap_stream(
+                upstream(),
+                &request,
+                "req-rendering-settings",
+                &engine,
+                &formatter,
+                &tokenizer,
+                &tasks,
+            );
+            let items: Vec<_> = wrapped.collect().await;
+            assert_eq!(text_of(&items), "everest is 8849 m tall.");
+            wait_for_dispatch(&backend.dispatched).await;
+            let actual = backend.token_ids.lock().clone();
+            drop(tasks);
+            tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+                .await
+                .unwrap();
+            assert_eq!(
+                actual.as_slice(),
+                expected.token_ids(),
+                "settings: {settings}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn warmup_tokens_preserve_mistral_raw_tool_schemas() {
+        let tokenizer = byte_fallback_tokenizer();
+        let formatter: Arc<dyn OAIPromptFormatter> =
+            Arc::new(dynamo_renderer::mistral::MistralFormatter::new(13, None).unwrap());
+        let mut payload = serde_json::to_value(chat_request(true)).unwrap();
+        payload["tools"] = json!([{"type": "function", "function": {
+            "name": "now", "parameters": {}
+        }}]);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(payload).unwrap();
+        let mut completed = request.clone();
+        completed
+            .inner
+            .messages
+            .push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                        "everest is 8849 m tall.".into(),
+                    )),
+                    ..Default::default()
+                },
+            ));
+        completed.common.add_generation_prompt = Some(false);
+        let rendered = formatter.render(&completed).unwrap();
+        assert!(rendered.contains(concat!(
+            r#"[AVAILABLE_TOOLS][{"type": "function", "function": {"name": "now", "description": "", "parameters": {}}}]"#,
+            "[/AVAILABLE_TOOLS]"
+        )));
+        let snapshot = SpeculativePrefillRequest::from_request(&completed);
+        assert_eq!(formatter.render(&snapshot).unwrap(), rendered);
+        let expected = tokenizer.encode(&rendered).unwrap();
+        assert!(!expected.token_ids().is_empty());
+
+        let backend = Arc::new(WindDownBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+        let tasks = test_tasks(None);
+        let tracker = tasks.tracker.clone();
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-mistral-raw-tools",
+            &engine,
+            &formatter,
+            &tokenizer,
+            &tasks,
+        );
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(text_of(&items), "everest is 8849 m tall.");
+        wait_for_dispatch(&backend.dispatched).await;
+        let actual = backend.token_ids.lock().clone();
+        drop(tasks);
+        tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+            .await
+            .unwrap();
+        assert_eq!(actual.as_slice(), expected.token_ids());
+    }
+
+    #[tokio::test]
+    async fn warmup_tokens_preserve_native_template_tools() {
+        let response: NvCreateResponse = serde_json::from_value(json!({
+            "model": "mock-llama", "input": "how tall is everest?",
+            "tools": [{"type": "namespace", "name": "fs", "description": "Files",
+                "tools": [{"type": "function", "name": "read", "description": "Read files",
+                    "defer_loading": true,
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                        "required": ["path"]}}]}],
+            "chat_template_args": {"current_date": "2000-01-01",
+                "deferred_render_mode": "tool_name_only"},
+            "nvext": {"agent_hints": {"speculative_prefill": true}}
+        }))
+        .unwrap();
+        let mut request: NvCreateChatCompletionRequest = response.try_into().unwrap();
+        let config: ChatTemplate = serde_json::from_value(json!({
+            "chat_template": include_str!("../../tests/data/muse_spark_open_deferred_tools.jinja")
+        }))
+        .unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(config, ContextMixins::new(&[]), true).unwrap();
+        assert!(formatter.supports_native_tools(&request));
+        request.normalize_responses_tools(true).unwrap();
+        let tokenizer = byte_fallback_tokenizer();
+
+        let mut completed = request.clone();
+        completed
+            .inner
+            .messages
+            .push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                        "everest is 8849 m tall.".into(),
+                    )),
+                    ..Default::default()
+                },
+            ));
+        completed.common.add_generation_prompt = Some(false);
+        let rendered = formatter.render(&completed).unwrap();
+        assert!(rendered.contains("Current date: 2000-01-01."));
+        assert!(rendered.contains("\"name\": \"fs.read\""));
+        assert!(rendered.contains("\"defer_loading\": true"));
+        assert!(!rendered.contains("\"parameters\""));
+        let expected = tokenizer.encode(&rendered).unwrap();
+
+        let mut flat_only = SpeculativePrefillRequest::from_request(&completed);
+        flat_only.template_tools = None;
+        let flat_tokens = tokenizer
+            .encode(&formatter.render(&flat_only).unwrap())
+            .unwrap();
+        assert_ne!(flat_tokens.token_ids(), expected.token_ids());
+
+        let backend = Arc::new(WindDownBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+        let tasks = test_tasks(None);
+        let tracker = tasks.tracker.clone();
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-native-template-tools",
+            &engine,
+            &formatter,
+            &tokenizer,
+            &tasks,
+        );
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(text_of(&items), "everest is 8849 m tall.");
+        wait_for_dispatch(&backend.dispatched).await;
+        let actual = backend.token_ids.lock().clone();
+        drop(tasks);
+        tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+            .await
+            .unwrap();
+        assert_eq!(actual.as_slice(), expected.token_ids());
     }
 
     async fn wait_for_tracked_tasks(tracker: &TaskTracker, expected: usize) {
@@ -954,7 +1222,7 @@ mod tests {
             prefill_task(
                 backend.clone(),
                 tasks.preprocessing(formatter, tokenizer),
-                chat_request(true).inner.messages,
+                SpeculativePrefillRequest::new(chat_request(true).inner.messages),
                 "8849 m tall.".to_string(),
                 &context_slot,
                 &cancel,
@@ -1035,7 +1303,7 @@ mod tests {
             prefill_task(
                 backend.clone(),
                 tasks.preprocessing(formatter, tokenizer),
-                chat_request(true).inner.messages,
+                SpeculativePrefillRequest::new(chat_request(true).inner.messages),
                 "8849 m tall.".to_string(),
                 &context_slot,
                 &cancel,

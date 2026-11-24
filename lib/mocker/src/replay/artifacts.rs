@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::residency::StorageTier;
 use uuid::Uuid;
 
 use crate::common::protocols::OutputSignal;
@@ -22,7 +23,7 @@ pub fn native_g1_parent_chain_artifact(block_size: usize) -> ReplayWorkerArtifac
     let tokens = (0..u32::try_from(prompt_len + 2)
         .expect("ordering regression token length must fit in u32"))
         .collect::<Vec<_>>();
-    let kv_events = aisimulate_core::engine::g1_parent_chain_events(block_size)
+    let kv_events = aisim_core::engine::g1_parent_chain_events(block_size)
         .into_iter()
         .enumerate()
         .map(|(ordinal, event)| ReplayTimedKvEvent {

@@ -55,5 +55,9 @@ class ReconfigurableEngineProtocol(EngineProtocol, Protocol):
     ) -> None:
         """Activate settings while preserving the existing tick cadence."""
 
+    def next_scheduled_tick(self) -> ScheduledTick:
+        """The pending tick recomputed under the active configuration; the
+        host replaces its pending tick with it after an activation."""
+
 
 __all__ = ["EngineProtocol", "ReconfigurableEngineProtocol"]

@@ -21,9 +21,10 @@ use super::kserve;
 use validator::Validate;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::{
+use crate::http::service::metrics::process_response_and_observe_metrics;
+use dynamo_http_server::{
     disconnect::create_connection_monitor,
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint},
 };
 
 use crate::protocols::tensor;
@@ -62,8 +63,8 @@ pub async fn tensor_response_stream(
     streaming: bool,
     metadata: &MetadataMap,
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
-    // create the context for the request
-    let request_id = get_or_create_request_id(request.id.as_deref());
+    // Client ids remain in the payload; only a server-minted id may key in-flight state.
+    let request_id = uuid::Uuid::new_v4().to_string();
     let model_name = request.model.clone();
     let cancellation_labels = CancellationLabels {
         model: model_name.clone(),
@@ -119,15 +120,15 @@ pub async fn tensor_response_stream(
         // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
         // surfaces' 429: the deadline elapsed waiting for capacity, so it is
         // backpressure rather than a gateway timeout. No rejection accounting.
-        if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
+        if dynamo_http_server::metrics::request_deadline_exceeded(e.as_ref()) {
             return Status::resource_exhausted(
-                crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Tensor);
             return Status::resource_exhausted(e.to_string());
         }
         dispatch_error_status(e.as_ref(), "Failed to generate tensor response stream")
@@ -175,20 +176,6 @@ pub async fn tensor_response_stream(
     connection_handle.disarm();
 
     Ok(stream)
-}
-
-/// Get the request ID from a primary source, or lastly create a new one if not present
-fn get_or_create_request_id(primary: Option<&str>) -> String {
-    // Try to get the request ID from the primary source
-    if let Some(primary) = primary
-        && let Ok(uuid) = uuid::Uuid::parse_str(primary)
-    {
-        return uuid.to_string();
-    }
-
-    // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
-    let uuid = uuid::Uuid::new_v4();
-    uuid.to_string()
 }
 
 /// Convert KServe InferParameter to Dynamo ParameterValue

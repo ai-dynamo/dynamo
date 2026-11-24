@@ -16,6 +16,8 @@ pub enum EndpointType {
     Images,
     /// Audios API (speech/audio generation)
     Audios,
+    /// Audio Transcriptions API (speech-to-text)
+    Transcriptions,
     /// Videos API (video generation)
     Videos,
     /// Realtime API (bidirectional streaming over WebSocket)
@@ -32,6 +34,8 @@ pub enum EndpointType {
     AnthropicMessages,
     /// Generate API (token-in/token-out)
     Generate,
+    /// System One typed-decisions API
+    SystemOne,
     /// Batch API
     Batch,
 }
@@ -44,6 +48,7 @@ impl EndpointType {
             Self::Embedding => "embedding",
             Self::Images => "images",
             Self::Audios => "audios",
+            Self::Transcriptions => "transcriptions",
             Self::Videos => "videos",
             Self::Realtime => "realtime",
             Self::Classify => "classify",
@@ -52,6 +57,7 @@ impl EndpointType {
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::Generate => "generate",
+            Self::SystemOne => "systemone",
             Self::Batch => "batch",
         }
     }
@@ -63,6 +69,7 @@ impl EndpointType {
             Self::Embedding,
             Self::Images,
             Self::Audios,
+            Self::Transcriptions,
             Self::Videos,
             Self::Realtime,
             Self::Classify,
@@ -71,6 +78,7 @@ impl EndpointType {
             Self::Responses,
             Self::AnthropicMessages,
             Self::Generate,
+            Self::SystemOne,
             Self::Batch,
         ]
     }
@@ -101,6 +109,12 @@ mod tests {
     }
 
     #[test]
+    fn transcriptions_is_registered() {
+        assert_eq!(EndpointType::Transcriptions.as_str(), "transcriptions");
+        assert!(EndpointType::all().contains(&EndpointType::Transcriptions));
+    }
+
+    #[test]
     fn batch_as_str() {
         assert_eq!(EndpointType::Batch.as_str(), "batch");
     }
@@ -108,5 +122,11 @@ mod tests {
     #[test]
     fn batch_in_all() {
         assert!(EndpointType::all().contains(&EndpointType::Batch));
+    }
+
+    #[test]
+    fn systemone_is_registered() {
+        assert_eq!(EndpointType::SystemOne.as_str(), "systemone");
+        assert!(EndpointType::all().contains(&EndpointType::SystemOne));
     }
 }

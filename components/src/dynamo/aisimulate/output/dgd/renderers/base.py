@@ -42,7 +42,9 @@ def _runtime_version(runtime_image: str, override: str | None) -> str:
 class CandidateLike(Protocol):
     """Public Sweeper result fields used by DGD renderers."""
 
-    config: dict[str, Any]
+    @property
+    def config(self) -> dict[str, Any]:
+        ...
 
 
 class CandidateMaterializationError(ValueError):

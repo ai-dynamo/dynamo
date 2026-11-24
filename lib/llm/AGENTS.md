@@ -71,24 +71,8 @@ do not carry compatibility branches forward indefinitely.
 
 # Frontend Serving-Load Metrics
 
-The frontend's request metrics (`http/service/metrics.rs`) also feed the frame
-it publishes for the KV DC Relay's `SubscribeServingLoad` (`frontend_load.rs`),
-so `/metrics` and the Relay report the same numbers. Three are specific to that
-use and are experimental (see the Metrics Catalog):
+The frontend's request metrics live in `dynamo-http-server`; their rules are in [`../http-server/AGENTS.md`](../http-server/AGENTS.md). This crate adapts model cards and discovery into those metrics (`http/service/metrics.rs`) and publishes the frame they build for the Pool Relay's `SubscribeServingLoad` (`frontend_load.rs`).
 
-- `dynamo_frontend_awaiting_first_token_requests{model}` (gauge): admitted
-  requests with no output token yet. Requests producing output are
-  `clamp_min(dynamo_frontend_active_requests - dynamo_frontend_awaiting_first_token_requests, 0)`;
-  the frame derives that value (saturating) rather than exporting a second gauge.
-- `dynamo_frontend_inflight_input_tokens{model, state}` (gauge, `state` is
-  `awaiting_first_token` or `generating`): known prompt tokens of in-flight
-  requests. Sum over `state` for the total.
-- `dynamo_frontend_input_tokens_total{model}` (counter): prompt tokens of every
-  admitted request, counted at tokenization. Use `rate()`.
+## Decision Cleanup Diagnostics
 
-Keep them consistent: one request transition updates every family through the
-request's shared `RequestMetrics` handle. Create a model's series when it
-registers, never from the publish path, which only reads. Before adding or
-changing a frontend metric, name its reader, check it is not a query over
-existing metrics or a sibling that should be a label, write its series count in
-the pull request, and add it to the Metrics Catalog.
+Report decision cleanup overruns through the request-correlated warning, not a separate metric until a continuous consumer is identified. Preserve the current tracing span when spawning cleanup, and retain admission until local work finishes. Use the warning to investigate overdue cleanup; it does not prove physical GPU settlement. This diagnostic adds no Prometheus series.
