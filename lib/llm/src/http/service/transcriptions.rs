@@ -28,7 +28,7 @@ use super::{
     disconnect::create_connection_monitor,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, process_response_and_observe_metrics,
-        request_was_rejected,
+        request_rejection_is_counted,
     },
     openai::{
         ErrorMessage, ErrorResponse, check_model_serving_ready, check_ready, context_from_headers,
@@ -297,7 +297,7 @@ async fn dispatch_audio_transcription(
 
     let stream = engine.generate(request).await.map_err(|error| {
         let is_validation = error_is_invalid_argument(error.as_ref());
-        if request_was_rejected(error.as_ref()) {
+        if request_rejection_is_counted(error.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&metric_model, Endpoint::Transcriptions);

@@ -780,10 +780,12 @@ async fn anthropic_messages(
                 super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+        }
+        if super::metrics::request_was_rejected(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Overloaded,
                 format!("{e:#}"),

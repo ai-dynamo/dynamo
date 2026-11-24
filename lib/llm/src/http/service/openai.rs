@@ -1516,7 +1516,7 @@ async fn completions_single(
     // Covers preprocessing, routing and the wire handoff to the worker.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Completions);
@@ -1862,7 +1862,7 @@ async fn completions_batch(
         // prompt's preprocessing, routing and wire handoff.
         let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if super::metrics::request_was_rejected(e.as_ref()) {
+            if super::metrics::request_rejection_is_counted(e.as_ref()) {
                 state
                     .metrics_clone()
                     .inc_rejection(&model, super::metrics::Endpoint::Completions);
@@ -2119,7 +2119,7 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
@@ -2261,7 +2261,7 @@ async fn classify(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
@@ -2347,7 +2347,7 @@ async fn rerank(
     let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
     let stream = engine.generate(request).await.map_err(|error| {
-        if super::metrics::request_was_rejected(error.as_ref()) {
+        if super::metrics::request_rejection_is_counted(error.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, Endpoint::Rerank);
@@ -2627,7 +2627,7 @@ async fn pooling(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
@@ -4459,7 +4459,7 @@ async fn chat_completions(
     // between the validated request and a live response stream.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
@@ -5274,7 +5274,7 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Responses);
@@ -6169,7 +6169,7 @@ async fn images_with_request(
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
         connection_handle.disarm();
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
@@ -6302,7 +6302,7 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
@@ -6430,7 +6430,7 @@ async fn video_stream(
     let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
@@ -6725,7 +6725,7 @@ async fn audio_speech(
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if super::metrics::request_rejection_is_counted(e.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
