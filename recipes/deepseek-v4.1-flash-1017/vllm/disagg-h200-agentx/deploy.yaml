@@ -22,60 +22,59 @@
 #
 # The pool is 8 GiB per GPU rank (16 ranks, 128 GiB) over TCP. The Mooncake master below must run in the same
 # namespace as the workers; apply this file as a whole.
-apiVersion: apps/v1
-kind: Deployment
+#
+# The master is a bare Pod, as in the measured deployment. A restarted master starts with an empty pool, so a
+# Deployment would not keep the pool alive across a node loss; if you prefer one, wrap this spec in a Deployment with
+# `strategy: Recreate` so two masters never run at once. If the master is gone, requests are still served: pool
+# lookups fail over to recomputing the prefix.
+apiVersion: v1
+kind: Pod
 metadata:
   name: dsv41-flash-h200-mooncake-master
+  labels:
+    app: dsv41-flash-h200-mooncake-master
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: dsv41-flash-h200-mooncake-master
-  template:
-    metadata:
-      labels:
-        app: dsv41-flash-h200-mooncake-master
-    spec:
-      containers:
-      - name: master
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
-        imagePullPolicy: IfNotPresent
-        command:
-        - /usr/local/bin/mooncake_master
-        args:
-        - -rpc_address=$(POD_IP)
-        - -rpc_port=50051
-        - -rpc_thread_num=8
-        - -default_kv_lease_ttl=60000
-        - -eviction_high_watermark_ratio=0.95
-        - -eviction_ratio=0.10
-        - -enable_metric_reporting=true
-        - -metrics_port=9003
-        - -logtostderr
-        env:
-        - name: POD_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
-        ports:
-        - containerPort: 50051
-          name: rpc
-          protocol: TCP
-        - containerPort: 9003
-          name: metrics
-          protocol: TCP
-        readinessProbe:
-          tcpSocket:
-            port: 50051
-          periodSeconds: 5
-          failureThreshold: 3
-        resources:
-          requests:
-            cpu: '4'
-            memory: 8Gi
-          limits:
-            cpu: '8'
-            memory: 16Gi
+  restartPolicy: Always
+  containers:
+  - name: master
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+    imagePullPolicy: IfNotPresent
+    command:
+    - /usr/local/bin/mooncake_master
+    args:
+    - -rpc_address=$(POD_IP)
+    - -rpc_port=50051
+    - -rpc_thread_num=8
+    - -default_kv_lease_ttl=60000
+    - -eviction_high_watermark_ratio=0.95
+    - -eviction_ratio=0.10
+    - -enable_metric_reporting=true
+    - -metrics_port=9003
+    - -logtostderr
+    env:
+    - name: POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+    ports:
+    - containerPort: 50051
+      name: rpc
+      protocol: TCP
+    - containerPort: 9003
+      name: metrics
+      protocol: TCP
+    readinessProbe:
+      tcpSocket:
+        port: 50051
+      periodSeconds: 5
+      failureThreshold: 3
+    resources:
+      requests:
+        cpu: '4'
+        memory: 8Gi
+      limits:
+        cpu: '8'
+        memory: 16Gi
 ---
 apiVersion: v1
 kind: Service
