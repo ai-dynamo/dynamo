@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_global_common::{PoolKey, grpc};
+use dynamo_llm::pool_relay::wan::grpc::protocol as relay;
+use prost::Message;
 mod common;
 use dynamo_global_frontend::{
     Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, serve, serve_relay_views,
@@ -73,6 +75,133 @@ async fn publish(
     sender.send(hello(replica)).await.unwrap();
     sender.send(snapshot(0, replica)).await.unwrap();
     (sender, task)
+}
+
+fn session_state(replica: &str, sequence: u64, sessions: &[(&str, u64)]) -> grpc::PoolState {
+    let mut state = common::state_for_replica(replica_id(replica), true, 1, 1, 1);
+    let mut load = relay::ServingLoadUpdate::decode(state.serving_load).unwrap();
+    load.window_sequence = sequence;
+    load.models[0].sessions = sessions
+        .iter()
+        .map(|(session_id, last_seen_ms)| relay::SessionObservation {
+            session_id: (*session_id).into(),
+            last_seen_ms: *last_seen_ms,
+        })
+        .collect();
+    state.serving_load = load.encode_to_vec().into();
+    state
+}
+
+async fn wait_session(
+    catalog: &RelayGatedPoolCatalog,
+    pool: &dynamo_global_common::PoolId,
+    session: &str,
+    expected: Option<u64>,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while catalog.session_last_seen(pool, "qwen", session) != expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn session_hints_replace_and_withdraw_over_receiver_transport() {
+    use dynamo_global_common::{PoolIdDeriver, V1PoolIdDeriver};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let key = PoolKey::new("east", "dynamo", "blue").unwrap();
+    let pool = V1PoolIdDeriver.derive(&key);
+    let (_discovery, candidates) = watch::channel(Arc::new(PoolSnapshot::new(vec![Pool::new(
+        &key,
+        "qwen",
+        "east",
+        vec!["http://pool:8000".parse().unwrap()],
+    )])));
+    let cancel = CancellationToken::new();
+    let catalog = Arc::new(RelayGatedPoolCatalog::new(candidates, cancel.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(serve_relay_views(
+        listener,
+        catalog.clone(),
+        cancel.clone(),
+    )));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let (first, first_task) = publish(address, "relay-a").await;
+    let update = |replica, revision, sessions: &[(&str, u64)]| PoolViewFrame {
+        event: Some(Event::Upsert(grpc::Upsert {
+            revision,
+            state: Some(session_state(replica, revision, sessions)),
+        })),
+    };
+    first
+        .send(update("relay-a", 1, &[("s", now - 2)]))
+        .await
+        .unwrap();
+    wait_session(&catalog, &pool, "s", Some(now - 2)).await;
+    assert_eq!(catalog.session_last_seen(&pool, "other-model", "s"), None);
+
+    first
+        .send(update(
+            "relay-a",
+            2,
+            &[("s", now - 1), ("removed", now - 1)],
+        ))
+        .await
+        .unwrap();
+    wait_session(&catalog, &pool, "removed", Some(now - 1)).await;
+    wait_session(&catalog, &pool, "s", Some(now - 1)).await;
+    first
+        .send(update("relay-a", 3, &[("s", now)]))
+        .await
+        .unwrap();
+    wait_session(&catalog, &pool, "s", Some(now)).await;
+    assert_eq!(catalog.session_last_seen(&pool, "qwen", "removed"), None);
+
+    // Another Relay observes the same source; the hint survives either replica's loss.
+    let (second, second_task) = publish(address, "relay-b").await;
+    second
+        .send(update("relay-b", 1, &[("s", now - 1)]))
+        .await
+        .unwrap();
+    drop(first);
+    first_task.await.unwrap().unwrap();
+    wait_session(&catalog, &pool, "s", Some(now - 1)).await;
+    drop(second);
+    second_task.await.unwrap().unwrap();
+    wait_session(&catalog, &pool, "s", None).await;
+
+    // An older connection cannot overwrite or withdraw its replacement's session state.
+    let (old, old_task) = publish(address, "relay-a").await;
+    old.send(update("relay-a", 1, &[("s", now - 2)]))
+        .await
+        .unwrap();
+    wait_session(&catalog, &pool, "s", Some(now - 2)).await;
+    let (replacement, replacement_task) = publish(address, "relay-a").await;
+    replacement
+        .send(update("relay-a", 1, &[("s", now)]))
+        .await
+        .unwrap();
+    wait_session(&catalog, &pool, "s", Some(now)).await;
+    old.send(update("relay-a", 2, &[("s", now - 1)]))
+        .await
+        .unwrap();
+    assert_eq!(
+        old_task.await.unwrap().unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    drop(old);
+    assert_eq!(catalog.session_last_seen(&pool, "qwen", "s"), Some(now));
+    drop(replacement);
+    replacement_task.await.unwrap().unwrap();
+    wait_session(&catalog, &pool, "s", None).await;
+    cancel.cancel();
 }
 
 async fn wait_count(pools: &mut watch::Receiver<Arc<PoolSnapshot>>, count: usize) {
