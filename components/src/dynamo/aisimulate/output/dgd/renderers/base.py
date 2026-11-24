@@ -259,13 +259,13 @@ def _apply_context_length(dgd: dict[str, Any], candidate: CandidateLike) -> None
         )
 
 
-def _apply_trtllm_worker_resources(
+def _apply_worker_resources(
     dgd: dict[str, Any],
     candidate: CandidateLike,
     *,
     num_gpus_per_node: int,
 ) -> None:
-    """Keep AIC's TRT-LLM worker resources faithful to the evaluated topology."""
+    """Keep AIC worker resources faithful to the evaluated topology."""
     config = candidate.config
     roles = (
         {"worker": "agg"}
@@ -400,12 +400,11 @@ def patch_dgd_manifest(
 
     _apply_router_config(dgd, candidate)
     _apply_context_length(dgd, candidate)
-    if candidate.config.get("backend") == "trtllm":
-        _apply_trtllm_worker_resources(
-            dgd,
-            candidate,
-            num_gpus_per_node=options.num_gpus_per_node,
-        )
+    _apply_worker_resources(
+        dgd,
+        candidate,
+        num_gpus_per_node=options.num_gpus_per_node,
+    )
 
     documents[dgd_index] = dgd
     metadata = dgd.setdefault("metadata", {})

@@ -759,3 +759,5 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+    multinode:
+      nodeCount: 2

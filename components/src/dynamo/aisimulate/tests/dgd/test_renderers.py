@@ -349,7 +349,10 @@ spec:
     assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
 
 
-def test_trtllm_resources_follow_disaggregated_candidate_topology() -> None:
+@pytest.mark.parametrize("backend", ["trtllm", "vllm"])
+def test_worker_resources_follow_disaggregated_candidate_topology(
+    backend: str,
+) -> None:
     def worker(component_type: str) -> dict:
         return {
             "type": component_type,
@@ -371,6 +374,7 @@ def test_trtllm_resources_follow_disaggregated_candidate_topology() -> None:
 
     dgd = {"spec": {"components": [worker("prefill"), worker("decode")]}}
     candidate = _candidate(
+        backend=backend,
         deployment_mode="disagg",
         prefill_tp=16,
         prefill_pp=1,
@@ -380,13 +384,13 @@ def test_trtllm_resources_follow_disaggregated_candidate_topology() -> None:
         prefill_cp=1,
         decode_tp=1,
         decode_pp=1,
-        decode_attention_dp=2,
+        decode_attention_dp=8,
         decode_moe_tp=1,
-        decode_moe_ep=2,
+        decode_moe_ep=8,
         decode_cp=1,
     )
 
-    base_module._apply_trtllm_worker_resources(dgd, candidate, num_gpus_per_node=8)
+    base_module._apply_worker_resources(dgd, candidate, num_gpus_per_node=8)
 
     prefill, decode = dgd["spec"]["components"]
     assert prefill["multinode"] == {"nodeCount": 2}
@@ -396,8 +400,8 @@ def test_trtllm_resources_follow_disaggregated_candidate_topology() -> None:
     }
     assert "multinode" not in decode
     assert decode["podTemplate"]["spec"]["containers"][0]["resources"] == {
-        "limits": {"nvidia.com/gpu": "2"},
-        "requests": {"nvidia.com/gpu": "2"},
+        "limits": {"nvidia.com/gpu": "8"},
+        "requests": {"nvidia.com/gpu": "8"},
     }
 
 
