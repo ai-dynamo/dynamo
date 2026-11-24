@@ -29,9 +29,12 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	leaderworkerset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -140,6 +143,15 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			dgd,
 			effective,
 		)
+
+		// Legacy normalization already merged graph env and removed absent policy settings.
+		environmentOptions := dynamo.GenerateBasePodSpecOptions{}
+		if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
+			environmentOptions.GeneralEnvironment = dgd.Spec.Env
+		}
+		if podAnnotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" || podAnnotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != "" {
+			environmentOptions.KVTransferPolicy = dynamo.KVTransferPolicyEnvironment(dgd.Spec.Experimental.KvTransferPolicy)
+		}
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
 		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
 		podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
@@ -175,6 +187,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			podLabels,
 			checkpointInfo,
 			containerGPUs,
+			environmentOptions,
 		)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
@@ -200,6 +213,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 	labels map[string]string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
+	environmentOptions dynamo.GenerateBasePodSpecOptions,
 ) (*corev1.PodTemplateSpec, error) {
 	podTemplate, err := r.generateComponentPodTemplateSpec(
 		ctx,
@@ -216,6 +230,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
+		environmentOptions,
 	)
 	if err != nil {
 		return nil, err
@@ -261,13 +276,12 @@ func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	}
 
 	leaderPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
-	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
 	if err := checkMainContainer(&leaderPodTemplateSpec.Spec); err != nil {
 		return nil, errors.Wrap(err, "generateLeaderPodTemplateSpec: failed to check main container")
 	}
 
-	return leaderPodTemplateSpec, nil
+	return leaderworkerset.RenderPodTemplate(leaderPodTemplateSpec), nil
 }
 
 func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
@@ -281,13 +295,12 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	}
 
 	workerPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleWorker)
-	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
 	if err := checkMainContainer(&workerPodTemplateSpec.Spec); err != nil {
 		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
 	}
 
-	return workerPodTemplateSpec, nil
+	return leaderworkerset.RenderPodTemplate(workerPodTemplateSpec), nil
 }
 
 func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
@@ -336,7 +349,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
 
 	// Standalone defaults use immutable DCD origin; graph children keep their inherited origin.
-	if dcd.GetParentGraphDeploymentName() == "" {
+	if dcd.GetGraphDeploymentController() == nil {
 		origin, exists := dcd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]
 		for _, template := range dynamo.EnsureComponentPodTemplates(componentForRendering) {
 			delete(template.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
@@ -366,6 +379,8 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
+		dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dcd.Spec.Env,
+			KVTransferPolicy: dynamo.DCDKVTransferPolicyEnvironment(dcd, component)},
 	)
 }
 
@@ -384,6 +399,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 	role dynamo.Role,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
+	environmentOptions dynamo.GenerateBasePodSpecOptions,
 ) (*corev1.PodTemplateSpec, error) {
 	component = component.DeepCopy()
 	if componentType != "" {
@@ -419,6 +435,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 		componentName,
 		nil,
 		containerGPUs,
+		environmentOptions,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
@@ -585,7 +602,7 @@ func (r *dcdWorkloadRenderer) generateService(
 	annotations := dynamo.GetDCDKubeAnnotations(dcd)
 	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, annotations)
 
-	if !(isK8sDiscovery || dcd.IsFrontendComponent()) {
+	if !componentdeployment.ServiceEnabled(string(dcd.Spec.ComponentType), isK8sDiscovery) {
 		return deleteStub, true, nil
 	}
 
@@ -599,7 +616,7 @@ func (r *dcdWorkloadRenderer) generateService(
 		return nil, false, err
 	}
 
-	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+	svc, err := componentdeployment.RenderService(componentdeployment.ServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
 		ComponentType:   componentType,
@@ -634,7 +651,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	dynamo.AddBaseModelAnnotation(annotations, component.ModelRef)
 	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, annotations)
 	componentType := string(component.ComponentType)
-	if !isK8sDiscovery && componentType != commonconsts.ComponentTypeFrontend {
+	if !componentdeployment.ServiceEnabled(componentType, isK8sDiscovery) {
 		return &corev1.Service{Name: dynamo.NormalizeKubeResourceName(serviceName), Namespace: dgd.Namespace}, true, nil
 	}
 	dynamoNamespace := dynamo.GetDynamoNamespace(dgd, component)
@@ -645,7 +662,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	if err != nil {
 		return nil, false, err
 	}
-	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+	service, err := componentdeployment.RenderService(componentdeployment.ServiceParams{
 		ServiceName:     serviceName,
 		Namespace:       dgd.Namespace,
 		ComponentType:   workloadComponentType,
@@ -753,7 +770,7 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 
 	if r.runtimeConfig.Gate.Enabled(features.LWS) {
 		// Both old and bounded resource names can carry the worker identity during upgrades.
-		lwsNames := []string{leaderWorkerSetNameForWorkload(workloadName)}
+		lwsNames := []string{leaderworkerset.Name(workloadName)}
 		if legacyName := legacyLeaderWorkerSetName(workloadName); legacyName != lwsNames[0] {
 			lwsNames = append(lwsNames, legacyName)
 		}

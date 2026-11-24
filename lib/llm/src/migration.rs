@@ -12,7 +12,6 @@ use anyhow::{Error, Result};
 use futures::{Stream, stream::StreamExt};
 
 use crate::{
-    http::service::metrics::Metrics,
     model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
@@ -25,6 +24,7 @@ use crate::{
     },
     session_affinity::explicit_target,
 };
+use dynamo_http_server::metrics::Metrics;
 
 use dynamo_admission::host::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
@@ -1052,11 +1052,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::service::metrics::Metrics;
     use crate::protocols::common::{
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
         preprocessor::RoutingHints, timing::RequestTracker,
     };
+    use dynamo_http_server::metrics::Metrics;
     use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
@@ -1178,6 +1178,7 @@ mod tests {
             ErrorType::InvalidArgument,
             ErrorType::Backend(BackendError::InvalidArgument),
             ErrorType::InvalidRequest,
+            ErrorType::NotImplemented,
         ] {
             let worker_error = DynamoError::builder()
                 .error_type(error_type)
@@ -1187,7 +1188,15 @@ mod tests {
                 format!("Generate Error: {worker_error}"),
                 worker_error,
             ));
-            assert_eq!(err.class(), ErrorType::InvalidRequest, "{error_type:?}");
+            assert_eq!(
+                err.class(),
+                if error_type == ErrorType::NotImplemented {
+                    ErrorType::NotImplemented
+                } else {
+                    ErrorType::InvalidRequest
+                },
+                "{error_type:?}"
+            );
             assert!(
                 !error::match_error_chain(&err, &[ErrorType::CannotConnect], &[]),
                 "{error_type:?} must not carry a CannotConnect ancestor"
@@ -1195,14 +1204,24 @@ mod tests {
             assert!(!is_migratable(&err), "{error_type:?} must not migrate");
         }
 
-        let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-            .message("engine is shutting down")
-            .build();
-        for prologue in [
-            StreamPrologueError::new("Generate Error: engine is shutting down", shutdown),
-            StreamPrologueError::from_message("Generate Error: legacy worker"),
+        let mut failures = vec![StreamPrologueError::from_message(
+            "Generate Error: legacy worker",
+        )];
+        for error_type in [
+            ErrorType::Backend(BackendError::EngineShutdown),
+            ErrorType::Internal,
+            ErrorType::Backend(BackendError::Unknown),
+            ErrorType::Conflict,
         ] {
+            failures.push(StreamPrologueError::new(
+                "Generate Error: worker failure",
+                DynamoError::builder()
+                    .error_type(error_type)
+                    .message("worker failure")
+                    .build(),
+            ));
+        }
+        for prologue in failures {
             let err = pre_stream_failure_error(prologue);
             assert_eq!(err.error_type(), ErrorType::CannotConnect, "{err}");
             assert!(is_migratable(&err), "{err}");

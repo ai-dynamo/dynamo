@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -78,7 +79,9 @@ def ledger_index(
 def context_doc(sha: str) -> dict:
     """A ``container/context.yaml`` stand-in for the night a tag names."""
     tag = f"{BACKEND_VERSIONS[sha.removeprefix('abc')]}-cu13-runtime"
-    return {fw.key: {fw.device: {"runtime_image_tag": tag}} for fw in gen.FRAMEWORKS}
+    return {
+        fw.key: {fw.devices[0]: {"runtime_image_tag": tag}} for fw in gen.FRAMEWORKS
+    }
 
 
 @pytest.fixture
@@ -137,7 +140,7 @@ class TestInstallableWheels:
         assert gen.ledger_version_published(wheel(NIGHTS[0]), published)
 
     def test_optional_package_is_never_required(self):
-        # kvbm is deprecated with removal targeted for v1.7.0: its wheel missing
+        # kvbm was removed in v1.8.0: its wheel missing
         # (or its index gone) must not cost the ledger a row.
         published = ledger_index([NIGHTS[0]], kvbm=[])
 
@@ -228,6 +231,29 @@ class TestSelectorRows:
         rows = gen.build(gen.installable_wheels(published))
 
         assert [row.dynamo for row in rows if row.latest] == [wheel(NIGHTS[0])] * 3
+
+
+def framework(backend: str):
+    return next(fw for fw in gen.FRAMEWORKS if fw.backend == backend)
+
+
+class TestContextKeys:
+    """Each row reads its backend version from container/context.yaml at its night."""
+
+    def test_reads_every_backend_from_the_current_context_yaml(self):
+        # A CUDA move renames the device key. If FRAMEWORKS misses the new key,
+        # every nightly built after the move drops out of the selector.
+        doc = yaml.safe_load((gen.REPO_ROOT / gen.CONTEXT).read_text())
+
+        for fw in gen.FRAMEWORKS:
+            assert gen.backend_version(doc, fw), fw.backend
+
+    def test_reads_trtllm_nightlies_from_before_the_cuda_13_4_move(self):
+        # Nightlies built before the move carry the cuda13.1 key. Without it the
+        # older TRT-LLM rows drop out.
+        doc = {"trtllm": {"cuda13.1": {"runtime_image_tag": "1.4.0rc3"}}}
+
+        assert gen.backend_version(doc, framework("trtllm")) == "1.4.0rc3"
 
 
 class TestMain:

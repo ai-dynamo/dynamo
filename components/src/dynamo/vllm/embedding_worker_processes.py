@@ -29,29 +29,14 @@ from typing import Any, Callable
 import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import utils as engine_utils
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import launch_core_engines
+from vllm.v1.engine.utils import bind_engine_zmq_listeners, launch_core_engines
 from vllm.v1.executor import Executor
-
-
-def _resolve_engine_utils(
-    vllm_config: VllmConfig, process_count: int
-) -> tuple[Any, Any]:
-    bind_listeners = getattr(engine_utils, "bind_engine_zmq_listeners", None)
-    if bind_listeners is None:
-        raise RuntimeError(
-            f"vLLM {vllm.__version__} provides no bind_engine_zmq_listeners"
-        )
-    listeners = bind_listeners(vllm_config, process_count)
-    return listeners.addresses, listeners
 
 
 def _client_listeners(
     zmq_listeners: Any, process_index: int
 ) -> tuple[socket.socket, ...]:
-    if zmq_listeners is None:
-        return ()
     return (
         zmq_listeners.inputs[process_index].socket,
         zmq_listeners.outputs[process_index].socket,
@@ -216,17 +201,14 @@ def _child_environment(
     process_index: int,
     addresses_json: str,
     parent_pid: int,
-    listener_fds: tuple[int, ...] = (),
+    listener_fds: tuple[int, ...],
 ) -> dict[str, str]:
     env = os.environ.copy()
     env[_ROLE_ENV] = _CHILD_ROLE
     env[_INDEX_ENV] = str(process_index)
     env[_PARENT_PID_ENV] = str(parent_pid)
     env[_ENGINE_ADDRESSES_ENV] = addresses_json
-    if listener_fds:
-        env[_LISTENER_FDS_ENV] = json.dumps(listener_fds)
-    else:
-        env.pop(_LISTENER_FDS_ENV, None)
+    env[_LISTENER_FDS_ENV] = json.dumps(listener_fds)
     env["PYTHONUNBUFFERED"] = "1"
 
     # Each Dynamo runtime process needs its own system-status listener, but the
@@ -302,7 +284,7 @@ class EmbeddingWorkerProcessGroup:
         engine_manager: Any,
         rpc_directory: tempfile.TemporaryDirectory,
         previous_rpc_base_path: str | None,
-        zmq_listeners: Any = None,
+        zmq_listeners: Any,
         parent_failure_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         self.children = children
@@ -359,8 +341,7 @@ class EmbeddingWorkerProcessGroup:
                 except Exception:
                     logger.exception("Failed to shut down shared embedding EngineCore")
 
-            if self.zmq_listeners is not None:
-                self.zmq_listeners.cleanup()
+            self.zmq_listeners.cleanup()
 
             try:
                 self.rpc_directory.cleanup()
@@ -456,14 +437,8 @@ def create_shared_embedding_engine_client(
 
     if is_embedding_process_child():
         process_index, inputs, outputs = _decode_child_addresses(process_count)
-        listener_fds = json.loads(os.environ.get(_LISTENER_FDS_ENV, "null"))
-        listeners: tuple[socket.socket, ...] = ()
-        if listener_fds is not None:
-            input_fd, output_fd = listener_fds
-            listeners = (
-                socket.socket(fileno=input_fd),
-                socket.socket(fileno=output_fd),
-            )
+        input_fd, output_fd = json.loads(os.environ[_LISTENER_FDS_ENV])
+        listeners = (socket.socket(fileno=input_fd), socket.socket(fileno=output_fd))
         client, client_config = _attach_client(
             vllm_config,
             process_count=process_count,
@@ -499,7 +474,7 @@ def create_shared_embedding_engine_client(
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
-        addresses, zmq_listeners = _resolve_engine_utils(vllm_config, process_count)
+        zmq_listeners = bind_engine_zmq_listeners(vllm_config, process_count)
 
         parent_logger_config = _client_config(
             vllm_config,
@@ -516,7 +491,7 @@ def create_shared_embedding_engine_client(
                 vllm_config,
                 executor_class,
                 not disable_log_stats,
-                addresses,
+                zmq_listeners.addresses,
             ) as core_engine_launch:
                 (
                     engine_manager,

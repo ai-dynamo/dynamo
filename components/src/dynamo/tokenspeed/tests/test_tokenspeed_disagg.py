@@ -235,12 +235,15 @@ def native(monkeypatch):
     fake.release()
 
 
-def make_engine(kv_block_size=None, bootstrap_host=None, **overrides):
+def make_engine(
+    kv_block_size=None, bootstrap_host=None, freeze_gc_after_init=False, **overrides
+):
     engine = TokenspeedLLMEngine(
         server_args(**overrides),
         engine_argv=["--model", "test-model"],
         kv_block_size=kv_block_size,
         bootstrap_host=bootstrap_host,
+        freeze_gc_after_init=freeze_gc_after_init,
     )
     # abort() waits this long for the engine's final chunk (tokenspeed#3227).
     engine._abort_grace_s = 0
@@ -328,10 +331,15 @@ def test_worker_options_come_from_flags_or_env(monkeypatch, source):
             cli += [flag, value]
         else:
             monkeypatch.setenv(env_var, value)
+    if source == "cli":
+        cli += ["--freeze-gc-after-init"]
+    else:
+        monkeypatch.setenv("DYN_TOKENSPEED_FREEZE_GC_AFTER_INIT", "true")
     config = args.parse_args(cli)
     assert config.kv_block_size == 32
     assert config.engine_startup_timeout == 90.0
     assert config.bootstrap_host == "prefill.example"
+    assert config.freeze_gc_after_init is True
     # Dynamo's options never reach the TokenSpeed launcher.
     assert config.engine_argv == ["--model", "m"]
 
@@ -397,6 +405,21 @@ async def test_start_binds_frontend_and_launches_headless_engine(
     finally:
         await engine.cleanup()
     assert launch.returncode == 0
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_start_tunes_gc_only_with_freeze_gc_after_init(
+    monkeypatch, native, enabled
+):
+    # The settings are process-wide: without the flag, start() must not apply them.
+    tune_gc = Mock()
+    monkeypatch.setattr(llm_engine, "_tune_gc", tune_gc)
+    engine = make_engine(freeze_gc_after_init=enabled)
+    try:
+        await engine.start(worker_id=1)
+        assert tune_gc.call_count == int(enabled)
+    finally:
+        await engine.cleanup()
 
 
 async def test_multi_node_binds_the_configured_handshake_port(native):

@@ -16,9 +16,9 @@ ARG ETCD_VERSION
 ARG ETCD_COMMIT
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOTOOLCHAIN=local
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
-{% include "templates/verify_ca_certificates.Dockerfile" %}
 RUN for attempt in 1 2 3; do \
         git clone --depth 1 --branch "${NATS_VERSION}" https://github.com/nats-io/nats-server.git /src/nats && break; \
         rm -rf /src/nats; \
@@ -70,9 +70,8 @@ USER root
 WORKDIR /opt/dynamo
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 {% if device == "cpu" %}
 RUN apt clean && apt-get update -y && \

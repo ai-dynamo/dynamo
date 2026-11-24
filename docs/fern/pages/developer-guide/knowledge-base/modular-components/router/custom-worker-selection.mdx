@@ -34,7 +34,7 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 
 ## Choose the Policy Stage
 
-To defer or reject requests before they enter the scheduling queue, use a [request classifier](custom-admission-control.md). It can be combined with a worker-selection policy.
+To classify or reject requests before they enter the scheduling queue, or hold them in it, use a [request classifier](custom-admission-control.md). It can be combined with a worker-selection policy.
 
 | Stage | Input | Output | Use this stage for |
 |---|---|---|---|
@@ -446,7 +446,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
 | `CACHE` | `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
-| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
+| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits`, `hits_beyond(prefix)` (every hit at or past `prefix`), and `loadable_beyond(prefix)` (the unbroken run starting at `prefix`, or zero when it is shorter than the engine loads) |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `active_decode_blocks()` | KV blocks the worker's active requests hold; excludes this request. Prompt blocks by default, plus the blocks generation adds only with `--router-track-output-blocks`; zero with `--no-router-track-active-blocks` |
@@ -604,30 +604,31 @@ Standalone EPP supplies `WorkerType::Aggregated` because it selects from one ful
 
 ## Request Classifier Sequence Hashes
 
-`ClassifyRequest::sequence_hashes()` returns a read-only snapshot of the existing ordered active-tracking sequence hashes before admission. Each entry covers a complete tracking block; use the factory context's `block_size()` for token units. Partial trailing blocks are excluded. `None` means tracking data is absent; `Some(&[])` means the host supplied an empty sequence. The snapshot remains valid while the classification future is pending and does not grow with generated output.
+`ClassifyRequest::sequence_hashes()` returns a read-only snapshot of the existing ordered active-tracking sequence hashes before admission. Each entry covers a complete tracking block; use the factory context's `block_size()` for token units. Partial trailing blocks are excluded. `None` means tracking data is absent; `Some(&[])` means the host supplied an empty sequence. The snapshot lives for the `classify` call and does not grow with generated output.
 
 Sequence hashes retain the host's tracking configuration. When KV reuse is disabled, they are randomized identities rather than reusable content hashes. Public and keyed hashes must stay within their respective tracking domains and configurations; matching values do not establish physical KV residency or a safe shared-budget discount. This accessor adds no hashing or scheduling overrides.
 
 Preparing a classifier input copies the supplied sequence on each eligible scheduling attempt, including retries that subsequently reuse cached classification overrides. Each nonempty snapshot allocates and copies `8 * hashes.len()` bytes. Missing and empty sequences need no hash-buffer allocation. Requests without a classifier skip this snapshot construction.
 
-For `P` retained inputs containing `H` hashes each, the added hash payload is `8 * P * H` bytes, plus request layout and allocator overhead. For example, 1,024 inputs of 32,768 tokens with 64-token tracking blocks retain 4 MiB of additional hash payload. The original scheduling hashes remain live separately. Snapshots are created before waiting for the classifier lock and remain live while classification is pending. Worker queue limits apply after classification; they do not bound these copies. There is no classifier-local pending-count limit or universal prompt-length limit here, so deployments must enforce both limits before this projection to bound its aggregate memory use.
+For `P` retained inputs containing `H` hashes each, the added hash payload is `8 * P * H` bytes, plus request layout and allocator overhead. For example, 1,024 inputs of 32,768 tokens with 64-token tracking blocks retain 4 MiB of additional hash payload. The original scheduling hashes remain live separately. Snapshots are created before waiting for the classifier lock and are freed when `classify` returns. Worker queue limits apply after classification; they do not bound these copies. There is no universal prompt-length limit here, so deployments must bound prompt length before this projection to bound its memory use.
 
-For example, a classifier can inspect the sequence while retaining the request in its future:
+For example, a classifier can inspect the sequence before it queues the request:
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
 };
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 
 struct InspectPrefixes;
 
 impl RequestClassifier for InspectPrefixes {
-    fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
-        Box::pin(async move {
-            let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
-            Ok(request)
-        })
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
+        Ok(request)
     }
 }
 ```

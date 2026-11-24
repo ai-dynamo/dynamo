@@ -184,6 +184,10 @@ impl RouterPolicyConfig {
         self.router.as_ref()
     }
 
+    pub(super) fn drop_router_settings(&mut self) {
+        self.router = None;
+    }
+
     /// Returns the process-wide worker-selection policy configuration, if present.
     pub fn worker_selection(&self) -> Option<&WorkerSelectionConfig> {
         self.worker_selection.as_ref()

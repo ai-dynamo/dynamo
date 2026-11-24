@@ -44,24 +44,8 @@ pub trait WorkerConfigLike {
         None
     }
 
-    /// Tokens retained by the backend's native KV offloading tier, if available.
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        None
-    }
-
     fn taints(&self) -> &HashSet<String> {
         &EMPTY_WORKER_TAINTS
-    }
-
-    /// Stable identifier for the worker, preserved across process restarts.
-    ///
-    /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
-    /// …). Used by rendezvous-style routing (HRW hashing) so cache assignments survive worker
-    /// restarts and minimise cache movement when the set of live workers churns. Returns
-    /// `None` when the worker did not publish a stable id, in which case callers should fall
-    /// back to the (ephemeral) `worker_id`.
-    fn stable_routing_id(&self) -> Option<&str> {
-        None
     }
 
     /// Returns the worker's topology domain labels (e.g. {"zone": "us-east-1a", "rack": "rack1"}).
@@ -81,11 +65,6 @@ pub trait WorkerConfigLike {
 
     /// Returns the KV transfer topology enforcement mode.
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
-        None
-    }
-
-    /// Returns the taint preference weight used when KV transfer topology enforcement is preferred.
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
         None
     }
 
@@ -270,11 +249,6 @@ mod tests {
             config.kv_transfer_enforcement().is_none(),
             "Default kv_transfer_enforcement() should return None"
         );
-        assert!(
-            config.kv_transfer_preferred_weight().is_none(),
-            "Default kv_transfer_preferred_weight() should return None"
-        );
-        assert!(config.native_offloading_capacity_tokens().is_none());
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 

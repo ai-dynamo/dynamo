@@ -264,9 +264,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         echo "       removal; the globs no longer match the base layout:" >&2; \
         echo "$left" >&2; \
         exit 1; \
-    fi
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    fi; \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
@@ -449,7 +448,8 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # - certifi (CA bundle) and Pillow: no required dependencies, so each moves
 #   exactly one distribution.
 # - transformers: past the exact pin that tensorrt-llm declares (==5.5.4).
-#   5.10.4 declares the same requirements as 5.5.4, so the solve moves no other
+#   5.13.0 fixed Hub-cache remote-code imports (huggingface/transformers#46618).
+#   5.13.1 shares 5.5.4's tokenizers and huggingface-hub requirements, moving no other
 #   distribution. The bounds of its checks must hold the pin
 #   (tests/dependencies/test_system_site_pins.py).
 # - jupyter-server, jupyterlab, notebook, urllib3: the upstream developer stack.
@@ -475,11 +475,11 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.
     /usr/bin/python3 -m pip install --break-system-packages --upgrade "pillow>=13.0.0,<14" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)' && \
     /usr/bin/python3 -m pip install --break-system-packages --upgrade \
-        --report /tmp/transformers-upgrade.json "transformers==5.10.4" && \
+        --report /tmp/transformers-upgrade.json "transformers==5.13.1" && \
     /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/transformers-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"transformers"}, "Unexpected transitive upgrade"' && \
     rm /tmp/transformers-upgrade.json && \
-    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'{% if target not in ("dev", "local-dev") %} && \
-    /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import transformers; print("runtime import path:", transformers.__file__); assert transformers.__file__ == "/usr/local/lib/python3.12/dist-packages/transformers/__init__.py"'{% endif %} && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.13.1", "5.13.2")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'{% if target not in ("dev", "local-dev") %} && \
+    /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.13.1", "5.13.2")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import transformers; print("runtime import path:", transformers.__file__); assert transformers.__file__ == "/usr/local/lib/python3.12/dist-packages/transformers/__init__.py"'{% endif %} && \
     /usr/bin/python3 -m pip install --break-system-packages --upgrade \
         --report /tmp/jupyter-upgrade.json \
         "jupyter-server==2.21.1" "jupyterlab==4.6.4" \

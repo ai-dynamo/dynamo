@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +60,33 @@ import (
 )
 
 const testTopologyLabelKey = "topology.kubernetes.io/zone"
+
+// GeneratePodSpecForComponent finalizes staged graph rendering for tests.
+// component and dynamoDeployment must not be nil.
+// deployerOverride may be nil to use the default multinode deployer from the factory.
+func GeneratePodSpecForComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+	role Role,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
+	deployerOverride MultinodeDeployer,
+	containerGPUs ContainerGPUCount,
+) (*corev1.PodSpec, error) {
+	pod, layers, err := GeneratePodSpecForComponentStaged(component, backendFramework, secretsRetriever, dynamoDeployment,
+		role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, containerGPUs, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := FinalizePodEnvironment(pod, layers, backendFramework, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
+		return nil, err
+	}
+	return pod, nil
+}
 
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	type args struct {
@@ -1673,58 +1701,31 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 	}
 }
 
-func Test_mergeEnvs(t *testing.T) {
-	type args struct {
-		common   []corev1.EnvVar
-		specific []corev1.EnvVar
+func TestMergeEnvsForOrigin(t *testing.T) {
+	system := []corev1.EnvVar{
+		{Name: "Z_SYSTEM", Value: "system"},
+		{Name: "SHARED", Value: "system"},
 	}
-	tests := []struct {
-		name string
-		args args
-		want []corev1.EnvVar
-	}{
-		{
-			name: "no_common_envs",
-			args: args{
-				common:   []corev1.EnvVar{},
-				specific: []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-			},
-			want: []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-		},
-		{
-			name: "no_specific_envs",
-			args: args{
-				common:   []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-				specific: []corev1.EnvVar{},
-			},
-			want: []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-		},
-		{
-			name: "common_and_specific_envs",
-			args: args{
-				specific: []corev1.EnvVar{{Name: "BAZ", Value: "QUX"}},
-				common:   []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-			},
-			want: []corev1.EnvVar{{Name: "BAZ", Value: "QUX"}, {Name: "FOO", Value: "BAR"}},
-		},
-		{
-			name: "common_and_specific_envs_with_same_name",
-			args: args{
-				common:   []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-				specific: []corev1.EnvVar{{Name: "FOO", Value: "QUX"}},
-			},
-			want: []corev1.EnvVar{{Name: "FOO", Value: "QUX"}},
-		},
+	user := []corev1.EnvVar{
+		{Name: "Z_BASE", Value: "expected"},
+		{Name: "A_DERIVED", Value: "$(Z_BASE)"},
+		{Name: "SHARED", Value: "user"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := MergeEnvs(tt.args.common, tt.args.specific)
-			sort.Slice(got, func(i, j int) bool {
-				return got[i].Name < got[j].Name
-			})
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("mergeEnvs() = %v, want %v", got, tt.want)
-			}
+
+	t.Run("origin 1.8 preserves staged system then user order and duplicate names", func(t *testing.T) {
+		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}
+		require.Equal(t, append(slices.Clone(system), user...), MergeEnvsForOrigin(annotations, system, user))
+	})
+
+	for _, origin := range []string{"1.7.99", "1.7.0", "1.6.0", ""} {
+		t.Run("older origin="+origin+" preserves legacy sorted and de-duplicated output", func(t *testing.T) {
+			annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
+			require.Equal(t, []corev1.EnvVar{
+				{Name: "A_DERIVED", Value: "$(Z_BASE)"},
+				{Name: "SHARED", Value: "user"},
+				{Name: "Z_BASE", Value: "expected"},
+				{Name: "Z_SYSTEM", Value: "system"},
+			}, MergeEnvsForOrigin(annotations, system, user))
 		})
 	}
 }
@@ -1759,7 +1760,7 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 				},
 			}
 
-			AddStandardEnvVars(container, operatorConfig.Infrastructure)
+			AddStandardEnvVars(container, operatorConfig.Infrastructure, nil)
 			envByName := envVarsToMap(container.Env)
 
 			if tt.wantNATS {
@@ -1771,7 +1772,7 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 	}
 }
 
-func TestAddMultinodeTopologyEnvVars(t *testing.T) {
+func TestAddLegacyMultinodeTopologyEnvVars(t *testing.T) {
 	enabledAnnotations := map[string]string{
 		commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 	}
@@ -1846,7 +1847,7 @@ func TestAddMultinodeTopologyEnvVars(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("inject topology aliases into the rendered main container")
 			container := &corev1.Container{Env: tt.initialEnv}
-			addMultinodeTopologyEnvVars(container, tt.numberOfNodes, "Engine", tt.deployer, tt.annotations)
+			addLegacyMultinodeTopologyEnvVars(container, tt.numberOfNodes, "Engine", tt.deployer, tt.annotations)
 
 			t.Log("verify aliases are present only for eligible multinode deployments")
 			leader := findEnvVar(container.Env, commonconsts.DynamoLeaderAddressEnvVar)
@@ -1907,6 +1908,155 @@ func TestGenerateBasePodSpecInjectsMultinodeTopologyEnvVars(t *testing.T) {
 	require.Equal(t, "$(GROVE_PCSG_POD_INDEX)", rank.Value)
 }
 
+func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
+	const backendName = "OMPI_MCA_orte_keep_fqdn_hostnames"
+	systemEnv := []corev1.EnvVar{{Name: "Z_BASE", Value: "expected"}, {Name: "A_DERIVED", Value: "$(Z_BASE)"}, {Name: "NATS_SERVER", Value: "nats://user:4222"}}
+	backendEnv := []corev1.EnvVar{{Name: "A_DERIVED", Value: "$(OMPI_MCA_orte_keep_fqdn_hostnames)"}, {Name: backendName, Value: "user"}}
+	backendDefault := corev1.EnvVar{Name: backendName, Value: "1"}
+	for _, test := range []struct {
+		name     string
+		backend  BackendFramework
+		role     Role
+		nodes    int32
+		authored []corev1.EnvVar
+	}{
+		{name: "system defaults", backend: BackendFrameworkNoop, role: RoleMain, nodes: 1, authored: systemEnv},
+		{name: "topology bindings", backend: BackendFrameworkNoop, role: RoleMain, nodes: 2, authored: systemEnv},
+		{name: "backend defaults", backend: BackendFrameworkTRTLLM, role: RoleWorker, nodes: 2, authored: backendEnv},
+	} {
+		for _, origin := range []string{"1.8.0", "1.7.9", "1.7.0", "1.6.0", ""} {
+			t.Run(test.name+"/origin="+origin, func(t *testing.T) {
+				t.Log("Render the same authored sequence against system or backend defaults")
+				component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "example/engine:1.7.0", Env: slices.Clone(test.authored)}}}},
+				}
+				config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{NATSAddress: "nats://system:4222"}}
+				pod, err := GenerateBasePodSpec(component, test.backend, &mockSecretsRetriever{}, "test-deployment", "default", test.role, test.nodes,
+					config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+				require.NoError(t, err)
+				require.Len(t, pod.Containers, 1)
+				env := pod.Containers[0].Env
+
+				t.Log("Semantic origins preserve local order and replace defaults; legacy output is unchanged")
+				names := make(map[string]bool)
+				for _, binding := range test.authored {
+					names[binding.Name] = true
+				}
+				var relevant []corev1.EnvVar
+				for _, binding := range env {
+					if names[binding.Name] {
+						relevant = append(relevant, binding)
+					}
+				}
+				want := test.authored
+				if origin != "1.8.0" {
+					if test.backend == BackendFrameworkTRTLLM {
+						want = append(slices.Clone(want), backendDefault)
+						require.Equal(t, backendDefault, env[len(env)-1])
+					} else {
+						want = []corev1.EnvVar{systemEnv[1], systemEnv[2], systemEnv[0]}
+						require.True(t, sort.SliceIsSorted(env, func(i, j int) bool { return env[i].Name < env[j].Name }))
+					}
+				} else if test.backend == BackendFrameworkNoop {
+					require.GreaterOrEqual(t, len(env), len(test.authored)+1)
+					require.Len(t, envVarsToMap(env), len(env))
+					suffix := slices.Clone(test.authored)
+					if test.nodes > 1 {
+						suffix = append(suffix,
+							corev1.EnvVar{Name: commonconsts.DynamoLeaderAddressEnvVar, Value: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE)"},
+							corev1.EnvVar{Name: commonconsts.DynamoRankEnvVar, Value: "$(GROVE_PCSG_POD_INDEX)"})
+					}
+					require.Equal(t, suffix, env[len(env)-len(suffix):])
+					require.Equal(t, "nats://user:4222", envVarsToMap(env)["NATS_SERVER"])
+				}
+				require.Equal(t, want, relevant)
+			})
+		}
+	}
+}
+func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *testing.T) {
+	dgdEnvironment := corev1.EnvVar{Name: "Z_DGD", Value: "source"}
+	componentEnvironment := corev1.EnvVar{Name: "A_COMPONENT", Value: "$(Z_DGD)"}
+	tests := []struct {
+		name            string
+		dgdOrigin       string
+		componentOrigin string
+		want            []corev1.EnvVar
+	}{
+		{
+			name:            "newer DGD origin overrides older component origin",
+			dgdOrigin:       "1.8.0",
+			componentOrigin: "1.6.0",
+			want:            []corev1.EnvVar{dgdEnvironment, componentEnvironment},
+		},
+		{
+			name: "origin 1.7 ignores a semantic component origin", dgdOrigin: "1.7.0", componentOrigin: "1.8.0",
+			want: []corev1.EnvVar{componentEnvironment, dgdEnvironment},
+		},
+		{
+			name: "missing origin ignores a semantic component origin", componentOrigin: "1.8.0",
+			want: []corev1.EnvVar{componentEnvironment, dgdEnvironment},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dynamoDeployment := &v1beta1.DynamoGraphDeployment{
+				Name:      "test-deployment",
+				Namespace: "default",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Env: []corev1.EnvVar{dgdEnvironment},
+				},
+			}
+			if tt.dgdOrigin != "" {
+				dynamoDeployment.Annotations = map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.dgdOrigin,
+				}
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.componentOrigin,
+					},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "example/engine:1.7.0",
+						Env:   []corev1.EnvVar{componentEnvironment},
+					}}},
+				},
+			}
+
+			podSpec, err := GeneratePodSpecForComponent(
+				component,
+				BackendFrameworkNoop,
+				&mockSecretsRetriever{},
+				dynamoDeployment,
+				RoleMain,
+				1,
+				&configv1alpha1.OperatorConfiguration{},
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"worker",
+				nil,
+				staticContainerGPUCount(0),
+			)
+			require.NoError(t, err)
+			require.Len(t, podSpec.Containers, 1)
+
+			var environment []corev1.EnvVar
+			for _, variable := range podSpec.Containers[0].Env {
+				if variable.Name == dgdEnvironment.Name || variable.Name == componentEnvironment.Name {
+					environment = append(environment, variable)
+				}
+			}
+			require.Equal(t, tt.want, environment)
+		})
+	}
+}
+
 func TestAddTransportTLSEnvVars(t *testing.T) {
 	t.Log("Each non-empty Infrastructure TLS path injects the matching env var.")
 	tlsCases := []struct {
@@ -1940,7 +2090,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 				Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 			}
 			tc.set(&operatorConfig.Infrastructure)
-			AddTransportTLSEnvVars(container, operatorConfig.Infrastructure)
+			AddTransportTLSEnvVars(container, operatorConfig.Infrastructure, nil)
 			envByName := envVarsToMap(container.Env)
 			assert.Equal(t, tc.want, envByName[tc.env])
 		})
@@ -1952,7 +2102,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 		operatorConfig := &configv1alpha1.OperatorConfiguration{
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 		}
-		AddTransportTLSEnvVars(container, operatorConfig.Infrastructure)
+		AddTransportTLSEnvVars(container, operatorConfig.Infrastructure, nil)
 		envByName := envVarsToMap(container.Env)
 		for _, tc := range tlsCases {
 			assert.NotContains(t, envByName, tc.env)
@@ -7329,61 +7479,84 @@ func TestGenerateBasePodSpec_SnapshotUsesGMSV1(t *testing.T) {
 
 func TestGenerateBasePodSpec_MultiGPUSnapshotFailover(t *testing.T) {
 	for _, backend := range []BackendFramework{BackendFrameworkVLLM, BackendFrameworkSGLang} {
-		t.Run(string(backend), func(t *testing.T) {
-			t.Log("Declare a two-GPU checkpoint worker and retain its authored launch configuration")
-			tpFlag := "--tensor-parallel-size"
-			if backend == BackendFrameworkSGLang {
-				tpFlag = "--tp"
-			}
-			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: v1beta1.ComponentTypeWorker,
-				Experimental: &v1beta1.ExperimentalSpec{
-					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
-					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
-					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint},
-				},
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-					Name: "main", Image: "runtime:1.6.0", Command: []string{"python3", "-m", "dynamo." + string(backend)},
-					Args:      []string{"--model", "Qwen/Qwen3-0.6B", tpFlag, "2"},
-					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("2")}},
-				}}}},
-			}
-			if backend == BackendFrameworkVLLM {
-				component.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
-					{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: "7000"},
-					{Name: "DYN_VLLM_KV_EVENT_PORT", Value: "21000"},
+		for _, origin := range []string{"", "1.8.0"} {
+			t.Run(string(backend)+"/origin="+origin, func(t *testing.T) {
+				t.Log("Declare a two-GPU checkpoint worker and retain its authored launch configuration")
+				tpFlag := "--tensor-parallel-size"
+				if backend == BackendFrameworkSGLang {
+					tpFlag = "--tp"
 				}
-			}
-			original := component.DeepCopy()
-
-			t.Log("Render the shared-GPU active/standby pair through the production backend")
-			podSpec, err := GenerateBasePodSpec(component, backend, &mockSecretsRetriever{}, "test-deployment", "default", RoleMain, 1,
-				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(2))
-			require.NoError(t, err)
-			require.Equal(t, original, component, "rendering must not mutate the DGD's launch configuration")
-			require.Len(t, podSpec.Containers, 2)
-
-			t.Log("Verify both whole rank groups share one allocation and use V1 election rather than cold shadows")
-			server := findInitContainerByName(podSpec, gmsruntime.ServerContainerName)
-			require.NotNil(t, server)
-			assert.Equal(t, "true", envVarsToMap(server.Env)[gmsruntime.EnvUseV1])
-			assert.Len(t, podSpec.ResourceClaims, 1)
-			for i, engine := range podSpec.Containers {
-				assert.Equal(t, fmt.Sprintf("engine-%d", i), engine.Name)
-				assert.Equal(t, original.PodTemplate.Spec.Containers[0].Args, engine.Args)
-				assert.Contains(t, engine.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
-				assert.NotContains(t, engine.Resources.Limits, corev1.ResourceName(commonconsts.KubeResourceGPUNvidia))
-				env := envVarsToMap(engine.Env)
-				assert.Equal(t, "true", env[gmsruntime.EnvUseV1])
-				assert.NotContains(t, env, "DYN_VLLM_GMS_SHADOW_MODE")
-				assert.Equal(t, intraPodFailoverLockFile, env["FAILOVER_LOCK_PATH"])
-				assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"])
-				assert.Equal(t, strconv.Itoa(commonconsts.DynamoSystemPort+i), env["DYN_SYSTEM_PORT"])
-				for _, authoredEnv := range original.PodTemplate.Spec.Containers[0].Env {
-					assert.Equal(t, authoredEnv.Value, env[authoredEnv.Name], "restored engine ports come from capture, not destination staggering")
+				component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: v1beta1.ComponentTypeWorker,
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+						Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+					},
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0", Command: []string{"python3", "-m", "dynamo." + string(backend)},
+						Args:      []string{"--model", "Qwen/Qwen3-0.6B", tpFlag, "2"},
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("2")}},
+					}}}},
 				}
-			}
-		})
+				if backend == BackendFrameworkVLLM {
+					component.PodTemplate.Spec.Containers[0].Env = append(component.PodTemplate.Spec.Containers[0].Env,
+						corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: "7000"},
+						corev1.EnvVar{Name: "DYN_VLLM_KV_EVENT_PORT", Value: "21000"},
+					)
+				}
+				if origin != "" {
+					component.PodTemplate.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
+					component.PodTemplate.Spec.Containers[0].Env = append(component.PodTemplate.Spec.Containers[0].Env,
+						corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "authored"}, corev1.EnvVar{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "authored"},
+						corev1.EnvVar{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "authored"}, corev1.EnvVar{Name: "GMS_SOCKET_DIR", Value: "/authored"},
+						corev1.EnvVar{Name: "DYN_GMS_USE_V1", Value: "authored"}, corev1.EnvVar{Name: "ENGINE_ID", Value: "authored"}, corev1.EnvVar{Name: "CONTAINER_NAME", Value: "authored"},
+						corev1.EnvVar{Name: "FAILOVER_LOCK_PATH", Value: "authored"}, corev1.EnvVar{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "authored"},
+						corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "authored"}, corev1.EnvVar{Name: "DYN_SYSTEM_ENABLED", Value: "authored"}, corev1.EnvVar{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "authored"},
+						corev1.EnvVar{Name: "UNOWNED", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "settings", Key: "value"}}})
+				}
+				original := component.DeepCopy()
+
+				t.Log("Render the shared-GPU active/standby pair through the production backend")
+				podSpec, err := GenerateBasePodSpec(component, backend, &mockSecretsRetriever{}, "test-deployment", "default", RoleMain, 1,
+					&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(2))
+				require.NoError(t, err)
+				require.Equal(t, original, component, "rendering must not mutate the DGD's launch configuration")
+				require.Len(t, podSpec.Containers, 2)
+
+				t.Log("Verify both whole rank groups share one allocation and use V1 election rather than cold shadows")
+				server := findInitContainerByName(podSpec, gmsruntime.ServerContainerName)
+				require.NotNil(t, server)
+				assert.Equal(t, "true", envVarsToMap(server.Env)[gmsruntime.EnvUseV1])
+				assert.Len(t, podSpec.ResourceClaims, 1)
+				for i, engine := range podSpec.Containers {
+					assert.Equal(t, fmt.Sprintf("engine-%d", i), engine.Name)
+					assert.Equal(t, original.PodTemplate.Spec.Containers[0].Args, engine.Args)
+					assert.Contains(t, engine.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
+					assert.NotContains(t, engine.Resources.Limits, corev1.ResourceName(commonconsts.KubeResourceGPUNvidia))
+					env := envVarsToMap(engine.Env)
+					assert.Equal(t, "true", env[gmsruntime.EnvUseV1])
+					assert.NotContains(t, env, "DYN_VLLM_GMS_SHADOW_MODE")
+					assert.Equal(t, "/gms-intrapod-control/failover.lock", env["FAILOVER_LOCK_PATH"])
+					assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"])
+					assert.Equal(t, strconv.Itoa(commonconsts.DynamoSystemPort+i), env["DYN_SYSTEM_PORT"])
+					if origin != "" {
+						assert.NotContains(t, env, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
+						assert.NotContains(t, env, "DYN_HEALTH_CHECK_ENABLED")
+						assert.Equal(t, "/gms-intrapod-control", env["GMS_SOCKET_DIR"])
+						assert.Equal(t, engine.Name, env["CONTAINER_NAME"])
+						assert.Equal(t, "notready", env["DYN_SYSTEM_STARTING_HEALTH_STATUS"])
+						assert.Equal(t, "true", env["DYN_SYSTEM_ENABLED"])
+						assert.Equal(t, strconv.Itoa(commonconsts.DynamoFPMBasePort+i), env["DYN_FORWARDPASS_METRIC_PORT"])
+						require.Equal(t, findEnvVar(original.PodTemplate.Spec.Containers[0].Env, "UNOWNED"), findEnvVar(engine.Env, "UNOWNED"))
+					}
+					if backend == BackendFrameworkVLLM {
+						assert.Equal(t, "7000", env["VLLM_NIXL_SIDE_CHANNEL_PORT"], "restored engine ports come from capture, not destination staggering")
+						assert.Equal(t, "21000", env["DYN_VLLM_KV_EVENT_PORT"], "restored engine ports come from capture, not destination staggering")
+					}
+				}
+			})
+		}
 	}
 }
 

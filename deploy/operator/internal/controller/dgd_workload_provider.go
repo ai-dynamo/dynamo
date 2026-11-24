@@ -25,6 +25,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -132,7 +133,7 @@ func hasOwnedDisaggregatedSet(
 	// A DGD owns one deterministic DisaggregatedSet. Treat an unavailable
 	// optional API as an empty observable workload family during adoption.
 	ds := newDisaggregatedSetObject()
-	key := client.ObjectKey{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}
+	key := client.ObjectKey{Name: disaggregatedset.Name(dgd), Namespace: dgd.Namespace}
 	if err := reader.Get(ctx, key, ds); err != nil {
 		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
 			return false, nil

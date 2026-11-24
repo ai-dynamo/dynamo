@@ -330,13 +330,10 @@ pub(crate) struct ResponseState {
     kept_stops: KeptStops,
 }
 
-/// The withheld stop tokens the frontend needs back: a visible one, such as
-/// gpt-oss's `<|call|>` that closes a tool call, and any one when the request
-/// keeps stop text (`no_stop_trim` or `retain_model_stop_token_text`), which
-/// needs token IDs through the matched stop. The frontend would trim the
-/// others, so they stay withheld; returned, one the hybrid engine stops on at
-/// the `min_tokens` boundary, where the frontend does not yet apply stops,
-/// would show as text.
+/// The matched stop tokens the frontend decodes: a visible one, such as
+/// gpt-oss's `<|call|>`, and any one under `no_stop_trim` or
+/// `retain_model_stop_token_text`. They are sent as a bare ID. Every other
+/// matched stop is sent with empty pre-decoded text, so it is counted, not shown.
 enum KeptStops {
     All,
     Visible(Vec<u32>),
@@ -466,15 +463,23 @@ impl ResponseState {
             .and_then(|stop_match| stop_match.r#match);
         // An engine withholds only a stop token it names: the hybrid engine
         // names none when its final batch is empty.
-        let stop_token = match &matched {
+        let matched_token = match &matched {
             Some(
                 pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id),
-            ) => self.kept_stops.contains(*id).then_some(*id),
+            ) => Some(*id),
             Some(pb::stop_match::Match::StopText(_)) | None => None,
         };
-        if stop_token.is_some() {
+        let kept = matched_token.filter(|id| self.kept_stops.contains(*id));
+        if matched_token.is_some() {
             self.completion_tokens = self.completion_tokens.saturating_add(1);
         }
+        // Every matched stop is sent so the frontend counts it. A hidden one
+        // carries empty text: a bare ID would show at the `min_tokens` boundary.
+        let (token_ids, text) = match (kept, matched_token) {
+            (Some(id), _) => (vec![id], None),
+            (None, Some(id)) => (vec![id], Some(String::new())),
+            (None, None) => (Vec::new(), None),
+        };
         let mut cached_tokens = self.handoff_cached_tokens.flatten();
         // The final usage is authoritative over the streamed counts, but never
         // counts fewer tokens than the output carries: the hybrid engine counts
@@ -491,7 +496,8 @@ impl ResponseState {
             }
         }
         Ok(LLMEngineOutput {
-            token_ids: stop_token.into_iter().collect(),
+            token_ids,
+            text,
             index: Some(0),
             finish_reason: Some(finish_reason),
             stop_reason: matched.map(|matched| match matched {
