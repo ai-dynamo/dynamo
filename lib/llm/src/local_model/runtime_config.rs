@@ -37,13 +37,20 @@ pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
 ///
-/// Absence means `false` for compatibility with workers that expect the
-/// frontend's structural tag to model an already-opened reasoning block.
+/// For tool structural tags, Dynamo treats an absent value as `false` for
+/// compatibility with workers that expect the frontend's structural tag to
+/// model an already-opened reasoning block.
+///
+/// For bare JSON responses, this key supplies no grammar timing information
+/// when absent. Inferring immediate grammar from this key requires an
+/// explicit `false`.
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
 /// A backend consumes the reasoning prefix only when `require_reasoning` is true
-/// on the request. Missing metadata leaves reasoning in the frontend grammar.
+/// on the request. An explicit `false` means no engine-side reasoning gate.
+/// Missing metadata leaves reasoning in the frontend grammar and does not prove
+/// immediate activation for bare structured responses.
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
