@@ -22,6 +22,11 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
 	const lpxOnDeleteErr = `metadata.annotations[nvidia.com/grove-update-strategy]: Invalid value: "OnDelete": must be "Coherent" or "RollingRecreate" when LPX components are configured`
 
+	// Change only replicas on a valid existing LPX component while its gate is disabled.
+	lpxReplicaEditOld := betaLPXDGDForAdmission(nil)
+	lpxReplicaEditNew := lpxReplicaEditOld.DeepCopy()
+	lpxReplicaEditNew.Spec.Components[0].Replicas = new(int32(2))
+
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
 		{
@@ -96,7 +101,10 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
 				dgd.Spec.Components = append(dgd.Spec.Components, betaLPXDGDForAdmission(nil).Spec.Components[0])
 			}),
-			wantWebhookErrs: []string{lpxOnDeleteErr},
+			wantWebhookErrs: []string{
+				lpxOnDeleteErr,
+				"spec.components: Forbidden: component topology is immutable and cannot be modified after creation: components added: [lpx]",
+			},
 		},
 		{
 			name: "LPX accepts the RollingRecreate update strategy",
@@ -307,6 +315,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		},
 		// Disabling LPX freezes each existing component, while unrelated updates remain available.
 		{
+			name:            "LPX gate rejects replica updates when disabled",
+			lpxDisabled:     true,
+			oldDeployment:   lpxReplicaEditOld,
+			deployment:      lpxReplicaEditNew,
+			wantWebhookErrs: []string{lpxGateErr},
+		},
+		{
 			name:        "LPX gate admits ordinary component updates and reordering when disabled",
 			lpxDisabled: true,
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -357,7 +372,10 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component.ComponentName = "additional"
 				dgd.Spec.Components = append(dgd.Spec.Components, *component)
 			}),
-			wantWebhookErrs: []string{"spec.components[1].type: Forbidden: LPX components require lpx.enabled=true"},
+			wantWebhookErrs: []string{
+				"spec.components[1].type: Forbidden: LPX components require lpx.enabled=true",
+				"spec.components: Forbidden: component topology is immutable and cannot be modified after creation: components added: [additional]",
+			},
 		},
 		{
 			name:        "LPX gate admits finalizer removal when disabled",

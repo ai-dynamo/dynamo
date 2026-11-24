@@ -11,6 +11,10 @@ A DGD is the resource that persists and serves traffic. Author one directly when
 
 This page documents the `nvidia.com/v1beta1` API — the served, current version.
 
+For updates, admission reports independent new-state and immutable-field errors together and preserves
+validation warnings. Updates to terminating DGDs validate only durable metadata rules so existing
+specification errors cannot prevent finalizer removal.
+
 LPX components are experimental and require the operator's `lpx.enabled` setting. When disabled,
 admission rejects new or changed LPX components but permits otherwise valid updates that leave them
 unchanged, and deletion. Existing LPX DGDs report a disabled status without further workload

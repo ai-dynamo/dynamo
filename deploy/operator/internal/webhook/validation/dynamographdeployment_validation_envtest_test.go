@@ -1442,6 +1442,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).MinAvailable = new(int32(2))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].minAvailable: Invalid value: 2: minAvailable is immutable after creation"},
+			wantWarnings:    []string{`spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name:          "v1alpha1 componentType change is rejected by CEL",
@@ -1579,6 +1580,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 power annotation cannot be added to a DRA component",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
 					Name:                      "device",
 					ResourceClaimTemplateName: new("device-template"),
@@ -1593,6 +1595,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				`spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "300": field is immutable`,
 			},
 		},
 		{
@@ -3079,8 +3082,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:         "strategy change revalidates unchanged budget",
-			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			name: "strategy change revalidates unchanged budget",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.Replicas = new(int32(4))
@@ -3090,7 +3092,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.Replicas = new(int32(4))
 				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
-				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+					consts.KubeAnnotationGroveUpdateStrategy:         "OnDelete",
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				}
 			}),
 			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate: Forbidden: must not be set when the update strategy is OnDelete`},
 		},
@@ -3481,6 +3487,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "1.2.3": field is immutable`},
+			wantWarnings:    []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "origin version cannot be removed on update",
@@ -3498,6 +3505,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{
 				"metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: null: field is immutable",
 			},
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "vLLM backend annotation accepts mp",
@@ -4151,6 +4159,19 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.Restart = betaRestart(nvidiacomv1beta1.RestartStrategyTypeParallel, "frontend", "worker")
 			}),
 			wantWebhookErrs: []string{"spec.restart.strategy.order: Forbidden: cannot be specified when strategy is parallel"},
+		},
+		{
+			name:          "v1beta1 update aggregates new-state and comparative errors",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				dgd.Spec.Restart = betaRestart(nvidiacomv1beta1.RestartStrategyTypeParallel, "frontend", "worker")
+			}),
+			wantWebhookErrs: []string{
+				"spec.restart.strategy.order: Forbidden: cannot be specified when strategy is parallel",
+				"spec.backendFramework: Invalid value: \"sglang\": is immutable and cannot be changed after creation",
+			},
+			wantWarnings: []string{"Changing spec.backendFramework may cause unexpected behavior"},
 		},
 		{
 			name:          "v1beta1 backend framework update reaches the webhook and warns",
