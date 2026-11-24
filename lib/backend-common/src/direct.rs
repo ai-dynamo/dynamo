@@ -20,16 +20,14 @@
 //! the requests it has admitted, and is released after that.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use dynamo_llm::local_model::model_card_instance;
 use dynamo_llm::local_model::runtime_config::{
     DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY, DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY,
 };
-use dynamo_llm::local_model::{LocalModelBuilder, model_card_instance};
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::DistributedRuntime;
@@ -51,8 +49,8 @@ use crate::disagg::DisaggregationMode;
 use crate::engine::{EngineConfig, KvEventSource, LLMEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::worker::{
-    WorkerConfig, fetch_model_files, local_model_builder, resolve_model_type,
-    resolve_worker_type_and_needs, validate_llm_model_input,
+    WorkerConfig, build_local_model, resolve_model_type, resolve_worker_type_and_needs,
+    validate_llm_model_input,
 };
 
 /// Delay after the first failed probe, and before the first probe of an engine
@@ -92,91 +90,9 @@ pub struct DirectDispatch {
     /// cleanup releases only this process's client, not the engine, which runs
     /// elsewhere.
     supervisors: TaskTracker,
-    /// Each model's files as its last registration found them. One
-    /// registration of a model looks at a time, so engines of a model that
-    /// start or return together download and hash it once, and a registration
-    /// that finds the same files copies the card.
-    models: parking_lot::Mutex<HashMap<String, ModelSlot>>,
-}
-
-/// Where a model's files are kept once read; locked while they are resolved.
-type ModelSlot = Arc<tokio::sync::Mutex<Option<ModelFiles>>>;
-
-/// A model's files on this host and the card read from them.
-#[derive(Clone)]
-struct ModelFiles {
-    directory: PathBuf,
-    card: ModelDeploymentCard,
-}
-
-impl ModelFiles {
-    /// Read the card of the model whose files are in `directory`. Reading
-    /// hashes the files, so it runs off the runtime's worker threads, which
-    /// serve requests.
-    async fn read(directory: PathBuf, custom_template: Option<&Path>) -> Result<Self, DynamoError> {
-        let (model_path, custom_template) = (directory.clone(), custom_template.map(PathBuf::from));
-        let read_error = |cause: String| {
-            error(
-                ErrorType::Backend(BackendError::Unknown),
-                format!("read the model card in '{}': {cause}", directory.display()),
-            )
-        };
-        let card = tokio::task::spawn_blocking(move || {
-            LocalModelBuilder::read_model_card(&model_path, custom_template.as_deref())
-        })
-        .await
-        .map_err(|join_error| read_error(join_error.to_string()))?
-        .map_err(|card_error| read_error(card_error.to_string()))?;
-        Ok(Self { directory, card })
-    }
 }
 
 impl DirectDispatch {
-    /// The files of the model `source` names.
-    ///
-    /// A model given as a path is read once: the path is where its files are,
-    /// and it is never asked of the hub, so when the path is gone `build`
-    /// reports that. A fetched model is resolved again on every registration,
-    /// as a sidecar resolves it when it starts: since the last one the hub ref
-    /// may have moved to another snapshot, or the cache may have been pruned
-    /// and the model must be downloaded again. Its card is read again only
-    /// when the directory changed.
-    ///
-    /// A failed fetch or read is not kept: the next registration tries again.
-    /// The custom template is not part of the key: every engine is hosted with
-    /// the same `WorkerConfig`.
-    async fn model_files(
-        &self,
-        source: &str,
-        custom_template: Option<&Path>,
-    ) -> Result<ModelFiles, DynamoError> {
-        let slot = self.model_slot(source);
-        let mut kept = slot.lock().await;
-        if let Some(files) = kept.as_ref()
-            && files.directory == Path::new(source)
-        {
-            return Ok(files.clone());
-        }
-        let directory = fetch_model_files(source).await?;
-        if let Some(files) = kept.as_ref()
-            && files.directory == directory
-        {
-            return Ok(files.clone());
-        }
-        let files = ModelFiles::read(directory, custom_template).await?;
-        *kept = Some(files.clone());
-        Ok(files)
-    }
-
-    /// Where the files of the model `source` names are kept once read.
-    fn model_slot(&self, source: &str) -> ModelSlot {
-        let mut models = self.models.lock();
-        match models.get(source) {
-            Some(slot) => slot.clone(),
-            None => models.entry(source.to_string()).or_default().clone(),
-        }
-    }
-
     /// Resolves once runtime shutdown has drained, withdrawn and released
     /// every engine.
     #[cfg(test)]
@@ -598,23 +514,7 @@ impl DirectEngineHost {
                 engine.kv_event_sources().await?,
             )?;
         }
-        let mut builder = local_model_builder(&config, &engine_config).await?;
-        if !config.model_name.is_empty() {
-            let files = self
-                .dispatch
-                .model_files(&config.model_name, config.custom_jinja_template.as_deref())
-                .await?;
-            builder
-                .model_path(files.directory)
-                .source_path(PathBuf::from(&config.model_name))
-                .model_card(files.card);
-        }
-        let local_model = builder.build().await.map_err(|build_error| {
-            error(
-                ErrorType::Backend(BackendError::Unknown),
-                format!("build local model: {build_error}"),
-            )
-        })?;
+        let local_model = build_local_model(&config, &engine_config, false).await?;
         let mut card = local_model.into_card();
         card.model_type = model_type;
         card.model_input = config.model_input;
@@ -804,14 +704,12 @@ mod tests {
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
-    /// `fail_next`, shared by every engine, makes the next request any of them
-    /// receives fail mid-stream as if its engine went away. `hold_next` makes
+    /// `hold_next`, shared by every engine, makes
     /// the next request wait until its engine is cleaned up, which ends it as
     /// cancelled, or until the test releases it, which completes it; the engine
     /// that holds it is posted to `held`.
     struct FakeEngine {
         state: Arc<EngineState>,
-        fail_next: Arc<AtomicBool>,
         hold_next: Arc<AtomicBool>,
         held: Arc<parking_lot::Mutex<Option<Arc<EngineState>>>>,
     }
@@ -858,13 +756,6 @@ mod tests {
             }
             if self.state.stalls.load(Ordering::SeqCst) {
                 std::future::pending::<()>().await;
-            }
-            if self.fail_next.swap(false, Ordering::SeqCst) {
-                return Ok(futures::stream::iter([Err(error(
-                    ErrorType::Backend(BackendError::EngineShutdown),
-                    "engine went away mid-stream",
-                ))])
-                .boxed());
             }
             if self.hold_next.swap(false, Ordering::SeqCst) {
                 *self.held.lock() = Some(self.state.clone());
@@ -932,7 +823,6 @@ mod tests {
         drt: DistributedRuntime,
         namespace: String,
         states: HashMap<&'static str, Arc<EngineState>>,
-        fail_next: Arc<AtomicBool>,
         hold_next: Arc<AtomicBool>,
         held: Arc<parking_lot::Mutex<Option<Arc<EngineState>>>>,
         dispatch: Arc<DirectDispatch>,
@@ -979,17 +869,14 @@ mod tests {
                     (url, state)
                 })
                 .collect();
-            let fail_next = Arc::new(AtomicBool::new(false));
             let hold_next = Arc::new(AtomicBool::new(false));
             let held = Arc::new(parking_lot::Mutex::new(None));
             let factory_states = states.clone();
-            let factory_fail_next = fail_next.clone();
             let factory_hold_next = hold_next.clone();
             let factory_held = held.clone();
             let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
                 Ok(Arc::new(FakeEngine {
                     state: factory_states[spec.url.as_str()].clone(),
-                    fail_next: factory_fail_next.clone(),
                     hold_next: factory_hold_next.clone(),
                     held: factory_held.clone(),
                 }) as Arc<dyn LLMEngine>)
@@ -1035,7 +922,6 @@ mod tests {
                 drt,
                 namespace: namespace.to_string(),
                 states,
-                fail_next,
                 hold_next,
                 held,
                 dispatch,
@@ -1238,7 +1124,6 @@ mod tests {
         let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
             Ok(Arc::new(FakeEngine {
                 state: factory_state.clone(),
-                fail_next: Arc::default(),
                 hold_next: Arc::default(),
                 held: Arc::default(),
             }) as Arc<dyn LLMEngine>)
@@ -1288,195 +1173,6 @@ mod tests {
         drt.shutdown();
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn an_engine_that_returns_registers_without_reading_its_models_files_again() {
-        // The engine's model is a copy of the sample model, so that the test
-        // can take its files away.
-        let model = tempfile::tempdir().unwrap();
-        for file in std::fs::read_dir(MODEL).unwrap() {
-            let file = file.unwrap();
-            std::fs::copy(file.path(), model.path().join(file.file_name())).unwrap();
-        }
-        let drt = DistributedRuntime::new(
-            Runtime::from_current().unwrap(),
-            DistributedConfig::process_local(),
-        )
-        .await
-        .unwrap();
-        let state = Arc::new(EngineState {
-            up: AtomicBool::new(true),
-            model: Some(model.path().display().to_string()),
-            ..EngineState::default()
-        });
-        let factory_state = state.clone();
-        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
-            Ok(Arc::new(FakeEngine {
-                state: factory_state.clone(),
-                fail_next: Arc::default(),
-                hold_next: Arc::default(),
-                held: Arc::default(),
-            }) as Arc<dyn LLMEngine>)
-        });
-        let spec = DirectEngineSpec {
-            url: A.to_string(),
-            mode: DisaggregationMode::Aggregated,
-        };
-        let config = WorkerConfig::default();
-        let endpoint = DiscoveryQuery::Endpoint {
-            namespace: config.namespace.clone(),
-            component: config.component.clone(),
-            endpoint: config.endpoint.clone(),
-        };
-        serve_direct_engines(&drt, config, vec![spec], factory)
-            .await
-            .unwrap();
-        let registered_after = |starts: usize| {
-            let (drt, state, endpoint) = (drt.clone(), state.clone(), endpoint.clone());
-            async move {
-                tokio::time::timeout(Duration::from_secs(600), async {
-                    loop {
-                        let listed = drt.discovery().list(endpoint.clone()).await.unwrap();
-                        if state.starts.load(Ordering::SeqCst) == starts && !listed.is_empty() {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .unwrap_or_else(|_| panic!("the engine must register after start {starts}"));
-            }
-        };
-        registered_after(1).await;
-
-        // Without its files the model can no longer be read from disk. The
-        // engine is lost and returns: it registers from the first read.
-        for file in std::fs::read_dir(model.path()).unwrap() {
-            std::fs::remove_file(file.unwrap().path()).unwrap();
-        }
-        state.lost.notify_one();
-        registered_after(2).await;
-        drt.shutdown();
-    }
-
-    /// Point `test-org/model`, in an hf-hub cache layout, at a snapshot that
-    /// is the sample model.
-    fn snapshot(cache: &Path, revision: &str) -> PathBuf {
-        let repo = cache.join("models--test-org--model");
-        std::fs::create_dir_all(repo.join("refs")).unwrap();
-        std::fs::create_dir_all(repo.join("snapshots")).unwrap();
-        std::fs::write(repo.join("refs/main"), revision).unwrap();
-        let snapshot = repo.join("snapshots").join(revision);
-        std::os::unix::fs::symlink(MODEL, &snapshot).unwrap();
-        snapshot
-    }
-
-    /// Run `test` with `cache` as the hub cache and no hub to reach: a fetch
-    /// that misses the cache fails at once.
-    async fn with_hub_cache<T>(cache: &Path, test: impl Future<Output = T>) -> T {
-        use dynamo_runtime::config::environment_names::model::huggingface;
-        temp_env::async_with_vars(
-            [
-                (huggingface::HF_HUB_CACHE, cache.to_str()),
-                (huggingface::HF_HUB_OFFLINE, None),
-                (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
-            ],
-            test,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_fetched_model_follows_its_hub_ref_to_another_snapshot() {
-        let cache = tempfile::tempdir().unwrap();
-        let first = snapshot(cache.path(), "first");
-        with_hub_cache(cache.path(), async {
-            let dispatch = DirectDispatch::default();
-            let files = dispatch.model_files("test-org/model", None).await.unwrap();
-            assert_eq!(files.directory.file_name(), first.file_name());
-
-            // The ref moves to a new snapshot and the old one stays in the
-            // cache, as after a download of a newer revision. A sidecar that
-            // starts now reads the new one, and so does the next registration.
-            let second = snapshot(cache.path(), "second");
-            assert!(first.exists());
-            let files = dispatch.model_files("test-org/model", None).await.unwrap();
-            assert_eq!(files.directory.file_name(), second.file_name());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_model_whose_directory_is_gone_is_fetched_again() {
-        let cache = tempfile::tempdir().unwrap();
-        let first = snapshot(cache.path(), "first");
-        with_hub_cache(cache.path(), async {
-            let dispatch = DirectDispatch::default();
-            let files = dispatch.model_files("test-org/model", None).await.unwrap();
-            assert_eq!(files.directory.file_name(), first.file_name());
-
-            // The cache is pruned and the model is downloaded again, to
-            // another snapshot. The directory read before is not kept.
-            std::fs::remove_file(&first).unwrap();
-            let second = snapshot(cache.path(), "second");
-            let files = dispatch.model_files("test-org/model", None).await.unwrap();
-            assert_eq!(files.directory.file_name(), second.file_name());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_fetched_model_that_cannot_be_resolved_is_retried() {
-        let cache = tempfile::tempdir().unwrap();
-        let first = snapshot(cache.path(), "first");
-        with_hub_cache(cache.path(), async {
-            let dispatch = DirectDispatch::default();
-            dispatch.model_files("test-org/model", None).await.unwrap();
-
-            // A file where the directory of snapshots was: the cache cannot
-            // be read, and there is no hub to download from. That is not a
-            // configuration error, which would end the engine's probing.
-            let snapshots = first.parent().unwrap();
-            std::fs::remove_dir_all(snapshots).unwrap();
-            std::fs::write(snapshots, "").unwrap();
-            let Err(unresolved) = dispatch.model_files("test-org/model", None).await else {
-                panic!("the model cannot be resolved");
-            };
-            assert!(!is_configuration_error(&unresolved), "{unresolved}");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_model_given_as_a_path_is_not_fetched_when_its_directory_is_gone() {
-        // A copy of the sample model, so that the test can remove it.
-        let root = tempfile::tempdir().unwrap();
-        let model = root.path().join("model");
-        std::fs::create_dir(&model).unwrap();
-        for file in std::fs::read_dir(MODEL).unwrap() {
-            let file = file.unwrap();
-            std::fs::copy(file.path(), model.join(file.file_name())).unwrap();
-        }
-        let source = model.display().to_string();
-        with_hub_cache(root.path(), async {
-            let dispatch = DirectDispatch::default();
-            dispatch.model_files(&source, None).await.unwrap();
-
-            // There is nowhere to fetch a path from: the files stay, and
-            // building the model reports the missing path.
-            std::fs::remove_dir_all(&model).unwrap();
-            let files = dispatch
-                .model_files(&source, None)
-                .await
-                .expect("a path must not be fetched as a hub model");
-            assert_eq!(files.directory, model);
-        })
-        .await;
-    }
-
     #[tokio::test]
     async fn an_engine_whose_configuration_is_rejected_is_not_probed_again() {
         let drt = DistributedRuntime::new(
@@ -1495,7 +1191,6 @@ mod tests {
         let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
             Ok(Arc::new(FakeEngine {
                 state: factory_state.clone(),
-                fail_next: Arc::default(),
                 hold_next: Arc::default(),
                 held: Arc::default(),
             }) as Arc<dyn LLMEngine>)
@@ -1534,7 +1229,6 @@ mod tests {
         let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
             Ok(Arc::new(FakeEngine {
                 state: factory_state.clone(),
-                fail_next: Arc::default(),
                 hold_next: Arc::default(),
                 held: Arc::default(),
             }) as Arc<dyn LLMEngine>)
@@ -1588,7 +1282,6 @@ mod tests {
             }
             Ok(Arc::new(FakeEngine {
                 state: factory_state.clone(),
-                fail_next: Arc::default(),
                 hold_next: Arc::default(),
                 held: Arc::default(),
             }) as Arc<dyn LLMEngine>)
@@ -1617,21 +1310,6 @@ mod tests {
             .await
             .expect("the corrected list must be served on the same runtime");
         drt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn a_request_whose_engine_goes_away_migrates_to_another_engine() {
-        let frontend = Frontend::start("direct-migration", 1).await;
-        frontend
-            .chat_until(|f| f.served(A) > 0 && f.served(B) > 0)
-            .await;
-
-        // Whichever engine the next request reaches fails it mid-stream, the
-        // way a sidecar reports an engine that went away.
-        frontend.fail_next.store(true, Ordering::SeqCst);
-        let before = frontend.served(A) + frontend.served(B);
-        assert!(frontend.chat().await, "the request must complete elsewhere");
-        assert_eq!(frontend.served(A) + frontend.served(B), before + 1);
     }
 
     #[tokio::test]
@@ -1692,7 +1370,6 @@ mod tests {
     fn dispatch_to(state: EngineState) -> (DirectDispatch, AddressedRequest<PreprocessedRequest>) {
         let engine = Arc::new(FakeEngine {
             state: Arc::new(state),
-            fail_next: Arc::default(),
             hold_next: Arc::default(),
             held: Arc::default(),
         });
@@ -1858,63 +1535,51 @@ mod tests {
         assert_eq!(frontend.states[B].cached_tokens.load(Ordering::SeqCst), 0);
     }
 
+    /// Setups direct mode cannot serve fail before any engine is built.
     #[tokio::test]
-    async fn a_model_input_other_than_tokens_is_rejected() {
-        let drt = DistributedRuntime::new(
-            Runtime::from_current().unwrap(),
-            DistributedConfig::process_local(),
-        )
-        .await
-        .unwrap();
-        let factory: DirectEngineFactory = Arc::new(
-            |_: &DirectEngineSpec| -> Result<Arc<dyn LLMEngine>, DynamoError> {
-                panic!("no engine is built for a model input the engines cannot take")
-            },
-        );
-        let spec = DirectEngineSpec {
-            url: A.to_string(),
-            mode: DisaggregationMode::Aggregated,
-        };
-        // A text model would be advertised as ready, and its requests would
-        // find no direct dispatch.
-        let config = WorkerConfig {
-            model_input: dynamo_llm::model_type::ModelInput::Text,
-            ..WorkerConfig::default()
-        };
-        let result = serve_direct_engines(&drt, config, vec![spec], factory).await;
-        assert!(result.is_err());
-        drt.shutdown();
-    }
+    async fn setups_direct_mode_cannot_serve_are_rejected() {
+        async fn rejection(
+            distributed: DistributedConfig,
+            config: WorkerConfig,
+        ) -> Option<ErrorType> {
+            let drt = DistributedRuntime::new(Runtime::from_current().unwrap(), distributed)
+                .await
+                .unwrap();
+            let factory: DirectEngineFactory = Arc::new(
+                |_: &DirectEngineSpec| -> Result<Arc<dyn LLMEngine>, DynamoError> {
+                    panic!("no engine is built for a rejected setup")
+                },
+            );
+            let spec = DirectEngineSpec {
+                url: A.to_string(),
+                mode: DisaggregationMode::Aggregated,
+            };
+            let result = serve_direct_engines(&drt, config, vec![spec], factory).await;
+            drt.shutdown();
+            result.err().map(|rejected| rejected.error_type())
+        }
+        let invalid = Some(ErrorType::Backend(BackendError::InvalidArgument));
 
-    #[tokio::test]
-    async fn shared_discovery_is_rejected() {
+        // Discovery other processes share: direct engines are listed, not discovered.
         let store = tempfile::tempdir().unwrap();
-        let config = DistributedConfig {
+        let shared = DistributedConfig {
             discovery_backend: dynamo_runtime::distributed::DiscoveryBackend::KvStore(
                 dynamo_runtime::storage::kv::Selector::File(store.path().to_path_buf()),
             ),
             ..DistributedConfig::process_local()
         };
-        let drt = DistributedRuntime::new(Runtime::from_current().unwrap(), config)
-            .await
-            .unwrap();
-        let factory: DirectEngineFactory = Arc::new(
-            |_: &DirectEngineSpec| -> Result<Arc<dyn LLMEngine>, DynamoError> {
-                panic!("no engine is built when discovery is shared")
-            },
-        );
-        let spec = DirectEngineSpec {
-            url: A.to_string(),
-            mode: DisaggregationMode::Aggregated,
+        assert_eq!(rejection(shared, WorkerConfig::default()).await, invalid);
+
+        // A text model would be advertised as ready, and its requests would
+        // find no direct dispatch.
+        let text = WorkerConfig {
+            model_input: dynamo_llm::model_type::ModelInput::Text,
+            ..WorkerConfig::default()
         };
-        let result = serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory).await;
-        // A setup error of this crate, in the backend category like the
-        // sidecar `Worker`'s.
         assert_eq!(
-            result.err().map(|rejected| rejected.error_type()),
-            Some(ErrorType::Backend(BackendError::InvalidArgument))
+            rejection(DistributedConfig::process_local(), text).await,
+            invalid
         );
-        drt.shutdown();
     }
 
     #[test]

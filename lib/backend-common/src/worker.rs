@@ -2227,30 +2227,6 @@ pub(crate) async fn build_local_model(
     name_only: bool,
     tensor_model_config: Option<dynamo_llm::protocols::tensor::TensorModelConfig>,
 ) -> Result<LocalModel, DynamoError> {
-    let mut builder = local_model_builder(config, engine_config).await?;
-    // Resolve model_name to a local path. Empty string or a raw media engine
-    // (`name_only`) → name-only card (no tokenizer/template): raw models carry
-    // no LLM artifacts to fetch and load themselves (cf. the legacy
-    // diffusion path's `ModelDeploymentCard::with_name_only()`).
-    if !config.model_name.is_empty() && !name_only {
-        let source = config.model_name.clone();
-        builder.model_path(fetch_model_files(&source).await?);
-        builder.source_path(PathBuf::from(source));
-    }
-    builder.build().await.map_err(|e| {
-        err(
-            ErrorType::Backend(BackendError::Unknown),
-            format!("build local model: {e}"),
-        )
-    })
-}
-
-/// The builder of [`build_local_model`]'s model, without the model's files:
-/// the caller says where they are. The topology read is done.
-pub(crate) async fn local_model_builder(
-    config: &WorkerConfig,
-    engine_config: &EngineConfig,
-) -> Result<LocalModelBuilder, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
         .filter(|s| !s.is_empty());
@@ -2328,26 +2304,37 @@ pub(crate) async fn local_model_builder(
         .media_fetcher(config.media_fetcher.clone())
         .tensor_model_config(tensor_model_config)
         .runtime_config(rt_cfg);
-    Ok(builder)
-}
 
-/// The local directory of the model `source` names: `source` itself when it
-/// is a path, otherwise the model's metadata files, downloaded unless they
-/// are already in the local cache.
-pub(crate) async fn fetch_model_files(source: &str) -> Result<PathBuf, DynamoError> {
-    if std::fs::exists(source).map_err(|e| {
-        err(
-            ErrorType::Backend(BackendError::InvalidArgument),
-            format!("model path: {e}"),
-        )
-    })? {
-        return Ok(PathBuf::from(source));
+    // Resolve model_name to a local path. Empty string or a raw media engine
+    // (`name_only`) → name-only card (no tokenizer/template): raw models carry
+    // no LLM artifacts to fetch and load themselves (cf. the legacy
+    // diffusion path's `ModelDeploymentCard::with_name_only()`).
+    if !config.model_name.is_empty() && !name_only {
+        let source = config.model_name.clone();
+        let local_path = if std::fs::exists(&source).map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                format!("model path: {e}"),
+            )
+        })? {
+            PathBuf::from(&source)
+        } else {
+            // Skip weights: the engine loaded them in start(); the card needs only metadata.
+            LocalModel::fetch(&source, true).await.map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("fetch '{source}': {e}"),
+                )
+            })?
+        };
+        builder.model_path(local_path);
+        builder.source_path(PathBuf::from(source));
     }
-    // Skip weights: the engine loaded them in start(); the card needs only metadata.
-    LocalModel::fetch(source, true).await.map_err(|e| {
+
+    builder.build().await.map_err(|e| {
         err(
-            ErrorType::Backend(BackendError::CannotConnect),
-            format!("fetch '{source}': {e}"),
+            ErrorType::Backend(BackendError::Unknown),
+            format!("build local model: {e}"),
         )
     })
 }
