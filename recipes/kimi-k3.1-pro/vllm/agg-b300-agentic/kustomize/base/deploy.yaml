@@ -143,7 +143,7 @@ spec:
             requests:
               cpu: '16'
               ephemeral-storage: 64Gi
-              # Above the default; matches the validated benchmark configuration.
+              # Sized for a single 8-GPU node.
               memory: 700Gi
               nvidia.com/gpu: '8'
             limits:

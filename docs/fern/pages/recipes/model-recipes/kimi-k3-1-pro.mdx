@@ -146,13 +146,13 @@ Serve `moonshotai/Kimi-K3.1-Pro` with NVIDIA Dynamo using vLLM or SGLang. Pick y
 
 <div data-recipe-framework="vllm" data-sku="b300" data-variant="agg">
 
-- A Kubernetes cluster with the Dynamo platform installed and 8 B300 GPUs available on one node. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and 8 B300 GPUs available on one node. The B300 workers are single-node, so no ComputeDomain or NVIDIA DRA driver is needed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 
 </div>
 
 <div data-recipe-framework="vllm" data-sku="b300" data-variant="disagg">
 
-- A Kubernetes cluster with the Dynamo platform installed and 16 B300 GPUs available on two nodes (8 per node). See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and 16 B300 GPUs available on two nodes (8 per node). Each B300 worker is single-node, so no ComputeDomain or NVIDIA DRA driver is needed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 
 </div>
 
@@ -214,6 +214,12 @@ The download Job populates the Hugging Face cache with `moonshotai/Kimi-K3.1-Pro
 <div data-sku="b200">
 
 The B200 worker uses the draft checkpoint downloaded by the Job.
+
+</div>
+
+<div data-sku="b300">
+
+B300 workers use only the main checkpoint. The draft checkpoint download is not required for the B300 recipes.
 
 </div>
 
