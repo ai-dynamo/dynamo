@@ -738,7 +738,7 @@ impl GenerateStreamer {
         mut output: LLMEngineOutput,
     ) -> Result<Option<GenerateStreamResponse>> {
         let finish_reason = finish_reason(&output)?;
-        let mut engine_data = match output.engine_data.take() {
+        let mut engine_data = match output.engine_data.take().map(|data| *data) {
             Some(Value::Object(engine_data)) => engine_data,
             _ => Map::new(),
         };
