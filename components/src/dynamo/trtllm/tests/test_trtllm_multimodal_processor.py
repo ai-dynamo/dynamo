@@ -1459,6 +1459,119 @@ async def test_epd_non_object_kwargs_raises_client_error() -> None:
     assert excinfo.value.status == 400
 
 
+@pytest.mark.parametrize("supported", [True, False])
+def test_item_handoff_follows_the_trtllm_input_processor(
+    monkeypatch, supported
+) -> None:
+    """The item path is used only when the model's TRT-LLM input processor
+    says it can encode media items without a prompt."""
+
+    class InputProcessor:
+        if supported:
+            supports_mm_item_handoff = True
+
+    monkeypatch.setattr(
+        "tensorrt_llm.inputs.create_input_processor",
+        lambda *args, **kwargs: InputProcessor(),
+    )
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    assert processor.supports_mm_item_handoff is supported
+
+
+def _encoder_engine(handles: list) -> MagicMock:
+    from tensorrt_llm.llmapi import DisaggregatedParams
+
+    engine = MagicMock()
+    engine.encoder_available = True
+    engine.llm.generate.return_value = [
+        SimpleNamespace(
+            disaggregated_params=DisaggregatedParams(
+                multimodal_embedding_handles=handles
+            )
+        )
+    ]
+    return engine
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "video"])
+async def test_encode_worker_encodes_media_items_without_a_prompt(
+    image_video_processor, monkeypatch, modality
+) -> None:
+    """A request with media items and no token ids is encoded with no prompt;
+    the response carries each item's handle with its metadata."""
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    processor, image = image_video_processor(None)
+    processor.supports_mm_item_handoff = True
+    video = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, "nvdec", video)
+    monkeypatch.setattr(EncodeHelper, "_image_loader", processor.image_loader)
+    handles = [{"name": "h0", "metadata": {"multimodal_hash": [7] * 8}}]
+    engine = _encoder_engine(handles)
+    url = _IMAGE_URL if modality == "image" else _VIDEO_URL
+
+    responses = [
+        response
+        async for response in EncodeHelper.process_encode_request(
+            request={
+                "multi_modal_data": {f"{modality}_url": [{"Url": url}]},
+                "mm_processor_kwargs": {"max_pixels": 1024},
+            },
+            multimodal_processor=processor,
+            connector=None,
+            tokenizer=MagicMock(),
+            model_dir="unused",
+            model_type="multimodal",
+            engine=engine,
+        )
+    ]
+
+    ((inputs,),) = engine.llm.generate.call_args.args
+    assert inputs == {
+        "multi_modal_data": {modality: [image if modality == "image" else video]},
+        "mm_processor_kwargs": {"max_pixels": 1024},
+    }
+    (response,) = responses
+    assert set(response) == {"ep_disaggregated_params"}
+    assert response["ep_disaggregated_params"]["multimodal_embedding_handles"] == (
+        handles
+    )
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_without_item_handoff_reports_an_error(
+    image_video_processor,
+) -> None:
+    """Media items with no prompt need TRT-LLM's item handoff."""
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    processor, _ = image_video_processor(None)
+    engine = MagicMock()
+    engine.encoder_available = True
+
+    responses = [
+        response
+        async for response in EncodeHelper.process_encode_request(
+            request={"multi_modal_data": {"image_url": [{"Url": _IMAGE_URL}]}},
+            multimodal_processor=processor,
+            connector=None,
+            tokenizer=MagicMock(),
+            model_dir="unused",
+            model_type="multimodal",
+            engine=engine,
+        )
+    ]
+
+    assert "without a prompt" in responses[0]["error"]
+    engine.llm.generate.assert_not_called()
+
+
 async def _cache_keys_for(request, url):
     """Run the real cache path and return the key it looked up."""
     from dynamo.trtllm.multimodal import embedding_fetcher as ef

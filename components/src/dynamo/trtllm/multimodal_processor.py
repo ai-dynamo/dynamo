@@ -278,6 +278,16 @@ class MultimodalRequestProcessor:
         except Exception as e:
             logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
 
+        # Whether TRT-LLM can encode this model's media items with no prompt
+        # and build prefill inputs from the item results. Then an encode worker
+        # gets only the media items, and each item is cached with its metadata
+        # (see fetch_mm_items_from_encoder). TRT-LLM builds without the flag
+        # keep the full-prompt encode path.
+        self.supports_mm_item_handoff = (
+            getattr(type(self.input_processor), "supports_mm_item_handoff", False)
+            is True
+        )
+
     def _expanded_prompt_len(
         self, token_ids: List[int], images: Optional[List[Any]]
     ) -> Optional[int]:
@@ -484,6 +494,138 @@ class MultimodalRequestProcessor:
                 embedding_paths = mm_emb
         return text, image_urls, embedding_paths
 
+    def media_urls_by_modality(self, request: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Image and video URLs of the request, by modality, in request order.
+
+        Only modalities with at least one URL are included. Embedding paths
+        (``.safetensors``) are not media URLs.
+        """
+        _, image_urls, _ = self.extract_prompt_and_media_from_request(request)
+        mm_data = request.get("multi_modal_data")
+        video_urls, _ = _urls_from_multi_modal_items(
+            mm_data.get("video_url") if isinstance(mm_data, dict) else None
+        )
+        media = {"image": image_urls, "video": video_urls}
+        return {modality: urls for modality, urls in media.items() if urls}
+
+    async def load_videos(self, video_items: List[Any]) -> List[VideoData]:
+        """Load ``multi_modal_data["video_url"]`` items as TRT-LLM videos.
+
+        Each item is a URL (``{"Url": ...}`` or a string); local files are
+        refused. Frames are float [0,1] tensors, as both decode paths give.
+        Raises ``HttpStatusError`` (400 for a bad item, 500 for a missing
+        decoder or a proxy fault).
+        """
+        videos: List[VideoData] = []
+        for item in video_items:
+            url = item.get("Url") if isinstance(item, dict) else item
+            # Everything user-supplied that can reach an error message or a
+            # log line goes through this bounded label: a data: URI carries
+            # the entire media payload inline, so echoing one back would
+            # serialize megabytes of base64 to the client and to every log
+            # sink that records the failure.
+            source = describe_media_source(url if isinstance(url, str) else str(item))
+            if not isinstance(url, str):
+                raise HttpStatusError(400, f"Unsupported video item: {source}", source)
+            if urlparse(url).scheme in ("", "file"):
+                raise HttpStatusError(
+                    400, "Local file access is not allowed for video", source
+                )
+            try:
+                normalized_url = await validate_media_url(url, self._url_policy)
+                scheme = urlparse(normalized_url).scheme
+                if scheme in ("http", "https", "data"):
+                    if scheme == "data":
+                        content = decode_data_uri(
+                            normalized_url, max_bytes=self.max_file_size_bytes
+                        )
+                    else:
+                        content = await fetch_bytes(
+                            normalized_url,
+                            30.0,
+                            policy=self._url_policy,
+                            max_bytes=self.max_file_size_bytes,
+                        )
+                    # Dual decode path: H.264/H.265 via NVDEC (hardware); other
+                    # codecs via the vendor cv2 loader. NVDEC failure falls back.
+                    nvdec_video = None
+                    codec = probe_video_codec(content)
+                    if should_use_nvdec(codec):
+                        try:
+                            nvdec_video = await asyncio.to_thread(
+                                _nvdec_video_data, content, self.num_video_frames
+                            )
+                        except Exception as exc:  # noqa: BLE001 - fall back
+                            logging.warning(
+                                "NVDEC decode failed (%s); using the vendor "
+                                "video decoder",
+                                exc,
+                            )
+                    if nvdec_video is not None:
+                        videos.append(nvdec_video)
+                    else:
+                        with tempfile.NamedTemporaryFile(suffix=".mp4") as video_file:
+                            await asyncio.to_thread(video_file.write, content)
+                            await asyncio.to_thread(video_file.flush)
+                            try:
+                                videos.append(
+                                    await async_load_video(
+                                        video_file.name, self.num_video_frames
+                                    )
+                                )
+                            except ImportError as exc:
+                                # The vendor loader needs cv2, which the
+                                # image deliberately omits; its bare error
+                                # names neither codec nor remedy. Carry its
+                                # text as the cause so the underlying
+                                # reason still reaches the client.
+                                raise video_decoder_missing(
+                                    "trtllm",
+                                    "opencv-python-headless",
+                                    "cv2",
+                                    codec,
+                                    cause=str(exc),
+                                ) from exc
+                else:
+                    try:
+                        videos.append(
+                            await async_load_video(
+                                normalized_url, self.num_video_frames
+                            )
+                        )
+                    except ImportError as exc:
+                        # No bytes fetched on this branch, so no codec probe.
+                        raise video_decoder_missing(
+                            "trtllm",
+                            "opencv-python-headless",
+                            "cv2",
+                            None,
+                            cause=str(exc),
+                        ) from exc
+            except UrlValidationError as e:
+                raise HttpStatusError(400, str(e), source) from e
+            except (HttpStatusError, HttpConfigurationError):
+                # An untrusted egress proxy is deployment configuration,
+                # not a bad request. It carries no status, so the generic
+                # handler below would make it a 400.
+                raise
+            except MissingMediaDecoderError as e:
+                # A missing decoder is deployment configuration, not a bad
+                # request: 500, not the 400 the generic handler below
+                # assigns. The actionable text (codec, bounded spec,
+                # installer command, vendor cause) is the message.
+                raise HttpStatusError(
+                    500, f"Failed to load video ({source}): {e}", source
+                ) from e
+            except Exception as e:
+                status = getattr(e, "status", None) or getattr(e, "code", None)
+                raise HttpStatusError(
+                    status if isinstance(status, int) and status >= 400 else 400,
+                    f"Failed to load video ({source}): {e}",
+                    source,
+                ) from e
+        return videos
+
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
     ) -> Optional[Any]:
@@ -586,11 +728,16 @@ class MultimodalRequestProcessor:
                 f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
             )
 
-            # Same structure as PD flow (TRT-LLM expects dict with "image" key)
-            image_embeddings = (
-                embeddings if isinstance(embeddings, list) else [embeddings]
-            )
-            processed_inputs["multi_modal_embeddings"] = {"image": image_embeddings}
+            if isinstance(embeddings, dict) and "mm_embeddings" not in embeddings:
+                # Media items by modality, each with its metadata
+                # (fetch_mm_items_from_encoder): images and videos.
+                processed_inputs["multi_modal_embeddings"] = embeddings
+            else:
+                # Same structure as PD flow (TRT-LLM expects dict with "image" key)
+                image_embeddings = (
+                    embeddings if isinstance(embeddings, list) else [embeddings]
+                )
+                processed_inputs["multi_modal_embeddings"] = {"image": image_embeddings}
             if formatted_prompt_from_frontend:
                 processed_inputs["prompt"] = formatted_prompt_from_frontend
             else:
@@ -727,120 +874,7 @@ class MultimodalRequestProcessor:
                     "request yet; send them in separate requests"
                 )
             uint8_videos = image_and_video and self._prefers_np_video()
-            videos = []
-            for item in video_items:
-                url = item.get("Url") if isinstance(item, dict) else item
-                # Everything user-supplied that can reach an error message or a
-                # log line goes through this bounded label: a data: URI carries
-                # the entire media payload inline, so echoing one back would
-                # serialize megabytes of base64 to the client and to every log
-                # sink that records the failure.
-                source = describe_media_source(
-                    url if isinstance(url, str) else str(item)
-                )
-                if not isinstance(url, str):
-                    raise HttpStatusError(
-                        400, f"Unsupported video item: {source}", source
-                    )
-                if urlparse(url).scheme in ("", "file"):
-                    raise HttpStatusError(
-                        400, "Local file access is not allowed for video", source
-                    )
-                try:
-                    normalized_url = await validate_media_url(url, self._url_policy)
-                    scheme = urlparse(normalized_url).scheme
-                    if scheme in ("http", "https", "data"):
-                        if scheme == "data":
-                            content = decode_data_uri(
-                                normalized_url, max_bytes=self.max_file_size_bytes
-                            )
-                        else:
-                            content = await fetch_bytes(
-                                normalized_url,
-                                30.0,
-                                policy=self._url_policy,
-                                max_bytes=self.max_file_size_bytes,
-                            )
-                        # Dual decode path: H.264/H.265 via NVDEC (hardware); other
-                        # codecs via the vendor cv2 loader. NVDEC failure falls back.
-                        nvdec_video = None
-                        codec = probe_video_codec(content)
-                        if should_use_nvdec(codec):
-                            try:
-                                nvdec_video = await asyncio.to_thread(
-                                    _nvdec_video_data, content, self.num_video_frames
-                                )
-                            except Exception as exc:  # noqa: BLE001 - fall back
-                                logging.warning(
-                                    "NVDEC decode failed (%s); using the vendor "
-                                    "video decoder",
-                                    exc,
-                                )
-                        if nvdec_video is not None:
-                            videos.append(nvdec_video)
-                        else:
-                            with tempfile.NamedTemporaryFile(
-                                suffix=".mp4"
-                            ) as video_file:
-                                await asyncio.to_thread(video_file.write, content)
-                                await asyncio.to_thread(video_file.flush)
-                                try:
-                                    videos.append(
-                                        await async_load_video(
-                                            video_file.name, self.num_video_frames
-                                        )
-                                    )
-                                except ImportError as exc:
-                                    # The vendor loader needs cv2, which the
-                                    # image deliberately omits; its bare error
-                                    # names neither codec nor remedy. Carry its
-                                    # text as the cause so the underlying
-                                    # reason still reaches the client.
-                                    raise video_decoder_missing(
-                                        "trtllm",
-                                        "opencv-python-headless",
-                                        "cv2",
-                                        codec,
-                                        cause=str(exc),
-                                    ) from exc
-                    else:
-                        try:
-                            videos.append(
-                                await async_load_video(
-                                    normalized_url, self.num_video_frames
-                                )
-                            )
-                        except ImportError as exc:
-                            # No bytes fetched on this branch, so no codec probe.
-                            raise video_decoder_missing(
-                                "trtllm",
-                                "opencv-python-headless",
-                                "cv2",
-                                None,
-                                cause=str(exc),
-                            ) from exc
-                except UrlValidationError as e:
-                    raise HttpStatusError(400, str(e), source) from e
-                except (HttpStatusError, HttpConfigurationError):
-                    # An untrusted egress proxy is deployment configuration,
-                    # not a bad request. It carries no status, so the generic
-                    # handler below would make it a 400.
-                    raise
-                except MissingMediaDecoderError as e:
-                    # A missing decoder is deployment configuration, not a bad
-                    # request: 500, not the 400 the generic handler below
-                    # assigns. The actionable text (codec, bounded spec,
-                    # installer command, vendor cause) is the message.
-                    raise HttpStatusError(
-                        500, f"Failed to load video ({source}): {e}", source
-                    ) from e
-                except Exception as e:
-                    status = getattr(e, "status", None) or getattr(e, "code", None)
-                    raise HttpStatusError(
-                        status if isinstance(status, int) and status >= 400 else 400,
-                        f"Failed to load video ({source}): {e}",
-                        source,
-                    ) from e
+            videos = await self.load_videos(video_items)
             if videos:
                 if uint8_videos:
                     # CPU work that grows with the frame count: run it off the
