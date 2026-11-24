@@ -22,7 +22,6 @@ impl ConcurrentRadixTreeCompressed {
     // apply_stored
     // ------------------------------------------------------------------
 
-    #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn apply_stored(
         &self,
         lookup: &mut LaneLookup,
@@ -71,7 +70,6 @@ impl ConcurrentRadixTreeCompressed {
             op.blocks.iter().map(|block| block.block_hash),
             node_id,
         );
-        self.insert_lifecycle_hashes(worker, &op.blocks);
         #[cfg(test)]
         self.bench_metrics
             .tail_appends
@@ -221,11 +219,9 @@ impl ConcurrentRadixTreeCompressed {
         );
 
         lookup.remove(worker, parent_hash);
-        self.release_hash(worker, parent_hash);
         KvCacheEventError::ParentBlockNotFound
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn insert_for_resolved_parent(
         &self,
         lookup: &mut LaneLookup,
@@ -269,7 +265,8 @@ impl ConcurrentRadixTreeCompressed {
         node: &SharedNode,
         duplicate_store: bool,
     ) -> StoreInsertOutcome {
-        let lookup_changed = self.update_lookup_for_blocks(worker, lookup, blocks, node);
+        let lookup_changed =
+            lookup.upsert_all(worker, blocks.iter().map(|block| block.block_hash), node) > 0;
 
         StoreInsertOutcome {
             duplicate_store: duplicate_store && !lookup_changed,
@@ -284,8 +281,16 @@ impl ConcurrentRadixTreeCompressed {
     ) -> StoreInsertOutcome {
         self.apply_split_lookup(lookup, finish.prefix_node, finish.split);
 
-        self.update_lookup_for_blocks(worker, lookup, finish.prefix_blocks, finish.prefix_node);
-        self.update_lookup_for_blocks(worker, lookup, finish.tail_blocks, finish.tail_node);
+        lookup.upsert_all(
+            worker,
+            finish.prefix_blocks.iter().map(|block| block.block_hash),
+            finish.prefix_node,
+        );
+        lookup.upsert_all(
+            worker,
+            finish.tail_blocks.iter().map(|block| block.block_hash),
+            finish.tail_node,
+        );
 
         StoreInsertOutcome {
             duplicate_store: false,
@@ -540,8 +545,13 @@ impl ConcurrentRadixTreeCompressed {
                 duplicate_store = false;
             }
 
-            let lookup_changed =
-                self.update_lookup_for_blocks(worker, lookup, &remaining[..scan.edge_len], child);
+            let lookup_changed = lookup.upsert_all(
+                worker,
+                remaining[..scan.edge_len]
+                    .iter()
+                    .map(|block| block.block_hash),
+                child,
+            ) > 0;
             if lookup_changed {
                 duplicate_store = false;
             }
@@ -554,7 +564,6 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn insert_blocks_from(
         &self,
         lookup: &mut LaneLookup,

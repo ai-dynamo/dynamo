@@ -6,10 +6,15 @@
 //! snapshot replay reads. Every item is re-exported from its owning module; this list is the
 //! host contract.
 
-pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress, WorkerView};
-pub use crate::placement::WorkerPlacement;
+pub use crate::classifier::{
+    AbortCause, RequestLifecycle, RequestProgress, RequestProgressUpdater, WorkerView,
+};
+pub use crate::placement::LaneKey;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
-pub use crate::queue::{PolicyQueue, QueueMetadata, QueueRejection, QueueSnapshot};
+pub use crate::queue::{
+    BlockReason, LaneCheck, PolicyQueue, QueueLane, QueueMetadata, QueueRejection, QueueSnapshot,
+    RecheckScope,
+};
 
 // What the frontend host (lib/llm) names beyond the lists above.
 pub use crate::queue::QueueLimitKind;

@@ -13,7 +13,7 @@ This page does not list:
 - Kubernetes operator metrics. See [Operator Metrics](operator-metrics.mdx).
 - NIXL transfer metrics, which NIXL serves on its own port. See the [NIXL telemetry documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
 - Velo metrics (`velo_*`), which the Velo library defines. Dynamo processes expose them when `DYN_RESPONSE_PLANE=velo`. See the [Velo metrics reference](https://github.com/ai-dynamo/velo/blob/main/docs/src/appendix/metrics.md).
-- KVBM metrics, including the block-pool metrics in the `kvbm-logical` crate. KVBM was removed in v1.7.0; see the documentation for v1.6 and earlier.
+- KVBM metrics, including the block-pool metrics in the `kvbm-logical` crate. KVBM was removed in v1.8.0; see the documentation for v1.7 and earlier.
 
 ## Metric Types
 
@@ -132,7 +132,7 @@ Metrics for [request migration](../../kubernetes/fault-tolerance/request-migrati
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Migratable worker failures, one per failed attempt: `new_request` when a response stream cannot be established, `ongoing_request` when an established stream fails. The last failure is counted even when no retry remains, including with the default `--migration-limit 0`, so this is not the number of migrations performed. | |
+| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Permitted migration attempts after a worker failure, counted once when each retry begins regardless of later failure or cancellation. The initial request and retries blocked by the migration limit or sequence-length cap do not count. `migration_type` names the failure that caused the retry: `new_request` for a failed connection, `ongoing_request` for a mid-stream disconnection. | |
 | `dynamo_frontend_model_migration_duration_seconds` | histogram | [`migration_type`](metric-labels.mdx#metric-specific-labels), [`outcome`](metric-labels.mdx#metric-specific-labels) | Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. | |
 | `dynamo_frontend_model_migration_max_seq_len_exceeded_total` | counter | — | Times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. | |
 
@@ -226,7 +226,7 @@ Scope these queries to the target frontend and deployment. Evaluate each Fronten
 
 ### Model Metrics
 
-All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other than `dynamo_frontend_model_ready` are populated from worker backend registration. Each time a worker group for the model is committed or rebuilt, its configuration overwrites these values, so with several groups, such as prefill and decode, they show the most recently committed one. A worker that joins an existing group does not change them. `dynamo_frontend_model_total_kv_blocks`, `dynamo_frontend_model_max_num_seqs`, and `dynamo_frontend_model_max_num_batched_tokens` change only when the committed configuration reports a value: a group that omits one keeps the previous value, and the series is absent until some group reports it.
+All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other than `dynamo_frontend_model_ready` and `dynamo_frontend_model_migration_limit` are populated from worker backend registration. Each time a worker group for the model is committed or rebuilt, its configuration overwrites these values, so with several groups, such as prefill and decode, they show the most recently committed one. A worker that joins an existing group does not change them. `dynamo_frontend_model_total_kv_blocks`, `dynamo_frontend_model_max_num_seqs`, and `dynamo_frontend_model_max_num_batched_tokens` change only when the committed configuration reports a value: a group that omits one keeps the previous value, and the series is absent until some group reports it.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -236,7 +236,7 @@ All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other tha
 | `dynamo_frontend_model_max_num_batched_tokens` | gauge | — | Maximum number of batched tokens for a worker serving the model. | |
 | `dynamo_frontend_model_context_length` | gauge | — | Maximum context length for a worker serving the model, from the Model Deployment Card. | |
 | `dynamo_frontend_model_kv_cache_block_size` | gauge | — | KV cache block size for a worker serving the model, from the Model Deployment Card. | |
-| `dynamo_frontend_model_migration_limit` | gauge | — | Migration limit in the worker's Model Deployment Card. Dynamo's workers always set it to `0`; the limit the frontend applies is its own `--migration-limit`, which no metric reports. | |
+| `dynamo_frontend_model_migration_limit` | gauge | — | Maximum number of migrations the frontend allows for a request to the model, from its own `--migration-limit`. | |
 
 The frontend evaluates `dynamo_frontend_model_ready` from its live routing catalog at scrape time, so worker registration and removal are reflected in the next scrape. Unlike request-populated metrics, the series appears when the model registers, without requiring an inference request. The series is absent while the model is not registered, and the entire family is absent when no models are registered. Detect this state with `absent(dynamo_frontend_model_ready{model="<model>"})`; a `== 0` comparison does not match an absent series. Aliases get no series of their own: a deployment served under several names emits one series, labeled with its primary name, so query an alias through its primary. `/v1/models` still lists alias names, but only the primary has a readiness series. A LoRA adapter is a distinct model rather than a second name for one, and keeps its own series.
 
@@ -513,7 +513,6 @@ Each rejected attempt is counted once in `dynamo_frontend_router_admission_rejec
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_kv_cache_events_applied` | counter | `status`, `event_type` | KV cache events applied to the router's radix-tree index, including events for lower tiers such as host-pinned memory and disk. See [Metric-specific labels](metric-labels.mdx#metric-specific-labels). | |
-| `dynamo_component_ckf_mutation_total` | counter | `outcome` | CKF block-level mutation outcomes recorded by the router indexer. Always 0: nothing increments it. No replacement; remove it from dashboards and alerts. | Deprecated |
 | `dynamo_component_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index, such as duplicate stores. | |
 | `dynamo_component_router_kv_event_source_mismatch_workers` | gauge | `model`, `worker_type`, `target_namespace`, `target_component`, `target_endpoint` | Serving worker DP ranks whose KV event source is missing, ambiguous, or disabled, or that lack an expected recovery target. While the KV event subscription fails, every rank counts. | |
 | `dynamo_component_router_kv_zmq_ingress_sources` | gauge | `state` | KV event sources on the ZMQ event plane, by lifecycle state. | |
@@ -531,7 +530,7 @@ Recorded only with `--shared-cache-type hicache`. These carry a `router_id` labe
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_router_shared_cache_hit_rate` | histogram | — | Fraction of request blocks found in the shared KV cache. | |
-| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | — | Shared-cache blocks beyond the selected worker's device overlap. | |
+| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | — | Shared-cache blocks the selected worker can load past its local (device, host, and disk) prefix: the unbroken run, or zero below the engine's minimum load. | |
 | `dynamo_router_shared_cache_errors_total` | counter | — | Failed shared-cache queries and subscriber errors. Frontend only; carries only `router_id`, like the [routing overhead](#per-request-routing-overhead) metrics. | |
 
 ### Active Sequence Synchronization
@@ -599,6 +598,7 @@ Emitted by every process that runs a Dynamo DistributedRuntime: on the HTTP port
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_uptime_seconds` | gauge | `worker_id` | DistributedRuntime uptime. Updated before each Prometheus scrape on both the frontend and the system-status server. | |
+| `dynamo_metrics_merge_conflicts_total` | counter | — | Metric families dropped from `/metrics` and OTLP because their help or type conflicted with an earlier family of the same name. A nonzero value means some metric is missing; a one-time warning, `skipping metric family`, names the family and both declarations. Counts every skip, so a conflict that persists adds one per scrape and per export. | Experimental |
 
 With the QUIC response plane (`--response-plane quic` or `DYN_RESPONSE_PLANE=quic`), every process also records:
 
@@ -708,7 +708,6 @@ Recorded when live retune is configured (`retune` in the planner configuration),
 | `dynamo_kvindexer_listeners` | gauge | `status` | ZMQ listeners, by status. | |
 | `dynamo_kvrouter_kv_cache_events_applied` | counter | `event_type`, `status` | KV cache events applied to the index. Device tier only. | |
 | `dynamo_kvrouter_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index. | |
-| `dynamo_kvrouter_ckf_mutation_total` | counter | `outcome` | Block-level index mutation outcomes. Always 0: nothing increments it. No replacement; remove it from dashboards and alerts. | Deprecated |
 
 ## KV State Agent Metrics
 

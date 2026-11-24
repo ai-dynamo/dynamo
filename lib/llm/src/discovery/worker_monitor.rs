@@ -12,15 +12,15 @@ use dashmap::DashMap;
 use dynamo_slot_tracker::host::{BusyThresholds, SchedulerLoadSnapshot};
 use serde::{Deserialize, Serialize};
 
-use crate::http::service::metrics::{
-    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
-    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
-};
 use crate::kv_router::ActiveLoad;
 use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::kv_router::routing_load::SchedulerLoadReceiver;
+use dynamo_http_server::metrics::{
+    UNSET_DP_RANK_LABEL, WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE,
+    WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE, WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
+};
 use dynamo_runtime::component::Client;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 
@@ -28,7 +28,6 @@ use super::runtime_config_watch;
 
 // Re-export worker type constants from timing.rs (single source of truth)
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
-const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Clean up load and latency Prometheus metrics for a worker across the specified dp_ranks.
 ///

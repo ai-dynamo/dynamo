@@ -41,15 +41,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
-        monitor_for_disconnects_with_activity_and_error_signal,
+        StreamErrorSignal, monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
-    error::{HttpError, invalid_argument},
+    error::{ContextLengthDetails, Protocol, invalid_argument, public_message_for},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
-        process_chat_response_and_observe_metrics,
+        EventConverter, process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
@@ -72,9 +70,10 @@ use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
 use crate::protocols::common::metadata_upload::UniqueJsonValue;
-use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use crate::protocols::openai::chat_completions::tool_call_merge::{
-    ToolCallMergeOutcome, merge_tool_call_chunk,
+use crate::protocols::openai::chat_completions::{
+    aggregator::ChatCompletionAggregator,
+    allowed_tools::{AllowedToolsRequest, ToolAllowlist},
+    tool_call_merge::{ToolCallMergeOutcome, merge_tool_call_chunk},
 };
 use crate::protocols::openai::{
     MediaDelivery, ParsingOptions,
@@ -102,6 +101,10 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_http_server::{
+    disconnect::{ConnectionHandle, create_connection_monitor},
+    metrics::{CancellationLabels, Endpoint, ErrorType},
+};
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
@@ -112,6 +115,8 @@ use dynamo_protocols::types::responses::{
 };
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
+
+use dynamo_http_server::request::{get_body_limit, is_json_content_type};
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -128,9 +133,9 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
-use super::error::{
-    BackendStatusAction, ClientErrorAction, SanitizedError, find_canonical_error_in_chain,
-    http_action_for_error, overload_status_code,
+use dynamo_error::http::{
+    BackendStatusAction, ClientErrorAction, HttpError, SanitizedError,
+    find_canonical_error_in_chain, http_action_for_error, overload_status_code,
 };
 
 pub(super) fn rl_router(
@@ -139,17 +144,6 @@ pub(super) fn rl_router(
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
     let state = dynamo_rl::RlDiscoveryState::new_from_env(config);
     Ok(dynamo_rl::rl_router(state))
-}
-
-// Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
-/// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
-pub(super) fn get_body_limit() -> usize {
-    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(45 * 1024 * 1024)
 }
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
@@ -254,6 +248,11 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    /// Typed context-length bounds for protocol re-rendering. Skipped on the
+    /// wire: `details` already carries the same bounds, and re-parsing it here
+    /// would silently fall back to the OpenAI wording if the shape ever drifts.
+    #[serde(skip)]
+    context_length: Option<ContextLengthDetails>,
     #[serde(skip)]
     metric_error_type: Option<ErrorType>,
 }
@@ -261,6 +260,10 @@ pub(crate) struct ErrorMessage {
 impl ErrorMessage {
     pub(crate) fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn context_length_details(&self) -> Option<ContextLengthDetails> {
+        self.context_length
     }
 
     pub(crate) fn is_overload(&self) -> bool {
@@ -364,7 +367,7 @@ pub(super) fn record_local_failure(class: ErrorClass) {
     if class == ErrorClass::Cancelled {
         return;
     }
-    super::metrics::record_failure(&DynamoError::builder().class(class).build());
+    dynamo_http_server::metrics::record_failure(&DynamoError::builder().class(class).build());
 }
 
 fn sanitized_error_class(error: SanitizedError) -> ErrorClass {
@@ -466,6 +469,7 @@ fn reject_media(refusal: Option<MediaRefusal>) -> Result<(), ErrorResponse> {
                 .to_string(),
             code: status.as_u16(),
             details: None,
+            context_length: None,
             metric_error_type: Some(ErrorType::UnsupportedModality),
         }),
     ))
@@ -537,7 +541,7 @@ fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
 }
 
 fn stream_error_type(error: &dynamo_runtime::error::DynamoError) -> ErrorType {
-    use super::metrics::{
+    use dynamo_http_server::metrics::{
         request_was_cancelled, request_was_rejected, request_was_timed_out, request_was_unavailable,
     };
 
@@ -608,6 +612,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -648,6 +653,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -669,6 +675,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -691,6 +698,7 @@ impl ErrorMessage {
                 error_type: reason,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Cancelled),
             }),
         )
@@ -708,6 +716,7 @@ impl ErrorMessage {
                 error_type: bad_request_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -732,6 +741,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -759,6 +769,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -807,6 +818,7 @@ impl ErrorMessage {
                 error_type,
                 code: status.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type,
             }),
         )
@@ -847,6 +859,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -869,6 +882,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
@@ -885,6 +899,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -907,7 +922,7 @@ impl ErrorMessage {
         };
 
         if record_failure {
-            super::metrics::record_failure(error);
+            dynamo_http_server::metrics::record_failure(error);
         }
 
         if matches!(
@@ -933,7 +948,8 @@ impl ErrorMessage {
         Some((
             status,
             Json(ErrorMessage {
-                message: error.public_message().unwrap_or(public_message).to_string(),
+                message: public_message_for(error, Protocol::OpenAi)
+                    .unwrap_or_else(|| public_message.to_string()),
                 error_type: semantic_error_type(error.class(), status),
                 code: status.as_u16(),
                 details: error
@@ -946,6 +962,9 @@ impl ErrorMessage {
                     })
                     .and_then(|details| serde_json::to_value(details).ok())
                     .map(Box::new),
+                context_length: error
+                    .public_details()
+                    .and_then(ContextLengthDetails::from_public_details),
                 metric_error_type: Some(metric_error_type_for_class(error.class())),
             }),
         ))
@@ -966,27 +985,30 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    context_length: None,
                     metric_error_type: None,
                 }),
             );
         }
 
-        if let Some(error) = super::metrics::queue_deadline_error(err.as_ref()) {
-            super::metrics::record_failure(error);
+        if let Some(error) = dynamo_http_server::metrics::queue_deadline_error(err.as_ref()) {
+            dynamo_http_server::metrics::record_failure(error);
             let code = StatusCode::TOO_MANY_REQUESTS;
             return (
                 code,
                 Json(ErrorMessage {
-                    message: super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+                    message: dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE
+                        .to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: Some(ErrorType::Cancelled),
                 }),
             );
         }
 
-        if super::metrics::request_was_cancelled(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_cancelled(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Cancelled,
                 format!("{err:#}"),
@@ -1002,7 +1024,7 @@ impl ErrorMessage {
         }
 
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
-        if super::metrics::request_was_rejected(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
                 format!("{err:#}"),
@@ -1010,7 +1032,7 @@ impl ErrorMessage {
         }
 
         // No backend workers are currently routable → HTTP 503.
-        if super::metrics::request_was_unavailable(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_unavailable(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Unavailable,
                 format!("{err:#}"),
@@ -1061,6 +1083,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: None,
                 }),
             ),
@@ -1117,6 +1140,7 @@ impl From<HttpError> for ErrorMessage {
             ),
             code: err.code,
             details: None,
+            context_length: None,
             metric_error_type: None,
         }
     }
@@ -1150,6 +1174,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: bad_request_error_type(),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -1485,10 +1510,10 @@ async fn completions_single(
     // Covers preprocessing, routing and the wire handoff to the worker.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1831,10 +1856,10 @@ async fn completions_batch(
         // prompt's preprocessing, routing and wire handoff.
         let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if super::metrics::request_was_rejected(e.as_ref()) {
+            if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                    .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2088,10 +2113,11 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model_name,
+                dynamo_http_server::metrics::Endpoint::Embeddings,
+            );
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2230,10 +2256,10 @@ async fn classify(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Classify);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2316,7 +2342,7 @@ async fn rerank(
     let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
     let stream = engine.generate(request).await.map_err(|error| {
-        if super::metrics::request_was_rejected(error.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(error.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, Endpoint::Rerank);
@@ -2596,10 +2622,10 @@ async fn pooling(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Pooling);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2650,6 +2676,42 @@ async fn pooling(
     Ok(response)
 }
 
+fn parse_chat_completion_request(
+    body: &[u8],
+) -> Result<(NvCreateChatCompletionRequest, Option<ToolAllowlist>), ErrorResponse> {
+    match parse_json_request("chat completions", body) {
+        Ok(request) => Ok((request, None)),
+        Err(original) => {
+            let request: AllowedToolsRequest = match parse_json_request("chat completions", body) {
+                Ok(request) => request,
+                Err(error) if names_allowed_tools_choice(body) => return Err(error),
+                Err(_) => return Err(original),
+            };
+            let (request, allowlist) = request.normalize().map_err(|error| {
+                ErrorMessage::from_anyhow(
+                    invalid_argument(error.to_string()).into(),
+                    "Invalid allowed_tools",
+                )
+            })?;
+            Ok((request, Some(allowlist)))
+        }
+    }
+}
+
+fn names_allowed_tools_choice(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        tool_choice: Option<serde_json::Value>,
+    }
+
+    serde_json::from_slice::<Probe>(body)
+        .ok()
+        .and_then(|probe| probe.tool_choice)
+        .is_some_and(|choice| {
+            choice.get("type").and_then(|kind| kind.as_str()) == Some("allowed_tools")
+        })
+}
+
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -2670,15 +2732,14 @@ async fn handler_chat_completions(
             return Err(error);
         }
     };
-    let mut request: NvCreateChatCompletionRequest =
-        match parse_json_request("chat completions", &body) {
-            Ok(request) => request,
-            Err(error) => {
-                lifecycle_request.record_session(&request_id, None);
-                terminal.finish(terminal_outcome_for_error_response(&error));
-                return Err(error);
-            }
-        };
+    let (mut request, allowed_tools) = match parse_chat_completion_request(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2784,7 +2845,7 @@ async fn handler_chat_completions(
             chat_completions(
                 state,
                 template,
-                request,
+                (request, allowed_tools),
                 stream_handle,
                 lifecycle,
                 request_lifecycle.clone(),
@@ -3022,20 +3083,6 @@ pub(super) async fn read_json_request_body(
         })
 }
 
-fn is_json_content_type(content_type: &str) -> bool {
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    let Some((media_type, subtype)) = media_type.split_once('/') else {
-        return false;
-    };
-
-    media_type.eq_ignore_ascii_case("application")
-        && (subtype.eq_ignore_ascii_case("json")
-            || subtype
-                .to_ascii_lowercase()
-                .rsplit_once('+')
-                .is_some_and(|(_, suffix)| suffix == "json"))
-}
-
 fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len());
     let mut in_string = false;
@@ -3187,11 +3234,11 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let overloaded = event
             .error
             .as_ref()
-            .is_some_and(|error| super::metrics::request_was_rejected(error));
+            .is_some_and(|error| dynamo_http_server::metrics::request_was_rejected(error));
         let metric_error_type = event
             .error
             .as_ref()
-            .filter(|error| super::metrics::request_was_timed_out(*error))
+            .filter(|error| dynamo_http_server::metrics::request_was_timed_out(*error))
             .map(|_| ErrorType::ResponseTimeout);
 
         // Parse the status-bearing node's own message. The diagnostic string
@@ -3495,7 +3542,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             && let Some(error) = &semantic
             && error.class().normalized() == sanitized_error_class(variant)
         {
-            super::metrics::record_failure(error);
+            dynamo_http_server::metrics::record_failure(error);
             render_record_failure = false;
         }
         return ErrorMessage::sanitized_with_details_recording(
@@ -3550,6 +3597,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: None,
                 }),
             )
@@ -4134,6 +4182,7 @@ fn accumulate_reasoning_dispatch(
     }
 }
 
+#[allow(deprecated)]
 fn apply_chat_completions_request_template(
     request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
     template: Option<&RequestTemplate>,
@@ -4145,7 +4194,14 @@ fn apply_chat_completions_request_template(
         if request.temperature.is_none() {
             request.temperature = Some(template.temperature);
         }
-        if request.max_completion_tokens.unwrap_or(0) == 0 {
+        // `max_completion_tokens` wins over the deprecated `max_tokens` downstream, so
+        // filling it here would discard a limit the client sent as `max_tokens`.
+        if request
+            .max_completion_tokens
+            .or(request.max_tokens)
+            .unwrap_or(0)
+            == 0
+        {
             request.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
@@ -4162,7 +4218,10 @@ fn apply_chat_completions_request_template(
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
-    mut request: Context<NvCreateChatCompletionRequest>,
+    (mut request, allowed_tools): (
+        Context<NvCreateChatCompletionRequest>,
+        Option<ToolAllowlist>,
+    ),
     stream_handle: ConnectionHandle,
     lifecycle: LifecycleTrace,
     request_lifecycle: tracing::Span,
@@ -4213,13 +4272,27 @@ async fn chat_completions(
     state
         .chat_template_defaults()
         .apply_to_request(&mut request);
+    if allowed_tools.is_some()
+        && request
+            .chat_template_args
+            .as_ref()
+            .is_some_and(|args| args.contains_key("builtin_tools"))
+    {
+        let response = ErrorMessage::from_anyhow(
+            invalid_argument("allowed_tools cannot be combined with builtin_tools".to_owned())
+                .into(),
+            "Invalid allowed_tools",
+        );
+        inflight_guard.mark_error(extract_error_type_from_response(&response));
+        return Err(response);
+    }
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
 
     // Retain API identity here while all engine/parser paths receive functions.
-    let custom_tools =
+    let mut custom_tools =
         crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
             &mut request,
         )
@@ -4333,6 +4406,14 @@ async fn chat_completions(
     let parsing_options =
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
+    custom_tools.keep_parser_confirmed_calls(
+        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ) == Some(
+            crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
+        ),
+    );
 
     // Any force_nonempty_content=true request: surface reasoning as content when
     // the turn produced none. See `wants_reasoning_as_content_when_empty`.
@@ -4359,10 +4440,11 @@ async fn chat_completions(
     // between the validated request and a live response stream.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model,
+                dynamo_http_server::metrics::Endpoint::ChatCompletions,
+            );
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4405,6 +4487,16 @@ async fn chat_completions(
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
         let stream = custom_tools.stream(stream);
+        // Reassembling delayed tool identity can put partial arguments in the
+        // same delta as the name. Only regular SSE is safe for these requests.
+        let tool_dispatch_enabled =
+            state.streaming_tool_dispatch_enabled() && allowed_tools.is_none();
+        let stream = match allowed_tools {
+            Some(allowlist) => {
+                futures::future::Either::Left(allowlist.stream(stream, enforce_single_tool_call))
+            }
+            None => futures::future::Either::Right(stream),
+        };
         let stream = until_client_disconnects(
             check_for_backend_error_info(stream, state.streaming_backend_error_check()),
             &ctx,
@@ -4416,7 +4508,6 @@ async fn chat_completions(
         })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
@@ -4643,6 +4734,14 @@ async fn chat_completions(
                 inflight_guard.mark_error(extract_error_type_from_response(&response));
                 response
             })?;
+
+        if let Some(allowlist) = allowed_tools {
+            allowlist.validate_response(&response).map_err(|error| {
+                let response = ErrorMessage::from_anyhow(error, "Invalid tool call output");
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?;
+        }
 
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
@@ -5157,10 +5256,10 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Responses);
+                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -5194,6 +5293,14 @@ async fn responses(
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
         };
+        converter.keep_parser_confirmed_calls(
+            crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+                parsing_options.tool_call_parser.as_deref(),
+                parsing_options.reasoning_parser.as_deref(),
+            ) == Some(
+                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
+            ),
+        );
 
         let mut http_queue_guard = Some(http_queue_guard);
         let error_signal = StreamErrorSignal::default();
@@ -5470,6 +5577,7 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> ErrorRespo
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            context_length: None,
             metric_error_type: None,
         }),
     )
@@ -6043,10 +6151,10 @@ async fn images_with_request(
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
         connection_handle.disarm();
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6176,10 +6284,10 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6304,10 +6412,10 @@ async fn video_stream(
     let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6599,10 +6707,10 @@ async fn audio_speech(
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -7033,14 +7141,28 @@ mod tests {
     }
 
     #[test]
-    fn test_is_json_content_type() {
-        assert!(is_json_content_type("application/json"));
-        assert!(is_json_content_type("application/json; charset=utf-8"));
-        assert!(is_json_content_type("Application/JSON"));
-        assert!(is_json_content_type("application/vnd.dynamo+json"));
-        assert!(!is_json_content_type("text/plain"));
-        assert!(!is_json_content_type("application/json-patch"));
-        assert!(!is_json_content_type("application"));
+    #[allow(deprecated)]
+    fn test_chat_completions_template_preserves_client_max_tokens() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            max_tokens: Some(16),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        // `max_completion_tokens` wins over `max_tokens` downstream, so filling it
+        // from the template would discard the limit the client asked for.
+        assert_eq!(request.max_tokens, Some(16));
+        assert_eq!(request.max_completion_tokens, None);
+
+        request.max_tokens = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.max_completion_tokens, Some(128));
     }
 
     #[test]
@@ -7737,6 +7859,7 @@ mod tests {
             error_type: "Unprocessable Entity".to_string(),
             code: 422,
             details: None,
+            context_length: None,
             metric_error_type: None,
         })
         .unwrap();
@@ -8150,7 +8273,7 @@ mod tests {
         ] {
             let err = delivered_refusal(error_type);
             assert!(
-                crate::http::service::metrics::request_was_rejected(err.as_ref()),
+                dynamo_http_server::metrics::request_was_rejected(err.as_ref()),
                 "{error_type:?}"
             );
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
@@ -8328,7 +8451,7 @@ mod tests {
 
         // The legacy shape has no capacity signal, so the overload override does
         // not engage.
-        assert!(!super::super::metrics::request_was_rejected(
+        assert!(!dynamo_http_server::metrics::request_was_rejected(
             event.error.as_ref().expect("error is set")
         ));
 
@@ -8450,6 +8573,7 @@ mod tests {
                 error_type: "service_unavailable".to_string(),
                 code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Overload),
             }),
         );
@@ -8778,7 +8902,9 @@ mod tests {
             .message("internal deadline detail")
             .build()
             .into();
-        assert!(!super::super::metrics::request_was_rejected(error.as_ref()));
+        assert!(!dynamo_http_server::metrics::request_was_rejected(
+            error.as_ref()
+        ));
 
         let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
@@ -8878,6 +9004,154 @@ mod tests {
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
         assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         assert!(!body.contains("/srv/frontend.rs"));
+    }
+
+    #[test]
+    fn frontend_context_length_rejection_renders_limit_and_actual() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL=/srv/preprocessor.rs:42")
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "This model's maximum context length is 8192 tokens. However, your request would \
+             use 4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). \
+             Please reduce the length of the messages or the requested output."
+        );
+        assert!(
+            response
+                .1
+                .message
+                .contains("maximum context length is 8192 tokens"),
+            "message must carry LiteLLM's context-overflow substring, got: {}",
+            response.1.message
+        );
+        assert!(
+            response.1.message.contains("9000 tokens"),
+            "message must carry the actual token count, got: {}",
+            response.1.message
+        );
+        assert!(
+            response.1.message.contains("requested output"),
+            "a combined input and output budget must not blame the messages alone, got: {}",
+            response.1.message
+        );
+        assert!(!response.1.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+        assert_eq!(
+            response.1.context_length_details(),
+            Some(ContextLengthDetails {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+        );
+        let details: dynamo_runtime::error::PublicDetails =
+            serde_json::from_value(*response.1.details.clone().expect("details are preserved"))
+                .expect("context details deserialize");
+        assert_eq!(
+            details,
+            dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            }
+        );
+    }
+
+    /// The native Generate endpoints render through the same helper, so a
+    /// context overflow there must not fall back to "Invalid request".
+    #[test]
+    fn frontend_context_length_rejection_reaches_generate_format_policy() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let message =
+            crate::generate_format::WorkerError::canonical_invalid_request_message(&error)
+                .expect("context overflow is an invalid-request error");
+
+        assert!(
+            message.contains("maximum context length is 8192 tokens"),
+            "native Generate endpoints must classify overflows, got: {message}"
+        );
+        assert!(message.contains("9000 tokens"), "got: {message}");
+    }
+
+    #[test]
+    fn frontend_context_length_prompt_at_limit_reports_no_room_for_output() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 64,
+                actual: Some(64),
+                prompt_tokens: Some(64),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "This model's maximum context length is 64 tokens. However, your messages resulted \
+             in 64 tokens, which leaves no room for output. Please reduce the length of the \
+             messages."
+        );
+    }
+
+    /// For a combined budget, `actual` includes the requested output, so the
+    /// count attributed to the messages must be the prompt count.
+    #[test]
+    fn frontend_context_length_prompt_overflow_reports_prompt_tokens() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8200),
+                prompt_tokens: Some(8193),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .1
+                .message
+                .contains("your messages resulted in 8193 tokens"),
+            "a prompt-only overflow must report prompt tokens, got: {}",
+            response.1.message
+        );
+        assert!(!response.1.message.contains("8200 tokens"));
+    }
+
+    #[test]
+    fn frontend_context_length_without_actual_falls_back_to_class_message() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: None,
+                prompt_tokens: None,
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "Invalid request");
+        assert!(!response.1.message.contains("None tokens"));
     }
 
     #[test]
@@ -9510,6 +9784,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -9542,6 +9817,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9797,6 +10073,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9832,6 +10109,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9866,6 +10144,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9900,6 +10179,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9934,6 +10214,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9970,6 +10251,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(

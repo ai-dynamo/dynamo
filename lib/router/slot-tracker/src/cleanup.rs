@@ -5,7 +5,7 @@
 //!
 //! Provides a throttled, one-in-flight sweep that unlinks empty child nodes
 //! from their parent. It is used by the sequence-side
-//! [`PromptMembershipTrie`](super::sequences::prompt_membership_trie::PromptMembershipTrie),
+//! [`PromptMembershipTrie`](super::prompt_membership_trie::PromptMembershipTrie),
 //! which embeds a [`CleanupState`] and implements [`CleanableNode`] for its
 //! node type.
 //!

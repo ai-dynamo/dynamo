@@ -60,6 +60,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	leaderworkerset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -428,7 +430,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 // resources without deleting serving legacy groups before reporting workload status.
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	// Reuse an existing supported or serving LWS so an operator upgrade does not restart it.
-	selectedName := leaderWorkerSetName(dynamoComponentDeployment)
+	selectedName := leaderworkerset.Name(dynamoComponentDeployment.Name)
 	legacy := &leaderworkersetv1.LeaderWorkerSet{}
 	legacyKey := types.NamespacedName{Name: legacyLeaderWorkerSetName(dynamoComponentDeployment.Name), Namespace: dynamoComponentDeployment.Namespace}
 	if legacyKey.Name != selectedName {
@@ -446,7 +448,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
 		}, selectedName)
-	})
+	}, commonController.WithPreservedListOrder(dynamo.DCDUsesOrderedEnvironment(dynamoComponentDeployment)))
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
 	}
@@ -649,36 +651,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to render multinode pod templates")
 	}
 
-	kubeNs := opt.dynamoComponentDeployment.Namespace
-	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
-
-	if labels == nil {
-		labels = make(map[string]string)
-	}
-
-	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
-		Name:      selectedName,
-		Namespace: kubeNs,
-		Labels:    labels,
-	}
-
-	desiredReplicas := int32(1)
-	if opt.dynamoComponentDeployment.Spec.Replicas != nil {
-		desiredReplicas = *opt.dynamoComponentDeployment.Spec.Replicas
-	}
-	groupSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
-
-	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
-		Replicas:      &desiredReplicas,
-		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
-		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
-			LeaderTemplate: leaderPodTemplateSpec,
-			WorkerTemplate: *workerPodTemplateSpec,
-			Size:           &groupSize,
-		},
-	}
-
-	return leaderWorkerSet, false, nil
+	return leaderworkerset.Render(opt.dynamoComponentDeployment, selectedName, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)}, leaderPodTemplateSpec, workerPodTemplateSpec), false, nil
 }
 
 // Pod label controller-revision-hash=<statefulset>-<10-char hash> must fit 63 chars, and LWS
@@ -688,27 +661,9 @@ const (
 	leaderWorkerSetRevisionHashLength   = 10
 	leaderWorkerSetRevisionSuffixLength = 2*len("-") + leaderWorkerSetRevisionHashLength
 	maxLegacyLeaderWorkerSetGroupDigits = len("9")
-	maxHashedLeaderWorkerSetGroupDigits = len("999999") // LWS allows up to 1,000,000 replicas.
 	maxLegacyLeaderWorkerSetNameLength  = maxLeaderWorkerSetLabelValueLength - leaderWorkerSetRevisionSuffixLength - maxLegacyLeaderWorkerSetGroupDigits
-	maxHashedLeaderWorkerSetNameLength  = maxLeaderWorkerSetLabelValueLength - leaderWorkerSetRevisionSuffixLength - maxHashedLeaderWorkerSetGroupDigits
 	legacyLeaderWorkerSetNameSuffix     = "-0"
 )
-
-// leaderWorkerSetName chooses a name that fits revision labels at every supported
-// group index and does not collide with the operator ClusterIP service.
-func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string {
-	return leaderWorkerSetNameForWorkload(dcd.Name)
-}
-
-// leaderWorkerSetNameForWorkload reserves room for every supported group index.
-// Reconciliation separately preserves existing legacy workloads to avoid upgrade restarts.
-func leaderWorkerSetNameForWorkload(workloadName string) string {
-	legacyName := legacyLeaderWorkerSetName(workloadName)
-	if len(legacyName) <= maxHashedLeaderWorkerSetNameLength {
-		return legacyName
-	}
-	return truncateDNSLabelWithHash(legacyName, maxHashedLeaderWorkerSetNameLength)
-}
 
 // legacyLeaderWorkerSetName matches the name used by earlier operators.
 func legacyLeaderWorkerSetName(workloadName string) string {
@@ -725,7 +680,7 @@ func preserveLegacyLeaderWorkerSet(legacy *leaderworkersetv1.LeaderWorkerSet) bo
 // resource syncs. It preserves serving legacy groups; dcd must be non-nil.
 func (r *DynamoComponentDeploymentReconciler) deleteUnselectedLeaderWorkerSet(ctx context.Context, dcd *nvidiacomv1beta1.DynamoComponentDeployment, selectedName string) error {
 	legacyName := legacyLeaderWorkerSetName(dcd.Name)
-	boundedName := leaderWorkerSetName(dcd)
+	boundedName := leaderworkerset.Name(dcd.Name)
 	if legacyName == boundedName {
 		return nil
 	}
@@ -835,7 +790,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt generateResourceOption) (bool, *appsv1.Deployment, error) {
 	modified, depl, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
 		return r.generateDeployment(ctx, opt)
-	})
+	}, commonController.WithPreservedListOrder(dynamo.DCDUsesOrderedEnvironment(opt.dynamoComponentDeployment)))
 	if err != nil {
 		return false, nil, errors.Wrap(err, "create or update deployment")
 	}
@@ -952,20 +907,7 @@ func (r *DynamoComponentDeploymentReconciler) dcdIngressSpec(dcd *nvidiacomv1bet
 
 //nolint:nakedret
 func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Context, opt generateResourceOption) (kubeDeployment *appsv1.Deployment, toDelete bool, err error) {
-	kubeNs := opt.dynamoComponentDeployment.Namespace
-
-	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
-
 	annotations := dynamo.GetDCDKubeAnnotations(opt.dynamoComponentDeployment)
-
-	kubeName := opt.dynamoComponentDeployment.Name
-
-	kubeDeployment = &appsv1.Deployment{
-		Name:        kubeName,
-		Namespace:   kubeNs,
-		Labels:      labels,
-		Annotations: annotations,
-	}
 
 	renderer := r.workloadRenderer()
 	containerGPUs := renderer.containerGPUCount(ctx, opt.dynamoComponentDeployment)
@@ -991,16 +933,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		}
 	}
 
-	kubeDeployment.Spec = appsv1.DeploymentSpec{
-		Replicas: opt.dynamoComponentDeployment.Spec.Replicas,
-		Selector: &metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: kubeName,
-			},
-		},
-		Template: *podTemplateSpec,
-		Strategy: strategy,
-	}
+	kubeDeployment = componentdeployment.Render(opt.dynamoComponentDeployment, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment), Annotations: annotations}, podTemplateSpec, strategy)
 
 	return
 }

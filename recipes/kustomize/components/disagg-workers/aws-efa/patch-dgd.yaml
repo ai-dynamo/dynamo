@@ -10,10 +10,6 @@ spec:
       extraPodSpec:
         mainContainer:
           env: &efaEnvironment
-            - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
-              value: "true"
-            - name: DYN_KVBM_NIXL_BACKEND_UCX
-              value: "false"
             - name: FI_PROVIDER
               value: efa
             - name: FI_EFA_USE_DEVICE_RDMA

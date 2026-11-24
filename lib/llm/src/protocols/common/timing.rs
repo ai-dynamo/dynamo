@@ -11,15 +11,12 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dynamo_admission::host::RequestProgressUpdater;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
-use crate::http::service::metrics::{
-    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
-    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
-};
 use crate::protocols::common::extensions::WorkerIdInfo;
 
 /// Worker type constants for Prometheus metric labels.
@@ -27,7 +24,6 @@ use crate::protocols::common::extensions::WorkerIdInfo;
 /// when updating per-worker metrics (TTFT, ITL).
 pub const WORKER_TYPE_PREFILL: &str = "prefill";
 pub const WORKER_TYPE_DECODE: &str = "decode";
-const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Phase of the request in disaggregated serving.
 ///
@@ -195,6 +191,12 @@ pub struct RequestTracker {
     /// `nvext.extra_fields=["prompt_token_ids"]` response request.
     /// First-write-wins because one response generator owns one prompt.
     prompt_token_ids: OnceLock<Vec<u32>>,
+
+    /// The request classifier's write handle for this request, left here by the router at
+    /// each dispatch so the frontend can record how the reply ended: tool-call parsing
+    /// decides that, sometimes after the router's response stream is finished. The latest
+    /// dispatch wins because a retry can begin a new classifier lifecycle.
+    classifier_progress: Mutex<Option<RequestProgressUpdater>>,
 }
 
 /// Data a standalone router (running the `PushRouter` bindings in its own process)
@@ -269,6 +271,7 @@ impl RequestTracker {
             external_timing: OnceLock::new(),
             external_query_token_ids: OnceLock::new(),
             prompt_token_ids: OnceLock::new(),
+            classifier_progress: Mutex::new(None),
         }
     }
 
@@ -573,6 +576,16 @@ impl RequestTracker {
         self.router_queue_depth.get().copied()
     }
 
+    /// Leave the request classifier's write handle, replacing an earlier dispatch's.
+    pub(crate) fn set_classifier_progress(&self, progress: RequestProgressUpdater) {
+        *self.classifier_progress.lock() = Some(progress);
+    }
+
+    /// The request classifier's write handle from the latest dispatch, if any.
+    pub(crate) fn classifier_progress(&self) -> Option<RequestProgressUpdater> {
+        self.classifier_progress.lock().clone()
+    }
+
     /// Record when the prefill result was received by the router.
     /// Returns true if this was the first call (OnceLock first-write-wins).
     pub fn record_prefill_complete(&self) -> bool {
@@ -635,51 +648,6 @@ impl RequestTracker {
     /// Get the decode worker type if recorded.
     pub fn decode_worker_type(&self) -> Option<&'static str> {
         self.decode_worker_type.get().copied()
-    }
-
-    /// Write TTFT and ISL to per-worker last gauges using prefill worker labels.
-    /// Called from the Python binding path on first token.
-    pub fn observe_first_token_gauges(&self) {
-        let Some(worker_id) = self.prefill_worker_id() else {
-            return;
-        };
-        let worker_id_str = worker_id.to_string();
-        let dp_rank_str = self
-            .prefill_dp_rank()
-            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
-        let worker_type = self.prefill_worker_type().unwrap_or(WORKER_TYPE_PREFILL);
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-
-        if let Some(ttft) = self.ttft_ms() {
-            WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
-                .with_label_values(labels)
-                .set(ttft / 1000.0);
-        }
-        if let Some(isl) = self.isl_tokens() {
-            WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
-                .with_label_values(labels)
-                .set(isl as i64);
-        }
-    }
-
-    /// Write avg ITL to per-worker last gauge using decode worker labels.
-    /// Called at each output block boundary and from the Python binding path.
-    pub fn observe_finish_gauges(&self) {
-        let Some(worker_id) = self.decode_worker_id() else {
-            return;
-        };
-        let worker_id_str = worker_id.to_string();
-        let dp_rank_str = self
-            .decode_dp_rank()
-            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
-        let worker_type = self.decode_worker_type().unwrap_or(WORKER_TYPE_DECODE);
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-
-        if let Some(avg_itl) = self.avg_itl_ms() {
-            WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-                .with_label_values(labels)
-                .set(avg_itl / 1000.0);
-        }
     }
 
     /// Inject timing measured in another process (a standalone router); `get_timing_info`
@@ -1038,71 +1006,6 @@ mod tests {
         assert_eq!(tracker.prefill_dp_rank(), Some(0));
         assert_eq!(tracker.decode_worker_id(), Some(42));
         assert_eq!(tracker.decode_dp_rank(), Some(0));
-    }
-
-    #[test]
-    fn test_observe_first_token_gauges_no_panic_without_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_first_token();
-        tracker.record_isl(100, Some(50));
-        // No worker recorded — should return early without panic
-        tracker.observe_first_token_gauges();
-    }
-
-    #[test]
-    fn test_observe_finish_gauges_no_panic_without_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_first_token();
-        tracker.record_osl(10);
-        tracker.record_finish();
-        // No worker recorded — should return early without panic
-        tracker.observe_finish_gauges();
-    }
-
-    #[test]
-    fn test_observe_first_token_gauges_with_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
-        thread::sleep(Duration::from_millis(5));
-        tracker.record_first_token();
-        tracker.record_isl(256, Some(128));
-
-        tracker.observe_first_token_gauges();
-
-        let labels = &["42", "0", WORKER_TYPE_PREFILL];
-        let ttft_val = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
-            .with_label_values(labels)
-            .get();
-        assert!(
-            ttft_val > 0.0,
-            "TTFT gauge should be positive after observe, got {ttft_val}"
-        );
-
-        let isl_val = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
-            .with_label_values(labels)
-            .get();
-        assert_eq!(isl_val, 256, "ISL gauge should be 256, got {isl_val}");
-    }
-
-    #[test]
-    fn test_observe_finish_gauges_with_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_worker(99, Some(1), WORKER_TYPE_DECODE);
-        tracker.record_first_token();
-        thread::sleep(Duration::from_millis(10));
-        tracker.record_osl(5);
-        tracker.record_finish();
-
-        tracker.observe_finish_gauges();
-
-        let labels = &["99", "1", WORKER_TYPE_DECODE];
-        let itl_val = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-            .with_label_values(labels)
-            .get();
-        assert!(
-            itl_val > 0.0,
-            "ITL gauge should be positive after observe, got {itl_val}"
-        );
     }
 
     #[test]

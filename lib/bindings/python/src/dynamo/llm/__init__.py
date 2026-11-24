@@ -56,6 +56,9 @@ from dynamo._core import update_model_taints as update_model_taints
 
 try:
     from dynamo._core import SelectionService as SelectionService
+    from dynamo._core import (
+        WorkerSequenceEventPublisher as WorkerSequenceEventPublisher,
+    )
 except ImportError:
     pass
 

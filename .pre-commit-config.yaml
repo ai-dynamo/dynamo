@@ -297,6 +297,13 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - datamodel-code-generator==0.83.0
+    - id: distroless-base-tags
+      name: Check the planner and operator distroless bases meet their floor
+      entry: python3 tests/dependencies/test_distroless_base_tags.py
+      language: python
+      additional_dependencies: [pytest, pyyaml]
+      pass_filenames: false
+      always_run: true
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py

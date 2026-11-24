@@ -350,7 +350,7 @@ async fn run_watcher(
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
-    metrics: Arc<crate::http::service::metrics::Metrics>,
+    metrics: Arc<dynamo_http_server::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
@@ -404,7 +404,7 @@ async fn run_watcher(
             if let Err(error) = update_http_endpoints(http_service.clone(), model_update.clone()) {
                 tracing::error!(%error, "failed to update HTTP endpoints");
             }
-            update_model_metrics(model_update, metrics.clone());
+            update_model_metrics(model_update, metrics.clone(), migration_limit);
         }
     });
 
@@ -455,14 +455,17 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
 /// Updates metrics for model type changes
 fn update_model_metrics(
     model_type: ModelUpdate,
-    metrics: Arc<crate::http::service::metrics::Metrics>,
+    metrics: Arc<dynamo_http_server::metrics::Metrics>,
+    migration_limit: u32,
 ) {
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
-                tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
-            }
+            crate::http::service::metrics::update_metrics_from_mdc(
+                &metrics,
+                &card,
+                migration_limit,
+            );
         }
         ModelUpdate::Removed(card) => {
             tracing::debug!(model_name = card.display_name, "Model removed");

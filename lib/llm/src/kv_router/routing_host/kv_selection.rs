@@ -46,6 +46,8 @@ pub(super) struct WorkerSelection {
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) kv_hint: Option<KvHint>,
     pub(super) request_lifecycle: Option<Box<RequestLifecycle>>,
+    /// Set by the request classifier; replaces the request's `priority` on dispatch.
+    pub(super) backend_priority: Option<i32>,
 }
 
 // Transient return value; `Routed` is moved into `WorkerSelection` right away.
@@ -196,6 +198,7 @@ impl RoutingHost {
                 routing_hashes,
                 kv_hint,
                 request_lifecycle: None,
+                backend_priority: admitted.backend_priority,
             })),
             FindBestMatchOutcome::QueueRejected { rejection } => {
                 Ok(SelectionOutcome::QueueRejected(rejection))
