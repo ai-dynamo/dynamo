@@ -156,6 +156,125 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Zero(t, stored.Status.ObservedGeneration)
 }
 
+func TestDynamoGraphDeploymentReconcileSnapshotFailoverInheritsGraphFramework(t *testing.T) {
+	t.Log("Store a graph with no explicit framework: a sibling infers vLLM and the failover worker runs a custom module")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name:       "test-dgd",
+		Namespace:  "default",
+		Generation: 7,
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "sibling",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+				},
+				{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "my_custom_worker"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+						Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+					},
+				},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      events.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+
+	t.Log("Reconcile once; the compatibility preflight must not reject the inherited framework")
+	_, _ = reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	var stored v1beta1.DynamoGraphDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored))
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	if ready != nil {
+		require.NotContains(t, ready.Message, "Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: noop)")
+	}
+}
+
+func TestDynamoGraphDeploymentReconcileSnapshotFailoverLegacyOriginMatchesServingRendering(t *testing.T) {
+	t.Log("Store a legacy-origin Grove graph with no explicit framework: a sibling infers vLLM and the failover worker runs a custom module")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name:       "test-dgd",
+		Namespace:  "default",
+		Generation: 7,
+		Annotations: map[string]string{
+			commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0",
+			commonconsts.KubeAnnotationWorkloadProvider:            commonconsts.WorkloadProviderGrove,
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "sibling",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+				},
+				{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "my_custom_worker"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+						Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+					},
+				},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      events.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+
+	t.Log("Reconcile once; the preflight must resolve the worker as the legacy Grove renderer does and reject noop")
+	_, _ = reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	var stored v1beta1.DynamoGraphDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored))
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	require.Contains(t, ready.Message, "Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: noop)")
+}
+
 func TestDynamoGraphDeploymentReconcileWithLPXDisabled(t *testing.T) {
 	t.Log("Store a mixed graph without Grove or LPX API types")
 	dgd := &v1beta1.DynamoGraphDeployment{

@@ -394,6 +394,82 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 	}
 }
 
+func TestDGDCheckpointsReconciler_InheritsGraphFrameworkForCustomWorkerModule(t *testing.T) {
+	t.Log("Build a graph with no explicit framework: a sibling infers vLLM and the checkpoint worker runs a custom module")
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{}, Recorder: events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "main", Image: "runtime:1.6.0",
+			Command: []string{"python3", "-m", "my_custom_worker"},
+			Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+		}}}},
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true, Mode: v1beta1.CheckpointModeAuto},
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{Name: "test-dgd", Namespace: "default", UID: "dgd-uid",
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "sibling", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+				},
+				*component,
+			},
+		}}
+
+	t.Log("Capture and compatibility reconciliation inherit the sibling's vLLM framework")
+	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
+	require.NotNil(t, job)
+}
+
+func TestDGDCheckpointsReconciler_LegacyOriginKeepsPerComponentFrameworkResolution(t *testing.T) {
+	t.Log("Build a legacy-origin Grove graph with no explicit framework: a sibling infers vLLM and the checkpoint worker runs a custom module")
+	dgd := &v1beta1.DynamoGraphDeployment{Name: "test-dgd", Namespace: "default", UID: "dgd-uid",
+		Annotations: map[string]string{
+			commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0",
+			commonconsts.KubeAnnotationWorkloadProvider:            commonconsts.WorkloadProviderGrove,
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "sibling", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+				},
+				{
+					ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "my_custom_worker"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+					Experimental: &v1beta1.ExperimentalSpec{
+						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true, Mode: v1beta1.CheckpointModeAuto},
+					},
+				},
+			},
+		}}
+	component := &dgd.Spec.Components[1]
+
+	t.Log("The checkpoint paths resolve the worker as its legacy serving renderer does")
+	framework, err := checkpointBackendFramework(dgd, component)
+	require.NoError(t, err)
+	require.Equal(t, dynamo.BackendFrameworkNoop, framework)
+}
+
 func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOwner(t *testing.T) {
 	t.Log("Build a DGD and the GPU DeviceClass required by the checkpoint template")
 	ctx := context.Background()

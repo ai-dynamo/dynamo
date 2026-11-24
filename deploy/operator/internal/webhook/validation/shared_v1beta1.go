@@ -187,6 +187,7 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
 	workloadProvider                  string
+	backendFramework                  string
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
 	groveStrategyChanged              bool
@@ -367,6 +368,17 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	// Validate the compilation cache against the backend framework rendering resolves.
+	if spec.CompilationCache != nil {
+		compilationCachePath := fldPath.Child("compilationCache")
+		backendFramework, err := dynamo.DetermineBackendFrameworkForComponent(spec, options.backendFramework)
+		if err != nil {
+			allErrs = append(allErrs, field.Forbidden(compilationCachePath, fmt.Sprintf("requires a resolvable backend framework: %v", err)))
+		} else {
+			allErrs = append(allErrs, v.validateCompilationCacheConfig(spec.CompilationCache, compilationCachePath, backendFramework)...)
+		}
+	}
+
 	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
@@ -391,6 +403,26 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				runtimeVersionOverrideRequiredMessage,
 			))
 		}
+	}
+
+	return allErrs
+}
+
+// validateCompilationCacheConfig validates config against the backend framework
+// rendering resolves. config and fldPath must not be nil.
+func (v *sharedValidation) validateCompilationCacheConfig(
+	config *nvidiacomv1beta1.CompilationCacheConfig,
+	fldPath *field.Path,
+	backendFramework dynamo.BackendFramework,
+) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if config.MountPath == "" && dynamo.DefaultCompilationCacheMountPoint(backendFramework) == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("mountPath"), fmt.Sprintf("is required for backend framework %s (no default available)", backendFramework)))
+	}
+
+	if config.MountPath != "" && (backendFramework == dynamo.BackendFrameworkSGLang || backendFramework == dynamo.BackendFrameworkTRTLLM) {
+		v.warnf("%s: the operator mounts the PVC but sets no compilation cache environment for backend framework %s", fldPath.String(), backendFramework)
 	}
 
 	return allErrs

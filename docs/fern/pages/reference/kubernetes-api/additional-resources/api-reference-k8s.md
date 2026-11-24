@@ -1617,8 +1617,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: \{\} <br /> |
-| `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  | Optional: \{\} <br /> |
-| `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false | Optional: \{\} <br /> |
+| `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />only vLLM has a backend-specific default; other engines require<br />mountPoint. |  | Optional: \{\} <br /> |
+| `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />Only vLLM gets cache environment variables and a default mount point;<br />other engines require mountPoint and only get the PVC mounted. | false | Optional: \{\} <br /> |
 
 
 
@@ -1717,8 +1717,9 @@ _Appears in:_
 
 
 CompilationCacheConfig configures a PVC-backed compilation cache for a component.
-The operator handles backend-specific mount paths and environment variables so
-users do not need to hand-wire them into the pod template.
+Only vLLM has a default mount path and operator-managed cache environment
+variables. Other engines require an explicit mountPath, and the operator only
+mounts the PVC for them.
 
 
 
@@ -1729,7 +1730,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `pvcName` _string_ | pvcName references a user-created PVC by name. The PVC must exist in<br />the same namespace as the DynamoGraphDeployment. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `mountPath` _string_ | mountPath overrides the backend-specific default mount path. When<br />empty, the operator selects a default appropriate for the backend<br />framework. |  | Optional: \{\} <br /> |
+| `mountPath` _string_ | mountPath overrides the backend-specific default mount path. Only vLLM<br />has a default; for other engines mountPath is required. |  | Optional: \{\} <br /> |
 
 
 #### ComponentCheckpointConfig
@@ -2036,7 +2037,7 @@ _Appears in:_
 | `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`.<br />Deprecated: omit this field for the native Rust EPP. Presence of<br />`eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config<br />mount) so existing DGDs keep running across operator upgrades until<br />migration is started by clearing this field. |  | Optional: \{\} <br /> |
 | `lpx` _[LPXConfig](#lpxconfig)_ | lpx holds LPX integration configuration. Only meaningful when<br />`type` is `lpx`.<br />Experimental: requires the operator's lpx.enabled setting and may change incompatibly. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in each selected PodTemplate<br />as the frontend sidecar. The value must match the `name` of a container in the<br />component-level podTemplate, or in every role podTemplate when those are used.<br />The operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into<br />`podTemplate.spec.containers[name=main]`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match the selected templates. |  | Optional: \{\} <br /> |
-| `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
+| `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. Only vLLM<br />has a default mount path and operator-managed cache environment<br />variables; other engines require an explicit mountPath and only get<br />the PVC mounted. Extracted from v1alpha1's<br />`volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
 | `experimental` _[ExperimentalSpec](#experimentalspec)_ | experimental groups opt-in preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases,<br />including disappearing without a name-preserving graduation path.<br />In v1beta1 this block holds `gpuMemoryService` and `failover` (which remain<br />tightly coupled -- failover requires GMS -- and<br />are expected to evolve together as the DRA-based GPU sharing story<br />matures); and `checkpoint` (whose API shape is still settling). Fields here are<br />explicitly NOT covered by the normal v1beta1 deprecation policy; do not<br />depend on them for production workloads. |  | Optional: \{\} <br /> |
 
@@ -2070,7 +2071,7 @@ _Appears in:_
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`.<br />Deprecated: omit this field for the native Rust EPP. Presence of<br />`eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config<br />mount) so existing DGDs keep running across operator upgrades until<br />migration is started by clearing this field. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in each selected PodTemplate<br />as the frontend sidecar. The value must match the `name` of a container in the<br />component-level podTemplate, or in every role podTemplate when those are used.<br />The operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into<br />`podTemplate.spec.containers[name=main]`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match the selected templates. |  | Optional: \{\} <br /> |
-| `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
+| `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. Only vLLM<br />has a default mount path and operator-managed cache environment<br />variables; other engines require an explicit mountPath and only get<br />the PVC mounted. Extracted from v1alpha1's<br />`volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
 | `experimental` _[ExperimentalSpec](#experimentalspec)_ | experimental groups opt-in preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases,<br />including disappearing without a name-preserving graduation path.<br />In v1beta1 this block holds `gpuMemoryService` and `failover` (which remain<br />tightly coupled -- failover requires GMS -- and<br />are expected to evolve together as the DRA-based GPU sharing story<br />matures); and `checkpoint` (whose API shape is still settling). Fields here are<br />explicitly NOT covered by the normal v1beta1 deprecation policy; do not<br />depend on them for production workloads. |  | Optional: \{\} <br /> |
 

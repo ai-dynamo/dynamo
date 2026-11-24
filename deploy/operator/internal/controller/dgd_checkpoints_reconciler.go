@@ -46,6 +46,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -204,12 +205,46 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 	return result, nil
 }
 
+// servingPathFrameworkForComponent resolves the framework the component's
+// serving rendering path uses, derived from the durable workload provider.
+func servingPathFrameworkForComponent(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	graphBackendFramework string,
+) string {
+	provider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
+	var dsSelection map[string]string
+	if provider == consts.WorkloadProviderDisaggregatedSet {
+		selection, _ := disaggregatedset.Select(dgd)
+		dsSelection = selection.ComponentToRole
+	}
+	return dynamo.ServingPathBackendFramework(
+		dgd, component, graphBackendFramework, provider == consts.WorkloadProviderGrove, dsSelection,
+	)
+}
+
+// checkpointBackendFramework resolves the component's engine as its serving
+// rendering path does, so snapshot jobs agree with the rendered workload.
+func checkpointBackendFramework(
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (dynamo.BackendFramework, error) {
+	graphBackendFramework, err := dynamo.BackendFrameworkForGeneratedDCDs(dynamoDeployment)
+	if err != nil {
+		return "", err
+	}
+	return dynamo.DetermineBackendFrameworkForComponent(
+		component,
+		servingPathFrameworkForComponent(dynamoDeployment, component, graphBackendFramework),
+	)
+}
+
 func (r *dgdCheckpointsReconciler) snapshotCompatibilityHashForComponent(
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (string, error) {
-	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
+	backendFramework, err := checkpointBackendFramework(dynamoDeployment, component)
 	if err != nil {
 		return "", fmt.Errorf("determine backend framework: %w", err)
 	}
@@ -262,7 +297,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		return nil, fmt.Errorf("checkpoint config is required")
 	}
 
-	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
+	backendFramework, err := checkpointBackendFramework(dynamoDeployment, component)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 	}

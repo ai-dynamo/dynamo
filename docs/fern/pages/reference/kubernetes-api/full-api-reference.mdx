@@ -2449,12 +2449,12 @@ Name references a PVC name defined in the top-level PVCs map
 </ParamField>
 
 <ParamField path="mountPoint" type="string">
-MountPoint specifies where to mount the volume. If useAsCompilationCache is true and mountPoint is not specified, a backend-specific default will be used.
+MountPoint specifies where to mount the volume. If useAsCompilationCache is true and mountPoint is not specified, only vLLM has a backend-specific default; other engines require mountPoint.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="useAsCompilationCache" type="boolean" default="false">
-UseAsCompilationCache indicates this volume should be used as a compilation cache. When true, backend-specific environment variables will be set and default mount points may be used.
+UseAsCompilationCache indicates this volume should be used as a compilation cache. Only vLLM gets cache environment variables and a default mount point; other engines require mountPoint and only get the PVC mounted.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2541,8 +2541,9 @@ CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
 
 <Accordion id="compilationcacheconfig" title="CompilationCacheConfig">
 CompilationCacheConfig configures a PVC-backed compilation cache for a component.
-The operator handles backend-specific mount paths and environment variables so
-users do not need to hand-wire them into the pod template.
+Only vLLM has a default mount path and operator-managed cache environment
+variables. Other engines require an explicit mountPath, and the operator only
+mounts the PVC for them.
 
 
 **Kind:** `type`
@@ -2554,7 +2555,7 @@ pvcName references a user-created PVC by name. The PVC must exist in the same na
 </ParamField>
 
 <ParamField path="mountPath" type="string">
-mountPath overrides the backend-specific default mount path. When empty, the operator selects a default appropriate for the backend framework.
+mountPath overrides the backend-specific default mount path. Only vLLM has a default; for other engines mountPath is required.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3050,7 +3051,7 @@ frontendSidecar optionally designates a container in each selected PodTemplate a
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">
-compilationCache configures a PVC-backed compilation cache. The operator handles backend-specific mount paths and environment variables, so users do not need to hand-wire them into `podTemplate`. Extracted from v1alpha1's `volumeMount.useAsCompilationCache` flag.
+compilationCache configures a PVC-backed compilation cache. Only vLLM has a default mount path and operator-managed cache environment variables; other engines require an explicit mountPath and only get the PVC mounted. Extracted from v1alpha1's `volumeMount.useAsCompilationCache` flag.
 See [CompilationCacheConfig](#compilationcacheconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3164,7 +3165,7 @@ frontendSidecar optionally designates a container in each selected PodTemplate a
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">
-compilationCache configures a PVC-backed compilation cache. The operator handles backend-specific mount paths and environment variables, so users do not need to hand-wire them into `podTemplate`. Extracted from v1alpha1's `volumeMount.useAsCompilationCache` flag.
+compilationCache configures a PVC-backed compilation cache. Only vLLM has a default mount path and operator-managed cache environment variables; other engines require an explicit mountPath and only get the PVC mounted. Extracted from v1alpha1's `volumeMount.useAsCompilationCache` flag.
 See [CompilationCacheConfig](#compilationcacheconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

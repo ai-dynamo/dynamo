@@ -1125,6 +1125,161 @@ func TestGenerateDynamoComponentsDeployments_SkipsTopologyLabelAnnotationWithout
 	assert.NotContains(t, GetDCDKubeAnnotations(worker), commonconsts.KubeAnnotationTopologyLabelKey)
 }
 
+func TestGenerateGrovePodCliqueSet_InheritsGraphFrameworkForCompilationCache(t *testing.T) {
+	t.Log("Build a 1.8.0-origin graph with no explicit framework: a sibling infers vLLM and the cache worker runs a custom module")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name:      "test-dgd",
+		Namespace: "default",
+		Annotations: map[string]string{
+			commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "sibling", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName, Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+				},
+				{
+					ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName, Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "my_custom_worker"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+					CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "compile-cache"},
+				},
+			},
+		},
+	}
+
+	t.Log("Render the PodCliqueSet; the cache worker inherits the sibling's vLLM default mount")
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd, nil,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, false, nil,
+	)
+	require.NoError(t, err)
+	var workerClique *grovev1alpha1.PodCliqueTemplateSpec
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Name == "worker" {
+			workerClique = clique
+		}
+	}
+	require.NotNil(t, workerClique)
+	var main *corev1.Container
+	for i := range workerClique.Spec.PodSpec.Containers {
+		if workerClique.Spec.PodSpec.Containers[i].Name == commonconsts.MainContainerName {
+			main = &workerClique.Spec.PodSpec.Containers[i]
+		}
+	}
+	require.NotNil(t, main)
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "compile-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint})
+}
+
+func TestGenerateGrovePodCliqueSet_LegacyOriginPreservesCustomWorkerRendering(t *testing.T) {
+	t.Log("Build a legacy-origin graph with no explicit framework and no compilation cache: a sibling infers TRT-LLM and the custom worker is multinode")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name:      "test-dgd",
+		Namespace: "default",
+		Annotations: map[string]string{
+			commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "sibling", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName, Image: "runtime:1.6.0",
+						Command: []string{"python3", "-m", "dynamo.trtllm"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+				},
+				{
+					ComponentName: "custom", ComponentType: v1beta1.ComponentTypeWorker,
+					Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName, Image: "custom-runtime:1.6.0",
+						Command: []string{"python3", "-m", "my_custom_worker"},
+						Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+					}}}},
+				},
+			},
+		},
+	}
+
+	t.Log("Render the PodCliqueSet; the legacy-origin custom worker keeps its authored launch and gets no SSH wrapping")
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd, nil,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, false, nil,
+	)
+	require.NoError(t, err)
+	cliques := map[string]*grovev1alpha1.PodCliqueTemplateSpec{}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+	require.Contains(t, cliques, "custom-ldr")
+	require.Contains(t, cliques, "custom-wkr")
+	for _, cliqueName := range []string{"custom-ldr", "custom-wkr"} {
+		clique := cliques[cliqueName]
+		var main *corev1.Container
+		for i := range clique.Spec.PodSpec.Containers {
+			if clique.Spec.PodSpec.Containers[i].Name == commonconsts.MainContainerName {
+				main = &clique.Spec.PodSpec.Containers[i]
+			}
+		}
+		require.NotNil(t, main)
+		assert.Equal(t, []string{"python3", "-m", "my_custom_worker"}, main.Command, cliqueName)
+		assert.Equal(t, []string{"--model", "Qwen/Qwen3-0.6B"}, main.Args, cliqueName)
+		for _, mount := range main.VolumeMounts {
+			assert.NotEqual(t, "/ssh-pk", mount.MountPath, cliqueName)
+		}
+		for _, volume := range clique.Spec.PodSpec.Volumes {
+			assert.Nil(t, volume.Secret, cliqueName)
+		}
+	}
+}
+
+func TestServingPathBackendFramework(t *testing.T) {
+	worker := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker}
+	lpxWorker := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "lpx", ComponentType: v1beta1.ComponentTypeLPX}
+	for _, tc := range []struct {
+		name          string
+		origin        string
+		specFramework string
+		component     *v1beta1.DynamoComponentDeploymentSharedSpec
+		grovePathway  bool
+		dsSelection   map[string]string
+		want          string
+	}{
+		{name: "new origin inherits the graph-wide framework on the Grove path", origin: "1.8.0", component: worker, grovePathway: true, want: "vllm"},
+		{name: "legacy Grove component keeps the authored graph framework", origin: "1.7.0", component: worker, grovePathway: true, want: ""},
+		{name: "legacy Grove component keeps an explicit authored framework", origin: "1.7.0", specFramework: "sglang", component: worker, grovePathway: true, want: "sglang"},
+		{name: "graph without an origin annotation keeps the authored framework", component: worker, grovePathway: true, want: ""},
+		{name: "legacy DisaggregatedSet-selected role keeps the authored framework", origin: "1.7.0", component: worker, dsSelection: map[string]string{"worker": "prefill"}, want: ""},
+		{name: "legacy unselected component inherits the graph-wide framework", origin: "1.7.0", component: worker, dsSelection: map[string]string{"other": "prefill"}, want: "vllm"},
+		{name: "legacy DCD-path component inherits the graph-wide framework", origin: "1.7.0", component: worker, want: "vllm"},
+		{name: "legacy externally managed Grove component inherits the graph-wide framework", origin: "1.7.0", component: lpxWorker, grovePathway: true, want: "vllm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "test-dgd", Namespace: "default"}
+			dgd.Spec.BackendFramework = tc.specFramework
+			if tc.origin != "" {
+				dgd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tc.origin}
+			}
+			require.Equal(t, tc.want, ServingPathBackendFramework(dgd, tc.component, "vllm", tc.grovePathway, tc.dsSelection))
+		})
+	}
+}
+
 func TestGenerateGrovePodCliqueSet_AddsTopologyLabelAnnotationToWorkerCliques(t *testing.T) {
 	labelKey := testTopologyLabelKey
 	dgd := &v1beta1.DynamoGraphDeployment{

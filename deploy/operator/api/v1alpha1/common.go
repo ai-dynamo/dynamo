@@ -133,11 +133,13 @@ type VolumeMount struct {
 	Name string `json:"name,omitempty"`
 	// MountPoint specifies where to mount the volume.
 	// If useAsCompilationCache is true and mountPoint is not specified,
-	// a backend-specific default will be used.
+	// only vLLM has a backend-specific default; other engines require
+	// mountPoint.
 	// +optional
 	MountPoint string `json:"mountPoint,omitempty"`
 	// UseAsCompilationCache indicates this volume should be used as a compilation cache.
-	// When true, backend-specific environment variables will be set and default mount points may be used.
+	// Only vLLM gets cache environment variables and a default mount point;
+	// other engines require mountPoint and only get the PVC mounted.
 	// +kubebuilder:default=false
 	// +optional
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`

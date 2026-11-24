@@ -159,10 +159,17 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	// Reject unsupported stored configurations before any primary-resource mutation.
+	// Resolve each component as its serving rendering path does so the guards agree
+	// with admission and rendering.
+	graphBackendFramework, frameworkErr := dynamo.BackendFrameworkForGeneratedDCDs(dynamoDeployment)
+	if frameworkErr != nil {
+		graphBackendFramework = dynamoDeployment.Spec.BackendFramework
+	}
 	var compatibilityErrs []error
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
-		if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(component, field.NewPath("spec", "components").Index(i), dynamoDeployment.Spec.BackendFramework).ToAggregate(); snapshotFailoverErr != nil {
+		componentFramework := servingPathFrameworkForComponent(dynamoDeployment, component, graphBackendFramework)
+		if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(component, field.NewPath("spec", "components").Index(i), componentFramework).ToAggregate(); snapshotFailoverErr != nil {
 			compatibilityErrs = append(compatibilityErrs, snapshotFailoverErr)
 		}
 		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(component.Experimental) {

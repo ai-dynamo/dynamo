@@ -167,7 +167,7 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// GenerateDynamoComponentsDeployments to populate spec.BackendFramework
 	// on the generated DCD before workerHashSpec is called.
 	if spec.CompilationCache != nil {
-		defaultPath := getDefaultCompilationCacheMountPoint(BackendFramework(spec.BackendFramework))
+		defaultPath := DefaultCompilationCacheMountPoint(BackendFramework(spec.BackendFramework))
 		if defaultPath != "" && spec.CompilationCache.MountPath == defaultPath {
 			spec.CompilationCache.MountPath = ""
 		}

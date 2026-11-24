@@ -55,8 +55,9 @@ const (
 )
 
 // CompilationCacheConfig configures a PVC-backed compilation cache for a component.
-// The operator handles backend-specific mount paths and environment variables so
-// users do not need to hand-wire them into the pod template.
+// Only vLLM has a default mount path and operator-managed cache environment
+// variables. Other engines require an explicit mountPath, and the operator only
+// mounts the PVC for them.
 type CompilationCacheConfig struct {
 	// pvcName references a user-created PVC by name. The PVC must exist in
 	// the same namespace as the DynamoGraphDeployment.
@@ -64,9 +65,8 @@ type CompilationCacheConfig struct {
 	// +kubebuilder:validation:MinLength=1
 	PVCName string `json:"pvcName"`
 
-	// mountPath overrides the backend-specific default mount path. When
-	// empty, the operator selects a default appropriate for the backend
-	// framework.
+	// mountPath overrides the backend-specific default mount path. Only vLLM
+	// has a default; for other engines mountPath is required.
 	// +optional
 	MountPath string `json:"mountPath,omitempty"`
 }

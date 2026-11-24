@@ -421,7 +421,7 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 
 	// Resolve the backend exactly as rendering does, including command inference.
 	// TRT-LLM snapshot failover is not supported yet; reject it at admission.
-	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	backendFramework, err := DetermineBackendFrameworkForComponent(component, explicitBackendFramework)
 	if err != nil {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"))
 	} else if !snapshotFailoverBackendSupported(backendFramework) {

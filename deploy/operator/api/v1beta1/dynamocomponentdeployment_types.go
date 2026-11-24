@@ -297,10 +297,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
-	// compilationCache configures a PVC-backed compilation cache. The operator
-	// handles backend-specific mount paths and environment variables, so
-	// users do not need to hand-wire them into `podTemplate`. Extracted from
-	// v1alpha1's `volumeMount.useAsCompilationCache` flag.
+	// compilationCache configures a PVC-backed compilation cache. Only vLLM
+	// has a default mount path and operator-managed cache environment
+	// variables; other engines require an explicit mountPath and only get
+	// the PVC mounted. Extracted from v1alpha1's
+	// `volumeMount.useAsCompilationCache` flag.
 	// +optional
 	CompilationCache *CompilationCacheConfig `json:"compilationCache,omitempty"`
 

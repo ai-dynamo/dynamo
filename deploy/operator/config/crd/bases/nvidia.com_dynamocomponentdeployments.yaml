@@ -20674,7 +20674,8 @@ spec:
                         description: |-
                           MountPoint specifies where to mount the volume.
                           If useAsCompilationCache is true and mountPoint is not specified,
-                          a backend-specific default will be used.
+                          only vLLM has a backend-specific default; other engines require
+                          mountPoint.
                         type: string
                       name:
                         description: Name references a PVC name defined in the top-level PVCs map
@@ -20683,7 +20684,8 @@ spec:
                         default: false
                         description: |-
                           UseAsCompilationCache indicates this volume should be used as a compilation cache.
-                          When true, backend-specific environment variables will be set and default mount points may be used.
+                          Only vLLM gets cache environment variables and a default mount point;
+                          other engines require mountPoint and only get the PVC mounted.
                         type: boolean
                     required:
                       - name
@@ -20962,16 +20964,16 @@ spec:
                   type: string
                 compilationCache:
                   description: |-
-                    compilationCache configures a PVC-backed compilation cache. The operator
-                    handles backend-specific mount paths and environment variables, so
-                    users do not need to hand-wire them into `podTemplate`. Extracted from
-                    v1alpha1's `volumeMount.useAsCompilationCache` flag.
+                    compilationCache configures a PVC-backed compilation cache. Only vLLM
+                    has a default mount path and operator-managed cache environment
+                    variables; other engines require an explicit mountPath and only get
+                    the PVC mounted. Extracted from v1alpha1's
+                    `volumeMount.useAsCompilationCache` flag.
                   properties:
                     mountPath:
                       description: |-
-                        mountPath overrides the backend-specific default mount path. When
-                        empty, the operator selects a default appropriate for the backend
-                        framework.
+                        mountPath overrides the backend-specific default mount path. Only vLLM
+                        has a default; for other engines mountPath is required.
                       type: string
                     pvcName:
                       description: |-

@@ -106,6 +106,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			dgd.Spec.BackendFramework = ""
 			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), trtllmBackendFramework)
 		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "snapshot failover is admitted when a sibling worker infers the framework", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			setBetaDCDPathRouting(dgd)
+			setBetaCustomFailoverWorkerBesideVLLMSibling(dgd)
+		})},
 		{name: "TRT-LLM snapshot without failover remains admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			dgd.Spec.BackendFramework = trtllmBackendFramework
 			worker := dgd.GetComponentByName("worker")
@@ -971,6 +976,141 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			mutateRequest: setAlphaCompilationCacheVolumeNameEmpty,
 			wantSchemaErr: `spec.services.worker.volumeMounts[0].name: Required value`,
+		},
+
+		// Compilation cache admission matches the engine's rendering defaults.
+		{
+			name: "vLLM compilation cache without mountPath is admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+		},
+		{
+			name: "SGLang compilation cache without mountPath is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].compilationCache.mountPath: Required value: is required for backend framework sglang (no default available)"},
+		},
+		{
+			name: "TRT-LLM compilation cache without mountPath is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = trtllmBackendFramework
+				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].compilationCache.mountPath: Required value: is required for backend framework trtllm (no default available)"},
+		},
+		{
+			name: "inferred SGLang compilation cache without mountPath is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = ""
+				worker := betaWorkerComponent(dgd)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+				worker.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].compilationCache.mountPath: Required value: is required for backend framework sglang (no default available)"},
+		},
+		{
+			name: "SGLang compilation cache with an explicit mountPath warns about the missing cache environment",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache", MountPath: "/cache"}
+			}),
+			wantWarnings: []string{"spec.components[1].compilationCache: the operator mounts the PVC but sets no compilation cache environment for backend framework sglang"},
+		},
+		{
+			name: "TRT-LLM compilation cache with an explicit mountPath warns about the missing cache environment",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = trtllmBackendFramework
+				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache", MountPath: "/cache"}
+			}),
+			wantWarnings: []string{"spec.components[1].compilationCache: the operator mounts the PVC but sets no compilation cache environment for backend framework trtllm"},
+		},
+		{
+			name: "compilation cache with a conflicting backend framework is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				worker := betaWorkerComponent(dgd)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				worker.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].compilationCache: Forbidden: requires a resolvable backend framework: backend framework mismatch: detected "vllm" from command but explicitly configured as "sglang"`},
+		},
+		{
+			name: "frontend compilation cache without mountPath is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].compilationCache.mountPath: Required value: is required for backend framework noop (no default available)"},
+		},
+		{
+			name: "v1alpha1 converted SGLang compilation cache without mountPoint is rejected",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				dgd.Spec.Services["worker"].VolumeMounts = []nvidiacomv1alpha1.VolumeMount{{Name: "cache", UseAsCompilationCache: true}}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].compilationCache.mountPath: Required value: is required for backend framework sglang (no default available)"},
+		},
+		{
+			name: "compilation cache without mountPath is admitted when a sibling worker infers the framework",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaDCDPathRouting(dgd)
+				setBetaCommandlessCacheWorkerBesideVLLMSibling(dgd)
+			}),
+		},
+		{
+			name: "commandless elastic-EP worker inheriting vLLM from a sibling is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaDCDPathRouting(dgd)
+				setBetaCommandlessElasticEPWorkerBesideVLLMSibling(dgd)
+			}),
+			wantWebhookErrs: []string{"spec.components[2].podTemplate.spec.containers[0].command: Required value: elastic expert parallelism (--enable-elastic-ep with --data-parallel-backend ray) requires an explicit container command; the operator starts the Ray head by wrapping that command and cannot start it from the image ENTRYPOINT"},
+		},
+
+		// Creates in this suite carry the operator's own legacy origin and materialize
+		// the Grove provider, so Grove components resolve per-component: admission must
+		// reject exactly what the origin-gated Grove renderer cannot render.
+		{
+			name: "legacy-origin Grove custom worker compilation cache without mountPath is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaCustomWorkerBesideVLLMSibling(dgd)
+				dgd.GetComponentByName("worker-b").CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			wantWebhookErrs: []string{"spec.components[2].compilationCache.mountPath: Required value: is required for backend framework noop (no default available)"},
+		},
+		{
+			name: "legacy-origin Grove snapshot failover on a custom worker is rejected as noop",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				setBetaCustomFailoverWorkerBesideVLLMSibling(dgd)
+			}),
+			wantWebhookErrs: []string{"spec.components[2].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: noop)"},
+		},
+		{
+			// The seeded old object receives the suite operator's legacy origin and the
+			// Grove provider from the CREATE mutator; the update only adds a label.
+			name:               "unchanged legacy-origin Grove elastic-EP worker without a command remains updateable",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaDGDForAdmission(setBetaCommandlessElasticEPWorkerBesideVLLMSibling),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaCommandlessElasticEPWorkerBesideVLLMSibling(dgd)
+				labelBetaUpdated(dgd)
+			}),
+		},
+		{
+			name:               "unchanged legacy SGLang compilation cache without mountPath is rejected on update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = sglangBackendFramework
+				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].compilationCache.mountPath: Required value: is required for backend framework sglang (no default available)"},
 		},
 		{
 			name: "v1beta1 sidecars must provide an image in CEL",
@@ -4763,6 +4903,88 @@ func setAlphaWorkerPowerInputs(
 
 func enableBetaContainerDiscovery(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 	dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+}
+
+// setBetaDCDPathRouting routes the graph through the ordinary DCD lowering,
+// where components inherit the graph-wide framework on any operator origin.
+func setBetaDCDPathRouting(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	if dgd.Annotations == nil {
+		dgd.Annotations = map[string]string{}
+	}
+	dgd.Annotations[consts.KubeAnnotationEnableGrove] = consts.KubeLabelValueFalse
+}
+
+// setBetaCustomWorkerBesideVLLMSibling clears the graph framework, points the
+// fixture worker at vLLM, and appends a custom-module worker.
+func setBetaCustomWorkerBesideVLLMSibling(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	dgd.Spec.BackendFramework = ""
+	betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+	dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName:          "worker-b",
+		ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+		RuntimeVersionOverride: "1.1.0",
+		Replicas:               new(int32(1)),
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0",
+				Command: []string{"python3", "-m", "my_custom_worker"},
+				Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+			}},
+		}},
+	})
+}
+
+// setBetaCommandlessCacheWorkerBesideVLLMSibling clears the graph framework,
+// points the fixture worker at vLLM, and appends a commandless worker with a
+// compilation cache and no mountPath.
+func setBetaCommandlessCacheWorkerBesideVLLMSibling(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	dgd.Spec.BackendFramework = ""
+	betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+	dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName:          "worker-b",
+		ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+		RuntimeVersionOverride: "1.1.0",
+		Replicas:               new(int32(1)),
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+		}},
+		CompilationCache: &nvidiacomv1beta1.CompilationCacheConfig{PVCName: "compile-cache"},
+	})
+}
+
+// setBetaCommandlessElasticEPWorkerBesideVLLMSibling clears the graph framework,
+// points the fixture worker at vLLM, and appends a commandless worker requesting
+// the elastic-EP Ray topology.
+func setBetaCommandlessElasticEPWorkerBesideVLLMSibling(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	dgd.Spec.BackendFramework = ""
+	betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+	dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName:          "worker-b",
+		ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+		RuntimeVersionOverride: "1.1.0",
+		Replicas:               new(int32(1)),
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0",
+				Args: []string{"--model", "Qwen/Qwen3-0.6B", "--enable-elastic-ep", "--data-parallel-backend", "ray"},
+			}},
+		}},
+	})
+}
+
+// setBetaCustomFailoverWorkerBesideVLLMSibling clears the graph framework,
+// points the fixture worker at vLLM, and appends a custom-module worker with
+// snapshot-backed intra-pod failover enabled.
+func setBetaCustomFailoverWorkerBesideVLLMSibling(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	setBetaCustomWorkerBesideVLLMSibling(dgd)
+	custom := dgd.GetComponentByName("worker-b")
+	enableBetaSnapshotFailover(custom, "vllm")
+	custom.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "my_custom_worker"}
+	custom.PodTemplate.Spec.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B"}
+}
+
+func labelBetaUpdated(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	dgd.Labels = map[string]string{"updated": "true"}
 }
 
 func enableAlphaInterPodGMSFailover(
