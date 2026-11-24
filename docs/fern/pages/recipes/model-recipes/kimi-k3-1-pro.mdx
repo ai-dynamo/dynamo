@@ -147,7 +147,7 @@ Serve `moonshotai/Kimi-K3.1-Pro` with NVIDIA Dynamo using vLLM or SGLang. Pick y
 
 <div data-sku="gb300 vr200">
 
-- The NVIDIA DRA driver with ComputeDomain support for multi-node NVLink serving. The hardware overlays include a ComputeDomain and worker channel claims.
+- The NVIDIA DRA driver with ComputeDomain support for multi-node NVLink serving. Every GB300 and VR200 manifest includes a ComputeDomain and worker channel claims.
 
 </div>
 
@@ -169,7 +169,7 @@ Review storage paths, node placement, registry credentials, and resource claims 
 
 <div data-sku="b200 gb300 vr200">
 
-Create the shared model cache and download the main checkpoint:
+Create the shared model cache and download the main and draft checkpoints:
 
 <Warning>
 Edit `storageClassName` in `recipes/kimi-k3.1-pro/model-cache/model-cache.yaml` to a ReadWriteMany class on your cluster before you apply it.
@@ -181,19 +181,19 @@ kubectl apply -f recipes/kimi-k3.1-pro/model-cache/model-download.yaml -n ${NAME
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
-The weights are stored at `/shared-model-cache/moonshotai/Kimi-K3.1-Pro` on the PVC. The download Job downloads only the main model.
+The download Job populates the Hugging Face cache with `moonshotai/Kimi-K3.1-Pro` and `Inferact/Kimi-K3-DSpark`, using `HF_HOME=/shared-model-cache`. Workers resolve these Hugging Face IDs offline from the same PVC. To change the checkpoints, update `MODEL_NAME` and `DRAFT_MODEL_NAME` in the Job and the corresponding worker settings.
 
 </div>
 
 <div data-sku="b200">
 
-For B200, also stage the `Inferact/Kimi-K3-DSpark` draft checkpoint at the path in the worker's `SPECULATIVE_CONFIG` on the same PVC, or update that setting to your staged checkpoint path.
+The B200 worker uses the draft checkpoint downloaded by the Job.
 
 </div>
 
 <div data-sku="vr200">
 
-For VR200, also stage the `Inferact/Kimi-K3-DSpark` draft checkpoint at `/shared-model-cache/Inferact/Kimi-K3-DSpark` on the same PVC. Both topologies mount `shared-model-cache` for the frontend and all workers; no node-local weight staging is required.
+Both VR200 topologies use the draft checkpoint downloaded by the Job and mount `shared-model-cache` only in the workers; frontends do not mount the PVC.
 
 </div>
 
@@ -202,7 +202,7 @@ Deploy the selected DynamoGraphDeployment (DGD):
 <div data-recipe-framework="vllm" data-sku="gb300" data-variant="agg">
 
 ```bash
-export DGD=kimi-k3-1-pro-vllm-aggregate-gb300
+export DGD=kimi-k3-1-pro-vllm-gb300-agg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
@@ -221,7 +221,7 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300-multi
 <div data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg">
 
 ```bash
-export DGD=kimi-k3-1-pro-vllm-disagg-gb300
+export DGD=kimi-k3-1-pro-vllm-gb300-disagg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
@@ -240,7 +240,7 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300-mu
 <div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
 
 ```bash
-export DGD=kimi-k3-1-pro-sglang-aggregate-gb300
+export DGD=kimi-k3-1-pro-sglang-gb300-agg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
@@ -249,7 +249,7 @@ kubectl apply -f recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/deploy-gb300.yam
 <div data-recipe-framework="sglang" data-sku="gb300" data-variant="disagg">
 
 ```bash
-export DGD=kimi-k3-1-pro-sglang-disagg-gb300
+export DGD=kimi-k3-1-pro-sglang-gb300-disagg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/sglang/disagg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
@@ -258,7 +258,7 @@ kubectl apply -f recipes/kimi-k3.1-pro/sglang/disagg-gb300-agentic/deploy-gb300.
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
 
 ```bash
-export DGD=kimi-k3-1-pro-vllm-aggregate-b200
+export DGD=kimi-k3-1-pro-vllm-b200-agg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml -n ${NAMESPACE}
 ```
 
@@ -267,7 +267,7 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml -n 
 <div data-recipe-framework="vllm" data-sku="vr200" data-variant="agg">
 
 ```bash
-export DGD=kimi-k3-1-pro-vllm-aggregate-vr200
+export DGD=kimi-k3-1-pro-vllm-vr200-agg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
 ```
 
@@ -276,13 +276,15 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml -
 <div data-recipe-framework="vllm" data-sku="vr200" data-variant="disagg">
 
 ```bash
-export DGD=kimi-k3-1-pro-vllm-disagg-vr200
+export DGD=kimi-k3-1-pro-vllm-vr200-disagg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
 ```
 
 </div>
 
-Each target also has a `generic` Kustomize overlay for customization. It inherits the base model paths and hardware requirements. B200 and VR200 targets enable DSpark; separate `*-synthetic-al` overlays change draft acceptance for benchmarking.
+Each target's Kustomize overlay produces the corresponding manifest above. Customize node placement and registry credentials for your cluster before deployment; the published manifests do not include node selectors, tolerations, or image pull secrets.
+
+B200 and VR200 targets enable DSpark with natural acceptance. Their manifests include a commented synthetic-acceptance alternative for benchmarking.
 
 ## Smoke Test
 
@@ -304,14 +306,15 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Benchmark
 
-Use [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/perf/perf.yaml) to run AIPerf 0.13.0 against the deployment. It runs `aiperf profile` with the chat endpoint type and streaming on the AgentX agentic trace (`semianalysis_cc_traces_weka_062126`), with an agentic warmup and a 1200 s profiling phase. The tokenizer is read from the model path on the `shared-model-cache` PVC.
+Use [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/perf/perf.yaml) to run AIPerf 0.13.0 against the deployment. It runs `aiperf profile` with the chat endpoint type and streaming on the AgentX agentic trace (`semianalysis_cc_traces_weka_062126`), scenario `inferencex-agentx-mvp`, with an agentic warmup and a 1200 s profiling phase. The tokenizer is resolved by Hugging Face ID with `HF_HOME=/shared-model-cache`.
 
-The performance results use text-only AgentX traffic. Apply the selected benchmark variant before running AIPerf; normal serving commands above use natural acceptance.
+The performance results use text-only AgentX traffic. For B200 and VR200 benchmarking, edit the selected target's `kustomize/base/deploy.yaml`: uncomment both lines of the synthetic `SPECULATIVE_CONFIG` alternative and comment out both lines of the active natural-acceptance entry. Keep exactly one active entry per worker; update both prefill and decode for disaggregated VR200. Regenerate and apply the selected manifest before running AIPerf:
 
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200-synthetic-al.yaml -n ${NAMESPACE}
+python3 scripts/kustomize-matrix.py render recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/.kustomize-matrix.yaml
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -319,7 +322,8 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200-syntheti
 <div data-recipe-framework="vllm" data-sku="vr200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200-synthetic-al.yaml -n ${NAMESPACE}
+python3 scripts/kustomize-matrix.py render recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/.kustomize-matrix.yaml
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -327,10 +331,15 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200-synthe
 <div data-recipe-framework="vllm" data-sku="vr200" data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200-synthetic-al.yaml -n ${NAMESPACE}
+python3 scripts/kustomize-matrix.py render recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/.kustomize-matrix.yaml
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
 ```
 
 </div>
+
+Wait for the replacement workers to become Ready before measuring. Restore natural acceptance, regenerate, and reapply the manifest before returning to normal serving.
+
+The synthetic acceptance length of 3.84 was measured offline on the SpeedBench (qualitative) coding subset using the same DSpark draft length as this recipe: 7 draft tokens. The AgentX dataset and scenario above describe the throughput benchmark, not the offline acceptance-length measurement.
 
 Set these values in the Job `env` section for your target:
 
@@ -352,7 +361,7 @@ The AgentX benchmark targets use the following interactivity goals:
 
 | Workload | User output tok/s (P50) | TTFT P50 |
 | --- | ---: | ---: |
-| AgentX | ≥ 50 | < 2 s |
+| AgentX (inferencex-agentx-mvp) | ≥ 50 | < 2 s |
 
 ### Performance Results
 
@@ -360,15 +369,15 @@ All results below measure text-only traffic; the selected target is highlighted.
 
 <div className="dynamo-variant-table-wrap">
 <table className="dynamo-variant-table dynamo-kimi-comparison">
-<thead><tr><th>Workload</th><th>Recipe</th><th>Framework</th><th>SKU</th><th>GPUs</th><th>Concurrency</th><th>System Output Tokens/s</th><th>System Output Tokens/s/GPU</th><th>User Output Tokens/s (P50)</th><th>TTFT P50 (ms)</th></tr></thead>
+<thead><tr><th>Workload</th><th>Recipe</th><th>Framework</th><th>SKU</th><th>Concurrency</th><th>System Output tok/s/GPU</th><th>User output tok/s (P50)</th><th>TTFT P50 (ms)</th></tr></thead>
 <tbody>
-<tr data-highlight-target="vllm-vr200-agg"><td>AgentX</td><td>aggregated, 2 replicas</td><td>vLLM</td><td>VR200</td><td>16</td><td>180</td><td>2,448.08</td><td>153.01</td><td>57.71</td><td>1,534</td></tr>
-<tr data-highlight-target="vllm-vr200-disagg"><td>AgentX</td><td>disaggregated 2P1D</td><td>vLLM</td><td>VR200</td><td>24</td><td>174</td><td>2,932.63</td><td>122.19</td><td>73.93</td><td>1,761</td></tr>
-<tr data-highlight-target="vllm-b200-agg"><td>AgentX</td><td>aggregated</td><td>vLLM</td><td>B200</td><td>16</td><td>48</td><td>422.50</td><td>≈26.41</td><td>64.02</td><td>550.45</td></tr>
-<tr data-highlight-target="vllm-gb300-agg"><td>AgentX</td><td>aggregated TP8</td><td>vLLM</td><td>GB300</td><td>8 (2 nodes)</td><td>32</td><td>≈319.12</td><td>39.89</td><td>76.7</td><td>428</td></tr>
-<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX</td><td>disaggregated 2P1D</td><td>vLLM</td><td>GB300</td><td>24</td><td>48</td><td>≈553.92</td><td>23.08</td><td>87.1</td><td>656</td></tr>
-<tr data-highlight-target="vllm-gb300-agg"><td>AgentX</td><td>aggregated multimodal overlay (pre-release)</td><td>vLLM</td><td>GB300</td><td>8 (2 nodes)</td><td>32</td><td>≈316.48</td><td>39.56</td><td>70.9</td><td>440</td></tr>
-<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX</td><td>disaggregated multimodal overlay (pre-release)</td><td>vLLM</td><td>GB300</td><td>24</td><td>48</td><td>≈561.12</td><td>23.38</td><td>85.7</td><td>693</td></tr>
+<tr data-highlight-target="vllm-vr200-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated, 2 replicas</td><td>vLLM</td><td>VR200</td><td>180</td><td>153.01</td><td>57.71</td><td>1,534</td></tr>
+<tr data-highlight-target="vllm-vr200-disagg"><td>AgentX (inferencex-agentx-mvp)</td><td>disaggregated 2P1D</td><td>vLLM</td><td>VR200</td><td>174</td><td>122.19</td><td>73.93</td><td>1,761</td></tr>
+<tr data-highlight-target="vllm-b200-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated, 1 replica</td><td>vLLM</td><td>B200</td><td>48</td><td>≈26.41</td><td>64.02</td><td>550.45</td></tr>
+<tr data-highlight-target="vllm-gb300-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated TP8, 1 replica</td><td>vLLM</td><td>GB300</td><td>32</td><td>39.89</td><td>76.7</td><td>428</td></tr>
+<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX (inferencex-agentx-mvp)</td><td>disaggregated 2P1D</td><td>vLLM</td><td>GB300</td><td>48</td><td>23.08</td><td>87.1</td><td>656</td></tr>
+<tr data-highlight-target="vllm-gb300-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated multimodal overlay, 1 replica (pre-release)</td><td>vLLM</td><td>GB300</td><td>32</td><td>39.56</td><td>70.9</td><td>440</td></tr>
+<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX (inferencex-agentx-mvp)</td><td>disaggregated multimodal overlay (pre-release)</td><td>vLLM</td><td>GB300</td><td>48</td><td>23.38</td><td>85.7</td><td>693</td></tr>
 </tbody>
 </table>
 </div>
@@ -377,6 +386,18 @@ All results below measure text-only traffic; the selected target is highlighted.
 
 
 ## Compare All Targets
+
+| Target | GPUs | Parallelism | Validation |
+| --- | ---: | --- | --- |
+| [GB300 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300.yaml) | 8 | TP8 per worker | Text-only benchmark |
+| [GB300 vLLM aggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300-multimodal.yaml) | 8 | TP8 per worker | Text-only benchmark with pre-release weights; image input validated |
+| [GB300 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300.yaml) | 24 | TP8 per worker | Text-only benchmark |
+| [GB300 vLLM disaggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300-multimodal.yaml) | 24 | TP8 per worker | Text-only benchmark with pre-release weights; image input validated |
+| [GB300 SGLang aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/deploy-gb300.yaml) | 8 | TP8 per worker | Functional only; no performance claim |
+| [GB300 SGLang disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/sglang/disagg-gb300-agentic/deploy-gb300.yaml) | 16 | TP8 per worker | Functional only; no performance claim |
+| [B200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml) | 16 | TP8 × PP2 | Text-only benchmark |
+| [VR200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml) | 16 | TP8 per worker | Text-only benchmark |
+| [VR200 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml) | 24 | TP8 per worker | Text-only benchmark |
 
 GPU counts below describe the checked-in manifests. P counts prefill workers; D counts decode workers.
 
@@ -398,8 +419,7 @@ GPU counts below describe the checked-in manifests. P counts prefill workers; D 
 ## Notes
 
 - SGLang targets are experimental, text-only, and functional-only. No SGLang performance claims are made. Use the vLLM multimodal overlays for image and video input.
-The SGLang frontends run the Dynamo chat processor (`--dyn-chat-processor dynamo`, `DYN_SGL_FRONTEND_DECODING=true`). With the SGLang chat processor, strict `json_schema` output with thinking enabled was returned in `reasoning_content`; if you switch processors, disable thinking for `json_schema` requests (`"chat_template_kwargs": {"thinking": false}`).
-- Synthetic draft acceptance is for benchmarking. Use the natural-acceptance variants for normal serving.
+- Synthetic draft acceptance is for benchmarking. Keep the natural-acceptance configuration active for normal serving.
 - Disaggregated performance depends on your fabric; RDMA tuning is cluster-specific.
 
 ## Source

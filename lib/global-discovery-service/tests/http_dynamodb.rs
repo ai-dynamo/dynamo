@@ -56,6 +56,7 @@ async fn start(store: Arc<DynamoDbPoolStore>) -> (String, CancellationToken) {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
         registrar: Some(registrar),
+        router_registrar: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -150,7 +151,7 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
     let (_, routers) = get_json(&b, "/routers").await;
     assert_eq!(
         routers,
-        json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]})
+        json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}], "complete": true})
     );
 
     // A lease later, both lists are complete at their next poll, and the

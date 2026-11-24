@@ -164,7 +164,8 @@ pub struct WorkerConfig {
     /// Optional KV-state event endpoint. When unset, KV state uses the serving endpoint.
     pub kv_state_endpoint: Option<EndpointId>,
     /// HF repo name or local model path. Empty means name-only registration
-    /// (no tokenizer / chat-template on the card).
+    /// (no tokenizer / chat-template on the card). An HF repo is fetched
+    /// without weight files; the engine loads weights itself.
     pub model_name: String,
     /// Public-facing model name (operator CLI override). When unset, the
     /// served name falls back to `EngineConfig.served_model_name`, then to
@@ -2299,7 +2300,8 @@ async fn build_local_model(
         })? {
             PathBuf::from(&source)
         } else {
-            LocalModel::fetch(&source, false).await.map_err(|e| {
+            // Skip weights: the engine loaded them in start(); the card needs only metadata.
+            LocalModel::fetch(&source, true).await.map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::CannotConnect),
                     format!("fetch '{source}': {e}"),
@@ -2707,6 +2709,44 @@ mod tests {
         assert!(local_model.card().media_decoder.is_some());
         assert!(local_model.card().media_fetcher.is_some());
         assert_eq!(local_model.card().aliases, ["media-alias"]);
+    }
+
+    /// A weights-free HF cache is enough to register: the engine loads weights itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn build_local_model_uses_weights_free_hf_cache() {
+        use dynamo_runtime::config::environment_names::model::huggingface;
+
+        // hf-hub cache layout whose snapshot is the metadata-only fixture.
+        let cache = tempfile::TempDir::new().unwrap();
+        let repo = cache.path().join("models--test-org--weights-free");
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::create_dir_all(repo.join("snapshots")).unwrap();
+        std::fs::write(repo.join("refs/main"), "rev").unwrap();
+        std::os::unix::fs::symlink(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct"
+            ),
+            repo.join("snapshots/rev"),
+        )
+        .unwrap();
+
+        let config = WorkerConfig {
+            model_name: "test-org/weights-free".to_string(),
+            ..WorkerConfig::default()
+        };
+        temp_env::async_with_vars(
+            [
+                (huggingface::HF_HUB_CACHE, cache.path().to_str()),
+                // Offline mode accepts a weights-free cache even without the fix.
+                (huggingface::HF_HUB_OFFLINE, None),
+                (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
+            ],
+            build_local_model(&config, &EngineConfig::default(), false),
+        )
+        .await
+        .expect("a weights-free cache must be enough to register");
     }
 
     #[test]

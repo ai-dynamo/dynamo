@@ -27,8 +27,8 @@
 //! `Estimated`, rather than being dropped as expired while it still
 //! heartbeats there.
 //!
-//! The store keeps registrations for every kind of pool discovery; router
-//! replicas come from configuration or MCS, not from this store.
+//! The store keeps pool registrations for every discovery mode. `router_store()`
+//! shares this table and client with the separately partitioned router directory.
 
 pub mod codec;
 pub mod keys;
@@ -502,6 +502,25 @@ impl DynamoDbPoolStore {
             polling: OnceLock::new(),
             stop: CancellationToken::new(),
         })
+    }
+
+    /// A router directory sharing this pool store's checked table and client.
+    pub fn router_store(&self) -> super::routers::RouterStore {
+        let config = DynamoDbConfig {
+            table: self.shared.table.clone(),
+            region: self.shared.region.clone(),
+            endpoint: None,
+            poll_interval: self.poll_interval,
+            lease_skew: self.shared.lease_skew,
+            replication_grace: self.shared.replication_grace,
+            ensure_table: false,
+        };
+        super::routers::RouterStore::dynamodb(
+            self.lease,
+            &config,
+            self.shared.client.clone(),
+            self.shared.clock.clone(),
+        )
     }
 
     /// Every trait method runs in a Tokio runtime, so the spawn is safe.

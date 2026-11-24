@@ -364,3 +364,23 @@ succeeds, so the Pod stays unready meanwhile.
 - A sharded `pk` if a deployment exceeds one partition.
 - DynamoDB Streams instead of polling if a consumer of `list_and_watch`
   needs sub-second fan-out.
+
+## Router membership
+
+`--router-discovery registrations` shares this table using `pk = "ROUTERS"` and `sk = replica`.
+Each item stores `url` (string), `writer_region` (string), `renewed_at_ms` (number), `lease_ms`
+(number), and the existing `expires_at` TTL (Unix seconds, renewal plus seven days).
+`UpdateItem` requires an absent row or an unchanged URL/writer region and nondecreasing renewal
+time. The same incarnation cannot move endpoints or regions; choose a new globally unique ID.
+These conditions serialize writes in one region only, not across MREC Global Table replicas.
+
+Every `GET /routers` reads a strongly consistent paginated regional `Query`, rather than using the
+pool polling cache. A failed page or invalid row fails the snapshot with 503. Lease skew and
+cross-region replication grace match pool semantics. `complete: false` marks startup, one lease
+after successful recovery from a storage failure, and remote registrations retained within grace.
+Clients keep missing known entries until a complete response confirms removal. A new remote row
+cannot be seen before it replicates; completeness is a best-effort lease signal, not global consensus.
+
+No new table or IAM actions are required: Query and UpdateItem on this table, plus DescribeTable
+for the existing startup check. If IAM restricts partition keys, allow both `pool` and `ROUTERS`.
+Router processes call GDS over HTTP and need no discovery-table credentials.

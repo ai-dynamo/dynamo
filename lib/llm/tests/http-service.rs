@@ -4,6 +4,7 @@
 use anyhow::Error;
 use async_stream::stream;
 use base64::Engine as _;
+use dynamo_error::http::HttpError;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -21,7 +22,6 @@ use dynamo_llm::{
     endpoint_type::EndpointType,
     http::service::{
         Metrics,
-        error::HttpError,
         metrics::{Endpoint, ErrorType, RequestType, Status},
         service_v2::{BackendErrorCheck, HttpService},
     },
@@ -4462,7 +4462,7 @@ async fn test_reject_media_disabled_preserves_anthropic_model_lookup_precedence(
         .json(&serde_json::json!({
             "model": "unregistered", "max_tokens": 16,
             "messages": [{"role": "user", "content": [{
-                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png", "media_type": "image/png", "data": ""}
+                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}
             }]}]
         }))
         .send()

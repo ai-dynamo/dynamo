@@ -1,0 +1,15 @@
+.local/
+.venv/
+deps/
+results/
+jobs/
+__pycache__/
+*.pyc
+.env
+.trace/
+.build/
+objectstore-s3.json
+oracle-job.yaml
+golden-template.yaml
+golden-job.yaml
+batch-job.yaml

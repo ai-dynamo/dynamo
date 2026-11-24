@@ -6536,6 +6536,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
     let uses_unified = dynamo_runtime::config::selected_parser_version().unwrap()
         != dynamo_runtime::config::ParserVersion::V1;
     let q = "q".repeat(4096);
+    let mut k3_ids = std::collections::BTreeSet::new();
     let shapes = [
         (
             "kimi_k2",
@@ -6545,7 +6546,6 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
             "\"}",
             "<|tool_call_end|>",
             "<|tool_calls_section_end|>",
-            "functions.write_file:0",
         ),
         (
             "kimi_k3",
@@ -6555,7 +6555,6 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
             "<|close|>argument<|sep|>",
             "<|close|>call<|sep|>",
             "<|close|>tools<|sep|>",
-            "write_file:0",
         ),
         (
             "kimi-k3",
@@ -6565,10 +6564,9 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
             "\"}<|close|>json<|sep|>",
             "<|close|>call<|sep|>",
             "<|close|>tools<|sep|>",
-            "write_file:0",
         ),
     ];
-    for (tool, reason, warmup, header, value_end, call_end, section_end, expected_id) in shapes {
+    for (tool, reason, warmup, header, value_end, call_end, section_end) in shapes {
         for size in [7, 1024] {
             for thinking in ["default", "disabled", "prefill"] {
                 for tail in ["complete", "truncated", "sibling", "unclosed_valid_json"] {
@@ -6627,18 +6625,28 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                             chunks.push(item.expect("source remains open"));
                         }
                         let early = kimi_native_calls(&chunks);
-                        if uses_unified {
+                        let first_id = if uses_unified {
                             assert_eq!(early.len(), 1, "{tool}/{size}/{thinking}");
                             let call = early.get(&0).unwrap();
-                            assert_eq!(call.id.as_deref(), Some(expected_id));
+                            let id = call.id.as_deref().expect("first chunk carries an ID");
+                            if tool == "kimi_k2" {
+                                assert_eq!(id, "functions.write_file:0");
+                            } else {
+                                let uuid = uuid::Uuid::parse_str(id.strip_prefix("call-").unwrap())
+                                    .unwrap();
+                                assert_eq!(uuid.get_version_num(), 4);
+                                assert!(k3_ids.insert(id.to_owned()), "K3 ID reused: {id}");
+                            }
                             assert_eq!(call.name.as_deref(), Some("write_file"));
                             assert_eq!(
                                 call.arguments.bytes().filter(|byte| *byte == b'q').count(),
                                 3072
                             );
+                            Some(id.to_owned())
                         } else {
                             assert!(early.is_empty(), "legacy calls remain buffered");
-                        }
+                            None
+                        };
                         if tail != "truncated" {
                             tx.unbounded_send(kimi_native_chunk(
                                 &format!("{}{value_end}", &q[3072..]),
@@ -6688,7 +6696,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                             .collect();
                         let calls = kimi_native_calls(&chunks);
                         if uses_unified && tail != "truncated" {
-                            assert_eq!(calls[&0].id.as_deref(), Some(expected_id));
+                            assert_eq!(calls[&0].id.as_deref(), first_id.as_deref());
                             assert_eq!(
                                 serde_json::from_str::<Value>(&calls[&0].arguments).unwrap(),
                                 serde_json::json!({"count":7,"content":q})
@@ -6722,7 +6730,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                                 serde_json::json!({"count":7,"content":q})
                             );
                             if uses_unified {
-                                assert_eq!(final_calls[0].id, expected_id);
+                                assert_eq!(Some(final_calls[0].id.as_str()), first_id.as_deref());
                             }
                         }
                         assert_eq!(
@@ -6789,6 +6797,7 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
     for (parser, reasoning) in parser_pairs {
         let preprocessor = build_preprocessor(reasoning, parser);
         let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let requires_complete_call = include_default_on && parser == Some("hermes");
         for finish in [
             None,
             Some(FinishReason::Stop),
@@ -6797,6 +6806,16 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
             Some(FinishReason::ContentFilter),
         ] {
             for arguments in [r#"{"location":"SF"}"#, r#"{"location":"SF""#, ""] {
+                let valid_json = serde_json::from_str::<serde_json::Value>(arguments).is_ok();
+                // Hermes unified parsing completes empty fragments only with a tool terminal.
+                let complete =
+                    valid_json || (arguments.is_empty() && finish == Some(FinishReason::ToolCalls));
+                let expected_finish = match finish {
+                    Some(FinishReason::Length) => FinishReason::Length,
+                    Some(FinishReason::ContentFilter) => FinishReason::ContentFilter,
+                    _ if requires_complete_call && !complete => FinishReason::Length,
+                    _ => FinishReason::ToolCalls,
+                };
                 let mixed_modes: &[bool] = if parser == Some("deepseek_v41") {
                     &[false, true]
                 } else {
@@ -6855,11 +6874,12 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                             .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
                             .collect();
                         assert_eq!(streamed, arguments, "stream {parser:?}/{finish:?}");
-                        if parser == Some("deepseek_v41")
-                            && matches!(
-                                finish,
-                                None | Some(FinishReason::Stop | FinishReason::ToolCalls)
-                            )
+                        if requires_complete_call
+                            || (parser == Some("deepseek_v41")
+                                && matches!(
+                                    finish,
+                                    None | Some(FinishReason::Stop | FinishReason::ToolCalls)
+                                ))
                         {
                             let streamed_finish = responses
                                 .iter()
@@ -6869,8 +6889,8 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                                 .next_back();
                             assert_eq!(
                                 streamed_finish,
-                                Some(FinishReason::ToolCalls),
-                                "legacy stream {arguments}/{finish:?}/mixed={mixed}/separate={separate_terminal}"
+                                Some(expected_finish),
+                                "stream finish {parser:?}/{arguments}/{finish:?}/mixed={mixed}/separate={separate_terminal}"
                             );
                         }
                         let response = NvCreateChatCompletionResponse::from_annotated_stream(
@@ -6883,8 +6903,7 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                         .await
                         .unwrap();
                         let choice = &response.inner.choices[0];
-                        let retained = finish != Some(FinishReason::Length)
-                            || serde_json::from_str::<serde_json::Value>(arguments).is_ok();
+                        let retained = expected_finish != FinishReason::Length || valid_json;
                         assert_eq!(
                             choice.message.tool_calls.is_some(),
                             retained,
@@ -6895,18 +6914,8 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                             assert_eq!(call.id, "backend-call");
                             assert_eq!(call.function.name, "get_weather");
                             assert_eq!(call.function.arguments, arguments);
-                            assert_eq!(
-                                choice.finish_reason,
-                                Some(match finish {
-                                    Some(FinishReason::Length) => FinishReason::Length,
-                                    Some(FinishReason::ContentFilter) =>
-                                        FinishReason::ContentFilter,
-                                    _ => FinishReason::ToolCalls,
-                                })
-                            );
-                        } else {
-                            assert_eq!(choice.finish_reason, Some(FinishReason::Length));
                         }
+                        assert_eq!(choice.finish_reason, Some(expected_finish));
                         assert_eq!(
                             match &choice.message.content {
                                 Some(ChatCompletionMessageContent::Text(text)) => text.as_str(),
@@ -6934,7 +6943,7 @@ async fn explicit_v2_rejects_legacy_and_mixed_stream_parser_pairs() {
         return;
     }
     for (reasoning, parser) in [
-        (None, Some("hermes")),
+        (None, Some("nemotron_deci")),
         (Some("qwen3"), Some("deepseek_v4")),
         (Some("qwen3"), Some("kimi_k2")),
     ] {

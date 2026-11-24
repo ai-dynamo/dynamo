@@ -97,6 +97,23 @@ impl NamespaceFilter {
     pub fn is_global(&self) -> bool {
         matches!(self, NamespaceFilter::Global)
     }
+
+    /// The discovery query for the model cards this filter can match: only the namespace's
+    /// cards for an exact filter, so discovery reads and watches just that namespace, and all
+    /// cards otherwise, because a namespace prefix is not a discovery path. Callers still
+    /// apply the filter to what the query returns.
+    pub fn model_query(&self) -> crate::discovery::DiscoveryQuery {
+        match self {
+            NamespaceFilter::Exact(namespace) => {
+                crate::discovery::DiscoveryQuery::NamespacedModels {
+                    namespace: namespace.clone(),
+                }
+            }
+            NamespaceFilter::Global | NamespaceFilter::Prefix(_) => {
+                crate::discovery::DiscoveryQuery::AllModels
+            }
+        }
+    }
 }
 
 pub fn is_global_namespace(namespace: &str) -> bool {
@@ -106,6 +123,24 @@ pub fn is_global_namespace(namespace: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::DiscoveryQuery;
+
+    #[test]
+    fn model_query_reads_only_an_exact_namespace() {
+        assert!(matches!(
+            NamespaceFilter::Exact("pool-7".into()).model_query(),
+            DiscoveryQuery::NamespacedModels { namespace } if namespace == "pool-7"
+        ));
+        // A prefix is not a discovery path, so it and the global filter list every card.
+        assert!(matches!(
+            NamespaceFilter::Prefix("pool".into()).model_query(),
+            DiscoveryQuery::AllModels
+        ));
+        assert!(matches!(
+            NamespaceFilter::Global.model_query(),
+            DiscoveryQuery::AllModels
+        ));
+    }
 
     #[test]
     fn test_from_namespace_and_prefix_global() {

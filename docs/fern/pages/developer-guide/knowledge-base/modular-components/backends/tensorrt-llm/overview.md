@@ -47,18 +47,17 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Disaggregated Serving** | — | | | | | | | | | |
-| **KV-Aware Routing** | ✅ | — | | | | | | | | |
-| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | Unsupported | Unsupported | Unsupported | — | | | | | | |
-| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | Unsupported | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | Unsupported | 🚧 | — | | | | |
-| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | Unsupported | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
-| **LoRA** | | | | Unsupported | | | | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | Unsupported | ✅ | ✅ | ✅ | | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | Unsupported | — | ✅ | ✅ | | ✅ | — |
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | — | | | | |
+| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
+| **LoRA** | | | | | | | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | — | ✅ | ✅ | | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source](multimodal.md))
@@ -66,6 +65,10 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 > 3. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
 
 ## Prerequisites
+
+The Dynamo TensorRT-LLM container uses the NIXL library and Python bindings provided by its upstream TensorRT-LLM release image. Multimodal embedding transfers still use those bindings. Do not install a second NIXL distribution or preload `libnixl` globally.
+
+Starting with TensorRT-LLM 1.4.0rc3, the upstream image includes the AWS EFA installer and a NIXL LIBFABRIC plugin. The AWS EFA variant replaces that plugin with one built from its `trtllm.nixl_ref` build setting, and keeps upstream's NIXL libraries and Python bindings. The plugin and the upstream runtime are both NIXL 1.5.2 and use plugin API 1. Updating either version requires compatibility validation; the build rejects unqualified version pairs.
 
 The deprecated KVBM connector and event consolidator have been removed. Remove `--connector kvbm` and KVBM-specific settings from existing deployments. Native KV-event publishing through `--publish-kv-events` and KV-aware routing remain supported.
 

@@ -444,6 +444,19 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
 
         **Notes:** `[THINK]...[/THINK]`
       </Accordion>
+      <Accordion title="Mistral v11+ tokenizers (tekken.json), including Mistral Large 4">
+        **Parser:** `mistral`, served by the `dynamo-parsers-v2` unified family `mistral_4`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
+
+        **Notes:** Output starts as content and `[THINK]` opens reasoning. `reasoning_effort` controls whether the model thinks; a thought it writes stays in `reasoning_content` even with thinking disabled.
+
+        **Input controls:** The public Mistral Large 4 FP8 and NVFP4 checkpoints accept `reasoning_effort` `low`, `medium`, and `high`, with `high` as the default. dynamo.frontend's Mistral formatter rejects any other value, including `none`, with HTTP 400, as mistral-common does. Omitted or null effort keeps the checkpoint default. Thinking switches without an effort, such as Anthropic `thinking.type: "disabled"` or `chat_template_kwargs.enable_thinking: false`, do not change the effort, so the checkpoint default applies.
+
+        **Tokenizer selection:** When `params.json` and supported v13/v15 `tekken.json` artifacts are present, dynamo.frontend prefers its Tekken tokenizer and Mistral formatter even if the repository also includes HF artifacts. This includes both public Large 4 checkpoints. Bundled HF template defaults can differ from this formatter. An explicit custom template retains the HF path when `config.json` and an HF tokenizer are available; a native-only checkpoint rejects a custom template.
+      </Accordion>
     </AccordionGroup>
   </Accordion>
 
@@ -476,7 +489,7 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
   </Accordion>
 
   <Accordion title="Muse Glimmer">
-    **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+    **Parser:** `muse_glimmer`. `muse` is a deprecated alias of `muse_glimmer` and will be removed in a future release.
 
     **Notes:** Unified recipient-routed channels; `to=self` carries reasoning. No V1 reasoning parser exists.
   </Accordion>

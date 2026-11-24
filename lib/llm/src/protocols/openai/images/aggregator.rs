@@ -25,7 +25,9 @@ impl StreamAggregable for NvImagesResponse {
     /// Token `usage` keeps the first chunk's value: no image backend reports
     /// it today, and summing would double count a backend that repeats
     /// running totals. Image accounting folds per
-    /// [`ImagesResponseNvExt::merge`](super::ImagesResponseNvExt::merge).
+    /// [`ImagesResponseNvExt::merge`](super::ImagesResponseNvExt::merge),
+    /// except that a chunk carrying images without accounting also clears
+    /// `num_inference_steps`, before or after the chunks that report it.
     /// `data` extends. The request-level fields come from the first chunk
     /// that carries images: `created` stays, while `size` and `output_format`
     /// are cleared when a later chunk disagrees, as are `background` and
@@ -35,7 +37,19 @@ impl StreamAggregable for NvImagesResponse {
         if self.usage.is_none() {
             self.usage = next.usage;
         }
-        if let Some(next) = next.nvext {
+
+        let mut next_nvext = next.nvext;
+        let had_images = !self.data.is_empty();
+        let current = self.nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
+        let reported = next_nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
+        match (current, reported) {
+            // These images have no step count.
+            (Some(current), None) if !next.data.is_empty() => current.num_inference_steps = None,
+            // Earlier images had no step count, even if this report carries no images.
+            (None, Some(reported)) if had_images => reported.num_inference_steps = None,
+            _ => {}
+        }
+        if let Some(next) = next_nvext {
             self.nvext.get_or_insert_with(Default::default).merge(next);
         }
 
@@ -208,5 +222,85 @@ mod tests {
         assert_eq!(empty.nvext, Some(accounting(2, Some(4))));
         assert!(empty.data.is_empty());
         assert!(empty.usage.is_none());
+    }
+
+    fn image_chunk(image: &str, nvext: Option<ImagesResponseNvExt>) -> NvImagesResponse {
+        let mut chunk = response(100, Some("png"), Some("37x19"), image);
+        chunk.nvext = nvext;
+        chunk
+    }
+
+    /// Start with no images or accounting so the first chunk also exercises `merge`.
+    fn merge_all(chunks: Vec<NvImagesResponse>) -> NvImagesResponse {
+        let mut merged = NvImagesResponse::empty();
+        for chunk in chunks {
+            merged.merge(chunk);
+        }
+        merged
+    }
+
+    fn images(response: &NvImagesResponse) -> Vec<&str> {
+        response
+            .data
+            .iter()
+            .map(|image| image.b64_json.as_deref().unwrap())
+            .collect()
+    }
+
+    /// Missing extensions and missing usage must keep steps absent through later reports.
+    #[test]
+    fn image_chunk_without_accounting_clears_step_count() {
+        // A chunk can omit accounting with no `nvext` or with `nvext: {}`.
+        let missing_shapes = [None, Some(ImagesResponseNvExt { usage: None })];
+        for missing in missing_shapes {
+            let reported = || Some(accounting(1, Some(4)));
+            let mut terminal = NvImagesResponse::empty();
+            terminal.nvext = reported();
+            let cases = [
+                (
+                    "missing then image-free reporting",
+                    vec![image_chunk("a", missing.clone()), terminal],
+                    1,
+                ),
+                (
+                    "reporting then missing",
+                    vec![
+                        image_chunk("a", reported()),
+                        image_chunk("b", missing.clone()),
+                    ],
+                    1,
+                ),
+                (
+                    "missing then reporting",
+                    vec![
+                        image_chunk("a", missing.clone()),
+                        image_chunk("b", reported()),
+                    ],
+                    1,
+                ),
+                (
+                    "a later matching report does not restore it",
+                    vec![
+                        image_chunk("a", reported()),
+                        image_chunk("b", missing.clone()),
+                        image_chunk("c", reported()),
+                    ],
+                    2,
+                ),
+            ];
+            for (case, chunks, output_images) in cases {
+                let expected_images: Vec<String> = chunks
+                    .iter()
+                    .flat_map(|chunk| images(chunk).into_iter().map(str::to_owned))
+                    .collect();
+                let merged = merge_all(chunks);
+                assert_eq!(
+                    merged.nvext,
+                    Some(accounting(output_images, None)),
+                    "{case}, missing shape {missing:?}"
+                );
+                assert_eq!(images(&merged), expected_images, "{case}");
+            }
+        }
     }
 }

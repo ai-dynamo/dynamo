@@ -25,15 +25,21 @@ import (
 )
 
 type preservedSpecEnvelope[T any] struct {
-	Version int                `json:"version"`
-	Spec    T                  `json:"spec"`
+	// +required
+	Version int `json:"version"`
+	// +required
+	Spec T `json:"spec"`
+	// +optional
 	RawJSON []preservedRawJSON `json:"rawJSON,omitempty"`
 }
 
 type preservedRawJSON struct {
+	// +required
 	Path string `json:"path"`
-	Raw  []byte `json:"raw,omitempty"`
-	Nil  bool   `json:"nil,omitempty"`
+	// +optional
+	Raw []byte `json:"raw,omitempty"`
+	// +optional
+	Nil bool `json:"nil,omitempty"`
 }
 
 func marshalPreservedSpec[T any](spec T, sanitize func(*T, *[]preservedRawJSON)) ([]byte, error) {

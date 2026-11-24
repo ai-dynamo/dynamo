@@ -42,6 +42,7 @@
 //!     pools: Arc::new(RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease)),
 //!     routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
 //!     registrar: Some(registrations),
+//!     router_registrar: None,
 //! };
 //! service::serve(listener, backend, None, shutdown).await?;
 //! ```

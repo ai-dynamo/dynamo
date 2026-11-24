@@ -18,9 +18,9 @@ pub struct ThunderAgentConfig {
     pub pause_threshold: f64,
     pub pause_target: f64,
     pub resume_hysteresis: f64,
+    /// Longest a queued turn waits for room before it is dispatched anyway.
     pub resume_timeout_seconds: f64,
     pub session_retention_seconds: f64,
-    pub scheduler_interval_seconds: f64,
     pub acting_token_weight: f64,
     pub acting_decay_tau_seconds: f64,
     pub buffer_per_program: usize,
@@ -35,7 +35,6 @@ impl Default for ThunderAgentConfig {
             resume_hysteresis: 0.10,
             resume_timeout_seconds: 1_800.0,
             session_retention_seconds: 1_800.0,
-            scheduler_interval_seconds: 5.0,
             acting_token_weight: 1.0,
             acting_decay_tau_seconds: 1.0,
             buffer_per_program: 100,
@@ -70,10 +69,6 @@ impl ThunderAgentConfig {
             self.session_retention_seconds,
             "session_retention_seconds must be positive",
         )?;
-        validate_duration(
-            self.scheduler_interval_seconds,
-            "scheduler_interval_seconds must be positive",
-        )?;
         if !self.acting_token_weight.is_finite() || self.acting_token_weight <= 0.0 {
             return Err(ConfigError::Invalid(
                 "acting_token_weight must be finite and positive",
@@ -98,10 +93,6 @@ impl ThunderAgentConfig {
 
     pub(crate) fn session_retention(&self) -> Duration {
         Duration::from_secs_f64(self.session_retention_seconds)
-    }
-
-    pub(crate) fn scheduler_interval(&self) -> Duration {
-        Duration::from_secs_f64(self.scheduler_interval_seconds)
     }
 }
 
@@ -137,11 +128,19 @@ mod tests {
         );
         assert!(
             ThunderAgentConfig {
-                scheduler_interval_seconds: 0.0,
+                resume_timeout_seconds: 0.0,
                 ..Default::default()
             }
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn rejects_the_removed_scheduler_interval() {
+        let error =
+            serde_json::from_str::<ThunderAgentConfig>(r#"{"scheduler_interval_seconds": 5}"#)
+                .unwrap_err();
+        assert!(error.to_string().contains("scheduler_interval_seconds"));
     }
 }

@@ -19,7 +19,7 @@ Every replica admitted to a worker set must have the same model deployment card 
 
 When a worker set advertises `--router-mode kv`, restate every non-default setting that it needs. An omitted worker flag selects the shared default, not the Frontend's tuned value. This distinction matters most when the Frontend and workers receive different environment variables, such as separate Kubernetes services.
 
-For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. Check the `Activating prefill router` log line to confirm the resolved configuration for each hop.
+For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. The Frontend logs the resolved configuration of each worker role when it activates the role's router: check the `Activating router` line for an aggregated or decode worker set and the `Activating prefill router` line for the prefill hop.
 
 ### Worker-Set Admission and Succession
 
@@ -79,7 +79,7 @@ its configuration even if the endpoint is unchanged.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.mdx) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
+- `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and per-role worker-selection policies. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
@@ -114,30 +114,44 @@ link no catalog and reject a configured policy type at startup.
 | Policy type | Behavior |
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
+| `round-robin` | One shared rotation over the eligible workers. |
+| `random` | A uniform random eligible worker. |
+| `least-loaded` | The eligible worker with the fewest active requests, ties broken at random. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
+| `kvcr` | The default cost model plus credit for the blocks a worker could copy from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. Takes the same parameters as `dynamo-default-cost-fn`. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
 
-Write the instance into the same YAML file that `--router-policy-config` already points at:
+Name the policy type under each worker role in the same YAML file that `--router-policy-config`
+already points at:
 
 ```yaml
 worker_selection:
   aggregated: dynamo-two-tier-cost-fn
   prefill: dynamo-two-tier-cost-fn
   decode: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
 ```
 
-`aggregated`, `prefill`, `decode`, and `encode` each select a named instance, so prefill and decode
-pools can run different policies. An omitted stage falls back to the built-in selector. `name` is
-yours to choose; `type` must be one of the policy types above.
+`aggregated`, `prefill`, `decode`, and `encode` each select a policy, so prefill and decode pools
+can run different policies. An omitted role falls back to the built-in selector; one role never
+inherits another role's selection. A bare string is a policy type from the table above with its
+default parameters. To tune a policy, write a mapping with `type` and `parameters` instead (see
+[Configure the Default Policy](#configure-the-default-policy)).
+
+> [!NOTE]
+> Before v1.7, the YAML listed `instances` (each with a `name`, a `type`, and `parameters`) and each
+> role referenced an instance by name. That form still works and logs a deprecation warning; it is
+> scheduled for removal in v1.8. Move each instance's `type` and `parameters` under the role that
+> selected it.
 
 ```bash
-python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
+python3 -m dynamo.frontend --router-policy-config worker-selection.yaml
 ```
+
+The file selects each role's policy, so the frontend takes no `--router-mode`. The frontend
+rejects a policy file passed with any `--router-mode` other than `kv`; `--router-mode kv` may
+still accompany one.
 
 #### Configure the Default Policy
 
@@ -145,22 +159,21 @@ Set the default policy’s scoring parameters in the YAML passed to `--router-po
 
 ```yaml
 worker_selection:
-  aggregated: tuned-default
-  prefill: tuned-default
-  decode: tuned-default
-  instances:
-    - name: tuned-default
-      type: dynamo-default-cost-fn
-      parameters:
-        overlap_score_credit: 1.0
-        overlap_score_credit_decay: 0.0
-        prefill_load_scale: 1.0
-        decode_active_request_weight: 0.0
-        shared_cache_multiplier: 0.5
-        router_temperature: 0.0
+  aggregated:
+    type: dynamo-default-cost-fn
+    parameters:
+      overlap_score_credit: 1.0
+      overlap_score_credit_decay: 0.0
+      prefill_load_scale: 1.0
+      decode_active_request_weight: 0.0
+      shared_cache_multiplier: 0.5
+      router_temperature: 0.0
 ```
 
-Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The same multiplier credits the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), such as from KVCR. Without shared cache it defaults to `0`, so set it to enable that credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
+Give `prefill` and `decode` their own `type` and `parameters` the same way when those pools need
+tuning; a role without a selection keeps the default selector with its flag-derived parameters.
+
+Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The default policy does not credit the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints); select `kvcr`, which applies the same multiplier to them. Without shared cache the multiplier defaults to `0`, so set it to enable that credit. Roles omitted from `worker_selection` keep the default selector.
 
 > [!WARNING]
 > The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
@@ -188,7 +201,7 @@ The optional `router` section configures shared cache and tracking infrastructur
 | Replica synchronization and identity | `router_replica_sync`, `router_tracking_hash`, `router_tracking_key_file`, `router_tracking_key_id` |
 | Cache-tier accounting | `host_cache_hit_weight`, `disk_cache_hit_weight` |
 
-Values and defaults match the corresponding [frontend options](../../../../reference/components/frontend-configuration.mdx). Policy scoring parameters belong under `worker_selection.instances[].parameters`.
+Values and defaults match the corresponding [frontend options](../../../../reference/components/frontend-configuration.mdx). Policy scoring parameters belong under each role's `parameters` mapping in `worker_selection`.
 
 ##### Replace the Load-Aware Preset
 
@@ -210,17 +223,18 @@ Start with `--router-mode kv --router-policy-config worker-selection.yaml`. The 
 
 #### Tune a Policy
 
-A policy instance may carry a `parameters` mapping that the policy itself validates at startup.
-Omitting it keeps every default, so `dynamo-two-tier-cost-fn` with no `parameters` reproduces the
-experimental router exactly. Add any subset to tune it:
+A role's policy may carry a `parameters` mapping that the policy itself validates at startup.
+Omitting it keeps every default, so a bare `dynamo-two-tier-cost-fn` reproduces the experimental
+router exactly. Add any subset to tune it:
 
 ```yaml
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
-      parameters:
-        cache_threshold: 0.5
-        balance_abs_threshold: 32
-        balance_rel_threshold: 1.1
+worker_selection:
+  aggregated:
+    type: dynamo-two-tier-cost-fn
+    parameters:
+      cache_threshold: 0.5
+      balance_abs_threshold: 32
+      balance_rel_threshold: 1.1
 ```
 
 | Parameter | Default | Meaning |
@@ -258,7 +272,8 @@ Each worker pool keeps its own bindings, so prefill and decode stages bind sessi
 
 `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every stage. `--router-prefill-policy` and
 `--router-decode-policy`, and their `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY`
-environment variables, override one stage each. Precedence for a stage is: stage flag, stage
+environment variables, override one stage each. An override value is a policy type, which runs with
+its default parameters, or `default`. Precedence for a stage is: stage flag, stage
 environment variable, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the YAML stage selection, then
 Dynamo's built-in selector. There is no YAML-wide default: a stage with no selection falls straight
 to the built-in selector, and `worker_selection` rejects unknown keys. Passing `default` explicitly selects the built-in selector
@@ -313,10 +328,17 @@ per-worker `CACHE` rows. Cached tokens also set each request's default
 scheduling cost and queue accounting, and prefix overlap still guides worker
 selection.
 
-Each class owns a shared heap plus one heap for each exact-worker lane, all
-ordered by the class's queue policy, along with its busy thresholds, queue
-limits, quantum, deficit, and counters. Arbitration compares the shared head with the currently dispatchable
-exact-worker lane heads. Absolute and fractional busy thresholds use OR
+Each class owns a shared heap plus one heap per lane, all ordered by the
+class's queue policy, along with its busy thresholds, queue limits, quantum,
+deficit, and counters. A request classifier may give a request a lane key, and
+requests that share a key wait in one lane: ThunderAgent keys by session, so a
+session bound to a busy rank, whether by hard session affinity or by the gate's
+hold, delays only its own later turns. Without a key, a pinned request, such as
+one with an explicit worker target, waits in a lane of its own worker and holds
+only the requests pinned to the same worker while it is full; every other
+request waits in the shared heap, as it does with no classifier installed.
+Arbitration compares the shared head with the currently dispatchable lane
+heads. Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
 `decode_busy_threshold_frac` also marks a worker busy when the KV
@@ -325,8 +347,8 @@ so a worker filled by long-running decodes stops taking new work even after
 their prefill completes. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
 not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate. A class queues only
 when at least one threshold is configured and every eligible worker is busy
-for that class, but a new arrival cannot bypass an existing backlog in the
-same class.
+for that class, or when an installed dispatch gate holds the request, but a
+new arrival cannot bypass an existing backlog in the same class.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
@@ -469,6 +491,12 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 
 ## Session Affinity
 
+In KV mode, session-affinity hits now emit the structured `Selected worker` log
+message with `router_mode="kv"` and `selection="session_affinity"`, replacing
+`Selected pinned worker`. Update log filters that match the old message to match
+`Selected worker` and the `selection` field. Explicit pins use `selection="pinned"`;
+other KV selections use `selection="kv"`.
+
 Session affinity is disabled by default. On the frontend, set
 `--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
 a value from `1` through `31536000` to enable it, then send
@@ -490,7 +518,7 @@ The first successfully dispatched request binds the session ID to its selected w
 
 | Mode | Behavior |
 |---|---|
-| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
+| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once. When the class queues and the target is full, the request waits in its target's lane until the target frees, holding only the requests bound to that target; a classifier that keys lanes by session narrows that to the session's own later turns |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
 
 **Experimental.** Available since v1.6. When session affinity is enabled (`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an internal key derived from that parent id instead of its own session, so the subagents of one parent share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts against the same global entry limit as any session binding. A request that carries an explicit worker target stays on its own session, so it is neither rejected against the group nor able to move it. Under the default `hard` mode the group is pinned to its first worker and does not migrate because of load; the binding resets only when the target becomes unusable or dispatch fails.
@@ -568,55 +596,88 @@ Enable it on the frontend like this:
 python -m dynamo.frontend \
     --router-mode kv \
     --router-prefill-load-model ais \
-    --ais-backend vllm \
-    --ais-system h200_sxm \
-    --ais-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+    --ais-perf-model perf-model.yaml
 ```
 
 Required when `--router-prefill-load-model=ais` is enabled:
 
 - `--router-mode kv` on the frontend
 - `--router-track-prefill-tokens`
-- `--ais-backend`
-- `--ais-system`
-- `--ais-model-path`
+- `--ais-perf-model`
 
-For full estimator settings, use `--ais-perf-config` with a JSON object or a JSON/YAML
-file. It accepts the AISimulate `ForwardPassPerfModelConfig` unchanged, including
-`worker_type`, ordered `systems_paths`, `estimation_mode`, `fallback_policy`, and
-nested `estimator_config`. The default selection is `auto` with `deny`; auto tries
+`--ais-perf-model` names the AIS perf model that Router predicts prefill durations with.
+Available since v1.8. The value is one perf model config, or a list of configs with one
+`worker_type` each. Write it as a path to a YAML or JSON file, or as inline JSON (text
+that starts with `{` or `[`):
+
+```bash
+--ais-perf-model perf-model.yaml
+--ais-perf-model '{"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm", "worker_type": "aggregated"}'
+```
+
+A file with one config looks like this:
+
+```yaml
+model: Qwen/Qwen3-32B
+system: h200_sxm
+backend: vllm
+backend_version: current
+worker_type: aggregated
+estimation_mode: auto
+fallback_policy: deny
+```
+
+A config holds AISimulate `ForwardPassPerfModelConfig` keys, including `worker_type`,
+ordered `systems_paths`, `estimation_mode`, `fallback_policy`, and nested
+`estimator_config`, or `from` to take them from a template file, a dataset, or a state
+snapshot. See
+[Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+in the AISimulate documentation. The default selection is `auto` with `deny`; auto tries
 op-level data, FPM interpolation, then FPM regression. Router requires a ready
 model and rejects cold regression because it has no training observations.
 
-```json
-{
-  "model": "Qwen/Qwen3-32B",
-  "system": "h200_sxm",
-  "backend": "vllm",
-  "backend_version": "current",
-  "worker_type": "aggregated",
-  "estimation_mode": "auto",
-  "fallback_policy": "deny"
-}
-```
-
 Set `worker_type` to the modeled deployment's role, even when Router only queries
-prefill work. Do not combine the full config with flat identity flags. The Python
-SDK accepts the same mapping as `dynamo.llm.AisPerfConfig(config=payload)`.
+prefill work. Router takes the `prefill` config or the `aggregated` config of the value.
+When the value is one config without `worker_type`, or a list with both a `prefill` and
+an `aggregated` config, set `--router-prefill-load-worker-type` to `prefill` or
+`aggregated`. A relative file path starts at the working directory. Relative paths inside
+a file start at the folder of that file.
 
-Deprecated `--aic-*` flags remain accepted by the CLI parser. Use `DYN_AIS_*`
-environment variables and `AisPerfConfig` in the SDK. Supplying both CLI spellings
-of the same input is an error; configuration output uses `ais`.
+`DYN_AIS_PERF_MODEL` and `DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE` set the two values from the
+environment; a flag wins over its variable. A flag without
+`--router-prefill-load-model ais` is an error, for example
+`--ais-perf-model requires --router-prefill-load-model=ais`. A variable alone is ignored
+when the load model is not `ais`.
 
-Optional AIS knobs:
+The Python SDK accepts one config without `from` as
+`dynamo.llm.AisPerfConfig(config=payload)`.
 
+> [!WARNING]
+> **Deprecated.** Use `--ais-perf-model`. Removed in v1.9. This applies to
+> `--ais-perf-config`, the flat flags below, `--ais-nextn`, their `DYN_AIS_*` environment
+> variables, and the `--aic-*` spellings of the flat flags. They still work and print one
+> warning that names the inputs in use, for example
+> `--ais-backend, --ais-system and --ais-model-path are deprecated and will be removed in v1.9; use --ais-perf-model.`
+> A flat flag is named with the spelling that was typed, `--ais-` or `--aic-`, and a value
+> from the environment is named by its variable.
+> A deprecated input together with `--ais-perf-model` or `DYN_AIS_PERF_MODEL` is an error,
+> for example `--ais-perf-model cannot be combined with --ais-backend`.
+
+`--ais-perf-config` takes one complete config as a JSON object or a JSON/YAML file. Do not
+combine it with the flat flags. Supplying both CLI spellings of the same flat flag is an
+error. In place of `--ais-nextn`, write `nextn` in the config. `--ais-nextn-accept-rates`
+and `--ais-mtp-seed` are not deprecated and can be combined with `--ais-perf-model`.
+
+Deprecated flat flags:
+
+- `--ais-backend`, `--ais-system`, `--ais-model-path`: backend family, hardware system, and model to look up; all three are required when the flat flags are used
 - `--ais-backend-version`: pinned AIS database version; if omitted, Dynamo uses a backend-specific default
 - `--ais-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
 - `--ais-moe-tp-size`: MoE tensor-parallel size for models that require AIS MoE parallelism
 - `--ais-moe-ep-size`: MoE expert-parallel size for models that require AIS MoE parallelism
 - `--ais-attention-dp-size`: attention data-parallel size for models that require AIS MoE parallelism
 
-For MoE models, these values must satisfy AIS's parallelism constraint:
+For MoE models, the flat flag values must satisfy AIS's parallelism constraint:
 `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`.
 For Kimi-style TP-only MoE runs, use `--ais-moe-tp-size` equal to `--ais-tp-size`,
 `--ais-moe-ep-size 1`, and `--ais-attention-dp-size 1`.
@@ -734,7 +795,7 @@ Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long e
 
 The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `--router-queue-threshold` (for example `0.1`) to compensate for the inflated denominator.
 
-Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--ais-*` config; see [AIS Prefill Load Model](#ais-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
+Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and `--ais-perf-model`; see [AIS Prefill Load Model](#ais-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
 
@@ -802,8 +863,9 @@ term does not prevent restoring its startup value later.
 Any nonzero device, host, disk, or shared-cache scoring weight requires cache inputs. A
 router that started with those inputs can set device credit to zero while keeping another
 cache tier's scoring weight active. A cache-free router rejects attempts to enable any of
-these weights, without advancing its revision. A nonzero shared-cache multiplier also requires
-KV fetch inputs, so a router that started with a zero multiplier rejects raising it.
+these weights, without advancing its revision. Under `kvcr`, a nonzero shared-cache multiplier
+also requires KV copy inputs, so a router that started `kvcr` with a zero multiplier rejects
+raising it.
 
 Legacy load-only configurations inherit zero effective cache-scoring weights when device
 credit is zero; explicit policy parameters can enable individual tiers at startup. Plain

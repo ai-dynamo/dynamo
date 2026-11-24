@@ -87,6 +87,9 @@ This interval includes tool execution and agent overhead. It cannot separate par
 
 ### Record Precise Tool Timing
 
+For Pi running in Substrate, follow [Trace Sandboxed Agents](trace-sandboxed-agents.mdx)
+to configure the frontend and the tool-event transport through sandbox egress.
+
 For per-tool attribution, have the harness send events to the frontend. Configure the frontend:
 
 ```bash title="Enable explicit tool-event ingress"
@@ -182,7 +185,7 @@ Default request traces do not capture prompt, response, or tool-call argument bo
 
 Requests with recognized session identity can include opaque strings in `agent_context.agent_headers`. Trace consumers decide how to interpret them and must tolerate unknown names, values, and embedded JSON. Captured headers do not change request placement or evict cached blocks. See [Captured agent headers](session-ids.mdx#agent-headers) for capture rules and limits. Older frontends cannot supply the map during a rolling upgrade.
 
-For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
+For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason. On `/v1/responses`, each `tool_calls` entry records the tool name the client receives, and a `namespace` field for a tool in a namespace.
 
 <Warning>
 Request tracing covers eligible chat completions, completions, Responses, and Messages requests that pass through the Rust preprocessor. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.

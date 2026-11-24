@@ -12,12 +12,6 @@ use modelexpress_common::{cache as mx_cache, download as mx, envs as mx_envs};
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
-mod huggingface;
-
-pub(crate) use huggingface::{
-    HfRepoSpec, cached_hf_snapshot, download_hf_snapshot, finalize_hf_snapshot, huggingface_cache,
-};
-
 const NGC_URI_PREFIX: &str = "ngc://";
 
 fn provider_for(model_name: &str) -> MxModelProvider {

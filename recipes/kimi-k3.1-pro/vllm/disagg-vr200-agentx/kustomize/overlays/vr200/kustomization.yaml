@@ -11,8 +11,3 @@ sortOptions:
   order: fifo
 resources:
   - "../../base"
-components:
-  - "../../components/deployment-identity"
-  - "../../components/registry-credentials"
-  - "../../components/scheduling"
-  - "../../components/compute-domain"

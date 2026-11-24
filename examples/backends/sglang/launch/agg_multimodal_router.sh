@@ -32,7 +32,7 @@ SGLANG_SYSTEM_PORT_BASE="${SGLANG_SYSTEM_PORT_BASE:-18091}"
 # Differs from agg_router.sh's 5557 so the two variants can co-run.
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-29090}"
 
-DYN_LOG_VAL="${DYN_LOG:-info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug}"
+DYN_LOG_VAL="${DYN_LOG:-info,mm_routing=debug,dynamo_scheduler=debug,dynamo_admission=debug,dynamo_worker_selection=debug,dynamo_llm::kv_router=debug}"
 
 # Pass-through extra args for `python -m dynamo.sglang`.
 SGLANG_EXTRA_ARGS="${SGLANG_EXTRA_ARGS:-}"

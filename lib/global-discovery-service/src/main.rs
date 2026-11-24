@@ -51,6 +51,7 @@ use dynamo_global_discovery_service::backends::kubernetes::{
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::backends::registered::RegisteredPoolDirectory;
+use dynamo_global_discovery_service::backends::routers::RouterStore;
 use dynamo_global_discovery_service::pool_discovery::{
     PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
 };
@@ -120,6 +121,9 @@ struct Args {
     /// A Global Router replica as `<id>=<url>`. Repeat it for each replica.
     #[arg(long = "router", value_parser = parse_router, help_heading = WITH_REGISTRATIONS)]
     routers: Vec<RouterReplica>,
+    /// Explicitly enable trusted-network router registration, or keep --router entries.
+    #[arg(long, value_enum, default_value_t = RouterDiscovery::Static, help_heading = WITH_REGISTRATIONS)]
+    router_discovery: RouterDiscovery,
     /// The DynamoDB table that keeps registrations: 3 to 255 letters, digits,
     /// `_`, `-` or `.`. Needed with `--registration-storage dynamodb`.
     #[arg(
@@ -260,6 +264,12 @@ impl PoolDiscovery {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RouterDiscovery {
+    Static,
+    Registrations,
+}
+
 /// Where registrations are kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum RegistrationStorage {
@@ -384,6 +394,12 @@ where
             ),
         ));
     }
+    if parsed.router_discovery == RouterDiscovery::Registrations && !parsed.routers.is_empty() {
+        return Err(command.error(
+            ErrorKind::ArgumentConflict,
+            "--router conflicts with --router-discovery registrations",
+        ));
+    }
     let mut ids = HashSet::new();
     if let Some(repeated) = parsed
         .routers
@@ -473,15 +489,16 @@ fn lease(args: &Args) -> Result<Lease> {
 async fn registration_storage(
     args: &Args,
     lease: Lease,
-) -> Result<(Arc<PoolDirectory>, Arc<dyn PoolRegistrar>)> {
+) -> Result<(Arc<PoolDirectory>, Arc<dyn PoolRegistrar>, Arc<RouterStore>)> {
     match args.registration_storage {
         RegistrationStorage::Memory => {
             let store = Arc::new(MemoryPoolStore::new(lease));
-            Ok((store.clone(), store))
+            Ok((store.clone(), store, Arc::new(RouterStore::memory(lease))))
         }
         RegistrationStorage::Dynamodb => {
             let store = connect_dynamodb(lease, dynamodb_config(args)?).await?;
-            Ok((store.clone(), store))
+            let routers = Arc::new(store.router_store());
+            Ok((store.clone(), store, routers))
         }
     }
 }
@@ -518,7 +535,15 @@ async fn connect_dynamodb(lease: Lease, config: DynamoDbConfig) -> Result<Arc<Dy
 
 /// Pools from registrations; router replicas from `--router`.
 async fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
-    let (pools, registrar) = registration_storage(args, lease(args)?).await?;
+    let (pools, registrar, registrations) = registration_storage(args, lease(args)?).await?;
+    if args.router_discovery == RouterDiscovery::Registrations {
+        return Ok(PoolDiscoveryBackend {
+            pools,
+            routers: registrations.clone(),
+            registrar: Some(registrar),
+            router_registrar: Some(registrations),
+        });
+    }
     if args.routers.is_empty() {
         tracing::warn!(
             "no --router given, so GET /routers lists no Global Router replica for PoolRelays to \
@@ -529,6 +554,7 @@ async fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
         registrar: Some(registrar),
+        router_registrar: None,
     })
 }
 
@@ -565,7 +591,7 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
         );
     };
     let lease = lease(args)?;
-    let (registrations, registrar) = registration_storage(args, lease).await?;
+    let (registrations, registrar, _) = registration_storage(args, lease).await?;
     let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
@@ -586,6 +612,7 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
         pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
         registrar: Some(registrar),
+        router_registrar: None,
     })
 }
 
@@ -633,6 +660,18 @@ fn cancel_on_signal(shutdown: CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_registration_is_explicit_and_excludes_static_and_mcs_sources() {
+        let parsed = parse_args(["gds", "--router-discovery", "registrations"]).unwrap();
+        assert_eq!(parsed.router_discovery, RouterDiscovery::Registrations);
+        assert_eq!(
+            parse_args(["gds"]).unwrap().router_discovery,
+            RouterDiscovery::Static
+        );
+        assert!(parse_args(["gds", "--router-discovery", "registrations", ROUTER]).is_err());
+        assert!(parse_args(karmada(&["--router-discovery", "registrations"])).is_err());
+    }
 
     const ROUTER: &str = "--router=aws-ohio/global-router-0=http://10.42.0.5:50051";
 

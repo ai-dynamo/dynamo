@@ -11,7 +11,11 @@ import sglang as sgl
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
+from dynamo.sglang._compat import (
+    cache_salt_kwargs,
+    require_reasoning_kwargs,
+    routed_dp_rank_kwargs,
+)
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
@@ -32,6 +36,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _ordered_cancellation_request_id,
     _raise_if_sglang_error,
     _sampling_option_params,
+    _validate_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
@@ -187,6 +192,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+        # Native requests forward client stop IDs to the prefill engine; rejecting here
+        # also avoids staging KV for a decode leg that would refuse the request.
+        _validate_stop_token_ids(self, inner_request)
 
         # Prefill encodes the media so the KV it transfers carries the vision
         # context; decode extracts the same URLs to match the token layout.
@@ -270,7 +278,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_room,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, inner_request),

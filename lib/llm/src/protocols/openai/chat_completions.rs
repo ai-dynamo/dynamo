@@ -21,8 +21,10 @@ use crate::protocols::common::extensions::{
 };
 
 pub mod aggregator;
+pub(crate) mod allowed_tools;
 pub(crate) mod custom_tools;
 mod delta;
+pub(crate) mod tool_call_merge;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 
@@ -118,6 +120,11 @@ pub struct NvCreateChatCompletionRequest {
     #[schema(ignore)]
     pub responses_tools: Option<super::responses::ResponsesToolContext>,
 
+    /// Full catalog for rendering when Chat Completions limits callable tools.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub chat_template_tools: Option<std::sync::Arc<[dynamo_protocols::types::ChatCompletionTool]>>,
+
     /// OpenAI-style thinking control from client request payloads.
     /// Normalized into `chat_template_args` before preprocessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,6 +166,18 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 impl NvCreateChatCompletionRequest {
+    /// The named passthrough fields (`validate::PASSTHROUGH_EXTRA_FIELDS`) this
+    /// request carries. They are not serialized with the request, so a Python
+    /// chat processor receives them through this accessor.
+    /// Unknown fields kept by `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` are skipped.
+    pub fn passthrough_extra_fields(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &serde_json::Value)> {
+        validate::PASSTHROUGH_EXTRA_FIELDS
+            .iter()
+            .filter_map(|key| self.unsupported_fields.get(*key).map(|value| (*key, value)))
+    }
+
     /// Resolve the request's reasoning controls into `chat_template_args`.
     /// Runs once at the HTTP boundary, so every render path reads one answer.
     /// Model-specific overrides still apply later in the default preprocessor.
@@ -310,6 +329,21 @@ pub enum ResponseOutputEvent {
     Boundary(MessageBoundary),
     Text(String),
     ToolCall(String),
+    /// The next `n` entries of choice 0's aggregated `logprobs.content` arrived at
+    /// this point of the stream on chunks with visible text or no content (EOS),
+    /// so a Responses projection can give each message the scores generated while
+    /// it was open.
+    Scores(usize),
+    /// The next `n` entries arrived on reasoning or tool-call chunks. They are not
+    /// output text, so a Responses projection skips them.
+    HiddenScores(usize),
+}
+
+impl ResponseOutputEvent {
+    /// Score bookkeeping that never changes the projected output items.
+    pub fn is_score(&self) -> bool {
+        matches!(self, Self::Scores(_) | Self::HiddenScores(_))
+    }
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -694,7 +728,12 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `Some(Vec<String>)` if stop conditions are set.
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+        // `"stop": []` means no stop sequences.
+        self.inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+            .filter(|v| !v.is_empty())
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
@@ -1165,6 +1204,30 @@ mod tests {
             serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
         let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn passthrough_extra_fields_skips_ignored_unknown_fields() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": [7],
+            "allowed_token_ids": [10, 11],
+        }))
+        .expect("Failed to deserialize request");
+        // DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS keeps unknown fields in the map.
+        request
+            .unsupported_fields
+            .insert("experimental_field".to_string(), json!("value"));
+
+        let fields: Vec<_> = request.passthrough_extra_fields().collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("stop_token_ids", &json!([7])),
+                ("allowed_token_ids", &json!([10, 11])),
+            ]
+        );
     }
 
     #[test]

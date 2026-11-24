@@ -23,6 +23,7 @@ from dynamo.planner.monitoring import aic_estimator
 from dynamo.planner.monitoring import aic_interpolation as aic_mod
 
 pytestmark = [
+    pytest.mark.planner,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
@@ -31,19 +32,26 @@ pytestmark = [
 
 def test_estimator_loader_does_not_import_application_layer(monkeypatch):
     """Planner modeling must not depend on application orchestration modules."""
-    pytest.importorskip("aisimulate_core")
+    pytest.importorskip("aisim_core")
     real_import = builtins.__import__
 
     def reject_upper_package(name, *args, **kwargs):
         """Reject accidental imports of the AISimulate application layer."""
-        if name.startswith(("aisimulate.sdk", "aisimulate.legacy_cli")):
+        if name.startswith(
+            (
+                "aisim.sdk",
+                "aisim.legacy_cli",
+                "aisimulate.sdk",
+                "aisimulate.legacy_cli",
+            )
+        ):
             raise AssertionError(f"planner imported upper package: {name}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", reject_upper_package)
-    loaded = aic_estimator._try_import_aisimulate_core()
+    loaded = aic_estimator._try_import_aisim_core()
 
-    assert loaded.__name__ == "aisimulate_core"
+    assert loaded.__name__ == "aisim_core"
 
 
 def test_estimator_passes_backend_name_to_model_factory():
@@ -60,7 +68,7 @@ def test_estimator_passes_backend_name_to_model_factory():
 
     with patch.object(
         aic_estimator,
-        "_try_import_aisimulate_core",
+        "_try_import_aisim_core",
         return_value=aic_core,
     ):
         estimator = aic_estimator.AIConfiguratorPerfEstimator(
@@ -133,10 +141,10 @@ def _patch_estimator(
 class TestPickedToAicKwargs:
     """Verify the pick → AIC ModelConfig kwargs helper for each strategy.
 
-    The invariant AIC enforces for MoE models (aisimulate_core sdk/models/,
+    The invariant AIC enforces for MoE models (aisim_core sdk/models/,
     ~8 assertion sites) is::
 
-        tp_size * attention_dp_size == moe_tp_size * moe_ep_size
+        tp_size * attention_dp_size * cp_size == moe_tp_size * moe_ep_size
 
     Each test case asserts both the expected kwargs and the identity.
     """
@@ -144,7 +152,7 @@ class TestPickedToAicKwargs:
     @staticmethod
     def _assert_identity(kw: dict) -> None:
         assert (
-            kw["tp_size"] * kw["attention_dp_size"]
+            kw["tp_size"] * kw["attention_dp_size"] * kw["cp_size"]
             == kw["moe_tp_size"] * kw["moe_ep_size"]
         ), f"AIC identity violated for {kw}"
 
@@ -160,6 +168,7 @@ class TestPickedToAicKwargs:
             "moe_tp_size": 1,
             "moe_ep_size": 1,
             "attention_dp_size": 1,
+            "cp_size": 1,
         }
 
     def test_tp_only_moe(self):
@@ -170,6 +179,15 @@ class TestPickedToAicKwargs:
         assert kw["moe_tp_size"] == 8
         assert kw["moe_ep_size"] == 1
         assert kw["attention_dp_size"] == 1
+        self._assert_identity(kw)
+
+    def test_prefill_cp(self):
+        # SGLang MoE prefill CP4 on 4 GPUs.
+        p = PickedParallelConfig(tp=1, dp=1, moe_tp=4, moe_ep=1, cp=4)
+        kw = picked_to_aic_model_config_kwargs(p)
+        assert kw["tp_size"] == 1
+        assert kw["cp_size"] == 4
+        assert kw["moe_tp_size"] == 4
         self._assert_identity(kw)
 
     def test_tep(self):
@@ -188,6 +206,7 @@ class TestPickedToAicKwargs:
             "moe_tp_size": 1,
             "moe_ep_size": 8,
             "attention_dp_size": 8,
+            "cp_size": 1,
         }
         self._assert_identity(kw)
 

@@ -17,22 +17,18 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k3-1-pro-vllm-disagg-gb300
-  labels:
-    app.kubernetes.io/name: kimi-k3-1-pro-vllm-disagg-gb300
-    app.kubernetes.io/part-of: dynamo
+  name: kimi-k3-1-pro-vllm-gb300-disagg-agentic
 spec:
   backendFramework: vllm
   components:
   - name: Frontend
     type: frontend
-    runtimeVersionOverride: 1.7.0
     replicas: 1
     podTemplate:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -45,8 +41,6 @@ spec:
           - '8000'
           - --dyn-chat-processor
           - dynamo
-          - --router-mode
-          - kv
           - --router-kv-events
           - --router-session-affinity-mode
           - hard
@@ -54,6 +48,8 @@ spec:
           - '7200'
           - --trust-remote-code
           env:
+          - name: DYN_ROUTER_MODE
+            value: kv
           - name: HF_HUB_OFFLINE
             value: '1'
           - name: TRANSFORMERS_OFFLINE
@@ -62,63 +58,63 @@ spec:
             value: '3600'
           - name: DYN_TOKENIZER_CACHE_BYTES
             value: '8589934592'
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
           resources:
             requests:
               cpu: '16'
               memory: 128Gi
-          volumeMounts:
-          - name: shared-model-cache
-            mountPath: /shared-model-cache
-            readOnly: true
-        volumes:
-        - name: shared-model-cache
-          persistentVolumeClaim:
-            claimName: shared-model-cache
-            readOnly: true
-  - name: prefill
+  - multinode:
+      nodeCount: 2
+    name: PrefillWorker
     type: prefill
-    runtimeVersionOverride: 1.7.0
     replicas: 2
-    multinode:
-      nodeCount: 2
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
         containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
-          imagePullPolicy: IfNotPresent
+        - args:
+          - --reasoning-parser
+          - kimi_k3
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - moonshotai/Kimi-K3.1-Pro
+          - --tensor-parallel-size
+          - '8'
+          - --distributed-executor-backend
+          - mp
+          - --attention-backend
+          - FLASHMLA_SPARSE
+          - --trust-remote-code
+          - --language-model-only
+          - --gpu-memory-utilization
+          - '0.92'
+          - --load-format
+          - fastsafetensors
+          - --no-enable-flashinfer-autotune
+          - --disaggregation-mode
+          - prefill
+          - --dyn-reasoning-parser
+          - kimi_k3
+          - --dyn-tool-call-parser
+          - kimi_k3
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           command:
-          - /bin/bash
-          - -lc
-          args:
-          - |
-            set -euo pipefail
-            ulimit -l unlimited
-            ulimit -n 1048576
-
-            exec python3 -m dynamo.vllm \
-              --reasoning-parser kimi_k3 \
-              --model "${MODEL_PATH}" \
-              --served-model-name moonshotai/Kimi-K3.1-Pro \
-              --tensor-parallel-size 8 \
-              --distributed-executor-backend mp \
-              --attention-backend FLASHMLA_SPARSE \
-              --trust-remote-code \
-              --language-model-only \
-              --enable-logging-iteration-details \
-              --gpu-memory-utilization 0.92 \
-              --load-format fastsafetensors \
-              --no-enable-flashinfer-autotune \
-              --disaggregation-mode prefill \
-              --dyn-reasoning-parser kimi_k3 \
-              --dyn-tool-call-parser kimi_k3 \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
           env:
+          - name: HF_HOME
+            value: /shared-model-cache
           - name: HF_HUB_OFFLINE
             value: '1'
           - name: TRANSFORMERS_OFFLINE
@@ -151,11 +147,15 @@ spec:
             value: '1'
           - name: NCCL_P2P_LEVEL
             value: NVL
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+          - name: MODEL_NAME
+            value: moonshotai/Kimi-K3.1-Pro
           resources:
+            claims:
+            - name: compute-domain-channel
             requests:
+              # Above the default; matches the validated benchmark configuration.
               cpu: '72'
+              # Above the default; matches the validated benchmark configuration.
               memory: 512Gi
               ephemeral-storage: 64Gi
               nvidia.com/gpu: '4'
@@ -173,56 +173,67 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-            readOnly: true
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
-  - name: decode
+  - multinode:
+      nodeCount: 2
+    name: DecodeWorker
     type: decode
-    runtimeVersionOverride: 1.7.0
     replicas: 1
-    multinode:
-      nodeCount: 2
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
         containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
-          imagePullPolicy: IfNotPresent
+        - args:
+          - --reasoning-parser
+          - kimi_k3
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - moonshotai/Kimi-K3.1-Pro
+          - --tensor-parallel-size
+          - '8'
+          - --distributed-executor-backend
+          - mp
+          - --attention-backend
+          - FLASHMLA_SPARSE
+          - --trust-remote-code
+          - --language-model-only
+          - --additional-config
+          - '{"decode_backend":"latency_specialized"}'
+          - --compilation-config
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}'
+          - --gpu-memory-utilization
+          - '0.92'
+          - --load-format
+          - fastsafetensors
+          - --no-enable-flashinfer-autotune
+          - --disaggregation-mode
+          - decode
+          - --dyn-reasoning-parser
+          - kimi_k3
+          - --dyn-tool-call-parser
+          - kimi_k3
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           command:
-          - /bin/bash
-          - -lc
-          args:
-          - |
-            set -euo pipefail
-            ulimit -l unlimited
-            ulimit -n 1048576
-
-            exec python3 -m dynamo.vllm \
-              --reasoning-parser kimi_k3 \
-              --model "${MODEL_PATH}" \
-              --served-model-name moonshotai/Kimi-K3.1-Pro \
-              --tensor-parallel-size 8 \
-              --distributed-executor-backend mp \
-              --attention-backend FLASHMLA_SPARSE \
-              --trust-remote-code \
-              --language-model-only \
-              --enable-logging-iteration-details \
-              --additional-config '{"decode_backend":"latency_specialized"}' \
-              --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}' \
-              --gpu-memory-utilization 0.92 \
-              --load-format fastsafetensors \
-              --no-enable-flashinfer-autotune \
-              --disaggregation-mode decode \
-              --dyn-reasoning-parser kimi_k3 \
-              --dyn-tool-call-parser kimi_k3 \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
           env:
+          - name: HF_HOME
+            value: /shared-model-cache
           - name: HF_HUB_OFFLINE
             value: '1'
           - name: TRANSFORMERS_OFFLINE
@@ -255,11 +266,15 @@ spec:
             value: '1'
           - name: NCCL_P2P_LEVEL
             value: NVL
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+          - name: MODEL_NAME
+            value: moonshotai/Kimi-K3.1-Pro
           resources:
+            claims:
+            - name: compute-domain-channel
             requests:
+              # Above the default; matches the validated benchmark configuration.
               cpu: '72'
+              # Above the default; matches the validated benchmark configuration.
               memory: 512Gi
               ephemeral-storage: 64Gi
               nvidia.com/gpu: '4'
@@ -277,9 +292,18 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-            readOnly: true
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
+  numNodes: 0

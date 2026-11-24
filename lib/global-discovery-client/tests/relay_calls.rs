@@ -11,7 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use dynamo_global_discovery_client::{
     Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolListing,
-    PoolLocation, PoolRegistration, RouterReplica, RouterReplicaId,
+    PoolLocation, PoolRegistration, RegistrationStatus, RouterHeartbeat, RouterRegistration,
+    RouterReplica, RouterReplicaId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,6 +26,7 @@ struct FakeState {
     routers_status: StatusCode,
     routers_body: String,
     pools_body: String,
+    registration_status: StatusCode,
     /// Registrations as the JSON the service received.
     registrations: Vec<Value>,
 }
@@ -34,6 +36,7 @@ impl FakeService {
         Self(Arc::new(Mutex::new(FakeState {
             routers_status: StatusCode::OK,
             routers_body: routers_body.to_owned(),
+            registration_status: StatusCode::OK,
             pools_body: r#"{ "pools": [], "complete": true }"#.to_owned(),
             registrations: Vec::new(),
         })))
@@ -43,7 +46,10 @@ impl FakeService {
     /// keeps the base URL's path.
     async fn client(&self) -> GlobalDiscoveryClient {
         let app = axum::Router::new()
-            .route("/discovery/routers", get(serve_routers))
+            .route(
+                "/discovery/routers",
+                get(serve_routers).post(serve_register),
+            )
             .route("/discovery/pools", get(serve_pools).post(serve_register))
             .with_state(self.clone());
         let address = serve(app).await;
@@ -82,9 +88,13 @@ async fn serve_pools(State(fake): State<FakeService>) -> Response {
 async fn serve_register(
     State(fake): State<FakeService>,
     Json(registration): Json<Value>,
-) -> Json<Value> {
-    fake.0.lock().unwrap().registrations.push(registration);
-    Json(json!({ "heartbeat_interval_s": 5, "lease_duration_s": 15 }))
+) -> Response {
+    let mut state = fake.0.lock().unwrap();
+    state.registrations.push(registration);
+    if state.registration_status != StatusCode::OK {
+        return (state.registration_status, "registration unavailable").into_response();
+    }
+    Json(json!({ "heartbeat_interval_s": 5, "lease_duration_s": 15 })).into_response()
 }
 
 fn replica(id: &str, url: &str) -> RouterReplica {
@@ -332,4 +342,52 @@ fn pools_body(dgd_names: &[&str], complete: bool) -> String {
         })
         .collect::<Vec<_>>();
     json!({ "pools": pools, "complete": complete }).to_string()
+}
+
+#[tokio::test]
+async fn router_heartbeat_retries_and_stops_on_cancel_or_drop() {
+    for cancel_instead_of_drop in [false, true] {
+        let fake = FakeService::new(r#"{"routers":[],"complete":true}"#);
+        fake.0.lock().unwrap().registration_status = StatusCode::SERVICE_UNAVAILABLE;
+        let client = fake.client().await;
+        let registration = RouterRegistration {
+            replica: "east/pod-uid".into(),
+            url: "http://127.0.0.1:50051".parse().unwrap(),
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let heartbeat = RouterHeartbeat::spawn(client, registration.clone(), cancel.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(heartbeat.status(), RegistrationStatus::Failing(_)) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        fake.0.lock().unwrap().registration_status = StatusCode::OK;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(heartbeat.status(), RegistrationStatus::Registered(_)) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fake.0.lock().unwrap().registrations,
+            vec![serde_json::to_value(registration).unwrap(); 2]
+        );
+        tokio::time::pause();
+        if cancel_instead_of_drop {
+            cancel.cancel();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(heartbeat);
+        } else {
+            drop(heartbeat);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        assert_eq!(fake.0.lock().unwrap().registrations.len(), 2);
+        tokio::time::resume();
+    }
 }

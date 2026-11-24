@@ -1,14 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! [`PoolHeartbeat`] keeps a pool registered with `POST /pools`. Each call is
-//! also the pool's heartbeat, so it calls again on the interval the service's
-//! [`Lease`] asks for.
+//! [`PoolHeartbeat`] and [`RouterHeartbeat`] renew registrations on the
+//! interval granted by the service's [`Lease`].
 
 use std::future::Future;
 use std::time::Duration;
 
-use dynamo_global_common::{Lease, PoolRegistration};
+use dynamo_global_common::{Lease, PoolRegistration, RouterRegistration};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -76,9 +75,9 @@ impl PoolHeartbeat {
         Self::spawn_from(client, registration, cancel)
     }
 
-    fn spawn_from(
-        registrar: impl Registrar + 'static,
-        registration: watch::Receiver<Option<PoolRegistration>>,
+    fn spawn_from<R: Registration + 'static>(
+        registrar: impl Registrar<R> + 'static,
+        registration: watch::Receiver<Option<R>>,
         cancel: CancellationToken,
     ) -> Self {
         let (status, status_rx) = watch::channel(RegistrationStatus::Unregistered);
@@ -100,15 +99,15 @@ impl PoolHeartbeat {
 }
 
 /// What a [`PoolHeartbeat`] calls. The client implements it; tests use a fake.
-trait Registrar: Send + Sync {
-    fn register_pool(
+trait Registrar<R>: Send + Sync {
+    fn register(
         &self,
-        registration: &PoolRegistration,
+        registration: &R,
     ) -> impl Future<Output = Result<Lease, DiscoveryClientError>> + Send;
 }
 
-impl Registrar for GlobalDiscoveryClient {
-    fn register_pool(
+impl Registrar<PoolRegistration> for GlobalDiscoveryClient {
+    fn register(
         &self,
         registration: &PoolRegistration,
     ) -> impl Future<Output = Result<Lease, DiscoveryClientError>> + Send {
@@ -116,10 +115,57 @@ impl Registrar for GlobalDiscoveryClient {
     }
 }
 
+/// Keeps one router incarnation registered until cancelled or dropped.
+#[derive(Debug)]
+#[must_use = "dropping the heartbeat stops registering the router"]
+pub struct RouterHeartbeat(PoolHeartbeat);
+
+impl RouterHeartbeat {
+    /// Starts after the advertised Relay receiver is bound. Renewal does not
+    /// depend on routable pools, which themselves depend on router discovery.
+    pub fn spawn(
+        client: GlobalDiscoveryClient,
+        registration: RouterRegistration,
+        cancel: CancellationToken,
+    ) -> Self {
+        let (_, registration) = watch::channel(Some(registration));
+        Self(PoolHeartbeat::spawn_from(client, registration, cancel))
+    }
+
+    pub fn status(&self) -> RegistrationStatus {
+        self.0.status()
+    }
+}
+
+impl Registrar<RouterRegistration> for GlobalDiscoveryClient {
+    fn register(
+        &self,
+        registration: &RouterRegistration,
+    ) -> impl Future<Output = Result<Lease, DiscoveryClientError>> + Send {
+        GlobalDiscoveryClient::register_router(self, registration)
+    }
+}
+
+trait Registration: Clone + Send + Sync {
+    fn identity(&self) -> impl std::fmt::Display;
+}
+
+impl Registration for PoolRegistration {
+    fn identity(&self) -> impl std::fmt::Display {
+        &self.key
+    }
+}
+
+impl Registration for RouterRegistration {
+    fn identity(&self) -> impl std::fmt::Display {
+        &self.replica
+    }
+}
+
 /// Never returns: it stops when cancelled or aborted.
-async fn keep_registered(
-    registrar: &impl Registrar,
-    mut registration: watch::Receiver<Option<PoolRegistration>>,
+async fn keep_registered<R: Registration>(
+    registrar: &impl Registrar<R>,
+    mut registration: watch::Receiver<Option<R>>,
     status: &watch::Sender<RegistrationStatus>,
 ) {
     // The last lease granted, and when the call that got it started.
@@ -139,17 +185,17 @@ async fn keep_registered(
             continue;
         };
         let started = Instant::now();
-        let wait = match registrar.register_pool(&current).await {
+        let wait = match registrar.register(&current).await {
             Ok(lease) => {
                 renewed = Some((lease, started));
                 retry = FIRST_RETRY;
                 lapse_logged = false;
                 if update(status, RegistrationStatus::Registered(lease)) {
                     tracing::info!(
-                        pool = %current.key,
+                        registration = %current.identity(),
                         heartbeat_interval_s = lease.heartbeat_interval().as_secs(),
                         lease_s = lease.duration().as_secs(),
-                        "pool registered with Global Discovery"
+                        "registered with Global Discovery"
                     );
                 }
                 lease.heartbeat_interval()
@@ -157,7 +203,7 @@ async fn keep_registered(
             Err(error) => {
                 let reason = error_chain(&error);
                 if update(status, RegistrationStatus::Failing(reason.clone())) {
-                    tracing::warn!(pool = %current.key, error = %reason, "cannot register the pool with Global Discovery; retrying");
+                    tracing::warn!(registration = %current.identity(), error = %reason, "cannot register with Global Discovery; retrying");
                 }
                 let cap = renewed.map_or(RETRY_CAP_WITHOUT_LEASE, |(lease, _)| {
                     lease.heartbeat_interval()
@@ -176,8 +222,7 @@ async fn keep_registered(
                     }
                     if !lapse_logged && at.elapsed() >= lease.duration() {
                         lapse_logged = true;
-                        // Another PoolRelay replica may still renew the pool.
-                        tracing::warn!(pool = %current.key, lease_s = lease.duration().as_secs(), "this PoolRelay's pool registration lapsed");
+                        tracing::warn!(registration = %current.identity(), lease_s = lease.duration().as_secs(), "registration with Global Discovery lapsed");
                     }
                 }
                 wait
@@ -250,8 +295,8 @@ mod tests {
         }
     }
 
-    impl Registrar for FakeRegistrar {
-        async fn register_pool(
+    impl Registrar<PoolRegistration> for FakeRegistrar {
+        async fn register(
             &self,
             registration: &PoolRegistration,
         ) -> Result<Lease, DiscoveryClientError> {

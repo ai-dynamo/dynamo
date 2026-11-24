@@ -16,7 +16,7 @@
 # AIPerf AgentX benchmark for the Kimi-K3.1-Pro recipes.
 # Set ENDPOINT, CONCURRENCY, and DURATION for the selected target:
 #   ENDPOINT     <dgd-name>-frontend:8000 (Service of the deployed DynamoGraphDeployment).
-#                Example: kimi-k3-1-pro-vllm-aggregate-gb300-frontend:8000
+#                Example: kimi-k3-1-pro-vllm-gb300-agg-agentic-frontend:8000
 #   CONCURRENCY  Closed-loop users. Use 32 for vllm/agg-gb300-agentic and 48 for
 #                vllm/disagg-gb300-agentic (2P1D).
 #   DURATION     Profiling duration in seconds (the reported runs use 1200).
@@ -42,7 +42,7 @@ data:
       model: ${TARGET_MODEL:moonshotai/Kimi-K3.1-Pro}
       scenario: inferencex-agentx-mvp
       endpoint:
-        url: ${ENDPOINT_URL:http://kimi-k3-1-pro-vllm-aggregate-gb300-frontend:8000}
+        url: ${ENDPOINT_URL:http://kimi-k3-1-pro-vllm-gb300-agg-agentic-frontend:8000}
         type: chat
         timeout: 3600
         streaming: true
@@ -52,7 +52,7 @@ data:
         extra:
           skip_special_tokens: false
       tokenizer:
-        name: ${TOKENIZER:/shared-model-cache/moonshotai/Kimi-K3.1-Pro}
+        name: ${TOKENIZER:moonshotai/Kimi-K3.1-Pro}
         trustRemoteCode: true
       dataset:
         name: main
@@ -137,11 +137,6 @@ spec:
               )
               PY
 
-              if [ ! -e "${TOKENIZER}/tokenizer_config.json" ]; then
-                echo "ERROR: tokenizer files not found at ${TOKENIZER}"
-                exit 1
-              fi
-
               EPOCH=$(python3 -c 'import time; print(int(time.time()))')
               export ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/agentx_c${CONCURRENCY}"
               export ENDPOINT_URL="http://${ENDPOINT}"
@@ -156,7 +151,7 @@ spec:
           env:
             # Set these values for the selected deployment target.
             - name: ENDPOINT
-              value: kimi-k3-1-pro-vllm-aggregate-gb300-frontend:8000
+              value: kimi-k3-1-pro-vllm-gb300-agg-agentic-frontend:8000
             - name: CONCURRENCY
               value: "32"
             - name: DURATION
@@ -165,7 +160,7 @@ spec:
             - name: TARGET_MODEL
               value: moonshotai/Kimi-K3.1-Pro
             - name: TOKENIZER
-              value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+              value: moonshotai/Kimi-K3.1-Pro
             - name: ROOT_ARTIFACT_DIR
               value: /shared-model-cache/perf
             - name: JOB_NAME
@@ -178,18 +173,13 @@ spec:
             - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
               value: "1800"
             - name: HF_HOME
-              value: /shared-model-cache/hf-home
-            - name: HF_HUB_OFFLINE
-              value: "0"
+              value: /shared-model-cache
             - name: PYTHONUNBUFFERED
               value: "1"
           resources:
             requests:
               cpu: "4"
               memory: 8Gi
-            limits:
-              cpu: "16"
-              memory: 64Gi
           volumeMounts:
             - name: shared-model-cache
               mountPath: /shared-model-cache

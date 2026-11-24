@@ -432,6 +432,10 @@ jobs:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
+    env:
+      # Every run builds target/ from scratch, so incremental caches are never
+      # reused. They only take runner disk, which this job has run out of.
+      CARGO_INCREMENTAL: "0"
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
@@ -502,13 +506,13 @@ jobs:
     - name: Set up Rust CI
       uses: ./.github/actions/setup-rust-ci
     - name: Check isolated kv-router feature builds
-      # Workspace feature unification hides these; check each on its own.
+      # Workspace feature unification hides these; check each feature on its own.
       run: |
-        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-slot-tracker
-        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-indexer
-    - name: Run standalone slot-tracker feature tests
-      # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
-      run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
+        cargo-hack --version || cargo install cargo-hack@0.6.45 --locked
+        cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
+    - name: Run kv-router adapter feature tests
+      # No workspace member enables the http adapter, so these tests run only here.
+      run: cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests
     - name: Run canonical replay feature tests
       run: |
         cargo test --locked -p dynamo-bench --features replay-bench \
@@ -533,12 +537,23 @@ jobs:
         compile_bench active-sequences --bench active_sequences_bench
         compile_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         compile_bench dc-ckf-relay --bench dc_ckf_relay_bench
+        compile_bench selection-replay --bench selection_replay_bench
 
         cargo test --locked --no-default-features -p dynamo-bench \
           --features request-trace-to-mooncake --test request_trace_to_mooncake
+        cargo test --locked --no-default-features -p dynamo-bench \
+          --features selection-replay --test selection_replay
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
+    - name: Run NVTX feature tests
+      # Only this step and "Lint the NVTX feature" turn on the nvtx feature here.
+      # The lint step and the image builds compile it but run no tests. So this
+      # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs
+      # and lib/runtime/tests/nvtx_payload.rs, which records what reaches NVTX.
+      run: |
+        cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::
+        cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload
 
   rust-clippy:
     needs: changed-files
@@ -575,6 +590,13 @@ jobs:
         # service, and the build without the optional policy catalog.
         cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
         cargo clippy --locked --no-deps --no-default-features --all-targets -- -D warnings
+    - name: Lint the NVTX feature
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # The default job builds this crate with the feature off, so the feature-on
+      # half of every `#[cfg(feature = "nvtx")]` — including the tests gated the
+      # other way — is otherwise never linted under -D warnings.
+      run: "cargo clippy --locked --no-deps -p dynamo-runtime --features nvtx --all-targets -- -D warnings"
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -594,6 +616,7 @@ jobs:
         lint_bench active-sequences --bench active_sequences_bench
         lint_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         lint_bench dc-ckf-relay --bench dc_ckf_relay_bench
+        lint_bench selection-replay --bench selection_replay_bench --test selection_replay
 
         cargo clippy --locked --no-deps -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench -- -D warnings

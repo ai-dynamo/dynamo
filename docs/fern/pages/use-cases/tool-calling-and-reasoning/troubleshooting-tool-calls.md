@@ -144,7 +144,7 @@ Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on w
 
 Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Invalid combinations are rejected during model setup with an error naming the configured selectors and the missing implementation. Runtime V2 parse errors never retry through V1. On V1 routes, an empty tool selector is treated as unset; an empty reasoning selector is rejected. Dynamo requires exact, case-sensitive V1 selector names. Omit selectors you do not need.
 
-For token-input chat using a [Python chat processor](chat-processors.mdx), the processor owns both parser registries, so Dynamo does not validate those names against its Rust registries. Parser-generation environment values are still validated. Completions do not use chat parsers; text-input chat retains Rust selector validation.
+For token-input chat using a [Python chat processor](chat-processors.mdx), the processor owns both parser registries, so Dynamo does not validate those names against its Rust registries. Parser-generation environment values are still validated, and so is the Mistral tokenizer requirement below, because the frontend's response handling still reads the selectors. Completions do not use chat parsers; text-input chat retains Rust selector validation.
 
 V2 uses one family grammar for reasoning, text, and tools. Either selector can usually choose that family; when both are set, they must resolve to the same family or a supported shared grammar. Auto requires both selectors to be `beam` for Beam. V1 uses separate reasoning and tool-call parsers, so it can mix formats when both names exist in their respective V1 registries. This table lists parser availability, not model/backend or GPU qualification.
 
@@ -157,8 +157,9 @@ V2 uses one family grammar for reasoning, text, and tools. Either selector can u
 | Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
 | Kimi K3 | `kimi_k3`, `kimi-k3` |
 | MiniMax M3 | `minimax_m3`, `minimax-m3` |
+| Mistral v11+ | `mistral_4`, `mistral`. The tokenizer must have `[ARGS]` (Mistral tokenizer v11 or later); otherwise the model is rejected at registration under `auto` or `2`. Serve an older Mistral tokenizer with `mistral` and `DYN_PARSER_VERSION=1`. |
 | Qwen3 Coder | `qwen3`, `qwen3_coder` |
-| Muse Glimmer | `muse_glimmer`, `muse` |
+| Muse Glimmer | `muse_glimmer`; `muse` is a deprecated alias of `muse_glimmer` |
 | Muse Spark | `muse_spark`, `muse_spark_open` |
 | Nemotron V3 | `nemotron_v3`, `nemotron3` |
 | Beam | `beam` |

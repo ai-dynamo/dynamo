@@ -174,6 +174,30 @@ must validate tool input before executing it. If the token limit interrupts the
 wrapper, Dynamo preserves `finish_reason: "length"` without emitting the
 truncated input.
 
+## Limit the Tools Available for a Turn
+
+For `/v1/chat/completions`, keep the full function catalog in `tools` and select
+a subset by name in `tool_choice.allowed_tools`. Use `auto` to allow a text
+response or `required` to require a call from the subset.
+
+```json
+{
+  "type": "allowed_tools",
+  "allowed_tools": {
+    "mode": "required",
+    "tools": [{"type": "function", "function": {"name": "lookup"}}]
+  }
+}
+```
+
+Use this object as the value of `tool_choice`. Every selected name must occur
+in the declared catalog. Dynamo uses the full catalog for prompt rendering and
+the selected tools for tool-call constraints. If the model returns a call
+outside the subset, Dynamo returns an error before exposing that call to the
+client, including during streaming. Use the standard SSE tool-call deltas
+with this option. Dynamo omits the optional early `tool_call_dispatch` event
+for requests with an allowlist.
+
 ## Supported Tool Call Parsers
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
@@ -334,7 +358,15 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
 
         **Notes:** Channel grammar: reasoning in `<\|channel\|>analysis<\|message\|>...<\|end\|>`, the answer in `<\|channel\|>final<\|message\|>...<\|return\|>`, and one `<\|start\|>assistant to=NAME<\|channel\|>analysis <\|constrain\|>xml<\|message\|>...<\|call\|>` message per tool call with `<rfl:parameter name="KEY">VALUE</rfl:parameter>` arguments typed from the tool schema. Pair with `--dyn-reasoning-parser beam`; both flags are required and the pair routes to the unified parser without `DYN_PARSER_VERSION=2`. The route accepts the request field `preserve_thinking` (supplied prior assistant reasoning always stays in the rendered history; `true` and omitted are the same, `false` is accepted and has no effect — omit `reasoning_content` to drop it) and defaults `allow_missing_thinking=true` so history turns without reasoning render an empty analysis block instead of failing and `chat_template_kwargs.builtin_tools` (names resolved against `tools` for rendering only).
 
-        **Per-turn grammar:** on the Beam route the frontend holds every chat turn to this channel grammar with a structural tag (a non-empty analysis channel, then either tool calls whose `rfl:parameter` values are held to their JSON-schema types or the final answer), mirroring the model builder's SGLang serving layer; `required` and named tool choices reuse the same tag, so they are enforced on the Harmony wire. A `response_format` (`json_object` or `json_schema`) is held inside the final channel behind the analysis, so the response keeps its reasoning and the channel structure the parser expects; a forced tool choice ignores `response_format`, and the `nvext` guided-decoding fields (`guided_json`, `guided_regex`, ...) stay bare constraints from the first token. Set `DYN_BEAM_TURN_GRAMMAR=0` on the frontend to disable it for automatic tool choice (forced choices keep theirs; `response_format` then falls back to the bare JSON constraint). A tool declared `strict: true` whose schema is outside OpenAI's strict subset is served as non-strict on this route (logged as a warning) instead of the HTTP 400 other routes return; the grammar holds every typeable tool either way.
+        **Per-turn grammar:** on the Beam route the frontend holds every chat turn to this channel grammar with a structural tag (a non-empty analysis channel, then either tool calls whose `rfl:parameter` values are held to their JSON-schema types or the final answer), mirroring the model builder's SGLang serving layer; `required` and named tool choices reuse the same tag, so they are enforced on the Harmony wire. A `response_format` (`json_object` or `json_schema`) is held inside the final channel behind the analysis, so the response keeps its reasoning and the channel structure the parser expects; a forced tool choice ignores `response_format`, and the `nvext` guided-decoding fields (`guided_json`, `guided_regex`, ...) stay bare constraints from the first token. Set `DYN_BEAM_TURN_GRAMMAR=0` on the frontend to disable it for automatic tool choice (forced choices keep theirs; `response_format` then falls back to the bare JSON constraint).
+
+        **Rejected requests** (`Beam cannot enforce the requested tool constraints with this schema and prompt configuration`): the frontend returns HTTP 400 with this message instead of serving the request best-effort when the request asks for tool enforcement that the turn grammar cannot provide. That happens when the request has:
+
+        - a forced tool choice (`required` or a named function), but the last assistant message you send as a prefill has already started the final answer, so a tool call can no longer be forced;
+        - an applicable `strict: true` tool (any strict tool under `auto` or `required`, the named one under a named choice; `tool_choice: "none"` makes none applicable) whose schema the grammar cannot hold, for example one using keywords outside its JSON-schema subset such as `pattern`;
+        - `parallel_tool_calls: false` with usable tools together with an `nvext` guided-decoding field (`guided_json`, `guided_regex`, ...), which takes the output away from the grammar.
+
+        To resolve it, drop `strict` or fix the schema, remove the assistant prefill before forcing a call, or drop the guided-decoding field. Independently of the grammar, a `strict: true` tool whose schema is outside OpenAI's strict subset is rejected with HTTP 400 on this route as on every other.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -385,12 +417,19 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
 
   <Accordion title="Mistral">
     <AccordionGroup>
-      <Accordion title="Mistral, Mixtral, Mistral-Nemo, and Magistral">
-        **Parser:** `mistral`
+      <Accordion title="Mistral tokenizers before v11, including Mistral 7B, Mixtral, and Mistral-Nemo">
+        **Parser:** `mistral` with `DYN_PARSER_VERSION=1`
 
         **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
-        **Notes:** `[TOOL_CALLS]...[/TOOL_CALLS]`
+        **Notes:** `[TOOL_CALLS] [{"name": ..., "arguments": ...}]` calls. Under `auto` or `2`, `mistral` selects the v11+ parser below, and a tokenizer without `[ARGS]` is rejected at registration: the frontend logs the error and the model never appears in `/v1/models`. `DYN_PARSER_VERSION=1` applies to every model on the frontend.
+      </Accordion>
+      <Accordion title="Mistral v11+ tokenizers (tekken.json), including Mistral Large 4">
+        **Parser:** `mistral`, served by the `dynamo-parsers-v2` unified family `mistral_4`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** `[TOOL_CALLS]NAME[ARGS]{json}` calls with `[THINK]` reasoning; pair with `--dyn-reasoning-parser mistral`. The tokenizer must have `[ARGS]`, which Mistral tokenizers have from v11 on; an older tokenizer is rejected at registration unless `DYN_PARSER_VERSION=1` selects the parser above. On dynamo.vllm with the `auto` or `guidance` structured-output backend, mistral-common's grammar holds forced `tool_choice`, `auto` with tools, and a reply JSON schema. Other workers parse the native format but do not enforce a forced `tool_choice`. See the [Mistral Large 4 recipe](../../recipes/model-recipes/mistral-large-4.mdx).
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -410,7 +449,7 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
   <Accordion title="Muse">
     <AccordionGroup>
       <Accordion title="Muse Glimmer">
-        **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+        **Parser:** `muse_glimmer`. `muse` is a deprecated alias of `muse_glimmer` and will be removed in a future release.
 
         **Upstream name:** Check your engine version's `--help`
 

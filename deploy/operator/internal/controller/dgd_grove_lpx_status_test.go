@@ -21,7 +21,7 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			t.Log("Create three independent components under one child; the third serves through an agent runtime sidecar")
 			source := newLPXHandoffSource(t, "node-local-v2-hybrid")
-			other := newLPXHandoffSource(t, "single_v2").Spec.Components[0]
+			other := newLPXHandoffSource(t, "node-local-v2-lpu-only").Spec.Components[0]
 			other.ComponentName = "other"
 			third := *other.DeepCopy()
 			third.ComponentName = "third"

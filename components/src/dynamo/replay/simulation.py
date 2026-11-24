@@ -18,12 +18,9 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.runner import (
-    EngineReplayRunnerFactory,
-    materialize_engine_launch_config,
-)
-from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
+from aisim.runner import EngineReplayRunnerFactory, materialize_engine_launch_config
+from aisim.sweeper.provider import JSONValue, RuntimeHookSpec
+from aisim.sweeper.replay import (
     HookCapability,
     ReplayOutputRequirements,
     ReplayReport,
@@ -31,8 +28,8 @@ from aisimulate.sweeper.replay import (
     RunnerCapabilities,
 )
 
-from dynamo.llm import AisPerfConfig, KvRouterConfig
-from dynamo.mocker.config import normalize_mocker_config
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker.config import normalize_mocker_config, performance_config
 from dynamo.planner.core.types import TrafficObservation
 from dynamo.replay.api import (
     TelemetryOptions,
@@ -96,7 +93,12 @@ class DynamoReplayRunnerFactory:
             supports_agentic_speculative_decoding=True,
             supports_agentic_snapshots=engine_capabilities.supports_agentic_snapshots,
             supports_agentic_warmup=engine_capabilities.supports_agentic_warmup,
+            supports_agentic_live_warmup=(
+                engine_capabilities.supports_agentic_live_warmup
+            ),
             supports_agentic_profile=engine_capabilities.supports_agentic_profile,
+            # Engine args, state cache included, reach AISimulate's engine config.
+            supports_state_cache=engine_capabilities.supports_state_cache,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=tuple(
@@ -106,6 +108,8 @@ class DynamoReplayRunnerFactory:
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             agentic_qualification="functional_only",
+            # The AIS model config carries these to replay timing and capacity.
+            supported_engine_model_controls=("gemm_quant_mode", "kvcache_quant_mode"),
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:
@@ -145,12 +149,22 @@ class DynamoReplayRunner:
             router_config,
             ais_perf_config,
             conversation_affinity,
+            ais_perf_config_from_engine,
         ) = self._resolve_hooks(spec.runtime_hooks)
+        if ais_perf_config_from_engine:
+            deployment = spec.backend_deployment
+            role = "aggregated" if deployment.deployment_mode == "agg" else "prefill"
+            ais_perf_config = performance_config(self._engine_args(deployment, role))
+            if ais_perf_config is None:
+                raise ValueError(
+                    "router.ais_perf_model: {use: engine} needs an AIS perf model "
+                    f"on the {role} engine; it has none"
+                )
         planner_warmup = self._planner_warmup(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
-            "ais_perf_config": ais_perf_config,
+            "router_ais_perf_model": ais_perf_config,
             "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
@@ -239,14 +253,17 @@ class DynamoReplayRunner:
         dict[str, JSONValue] | None,
         str,
         KvRouterConfig | None,
-        AisPerfConfig | None,
         dict[str, JSONValue] | None,
+        dict[str, JSONValue] | None,
+        bool,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
-        ais_perf_config: AisPerfConfig | None = None
+        ais_perf_config: dict[str, JSONValue] | None = None
         conversation_affinity = None
+        # Set when the router takes the perf model of the engine it routes to.
+        ais_perf_config_from_engine = False
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -278,12 +295,24 @@ class DynamoReplayRunner:
                     )
                 router_config = KvRouterConfig.from_json(json.dumps(raw_config))
                 raw_ais = hook.config.get("ais_perf_config")
+                raw_from_engine = hook.config.get("ais_perf_config_from_engine")
+                if raw_from_engine is not None and raw_from_engine is not True:
+                    raise TypeError(
+                        "Dynamo Router ais_perf_config_from_engine must be true "
+                        "or absent"
+                    )
+                ais_perf_config_from_engine = raw_from_engine is True
                 if raw_ais is not None:
                     if not isinstance(raw_ais, dict):
                         raise TypeError(
                             "Dynamo Router AIS config must be a mapping or null"
                         )
-                    ais_perf_config = AisPerfConfig(config=raw_ais)
+                    if ais_perf_config_from_engine:
+                        raise ValueError(
+                            "Dynamo Router hook config has both ais_perf_config "
+                            "and ais_perf_config_from_engine"
+                        )
+                    ais_perf_config = raw_ais
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "
@@ -295,6 +324,7 @@ class DynamoReplayRunner:
             router_config,
             ais_perf_config,
             conversation_affinity,
+            ais_perf_config_from_engine,
         )
 
     @staticmethod
@@ -429,7 +459,12 @@ class DynamoReplayRunner:
         agentic_lanes = spec.workload.get("agentic_lanes")
         agentic_options = {
             name: spec.workload[name]
-            for name in ("agentic_snapshot", "agentic_warmup", "agentic_profile")
+            for name in (
+                "agentic_snapshot",
+                "agentic_warmup",
+                "agentic_warmup_policy",
+                "agentic_profile",
+            )
             if name in spec.workload
         }
         trace_block_size = spec.workload.get("trace_block_size")
@@ -566,6 +601,11 @@ class DynamoReplayRunner:
             ),
             "inter_turn_delay_ms": _float_value(
                 workload.get("inter_turn_delay_ms", 0.0), "inter_turn_delay_ms"
+            ),
+            # Session sources author each turn's new input; replay prefixes it
+            # with the earlier turns, as AISimulate's engine stack does.
+            "accumulate_session_deltas": (
+                workload.get("source_type") == "synthetic-session"
             ),
         }
 

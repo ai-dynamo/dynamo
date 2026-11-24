@@ -3,13 +3,8 @@
 
 mod support;
 
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCacheInput, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-};
-use dynamo_kv_router::{
-    KvRouterConfig, SharedCacheHits, WorkerSelectionPolicyError, WorkerSelector,
-};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -212,7 +207,7 @@ fn each_component_can_only_read_its_own_inputs() {
                             calls: calls.clone(),
                         };
                         let policy = WorkerSelectionPolicy::new_with_filters(
-                            KvRouterConfig::default(),
+                            SelectionConfig::default(),
                             "test",
                             vec![
                                 Box::new(probe(filter_mask)),

@@ -8,12 +8,10 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::{
-    plugins::{request_classifier::AbortCause, worker_selection::WorkerInputs},
-    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::KvSchedulerError,
-    selector::{HostedSelectionRequest, HostedWorkerPicker},
-};
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::routing::TokensWithHashes;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -26,6 +24,8 @@ use dynamo_runtime::{
     },
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike};
+use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
@@ -34,7 +34,6 @@ use crate::{
         KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
         to_worker_selection_session_context,
     },
-    lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -43,6 +42,7 @@ use crate::{
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
+    routing_policy::{HostedCandidatePolicy, check_candidate_policy},
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
         explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
@@ -57,13 +57,14 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
-pub(crate) use builder::hosted_picker;
+pub(crate) use builder::{EVERY_ROLE, check_hint_policies_route_on_kv_path, hosted_picker};
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+pub(crate) use hosted::hosted_request;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
+use request_guard::{KvRequestCleanup, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -274,18 +275,6 @@ enum RoutingPolicy {
     DeviceAwareWeighted,
 }
 
-struct LoraRouting {
-    filter: Arc<LoraFilter>,
-    load_estimator: Arc<LoadEstimator>,
-    picker: HostedWorkerPicker,
-}
-
-struct LoraSelection {
-    target: u64,
-    allowed_fallback: HashSet<u64>,
-    load_guard: LoraLoadGuard,
-}
-
 struct HostedSelection {
     initial_worker: u64,
     target_constraint: Option<AffinityTarget>,
@@ -313,7 +302,7 @@ pub struct RoutingHost {
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
-    lora: Option<LoraRouting>,
+    candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Required for every mode except KV, where the [`KvRouter`] owns the client.
@@ -798,11 +787,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             );
 
             let output = LLMEngineOutput {
-                routing_data: Some(RoutingData {
+                routing_data: Some(Box::new(RoutingData {
                     worker_id: worker_id_info,
                     token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             };
             let response = Annotated::from_data(output);
