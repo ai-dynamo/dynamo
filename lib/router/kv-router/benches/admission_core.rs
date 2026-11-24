@@ -38,9 +38,11 @@
 //!   when it is sent, and when it completes or aborts. This case issues one wake per request,
 //!   so it is a lower bound for that plugin.
 //! - `gate_wake_room`: as `gate_wake`, but a request's lifecycle ends before its slot frees,
-//!   which is the frontend's order. The wake and the free reach the actor together, so the
-//!   recheck finds a slot free: every waiting lane may go and becomes a candidate, one is
-//!   admitted, and the rest are refused and blocked again.
+//!   as the frontend ends it. On this bench's one thread the wake and the free then reach the
+//!   actor together, so the recheck finds a slot free: every waiting lane may go and becomes a
+//!   candidate, one is admitted, and the rest are refused and blocked again. On the frontend's
+//!   runtime the wake can also arrive after the free, which is `gate_wake`: the two cases
+//!   bound what a wake costs.
 //!
 //! Run with: `cargo bench -p dynamo-kv-router --bench admission_core --features bench`
 
