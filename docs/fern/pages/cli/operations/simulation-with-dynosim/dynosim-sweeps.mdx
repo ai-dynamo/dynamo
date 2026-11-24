@@ -85,7 +85,7 @@ dgd:
   output_file: deployment.yaml
   generator: aic
   format: manifest
-  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
   num_gpus_per_node: 8
 ```
 
@@ -153,7 +153,7 @@ dgd:
   name: qwen
   format: kustomize
   output_dir: qwen
-  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
   num_gpus_per_node: 8
 ```
 

@@ -78,9 +78,21 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Selecting `velo` while TLS is configured uses the tcp response plane** ([#17885](https://github.com/ai-dynamo/dynamo/pull/17885)). Velo has no TLS. A process that selects `velo` while any `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is true now runs on tcp and logs one warning, instead of refusing to start.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend HTTP server log targets follow the move into `dynamo-http-server`.** The frontend's listener, service stages, request metrics, and connection monitor moved out of the `dynamo-llm` crate into `dynamo-http-server`, so their log lines, including the per-request `request received` and `request completed` lines, report a `dynamo_http_server` target.
+
+| Log target before | Log target now |
+| :---- | :---- |
+| `dynamo_llm::http::service::service_v2`, for listener startup, bind failure, shutdown, and the drain timeout | `dynamo_http_server::server` |
+| `dynamo_llm::http::service::service_v2`, for the draining and stopping stage changes | `dynamo_http_server::lifecycle` |
+| `dynamo_llm::http::service::server`, for accept and TLS handshake failures | `dynamo_http_server::server` |
+| `dynamo_llm::http::service::metrics`, for request received and completed lines, histogram bucket configuration, the metrics prefix, and scrape failures | `dynamo_http_server::metrics` |
+| `dynamo_llm::http::service::disconnect`, for the connection monitor | `dynamo_http_server::disconnect` |
+
+  > **Migrate:** A `DYN_LOG` filter scoped to `dynamo_llm`, `dynamo_llm::http`, `dynamo_llm::http::service`, or one of the modules in the table must also name `dynamo_http_server` or the new target, for example `dynamo_http_server=<level>`. There is no runtime alias, so the old directive no longer selects these lines.
+
 <a id="v170"></a>
 
-## v1.7.0 - Upcoming
+## v1.7.0 - Nov 23, 2026
 
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated `worker_selection.instances` in the router policy YAML** in favor of writing each role's policy inline. A role (`aggregated`, `prefill`, `decode`, `encode`) is now a policy type name, or a mapping with `type` and `parameters`. The `instances` list and name references still load with a warning and are scheduled for removal in v1.8.0. `DYN_ROUTER_WORKER_SELECTION_POLICY`, `DYN_ROUTER_PREFILL_POLICY`, and `DYN_ROUTER_DECODE_POLICY` now accept a policy type as well as an instance name.
 
@@ -198,6 +210,18 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Mocker and replay vLLM engines model async scheduling by default** ([#18014](https://github.com/ai-dynamo/dynamo/pull/18014), [#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). With `aisim` 0.14, a busy vLLM engine keeps its next batch committed, so a request that arrives while the engine is busy is admitted later than before. SGLang and TensorRT-LLM engines are not affected. The figures that follow were measured with `aisim` 0.15. Against synchronous scheduling, the request is admitted one pass later in offline replay and up to two passes later in online replay and on the live Mocker, and a request that arrives at an idle engine is not delayed. Against `aisimulate` 0.13 on one default live Mocker worker with 512-token prompts and 64 output tokens, mean time to first token rose from 46 ms to 66 ms at 20 requests per second, and with 16 closed-loop streams throughput fell from 20.2 to 19.9 requests per second.
 
   > **Migrate:** To keep synchronous scheduling, set `engine.async_scheduling` to `false` in the Mocker's `--extra-engine-args` file, or in `extra_engine_args`, `prefill_engine_args`, or `decode_engine_args` of the replay API. The Mocker file replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a file that changes only the scheduling is `{"engine": {"async_scheduling": false}, "dynamo": {"enable_local_indexer": true}}`.
+
+<a id="v162"></a>
+
+## v1.6.2 - Nov 5, 2026
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`cuda-gdb` in the SGLang image no longer supports Python scripting** ([#18081](https://github.com/ai-dynamo/dynamo/pull/18081)). The SGLang image moved to a uv-installed CPython 3.12.16, and the `cuda-gdb` Python front end links the Ubuntu `libpython3.12` that this change removes.
+
+<a id="v161"></a>
+
+## v1.6.1 - Oct 27, 2026
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **The updated trust stores drop the emSign ECC Root CA - G3 root** ([#17108](https://github.com/ai-dynamo/dynamo/pull/17108)). The system CA bundles in every container image and the Rust TLS roots in the `ai-dynamo-runtime` and `kvbm` wheels no longer include it, so a TLS connection to an endpoint whose certificate chains to that root now fails verification.
 
 <a id="v160"></a>
 

@@ -107,10 +107,3 @@ def observe_embedding_input_tokens(model: str, input_tokens: int) -> None:
         )
         return
     _EMBEDDING_INPUT_TOKENS.labels(model=model).observe(input_tokens)
-
-
-def reset_metrics_for_testing() -> None:
-    """Clear cached Histogram singletons so tests can register against a fresh registry."""
-    global _EMBEDDING_BATCH_SIZE, _EMBEDDING_INPUT_TOKENS
-    _EMBEDDING_BATCH_SIZE = None
-    _EMBEDDING_INPUT_TOKENS = None

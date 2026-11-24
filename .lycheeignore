@@ -60,10 +60,6 @@
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
 
-# The classic dynamo-platform 1.6.0 chart publishes to helm.ngc.nvidia.com in a
-# follow-up NGC publishing MR; the .tgz URL 404s until then. Remove once live.
-^https://helm\.ngc\.nvidia\.com/nvidia/ai-dynamo/charts/dynamo-platform-1\.6\.0\.tgz$
-
 # The Dynamo Enterprise NGC collection is not published on the public catalog
 # yet, so the canonical collection URL 404s from CI. The org and team segments
 # are correct; only the collection is missing. Remove once it is live.

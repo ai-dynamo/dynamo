@@ -220,7 +220,8 @@ where
     selectors: Vec<(RouterMode, Arc<dyn InstanceSelector>)>,
 
     /// The final hop: after selecting an instance, `PushRouter` hands it to this
-    /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
+    /// `StreamingDispatch` (`TransportDispatch` by default: the request plane,
+    /// or the registered direct dispatch for `Direct` instances).
     /// A trait object so an alternate transport can swap it out.
     addressed: Arc<dyn StreamingDispatch<T, U>>,
 
@@ -644,6 +645,105 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
     AddressedPushRouter::from_runtime_provider(endpoint).await
 }
 
+/// The default final hop: the request plane, except for instances that
+/// advertise `TransportType::Direct`, which go to the dispatch registered with
+/// [`DistributedRuntime::register_direct_dispatch`](crate::DistributedRuntime::register_direct_dispatch).
+struct TransportDispatch<T, U> {
+    request_plane: Arc<AddressedPushRouter>,
+    drt: crate::DistributedRuntime,
+    /// The registered direct dispatch, cached on first use so the request path
+    /// does not take the registry lock. A miss is not cached, so a dispatch
+    /// registered after this router is built is still found.
+    direct: std::sync::OnceLock<Arc<dyn StreamingDispatch<T, U>>>,
+}
+
+impl<T, U> TransportDispatch<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    /// A missing registration is a process misconfiguration, not a worker
+    /// fault: `Internal` fails the request without reporting the worker down.
+    fn direct(&self, instance_id: u64) -> Result<&Arc<dyn StreamingDispatch<T, U>>, Error> {
+        if let Some(dispatch) = self.direct.get() {
+            return Ok(dispatch);
+        }
+        let dispatch = self.drt.direct_dispatch::<T, U>().ok_or_else(|| {
+            DynamoError::builder()
+                .error_type(ErrorType::Internal)
+                .message(format!(
+                    "instance {instance_id} is reached directly, but no direct dispatch is registered"
+                ))
+                .build()
+        })?;
+        Ok(self.direct.get_or_init(|| dispatch))
+    }
+}
+
+fn is_direct(instance: &Instance) -> bool {
+    matches!(
+        instance.transport,
+        crate::component::TransportType::Direct(_)
+    )
+}
+
+#[async_trait]
+impl<T, U> StreamingDispatch<T, U> for TransportDispatch<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        match request.instance().filter(|instance| is_direct(instance)) {
+            Some(instance) => self.direct(instance.id())?.generate(request).await,
+            // Call what the request plane's own `StreamingDispatch` impl
+            // forwards to, here and in `generate_bidirectional`: going through
+            // that impl would box one more future per request.
+            None => {
+                AsyncEngine::<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error>::generate(
+                    self.request_plane.as_ref(),
+                    request,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error> {
+        if is_direct(&instance) {
+            self.direct(instance.id())?
+                .generate_bidirectional(instance, address, input)
+                .await
+        } else {
+            self.request_plane
+                .dispatch_bidirectional(instance, address, input)
+                .await
+        }
+    }
+
+    // The hooks notify every registered direct dispatch, not only the one for
+    // `T` and `U`: an endpoint has one instance watcher, which runs through the
+    // first router built for it, and routers of other types reach that endpoint.
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        StreamingDispatch::<T, U>::on_instance_removed(self.request_plane.as_ref(), id).await;
+        for direct in self.drt.direct_dispatch_entries() {
+            direct.on_instance_removed(id).await;
+        }
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        StreamingDispatch::<T, U>::on_instance_added(self.request_plane.as_ref(), id).await;
+        for direct in self.drt.direct_dispatch_entries() {
+            direct.on_instance_added(id).await;
+        }
+    }
+}
+
 /// Optional capabilities of a [`PushRouter`], for [`PushRouter::from_client_with_options`].
 ///
 /// Every named constructor on [`PushRouter`] is a shorthand for one of these.
@@ -653,7 +753,9 @@ pub struct PushRouterOptions<T, U> {
     /// Multimodal embedding-cache state for `RouterMode::DeviceAwareWeighted`.
     pub multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
     pub multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
-    /// A caller-supplied final hop in place of the request plane. Its `ErrorType`
+    /// A caller-supplied final hop for every instance. Without one, the router
+    /// reaches `TransportType::Direct` instances through the runtime's registered
+    /// direct dispatch and all others over the request plane. Its `ErrorType`
     /// mapping drives report-down, overload and migration as usual.
     pub dispatch: Option<Arc<dyn StreamingDispatch<T, U>>>,
     /// Report transient worker errors to discovery (`report_instance_down`) and
@@ -736,7 +838,7 @@ where
     }
 
     /// Create a new PushRouter from `client` with the given optional capabilities.
-    /// A caller-supplied `dispatch` replaces the request plane as the final hop;
+    /// A caller-supplied `dispatch` replaces the default final hop;
     /// fault detection stays on, so its `ErrorType` mapping drives report-down,
     /// overload and migration as usual.
     pub async fn from_client_with_options(
@@ -757,7 +859,11 @@ where
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = match dispatch {
             Some(dispatch) => dispatch,
-            None => addressed_router(&client.endpoint).await?,
+            None => Arc::new(TransportDispatch {
+                request_plane: addressed_router(&client.endpoint).await?,
+                drt: client.endpoint.drt().clone(),
+                direct: std::sync::OnceLock::new(),
+            }),
         };
 
         // Start worker monitor if provided and in dynamic mode
@@ -1800,6 +1906,9 @@ where
                         (tcp_endpoint.clone(), "transport.tcp.request")
                     }
                     TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                    TransportType::Direct(endpoint) => {
+                        (endpoint.clone(), "transport.direct.request")
+                    }
                 };
                 (addr, kind, instance)
             })
@@ -3695,7 +3804,7 @@ mod tests {
 
     /// A `StreamingDispatch` that records what the router hands the seam, so the
     /// test can assert a *caller-supplied* dispatch (not just the default
-    /// `AddressedPushRouter`) receives the selected address/instance and the
+    /// `TransportDispatch`) receives the selected address/instance and the
     /// discovery lifecycle events.
     #[derive(Default)]
     struct RecordingDispatch {
@@ -3716,17 +3825,20 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StreamingDispatch<u64, TestResponse> for RecordingDispatch {
+    impl<T> StreamingDispatch<T, TestResponse> for RecordingDispatch
+    where
+        T: Data + Serialize + Into<u64>,
+    {
         async fn generate(
             &self,
-            request: SingleIn<AddressedRequest<u64>>,
+            request: SingleIn<AddressedRequest<T>>,
         ) -> Result<ManyOut<TestResponse>, Error> {
             let (addressed, _ctx) = request.transfer(());
             let (payload, address, instance) = addressed.into_parts();
             self.unary
                 .lock()
                 .unwrap()
-                .push((payload, address, instance.map(|i| i.id())));
+                .push((payload.into(), address, instance.map(|i| i.id())));
             Ok(Self::canned_stream())
         }
 
@@ -3734,7 +3846,7 @@ mod tests {
             &self,
             instance: Instance,
             address: String,
-            _input: ManyIn<u64>,
+            _input: ManyIn<T>,
         ) -> Result<ManyOut<TestResponse>, Error> {
             self.bidi.lock().unwrap().push((address, instance.id()));
             Ok(Self::canned_stream())
@@ -3829,6 +3941,232 @@ mod tests {
             poll_until(|| dispatch.added.lock().unwrap().len() > adds_before).await,
             "on_instance_added (re-registration) not delivered to the supplied dispatch"
         );
+
+        rt.shutdown();
+    }
+
+    /// Register this runtime's own instance of `endpoint` as one reached directly.
+    async fn register_direct_instance(drt: &DistributedRuntime, endpoint: &Endpoint) {
+        let id = endpoint.id();
+        drt.discovery()
+            .register(crate::discovery::DiscoverySpec::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+                transport: crate::component::TransportType::Direct(
+                    "http://engine:30001".to_string(),
+                ),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A router built without a dispatch reaches direct instances through the
+    /// runtime's registered direct dispatch, with its lifecycle hooks.
+    #[tokio::test]
+    async fn direct_instances_use_the_registered_direct_dispatch() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_direct_dispatch".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        register_direct_instance(&drt, &endpoint).await;
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        drt.register_direct_dispatch::<u64, TestResponse>(dispatch.clone())
+            .unwrap();
+        assert!(
+            drt.register_direct_dispatch::<u64, TestResponse>(dispatch.clone())
+                .is_err(),
+            "a second direct dispatch for the same types must be refused"
+        );
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut stream = router.generate(SingleIn::new(7u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let unary = dispatch.unary.lock().unwrap();
+            assert_eq!(unary.len(), 1, "one unary dispatch expected");
+            assert_eq!(unary[0].0, 7);
+            assert_eq!(unary[0].1, "http://engine:30001");
+            assert_eq!(unary[0].2, Some(instance_id));
+        }
+
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
+                1u64, 2u64,
+            ]))));
+        let mut stream = router.generate(input).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.bidi.lock().unwrap()[..],
+            [("http://engine:30001".to_string(), instance_id)]
+        );
+
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_added not delivered to the direct dispatch"
+        );
+        drt.discovery()
+            .unregister(crate::discovery::DiscoveryInstance::Endpoint(
+                client.wait_for_instances().await.unwrap()[0].clone(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            poll_until(|| dispatch.removed.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_removed not delivered to the direct dispatch"
+        );
+
+        rt.shutdown();
+    }
+
+    /// A direct instance with no registered direct dispatch fails the request
+    /// as `Internal` and is not reported down. The router does not cache that
+    /// miss: once a dispatch is registered, the same router reaches it.
+    #[tokio::test]
+    async fn direct_instances_fail_internal_until_a_dispatch_is_registered() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_direct_dispatch_missing".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        register_direct_instance(&drt, &endpoint).await;
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let Err(error) = router.generate(SingleIn::new(1u64)).await else {
+            panic!("no dispatch is registered for direct instances");
+        };
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::Internal], &[]),
+            "{error}"
+        );
+        assert!(!is_inhibited(error.as_ref()), "{error}");
+        assert_eq!(
+            client.instance_ids_avail().len(),
+            1,
+            "a missing registration must not report the worker down"
+        );
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        drt.register_direct_dispatch::<u64, TestResponse>(dispatch.clone())
+            .unwrap();
+        let mut stream = router.generate(SingleIn::new(2u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.unary.lock().unwrap()[..],
+            [(2, "http://engine:30001".to_string(), Some(instance_id))],
+            "a dispatch registered after the router missed it must be found"
+        );
+
+        rt.shutdown();
+    }
+
+    /// An endpoint has one instance watcher, driven through the first router
+    /// built for it. Its events must also reach the direct dispatch of a router
+    /// with other request and response types on that endpoint.
+    #[tokio::test]
+    async fn instance_events_reach_the_direct_dispatch_of_every_type_pair() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_direct_dispatch_type_pairs".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        let first = Arc::new(RecordingDispatch::default());
+        let second = Arc::new(RecordingDispatch::default());
+        drt.register_direct_dispatch::<u64, TestResponse>(first.clone())
+            .unwrap();
+        drt.register_direct_dispatch::<u32, TestResponse>(second.clone())
+            .unwrap();
+        register_direct_instance(&drt, &endpoint).await;
+        let instance = client.wait_for_instances().await.unwrap()[0].clone();
+        let instance_id = instance.id();
+
+        let _first_router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let second_router = PushRouter::<u32, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut stream = second_router.generate(SingleIn::new(7u32)).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            second.unary.lock().unwrap()[..],
+            [(7, "http://engine:30001".to_string(), Some(instance_id))]
+        );
+
+        for (name, dispatch) in [("first", &first), ("second", &second)] {
+            assert!(
+                poll_until(|| dispatch.added.lock().unwrap().contains(&instance_id)).await,
+                "on_instance_added not delivered to the {name} router's direct dispatch"
+            );
+        }
+        drt.discovery()
+            .unregister(crate::discovery::DiscoveryInstance::Endpoint(instance))
+            .await
+            .unwrap();
+        for (name, dispatch) in [("first", &first), ("second", &second)] {
+            assert!(
+                poll_until(|| dispatch.removed.lock().unwrap().contains(&instance_id)).await,
+                "on_instance_removed not delivered to the {name} router's direct dispatch"
+            );
+        }
 
         rt.shutdown();
     }

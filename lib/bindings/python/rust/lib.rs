@@ -408,6 +408,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::WorkerSequenceEventPublisher>()?;
+    #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SessionBindingStream>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionCacheConfig>()?;
@@ -1143,7 +1145,7 @@ struct Client {
 }
 
 /// A read-only view of an instance's transport, wrapping the runtime
-/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp") and its
+/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp" / "direct") and its
 /// `address`; the address format is transport-specific and not a stable parse
 /// target.
 #[pyclass(eq, hash, frozen)]
@@ -1159,6 +1161,7 @@ impl TransportType {
         match &self.inner {
             rs::component::TransportType::Nats(_) => "nats_tcp",
             rs::component::TransportType::Tcp(_) => "tcp",
+            rs::component::TransportType::Direct(_) => "direct",
         }
     }
 
