@@ -545,10 +545,8 @@ def test_request_cancellation_vllm_decode_cancel_during_kv_receive(
                 prefill_metrics = VllmMetricsChecker(port_env="DYN_SYSTEM_PORT")
                 prefill_metrics.bind_environment(prefill_worker.env)
 
-                # An abort before the first NIXL handshake between the two
-                # engines waits for the prefill-side KV lease (see #17871), so
-                # complete one transfer first. A different prompt keeps the
-                # measured request from hitting the decode prefix cache.
+                # Warm up: an abort before the first NIXL handshake waits for the
+                # prefill KV lease (#17871). A new prompt avoids the prefix cache.
                 warmup = send_completion_request(
                     KV_RECEIVE_WARMUP_PROMPT, 8, frontend.frontend_port
                 )
@@ -601,8 +599,7 @@ def test_request_cancellation_vllm_decode_cancel_during_kv_receive(
                 )
                 held_at = time.monotonic()
 
-                # The scheduler only reports a held receive for a request in
-                # WAITING_FOR_REMOTE_KVS, and it cannot leave that state until
+                # A held receive keeps the request in WAITING_FOR_REMOTE_KVS until
                 # the connector releases it.
                 running, waiting = decode_metrics.scheduler_counts()
                 deadline = time.monotonic() + 3
