@@ -13,11 +13,11 @@ This page is for developers who change a built-in format or add a format.
 
 ## Built-In Formats
 
-Dynamo links two formats. The frontend serves a route only after you enable it.
+Dynamo includes two built-in formats. The frontend serves a route only after you enable it.
 
 | Format | Route | Enable with | Path override | Worker capability |
 |---|---|---|---|---|
-| `sglang` | `POST` and `PUT /generate` | `DYN_SGLANG_ENABLE_GENERATE=1` | `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` | `sglang_generate` |
+| `sglang` | `POST`, `PUT` `/generate` | `DYN_SGLANG_ENABLE_GENERATE=1` | `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` | `sglang_generate` |
 | `vllm` | `POST /inference/v1/generate` | `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE=1` | `DYN_HTTP_SVC_VLLM_GENERATE_PATH` | `vllm_inference_v1_generate` |
 
 `DYN_GENERATE_FORMAT` selects the format for the `/generate` route. The default is `sglang`. The `/inference/v1/generate` route always uses the `vllm` format.
@@ -83,6 +83,8 @@ The other methods have default implementations. They control `PUT` support, body
 
 A format sends the native request body to the worker in `PreprocessedRequest::extra_args`. The worker reads the body from the key that the format uses.
 
+The body in `extra_args` is not the complete native request. The format moves the prompt token IDs out of the body and into `PreprocessedRequest::token_ids`. The worker puts the canonical token IDs back into the native request before it validates the request and sends it to the engine.
+
 | Format | Request key | Response key |
 |---|---|---|
 | `sglang` | `extra_args.sglang_tito` | `engine_data.sglang_response` |
@@ -115,9 +117,9 @@ A `WorkerError` holds the HTTP status, the public message, and the error type fo
 To serve a format that Dynamo does not include, link a custom catalog into the frontend.
 
 1. Create a Rust crate that implements `GenerateFormat` and `GenerateExchange`.
-2. Create a catalog crate. In its `register` function, call `dynamo_generate_format_catalog::register` to keep the built-in formats.
+2. Create a catalog crate. Add `dynamo-generate-format-catalog` to this crate as a dependency under an alias. In the `register` function of your catalog, call `register` of the built-in catalog to keep the built-in formats.
 3. Register your format with a name that no other format uses. The registry rejects duplicate names.
-4. Replace the `dynamo-generate-format-catalog` dependency in `lib/bindings/python/Cargo.toml` with your catalog crate.
+4. In `lib/bindings/python/Cargo.toml`, point the `dynamo-generate-format-catalog` dependency at your catalog crate with `package = "<your-crate>"`. The bindings call `dynamo_generate_format_catalog::register`, so the dependency name does not change.
 5. Set `DYN_GENERATE_FORMAT` to the name of your format.
 6. Make sure that each worker advertises the capability of your format in its runtime data.
 
