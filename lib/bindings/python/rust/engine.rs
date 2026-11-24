@@ -134,25 +134,47 @@ fn demand_driven_python_stream(
     locals: TaskLocals,
     generator: Bound<'_, PyAny>,
 ) -> PyResult<PyItemStream> {
-    let anext = generator.getattr("__anext__")?.unbind();
+    let anext = Arc::new(generator.getattr("__anext__")?.unbind());
+    let locals = Arc::new(locals);
     let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
-        // Only the GIL-bound `__anext__` call is annotated. The `.await` below is
-        // the Python generator (and, for a worker, the engine) producing the item,
-        // so leaving it outside the range keeps engine time out of the bridge cost.
-        let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
-        let next = Python::with_gil(|py| {
-            pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
-        });
-        drop(nvtx_anext);
-        let item = match next {
-            Ok(next) => next.await,
-            Err(error) => Err(error),
-        };
-        if item.as_ref().is_err_and(|error| {
-            Python::with_gil(|py| {
-                error.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py)
+        // `__anext__` and the end-of-stream check take the GIL once per item, so they run
+        // on the blocking pool: a Tokio worker waiting for the GIL stalls every task queued
+        // on it (HTTP, health, other streams) for as long as another thread holds the GIL.
+        let call = {
+            let (anext, locals) = (anext.clone(), locals.clone());
+            crate::gil_offload::with_gil_offloaded(move |py| {
+                // Only the GIL-bound `__anext__` call is annotated. The `.await` below
+                // is the Python generator (and, for a worker, the engine) producing the
+                // item, so leaving it outside the range keeps engine time out of the
+                // bridge cost.
+                let _nvtx = dynamo_nvtx_range!("pybridge.anext_call");
+                pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
             })
-        }) {
+        };
+        let item = match call.await {
+            Ok(Ok(next)) => next.await,
+            Ok(Err(error)) => Err(error),
+            Err(join) => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to offload the python __anext__ call: {join}"
+            ))),
+        };
+        let (item, exhausted) = match item {
+            Ok(item) => (Ok(item), false),
+            Err(error) => crate::gil_offload::with_gil_offloaded(move |py| {
+                let exhausted = error.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py);
+                (Err(error), exhausted)
+            })
+            .await
+            .unwrap_or_else(|join| {
+                (
+                    Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "failed to offload the python end-of-stream check: {join}"
+                    ))),
+                    false,
+                )
+            }),
+        };
+        if exhausted {
             None
         } else {
             Some((item, (anext, locals)))

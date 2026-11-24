@@ -82,6 +82,7 @@ mod backend;
 mod context;
 mod engine;
 pub mod errors;
+mod gil_offload;
 mod http;
 mod kserve_grpc;
 mod llm;
@@ -234,19 +235,21 @@ pub(crate) fn bridge_runtime() -> &'static tokio::runtime::Runtime {
     BRIDGE_RUNTIME.get_or_init(pyo3_async_runtimes::tokio::get_runtime)
 }
 
-/// Convert a future and record its runtime for the bounded interpreter-exit drain.
+/// Convert a future into an asyncio awaitable on the current event loop.
+///
+/// The result is delivered from the blocking pool, never from a runtime worker: see
+/// [`gil_offload::future_into_py_with_locals`]. Spawning on [`bridge_runtime`] also records
+/// the runtime for the bounded interpreter-exit drain.
 pub(crate) fn future_into_py<F, T>(py: Python<'_>, fut: F) -> PyResult<Bound<'_, PyAny>>
 where
     F: std::future::Future<Output = PyResult<T>> + Send + 'static,
-    T: for<'py> IntoPyObject<'py>,
+    T: for<'py> IntoPyObject<'py> + Send + 'static,
 {
-    let future = pyo3_async_runtimes::tokio::future_into_py(py, fut)?;
-    // Successful conversion initialized the bridge without requiring a Dynamo runtime.
-    bridge_runtime();
-    Ok(future)
+    let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
+    gil_offload::future_into_py_with_locals(py, locals, fut)
 }
 
-/// Preserve explicit task locals while recording the converted future's runtime.
+/// [`future_into_py`] with explicit task locals.
 fn future_into_py_with_locals<F, T>(
     py: Python<'_>,
     locals: pyo3_async_runtimes::TaskLocals,
@@ -254,11 +257,9 @@ fn future_into_py_with_locals<F, T>(
 ) -> PyResult<Bound<'_, PyAny>>
 where
     F: std::future::Future<Output = PyResult<T>> + Send + 'static,
-    T: for<'py> IntoPyObject<'py>,
+    T: for<'py> IntoPyObject<'py> + Send + 'static,
 {
-    let future = pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, fut)?;
-    bridge_runtime();
-    Ok(future)
+    gil_offload::future_into_py_with_locals(py, locals, fut)
 }
 
 /// Longest the exit hook will wait for the runtimes it drains to go quiet.
@@ -2356,14 +2357,19 @@ async fn process_stream(
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
-        // Convert the response to a PyObject using Python's GIL
+        // Convert the response to a PyObject under the GIL, off the runtime workers.
         let annotated: RsAnnotated<rmpv::Value> = response;
-        let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
+        let annotated: RsAnnotated<PyObject> = match gil_offload::with_gil_offloaded(move |py| {
+            annotated.map_data(|data| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
             })
-        });
+        })
+        .await
+        {
+            Ok(annotated) => annotated,
+            Err(e) => RsAnnotated::from_error(format!("failed to convert response: {e}")),
+        };
 
         let is_error = annotated.is_error();
 
@@ -2430,13 +2436,11 @@ impl AsyncResponseStream {
                         let pyobj = crate::errors::check_response_error(pyobj, routed_engine)?;
 
                         if annotated {
-                            let object = Annotated { inner: pyobj };
-                            #[allow(deprecated)]
-                            let object = Python::with_gil(|py| object.into_py(py));
-                            return Ok(object);
+                            // Wrapped by `future_into_py`'s off-worker delivery step.
+                            return Ok(StreamItem::Annotated(Annotated { inner: pyobj }));
                         } else {
                             match pyobj.data {
-                                Some(data) => return Ok(data),
+                                Some(data) => return Ok(StreamItem::Data(data)),
                                 None => continue,
                             }
                         }
@@ -2498,6 +2502,25 @@ impl PyAsyncRequestStream {
 #[pyclass]
 struct Annotated {
     inner: RsAnnotated<PyObject>,
+}
+
+/// One item of an [`AsyncResponseStream`], converted to Python only when it is delivered.
+enum StreamItem {
+    Annotated(Annotated),
+    Data(PyObject),
+}
+
+impl<'py> IntoPyObject<'py> for StreamItem {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        match self {
+            StreamItem::Annotated(annotated) => Ok(Bound::new(py, annotated)?.into_any()),
+            StreamItem::Data(data) => Ok(data.into_bound(py)),
+        }
+    }
 }
 
 #[pymethods]
