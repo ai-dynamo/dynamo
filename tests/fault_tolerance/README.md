@@ -76,12 +76,14 @@ API endpoints, backends, and deployment configurations.
 |------|------|-------------------|--------------|-------|
 | `test_request_cancellation_vllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker |
 | `test_request_cancellation_vllm_decode_cancel` | Disaggregated | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
+| `test_request_cancellation_vllm_decode_cancel_during_kv_receive` | Disaggregated | Remote decode, KV receive held in flight | Streaming chat (no response read) | Prefill + Decode workers |
 | `test_request_cancellation_vllm_remote_prefill_cancel` | Disaggregated | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
 
 **Run examples:**
 ```bash
 pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_aggregated -v -s
 pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_decode_cancel -v -s
+pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_decode_cancel_during_kv_receive -v -s
 pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_remote_prefill_cancel -v -s
 ```
 

@@ -63,8 +63,9 @@ DECODE_CANCEL_TEST_TIMEOUT_S = 900
 DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
 
-# Long enough to observe and abort the held request, and well below NIXL's
-# default 30s KV lease so prefill-side lease expiry cannot mask a leak.
+# Long enough to observe and abort the held request. Decode notifies prefill
+# when the real read completes, before the hold starts, so prefill frees its
+# blocks without waiting for the hold or the NIXL KV lease.
 KV_RECEIVE_HOLD_S = 15.0
 KV_RECEIVE_RELEASE_ALLOWANCE_S = 10.0
 KV_RECEIVE_WARMUP_PROMPT = "Name three primary colors."
@@ -623,13 +624,6 @@ def test_request_cancellation_vllm_decode_cancel_during_kv_receive(
                 )
                 aborted_after_s = time.monotonic() - held_at
 
-                poll_for_pattern(
-                    process=frontend,
-                    pattern="issued control message control_msg=Kill",
-                    max_wait_ms=5000,
-                    poll_interval_ms=50,
-                )
-
                 decode_metrics.wait_for_scheduler(is_active=False)
                 usage_after_abort = kv_cache_usage(decode_metrics)
                 decode_log = read_log_content(decode_worker.log_path)
@@ -646,6 +640,13 @@ def test_request_cancellation_vllm_decode_cancel_during_kv_receive(
                     "Aborted %.2fs after the hold started; decode KV usage %s",
                     aborted_after_s,
                     usage_after_abort,
+                )
+
+                poll_for_pattern(
+                    process=frontend,
+                    pattern="issued control message control_msg=Kill",
+                    max_wait_ms=5000,
+                    poll_interval_ms=50,
                 )
 
                 poll_for_pattern(
