@@ -811,10 +811,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
 		return r.generateService(ctx, opt)
 	})
-	if err != nil {
-		return false, err
-	}
-	return modified, nil
+	return modified, err
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {
@@ -1029,7 +1026,7 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 			podcontroller.EnqueueOwners(podcontroller.DCDName),
 			builder.WithPredicates(podcontroller.CrashLoopPredicate(podcontroller.DCDName)),
 		).
-		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Owns(&corev1.Service{}, builder.WithPredicates(predicate.ResourceVersionChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
 

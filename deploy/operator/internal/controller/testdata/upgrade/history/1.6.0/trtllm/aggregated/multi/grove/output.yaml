@@ -629,8 +629,12 @@ metadata:
     nvidia.com/last-applied-hash: 725f172403ac49d588b57dfbe3bde3de84efbb5c8075bdc683f4f9d1bdee1a0e
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: "frontend"
+    nvidia.com/dynamo-component-type: "frontend"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: "workers"
+    nvidia.com/dynamo-namespace: "upgrade-history-1-6-0-trtllm-aggregated-multi-grove-workers"
   name: workers-frontend
   namespace: upgrade-history-1-6-0-trtllm-aggregated-multi-grove
   ownerReferences:
@@ -672,8 +676,12 @@ metadata:
     nvidia.com/last-applied-hash: 9ebccbd9bf666345a69fff155cab3f4590b92360cceeb9263408e638c0e1fbd2
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: "worker"
+    nvidia.com/dynamo-component-type: "worker"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: "workers"
+    nvidia.com/dynamo-namespace: "upgrade-history-1-6-0-trtllm-aggregated-multi-grove-workers"
     nvidia.com/dynamo-worker-hash: 786a7421
   name: workers-worker
   namespace: upgrade-history-1-6-0-trtllm-aggregated-multi-grove

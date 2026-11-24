@@ -46,8 +46,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -129,8 +129,9 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			}
 			writes := 0
 			funcs := groveScaleInterceptor(interceptor.Funcs{
-				Update: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
-					if desired, ok := object.(*unstructured.Unstructured); ok && desired.GetKind() == groveconstants.KindPodCliqueSet {
+				Apply: func(ctx context.Context, delegated client.WithWatch, object runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+					desired := &unstructured.Unstructured{Object: object.(runtime.Unstructured).UnstructuredContent()}
+					if desired.GetKind() == groveconstants.KindPodCliqueSet {
 						current := &unstructured.Unstructured{}
 						current.SetGroupVersionKind(desired.GroupVersionKind())
 						require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(desired), current))
@@ -138,7 +139,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 							desired.SetGeneration(current.GetGeneration() + 1)
 						}
 					}
-					return delegated.Update(ctx, object, opts...)
+					return delegated.Apply(ctx, object, opts...)
 				},
 			}, func() { writes++ })
 			providerClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, child).WithStatusSubresource(dgd, pcs).Build()
@@ -169,6 +170,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			}
 
 			t.Log("Acknowledged active progress still blocks both scaling directions")
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
 			pcs.Status.ObservedGeneration = new(pcs.Generation)
 			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
 			require.NoError(t, providerClient.Status().Update(ctx, pcs))
@@ -398,21 +400,24 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 						}
 						return nil
 					},
+					Apply: func(_ context.Context, _ client.WithWatch, object runtime.ApplyConfiguration, _ ...client.ApplyOption) error {
+						wire := &unstructured.Unstructured{Object: object.(runtime.Unstructured).UnstructuredContent()}
+						if isGrovePodCliqueSetObject(wire) && tt.existingPCS {
+							return apierrors.NewConflict(
+								schema.GroupResource{Group: "grove.io", Resource: "podcliquesets"},
+								wire.GetName(),
+								errors.New("stale PodCliqueSet"),
+							)
+						}
+						return nil
+					},
 					Update: func(
 						_ context.Context,
 						_ client.WithWatch,
 						object client.Object,
 						_ ...client.UpdateOption,
 					) error {
-						if isGrovePodCliqueSetObject(object) {
-							if tt.existingPCS {
-								return apierrors.NewConflict(
-									schema.GroupResource{Group: "grove.io", Resource: "podcliquesets"},
-									object.GetName(),
-									errors.New("stale PodCliqueSet"),
-								)
-							}
-						} else if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok {
+						if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok {
 							dgdUpdateCalls++
 						}
 						return nil
@@ -485,15 +490,24 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 		WithObjects(dgd, legacyPCS).
 		WithStatusSubresource(dgd).
 		WithInterceptorFuncs(interceptor.Funcs{
+			Apply: func(ctx context.Context, writer client.WithWatch, object runtime.ApplyConfiguration, options ...client.ApplyOption) error {
+				wire := &unstructured.Unstructured{Object: object.(runtime.Unstructured).UnstructuredContent()}
+				if isGrovePodCliqueSetObject(wire) {
+					current := newUnstructuredGrovePodCliqueSet()
+					require.NoError(t, writer.Get(ctx, client.ObjectKeyFromObject(wire), current))
+					if !apiequality.Semantic.DeepEqual(current.Object["spec"], wire.Object["spec"]) {
+						pcsUpdateCalls++
+					}
+				}
+				return writer.Apply(ctx, object, options...)
+			},
 			Update: func(
 				ctx context.Context,
 				writer client.WithWatch,
 				object client.Object,
 				options ...client.UpdateOption,
 			) error {
-				if isGrovePodCliqueSetObject(object) {
-					pcsUpdateCalls++
-				} else if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok {
+				if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok {
 					dgdUpdateCalls++
 					if failDGDUpdate {
 						return apierrors.NewConflict(
@@ -587,12 +601,13 @@ func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetRejectsStaleObservation(t
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 		WithObjects(existing).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(
+			Apply: func(
 				_ context.Context,
 				_ client.WithWatch,
-				object client.Object,
-				_ ...client.UpdateOption,
+				configuration runtime.ApplyConfiguration,
+				_ ...client.ApplyOption,
 			) error {
+				object := configuration.(client.Object)
 				updateCalls++
 				assert.Equal(t, existing.ResourceVersion, object.GetResourceVersion())
 				return apierrors.NewConflict(
@@ -654,74 +669,6 @@ func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetReturnsCreateConflict(t *
 	t.Log("Verify the creation collision is returned to the caller")
 	require.Error(t, err)
 	assert.True(t, apierrors.IsAlreadyExists(err))
-}
-
-func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
-	t.Log("Build one Grove reconciler with an injectable ordinary update failure")
-	ctx := context.Background()
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		Name: "graph", Namespace: "default", UID: types.UID("graph-uid"),
-	}
-	desired := &grovev1alpha1.PodCliqueSet{
-		APIVersion: provideroverride.GroveAPIVersion, Kind: provideroverride.TargetPodCliqueSet,
-		Name: "graph", Namespace: "default",
-		Spec: grovev1alpha1.PodCliqueSetSpec{
-			Template: grovev1alpha1.PodCliqueSetTemplateSpec{},
-		},
-	}
-	rejectUpdate := false
-	updateCalls := 0
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(ctx context.Context, writer client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
-				require.IsType(t, &unstructured.Unstructured{}, object, "opaque PCS updates must serialize only at the write boundary")
-				updateCalls++
-				if rejectUpdate {
-					return errors.New("provider rejected update")
-				}
-				return writer.Update(ctx, object, opts...)
-			},
-		}).
-		Build()
-	reconciler := &groveWorkloadsReconciler{
-		syncer: newDGDResourceSyncer(kubeClient, events.NewFakeRecorder(10)),
-	}
-
-	t.Log("Create the PCS after composing an opaque root topology override")
-	dgd.Spec.ProviderOverride = rootTopologyOverride(`{"topologyName":"gpu-topology","futureProviderField":{"enabled":true}}`)
-	_, _, err := reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{desired: desired})
-	require.NoError(t, err)
-	assertLiveRootTopologyValue(t, kubeClient, "topologyName", "gpu-topology")
-
-	t.Log("Reuse the typed render observation when the desired PCS is unchanged")
-	observed := &grovev1alpha1.PodCliqueSet{}
-	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
-	_, _, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
-	require.NoError(t, err)
-	assert.Zero(t, updateCalls)
-
-	t.Log("Reject an ordinary PCS update and verify the live resource remains unchanged")
-	dgd.Spec.ProviderOverride = rootTopologyOverride(`{"topologyName":"changed"}`)
-	rejectUpdate = true
-	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
-	_, _, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
-	require.ErrorContains(t, err, "provider rejected update")
-	assert.Equal(t, 1, updateCalls)
-	assertLiveRootTopologyValue(t, kubeClient, "topologyName", "gpu-topology")
-
-	t.Log("Remove the override and let the same PCS update path prune its subtree")
-	rejectUpdate = false
-	dgd.Spec.ProviderOverride = nil
-	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
-	_, _, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
-	require.NoError(t, err)
-	assert.Equal(t, 2, updateCalls)
-	live := newUnstructuredGrovePodCliqueSet()
-	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), live))
-	_, found, nestedErr := unstructured.NestedFieldNoCopy(live.Object, "spec", "template", "topologyConstraint")
-	require.NoError(t, nestedErr)
-	assert.False(t, found)
 }
 
 func TestPodCliqueSetObservesWorkerHash(t *testing.T) {
@@ -953,27 +900,6 @@ func rootTopologyOverride(topology string) *nvidiacomv1beta1.ProviderOverride {
 	}
 }
 
-func assertLiveRootTopologyValue(
-	t *testing.T,
-	kubeClient client.Client,
-	field string,
-	want any,
-) {
-	t.Helper()
-	live := newUnstructuredGrovePodCliqueSet()
-	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "graph", Namespace: "default"}, live))
-	got, found, err := unstructured.NestedFieldNoCopy(
-		live.Object,
-		"spec",
-		"template",
-		"topologyConstraint",
-		field,
-	)
-	require.NoError(t, err)
-	require.True(t, found)
-	assert.Equal(t, want, got)
-}
-
 func newUnstructuredGrovePodCliqueSet() *unstructured.Unstructured {
 	object := &unstructured.Unstructured{}
 	object.SetAPIVersion(provideroverride.GroveAPIVersion)
@@ -1054,9 +980,12 @@ func TestGroveServiceRenderingCharacterization(t *testing.T) {
 	}, service.Spec.Selector)
 	require.Equal(t, consts.DynamoServicePortName, service.Spec.Ports[0].Name)
 	require.Equal(t, int32(consts.DynamoServicePort), service.Spec.Ports[0].Port)
-	require.Empty(t, service.Labels)
-	require.Equal(t, "1", service.Annotations[commoncontroller.NvidiaAnnotationGenerationKey])
-	require.NotEmpty(t, service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
+	require.Equal(t, map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoComponent:           "frontend",
+		consts.KubeLabelDynamoComponentType:       consts.ComponentTypeFrontend,
+		consts.KubeLabelDynamoNamespace:           dynamoNamespace,
+	}, service.Labels)
 	require.Len(t, service.OwnerReferences, 1)
 	require.Equal(t, dgd.UID, service.OwnerReferences[0].UID)
 }

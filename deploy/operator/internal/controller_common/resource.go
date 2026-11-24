@@ -22,13 +22,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"reflect"
 	"sort"
 	"strconv"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -37,12 +35,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/csaupgrade"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 )
 
 const (
@@ -233,8 +234,11 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 // object previously observed by its caller. Unlike SyncResource, it does not
 // read from the API server. parentResource may be nil; when it is nil,
 // SyncObservedResource neither sets nor validates controller ownership. Create
-// and update conflicts must be retried from a fresh observation so render-time
+// and apply conflicts must be retried from a fresh observation so render-time
 // decisions remain tied to the written object.
+// desired must be non-nil rendered intent, without fields copied from a live
+// object solely because the API server defaulted them. Explicit zero values
+// must survive serialization through pointers or unstructured fields.
 func SyncObservedResource[T client.Object](
 	ctx context.Context,
 	r Reconciler,
@@ -243,108 +247,172 @@ func SyncObservedResource[T client.Object](
 	desired T,
 	opts ...SyncOption,
 ) (bool, T, error) {
-	resourceNamespace := desired.GetNamespace()
-	resourceName := desired.GetName()
-	resourceType := reflect.TypeOf(desired).Elem().Name()
-	logs := log.FromContext(ctx).WithValues(
-		"namespace", resourceNamespace,
-		"resourceName", resourceName,
-		"resourceType", resourceType,
-	)
-
-	if isNilClientObject(observed) {
-		if parentResource != nil {
-			if err := ctrl.SetControllerReference(parentResource, desired, r.Scheme()); err != nil {
-				logs.Error(err, "Failed to set controller reference.")
-				recordResourceEvent(r, desired, corev1.EventTypeWarning, "SetControllerReference", "Update", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
-				var zero T
-				return false, zero, err
-			}
-		} else {
-			logs.Info("No parent resource provided, creating resource without owner reference (independent lifecycle)")
-		}
-
-		hash, err := GetSpecHash(desired, opts...)
-		if err != nil {
-			logs.Error(err, "Failed to get spec hash.")
-			recordResourceEvent(r, desired, corev1.EventTypeWarning, "GetSpecHash", "Get", "Failed to get spec hash for %s %s: %s", resourceType, resourceNamespace, err)
-			var zero T
-			return false, zero, err
-		}
-		updateAnnotations(desired, hash, 1)
-
-		if err := r.Create(ctx, desired); err != nil {
-			logs.Error(err, "Failed to create Resource.")
-			recordResourceEvent(r, desired, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Create", "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
-			var zero T
-			return false, zero, err
-		}
-		logs.Info(fmt.Sprintf("%s created.", resourceType))
-		recordResourceEvent(r, desired, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Created %s %s", resourceType, resourceNamespace)
-		return true, desired, nil
-	}
-
-	if !resolveSyncOptions(opts).sharedOwnership {
-		if err := CheckControllerOwnership(observed, parentResource, r.Scheme()); err != nil {
-			logs.Error(err, "Refusing to reconcile a resource with conflicting controller ownership")
-			var zero T
-			return false, zero, err
-		}
-	}
-
-	changeResult, err := GetSpecChangeResult(observed, desired, opts...)
-	if err != nil {
-		recordResourceEvent(r, desired, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Update", "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
-		return false, desired, fmt.Errorf("failed to check if spec has changed: %w", err)
-	}
-	if !changeResult.NeedsUpdate {
-		logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
-		return false, observed, nil
-	}
-	if changeResult.NewHash == nil {
-		var zero T
-		return false, zero, fmt.Errorf("%s update has no desired spec hash", resourceType)
-	}
-
-	if changeResult.ManualChangeDetected {
-		logs.Info(fmt.Sprintf("Manual changes detected on %s, will be overwritten", resourceType),
-			"currentGeneration", observed.GetGeneration(),
-			"lastAppliedGeneration", getAnnotation(observed, NvidiaAnnotationGenerationKey))
-	}
-
-	synced, ok := observed.DeepCopyObject().(T)
+	// Rendered intent remains independent of the observed object and write responses.
+	var zero T
+	intent, ok := desired.DeepCopyObject().(T)
 	if !ok {
-		var zero T
-		return false, zero, fmt.Errorf("deep copy observed %s as %T", resourceType, observed)
+		return false, zero, fmt.Errorf("deep copy desired resource as %T", desired)
 	}
-	if changeResult.SpecNeedsUpdate {
-		diff, diffErr := generateSpecDiff(observed, desired)
-		if diffErr != nil {
-			logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
-		} else if diff != "" {
-			logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
-		}
-
-		if err := CopySpec(desired, synced); err != nil {
-			logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
-			recordResourceEvent(r, observed, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Update", "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
-			var zero T
-			return false, zero, err
-		}
-	} else {
-		logs.Info(fmt.Sprintf("%s spec is equivalent. Updating bookkeeping annotations only.", resourceType))
-	}
-
-	updateAnnotations(synced, *changeResult.NewHash, changeResult.NewGeneration)
-	if err := r.Update(ctx, synced); err != nil {
-		logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
-		recordResourceEvent(r, observed, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Update", "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
-		var zero T
+	gvk, err := apiutil.GVKForObject(desired, r.Scheme())
+	if err != nil {
 		return false, zero, err
 	}
-	logs.Info(fmt.Sprintf("%s updated.", resourceType))
-	recordResourceEvent(r, observed, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Updated %s %s", resourceType, resourceNamespace)
-	return true, synced, nil
+	options := resolveSyncOptions(opts)
+	fieldManager := "dynamo-operator"
+	if options.sharedOwnership && parentResource != nil {
+		fieldManager += "-" + string(parentResource.GetUID())
+	}
+
+	// Create first so a stale cache miss cannot adopt a same-name foreign object.
+	createdNew := isNilClientObject(observed)
+	if createdNew {
+		if parentResource != nil {
+			if err := ctrl.SetControllerReference(parentResource, intent, r.Scheme()); err != nil {
+				return false, zero, err
+			}
+		}
+		hash, err := GetSpecHash(desired, opts...)
+		if err != nil {
+			return false, zero, err
+		}
+		updateAnnotations(intent, hash, 1)
+		created := intent.DeepCopyObject().(T)
+		if err := r.Create(ctx, created, client.FieldOwner(fieldManager)); err != nil {
+			return false, zero, err
+		}
+		observed = created
+	} else {
+		// Validate ownership without turning observed lifecycle metadata into intent.
+		if !options.sharedOwnership {
+			if err := CheckControllerOwnership(observed, parentResource, r.Scheme()); err != nil {
+				return false, zero, err
+			}
+		}
+		if parentResource != nil && (!options.sharedOwnership || metav1.IsControlledBy(observed, parentResource)) {
+			// Only our validated controller reference belongs to this actor's lifecycle intent.
+			intent.SetOwnerReferences([]metav1.OwnerReference{*metav1.GetControllerOf(observed)})
+		}
+
+		// Preserve bookkeeping still read by existing callers, without gating metadata Apply.
+		change, err := GetSpecChangeResult(observed, desired, opts...)
+		if err != nil {
+			return false, zero, err
+		}
+		if change.NewHash != nil {
+			updateAnnotations(intent, *change.NewHash, change.NewGeneration)
+		} else {
+			annotations := intent.GetAnnotations()
+			if annotations == nil {
+				annotations = make(map[string]string, 2)
+			}
+			for _, key := range []string{NvidiaAnnotationHashKey, NvidiaAnnotationGenerationKey} {
+				annotations[key] = observed.GetAnnotations()[key]
+			}
+			intent.SetAnnotations(annotations)
+		}
+	}
+
+	// Transfer prior Update ownership so omitted fields can be removed by Apply.
+	legacyOwner := !options.sharedOwnership || (parentResource != nil && metav1.IsControlledBy(observed, parentResource))
+	observed, err = migrateUpdateOwnership(ctx, r, observed, fieldManager, legacyOwner)
+	if err != nil {
+		return false, zero, err
+	}
+
+	// Keep the exact observation's write preconditions while excluding server-owned fields.
+	intent.GetObjectKind().SetGroupVersionKind(gvk)
+	intent.SetUID(observed.GetUID())
+	intent.SetResourceVersion(observed.GetResourceVersion())
+	fields, err := runtime.DefaultUnstructuredConverter.ToUnstructured(intent)
+	if err != nil {
+		return false, zero, err
+	}
+	delete(fields, "status")
+	metadata := fields["metadata"].(map[string]any)
+	for _, key := range []string{"managedFields", "generation", "creationTimestamp", "deletionTimestamp", "deletionGracePeriodSeconds"} {
+		delete(metadata, key)
+	}
+	applyObject := &unstructured.Unstructured{Object: fields}
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(applyObject), client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
+		return false, zero, err
+	}
+
+	// Continue from the write response, without reading it back through the cache.
+	synced := desired.DeepCopyObject().(T)
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(applyObject.Object, synced); err != nil {
+		return false, zero, err
+	}
+	comparison := synced.DeepCopyObject().(T)
+	comparison.SetResourceVersion(observed.GetResourceVersion())
+	comparison.SetManagedFields(observed.GetManagedFields())
+	comparison.GetObjectKind().SetGroupVersionKind(observed.GetObjectKind().GroupVersionKind())
+	modified := createdNew || (synced.GetResourceVersion() != observed.GetResourceVersion() && !equality.Semantic.DeepEqual(observed, comparison))
+	if modified {
+		action := "Update"
+		if createdNew {
+			action = "Create"
+		}
+		resourceType := gvk.Kind
+		recordResourceEvent(r, synced, corev1.EventTypeNormal, action+resourceType, action, "%s %s %s/%s", action, resourceType, synced.GetNamespace(), synced.GetName())
+	}
+	return modified, synced, nil
+}
+
+// migrateUpdateOwnership upgrades this actor's Update entries and, for a legacy
+// owner, the operator entries identified by its bookkeeping. Legacy lifecycle
+// attribution is relinquished without deleting values: a shared Update manager
+// does not tell us which controller added a finalizer or reference.
+// observed must be non-nil.
+func migrateUpdateOwnership[T client.Object](ctx context.Context, kubeClient client.Writer, observed T, fieldManager string, legacyOwner bool) (T, error) {
+	// Shared resources must not transfer another parent's field ownership.
+	managers := sets.New(fieldManager)
+	if legacyOwner {
+		bookkeeping := fieldpath.NewSet(
+			fieldpath.MakePathOrDie("metadata", "annotations", NvidiaAnnotationHashKey),
+			fieldpath.MakePathOrDie("metadata", "annotations", NvidiaAnnotationGenerationKey),
+		)
+		for _, owner := range csaupgrade.FindFieldsOwners(observed.GetManagedFields(), metav1.ManagedFieldsOperationUpdate, bookkeeping) {
+			if owner.Subresource == "" {
+				managers.Insert(owner.Manager)
+			}
+		}
+	}
+
+	// Do not transfer ambiguous lifecycle fields from a legacy shared manager to Apply.
+	migrated := observed.DeepCopyObject().(T)
+	lifecycle := fieldpath.NewSet(
+		fieldpath.MakePathOrDie("metadata", "finalizers"),
+		fieldpath.MakePathOrDie("metadata", "ownerReferences"),
+	)
+	entries := migrated.GetManagedFields()
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Operation != metav1.ManagedFieldsOperationUpdate || entry.Subresource != "" || !managers.Has(entry.Manager) {
+			continue
+		}
+		fields := &fieldpath.Set{}
+		if err := fields.FromJSON(entry.FieldsV1.GetRawReader()); err != nil {
+			return observed, err
+		}
+		owned, err := fields.RecursiveDifference(lifecycle).ToJSON()
+		if err != nil {
+			return observed, err
+		}
+		entry.FieldsV1.SetRawBytes(owned)
+	}
+	migrated.SetManagedFields(entries)
+	if err := csaupgrade.UpgradeManagedFields(migrated, managers, fieldManager); err != nil {
+		return observed, err
+	}
+	if reflect.DeepEqual(observed.GetManagedFields(), migrated.GetManagedFields()) {
+		return observed, nil
+	}
+
+	// An ownership-only patch preserves values and rejects a changed observation.
+	if err := kubeClient.Patch(ctx, migrated, client.MergeFromWithOptions(observed, client.MergeFromWithOptimisticLock{})); err != nil {
+		return observed, err
+	}
+	return migrated, nil
 }
 
 func isNilClientObject[T client.Object](object T) bool {
@@ -367,8 +435,6 @@ func recordResourceEvent(
 		recorder.Eventf(object, nil, eventType, reason, action, messageFmt, args...)
 	}
 }
-
-// CopySpec copies only the Spec field from source to destination using Unstructured
 
 // kubeEnvelopeFields are standard top-level Kubernetes fields that don't
 // represent the resource's desired state. Everything else (spec, data,
@@ -408,35 +474,6 @@ func getContentFields(u *unstructured.Unstructured) (any, bool) {
 		return nil, false
 	}
 	return content, true
-}
-
-func CopySpec(source, destination client.Object) error {
-	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(source)
-	if err != nil {
-		return err
-	}
-	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
-
-	destMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(destination)
-	if err != nil {
-		return err
-	}
-	destUnstructured := &unstructured.Unstructured{Object: destMap}
-
-	if spec, found, err := unstructured.NestedFieldNoCopy(sourceUnstructured.Object, "spec"); err == nil && found {
-		// Keep unstructured destinations opaque so unknown provider fields survive.
-		if destinationUnstructured, ok := destination.(*unstructured.Unstructured); ok {
-			return unstructured.SetNestedField(destinationUnstructured.Object, spec, "spec")
-		}
-		if err := unstructured.SetNestedField(destUnstructured.Object, spec, "spec"); err != nil {
-			return err
-		}
-		return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
-	}
-
-	maps.Copy(destUnstructured.Object, nonEnvelopeFields(sourceUnstructured.Object))
-
-	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 }
 
 func getSpec(obj client.Object) (any, error) {
@@ -572,27 +609,6 @@ func getAnnotation(obj client.Object, key string) string {
 		return ""
 	}
 	return annotations[key]
-}
-
-// generateSpecDiff creates a unified diff showing changes between old and new resource specs
-func generateSpecDiff(oldResource, newResource client.Object) (string, error) {
-	oldSpec, err := getSpec(oldResource)
-	if err != nil {
-		return "", fmt.Errorf("failed to get old spec: %w", err)
-	}
-
-	newSpec, err := getSpec(newResource)
-	if err != nil {
-		return "", fmt.Errorf("failed to get new spec: %w", err)
-	}
-
-	// Generate diff using cmp
-	diff := cmp.Diff(oldSpec, newSpec)
-	if diff == "" {
-		return "", nil
-	}
-
-	return diff, nil
 }
 
 func GetSpecHash(obj client.Object, opts ...SyncOption) (string, error) {

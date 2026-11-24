@@ -25,6 +25,7 @@ import (
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
@@ -98,7 +99,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 			if existingErr != nil && !apierrors.IsNotFound(existingErr) {
 				return nil, fmt.Errorf("failed to get existing component service for %q: %w", componentName, existingErr)
 			}
-			setDesiredDisaggregatedSetServiceSelector(
+			setDesiredDisaggregatedSetServiceTarget(
 				service,
 				existing,
 				existingErr == nil,
@@ -177,7 +178,7 @@ func setDisaggregatedSetServiceSelector(service *corev1.Service, setName, roleNa
 	}
 }
 
-func setDesiredDisaggregatedSetServiceSelector(
+func setDesiredDisaggregatedSetServiceTarget(
 	service *corev1.Service,
 	existingService *corev1.Service,
 	hasExistingService bool,
@@ -187,11 +188,29 @@ func setDesiredDisaggregatedSetServiceSelector(
 	isMultinode bool,
 	targetReady bool,
 ) {
-	if targetReady || !hasExistingService {
-		setDisaggregatedSetServiceSelector(service, setName, roleName, revision, isMultinode)
+	// Matching revision selectors already address the desired role's complete Pod templates.
+	setDisaggregatedSetServiceSelector(service, setName, roleName, revision, isMultinode)
+	if targetReady || !hasExistingService || maps.Equal(service.Spec.Selector, existingService.Spec.Selector) {
 		return
 	}
+
+	// Identity describes the active Pods until the selector switches to the ready target.
 	service.Spec.Selector = maps.Clone(existingService.Spec.Selector)
+	if service.Labels == nil {
+		service.Labels = make(map[string]string)
+	}
+	for _, key := range []string{
+		consts.KubeLabelDynamoGraphDeploymentName,
+		consts.KubeLabelDynamoComponent,
+		consts.KubeLabelDynamoComponentType,
+		consts.KubeLabelDynamoNamespace,
+	} {
+		if value, found := existingService.Labels[key]; found {
+			service.Labels[key] = value
+		} else {
+			delete(service.Labels, key)
+		}
+	}
 }
 
 func (r *disaggregatedSetStableResourcesReconciler) syncDGDStableService(

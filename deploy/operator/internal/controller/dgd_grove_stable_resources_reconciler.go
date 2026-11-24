@@ -27,6 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/service"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -139,7 +140,7 @@ func groveComponentServiceParams(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
-) componentdeployment.ServiceParams {
+) service.Params {
 	componentName := component.ComponentName
 	componentType := string(component.ComponentType)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
@@ -157,9 +158,10 @@ func groveComponentServiceParams(
 			labels[commonconsts.KubeLabelDynamoWorkerHash] = value
 		}
 	}
-	return componentdeployment.ServiceParams{
+	return service.Params{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
+		DGDName:         dgd.Name,
 		ComponentType:   componentType,
 		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component),
 		ComponentName:   componentName,
@@ -176,7 +178,6 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	isK8sDiscoveryEnabled bool,
 ) (Resource, error) {
 	logger := log.FromContext(ctx)
-	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
 	params.IsK8sDiscovery = isK8sDiscoveryEnabled
 	service, err := componentdeployment.RenderService(params)
@@ -184,27 +185,13 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
-	_, syncedService, err := commoncontroller.SyncResource(
-		ctx,
-		r,
-		dgd,
-		func(context.Context) (*corev1.Service, bool, error) {
-			return service, false, nil
-		},
-	)
+	_, syncedService, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.Service, bool, error) {
+		return service, false, nil
+	})
 	if err != nil {
 		logger.Error(err, "failed to sync the main component service")
 		return nil, fmt.Errorf("failed to sync the main component service: %w", err)
 	}
-	if syncedService == nil {
-		return nil, nil
-	}
-
-	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
-		logger.Error(err, "Failed to update main component service", "component", componentName)
-		return nil, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
-	}
-
 	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) {
 		return true, ""
 	})
@@ -212,49 +199,6 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		return nil, fmt.Errorf("failed to sync the main component service: %w", err)
 	}
 	return resource, nil
-}
-
-// syncServiceAnnotations merges the desired annotations onto an already-synced Service
-// and updates it when any changed. SyncResource hashes and copies only the spec, so
-// metadata edits on the DGD never converge onto the Service without this.
-func (r *groveStableResourcesReconciler) syncServiceAnnotations(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	service *corev1.Service,
-	desired map[string]string,
-	componentName string,
-) error {
-	if service.Annotations == nil {
-		service.Annotations = make(map[string]string)
-	}
-
-	changed := false
-	for key, value := range desired {
-		if current, ok := service.Annotations[key]; !ok || current != value {
-			service.Annotations[key] = value
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-
-	if err := r.Update(ctx, service); err != nil {
-		if r.GetRecorder() != nil {
-			r.GetRecorder().Eventf(
-				dgd,
-				service,
-				corev1.EventTypeWarning,
-				"UpdateService",
-				"Update",
-				"Failed to update Service %s: %s",
-				componentName,
-				err,
-			)
-		}
-		return err
-	}
-	return nil
 }
 
 // reconcileElasticEPLeaderService creates the headless Service a single-pod elastic-EP
@@ -267,7 +211,6 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) (Resource, error) {
 	// Use the same rendered identity as discovery Services so followers find the leader.
-	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
 	container := dynamo.GetMainContainer(component)
 	elasticRayLaunch := container != nil && dynamo.IsElasticEPRayLaunch(container)
@@ -279,24 +222,11 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		return nil, r.deleteOwnedService(ctx, dgd, grove.ElasticEPLeaderServiceName(params.ServiceName))
 	}
 
-	_, syncedService, err := commoncontroller.SyncResource(
-		ctx,
-		r,
-		dgd,
-		func(context.Context) (*corev1.Service, bool, error) {
-			return service, false, nil
-		},
-	)
+	_, syncedService, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.Service, bool, error) {
+		return service, false, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync the elastic-EP leader service: %w", err)
-	}
-
-	if syncedService == nil {
-		return nil, nil
-	}
-
-	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
-		return nil, fmt.Errorf("failed to update the elastic-EP leader service %s: %w", componentName, err)
 	}
 
 	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) { return true, "" })

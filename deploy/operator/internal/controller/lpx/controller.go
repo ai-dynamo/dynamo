@@ -549,9 +549,10 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 // reconcileRuntimeResources synchronizes additional resources for the LPX deployment.
 func (r *graphReconciler) reconcileRuntimeResources(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, resources []client.Object) error {
 	for _, resource := range resources {
-		if _, _, err := commoncontroller.SyncResource(ctx, r, deployment, func(context.Context) (client.Object, bool, error) {
+		_, _, err := commoncontroller.SyncResource(ctx, r, deployment, func(context.Context) (client.Object, bool, error) {
 			return resource, false, nil
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
 	}

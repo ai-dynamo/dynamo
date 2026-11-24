@@ -502,6 +502,16 @@ func (c *restartWriteConflictClient) Update(ctx context.Context, object client.O
 	return c.Client.Update(ctx, object, options...)
 }
 
+func (c *restartWriteConflictClient) Apply(ctx context.Context, configuration runtime.ApplyConfiguration, options ...client.ApplyOption) error {
+	applyOptions := (&client.ApplyOptions{}).ApplyOptions(options)
+	if object, ok := configuration.(client.Object); ok {
+		if err := c.injectConflict(object, applyOptions.DryRun); err != nil {
+			return err
+		}
+	}
+	return c.Client.Apply(ctx, configuration, options...)
+}
+
 func (c *restartWriteConflictClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
 	patchOptions := &client.PatchOptions{}
 	patchOptions.ApplyOptions(options)

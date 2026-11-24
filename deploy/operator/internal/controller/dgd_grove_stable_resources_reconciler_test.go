@@ -21,12 +21,12 @@ import (
 	"context"
 	"testing"
 
-	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/service"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -139,7 +139,7 @@ func TestIsSinglePodElasticEPLeader(t *testing.T) {
 			component := tt.component()
 			container := dynamo.GetMainContainer(&component)
 			elasticRayLaunch := container != nil && dynamo.IsElasticEPRayLaunch(container)
-			got := grove.RenderElasticEPLeaderService(&component, componentdeployment.ServiceParams{}, elasticRayLaunch) != nil
+			got := grove.RenderElasticEPLeaderService(&component, service.Params{}, elasticRayLaunch) != nil
 
 			t.Log("Verify only a component that renders as exactly one Ray head qualifies")
 			if got != tt.want {
@@ -299,6 +299,10 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 					require.True(t, labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Set(podLabels)),
 						"Service %s selector %v does not match rendered pod labels %v", name, service.Spec.Selector, podLabels)
 					require.Equal(t, podLabels[commonconsts.KubeLabelDynamoWorkerHash], service.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+					require.Equal(t, dgd.Name, service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+					for _, key := range []string{commonconsts.KubeLabelDynamoComponent, commonconsts.KubeLabelDynamoComponentType, commonconsts.KubeLabelDynamoNamespace} {
+						require.Equal(t, podLabels[key], service.Labels[key], "Service %s identity %s must match its Pods", name, key)
+					}
 					if tc.labels != nil {
 						require.Subset(t, service.Labels, tc.labels)
 					} else if tc.legacy {
