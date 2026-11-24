@@ -2742,6 +2742,64 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
 
 
 @pytest.mark.asyncio
+async def test_generate_text_mode_passes_chat_ids_as_tokens_prompt():
+    """Chat ids from InputParamManager reach vLLM as TokensPrompt, so the
+    engine never re-tokenizes rendered text and adds a second BOS (#18810)."""
+    from vllm.inputs import TokensPrompt
+
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    captured = {}
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            assert "messages" in request
+            return [128000, 128006, 882]
+
+    class EngineClient:
+        def generate(self, prompt, *args, **kwargs):
+            captured["prompt"] = prompt
+
+            async def gen():
+                output = SimpleNamespace(index=0, text="ok", finish_reason=None)
+                yield SimpleNamespace(outputs=[output])
+
+            return gen()
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=EngineClient(),
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    context = SimpleNamespace(trace_headers=lambda: {})
+    request = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "What is 2 + 3?"}],
+    }
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert chunks
+    # TokensPrompt is a TypedDict, so compare the mapping itself.
+    assert captured["prompt"] == TokensPrompt(prompt_token_ids=[128000, 128006, 882])
+    assert "prompt" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_generate_text_mode_notifies_for_empty_decoded_token():
     from dynamo.vllm.handlers import DecodeWorkerHandler
 

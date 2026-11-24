@@ -322,14 +322,23 @@ class _ChatTokenizer:
     chat_template = ""
 
     def apply_chat_template(self, messages, **kwargs):
-        return "<|user|>hi<|assistant|>"
+        assert kwargs["tokenize"] is True
+        return [1, 7, 9]
 
 
-def test_text_from_the_sglang_tokenizer_passes_unchanged():
+def test_chat_from_the_sglang_tokenizer_is_passed_as_input_ids():
     handler = _decode_handler(tokenizer=_ChatTokenizer())
     request = {"messages": [{"role": "user", "content": "hi"}]}
 
-    assert handler._get_input_param(request) == {"prompt": "<|user|>hi<|assistant|>"}
+    assert handler._get_input_param(request) == {"input_ids": [1, 7, 9]}
+
+
+def test_chat_from_the_sglang_tokenizer_is_vocabulary_checked():
+    handler = _decode_handler(tokenizer=_ChatTokenizer(), max_token_id=8)
+    request = {"messages": [{"role": "user", "content": "hi"}]}
+
+    with pytest.raises(HttpError, match=r"out of vocabulary at token_ids\[2\]$"):
+        handler._get_input_param(request)
 
 
 class _EmbeddingEngine:
