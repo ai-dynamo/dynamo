@@ -17,9 +17,15 @@
 import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
-import msgspec
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_serializer,
+    field_validator,
+)
 from typing_extensions import NotRequired
 from vllm.inputs import TokensPrompt  # noqa: F401
 
@@ -80,36 +86,33 @@ class vLLMGenerateRequest(BaseModel):
 
     @field_validator("sampling_params", mode="before")
     @classmethod
-    def parse_sampling_params(cls, v: Any) -> SamplingParams:
+    def parse_sampling_params(cls, v: Any) -> Any:
         if isinstance(v, str):
             v = json.loads(v)
         if isinstance(v, dict):
-            # Workaround for vLLM SamplingParams serialization/deserialization issue.
-            #
-            # Problem: When SamplingParams is serialized via msgspec.json.encode(),
-            # Python sets are converted to JSON arrays (lists). The serialized dict
-            # includes private fields like _all_stop_token_ids. Upon deserialization,
-            # passing this dict to SamplingParams(**dict) causes __post_init__ to fail
-            # because it expects _all_stop_token_ids to be a set (to call .update()),
-            # but it's now a list.
-            #
-            # Solution: Filter out private fields (starting with '_') which are
-            # internal state that should be computed by __post_init__, not passed
-            # from serialized data. Public fields like stop_token_ids are preserved.
-            v = {k: val for k, val in v.items() if not k.startswith("_")}
-            return SamplingParams(**v)
+            # vLLM's schema ignores extra keys. Keep rejecting misspelled
+            # public options, while accepting private fields from older workers.
+            for key in v:
+                if (
+                    not key.startswith("_")
+                    and key not in SamplingParams.__struct_fields__
+                ):
+                    raise ValueError(f"Unknown sampling parameter: {key}")
         return v
 
-    @field_serializer("sampling_params")
-    def serialize_sampling_params(self, value: SamplingParams) -> dict[str, Any]:
-        """Serialize SamplingParams, filtering out private fields.
-
-        This is the primary fix for the set→list serialization issue.
-        Private fields like _all_stop_token_ids are filtered out here
-        so they never get sent over the wire.
-        """
-        serialized = json.loads(msgspec.json.encode(value))
-        return {k: v for k, v in serialized.items() if not k.startswith("_")}
+    @field_serializer("sampling_params", mode="wrap")
+    def serialize_sampling_params(
+        self, value: SamplingParams, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        params = handler(value)
+        # vLLM filters private SamplingParams fields at the top level only.
+        # Backend selection is worker-local. Leave user JSON schemas intact.
+        structured = params.get("structured_outputs")
+        if isinstance(structured, dict):
+            params["structured_outputs"] = {
+                key: item for key, item in structured.items() if not key.startswith("_")
+            }
+        return params
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,

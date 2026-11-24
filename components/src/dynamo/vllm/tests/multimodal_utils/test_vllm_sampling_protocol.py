@@ -5,8 +5,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from pydantic import TypeAdapter
-from vllm.sampling_params import SamplingParams
+from pydantic import TypeAdapter, ValidationError
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from dynamo.vllm.multimodal_utils.protocol import vLLMMultimodalRequest
 
@@ -83,3 +83,56 @@ def test_tito_adapter_accepts_logit_bias_after_dynamo_import():
 
     assert adapted is not None
     assert adapted.sampling_params.logit_bias == {50256: -100.0}
+
+
+@pytest.mark.parametrize("legacy_json", [False, True])
+def test_multimodal_structured_sampling_roundtrip(legacy_json):
+    schema = {"type": "object", "properties": {"_id": {"type": "string"}}}
+    raw = {
+        "structured_outputs": {"json": schema, "disable_any_whitespace": True},
+        "logit_bias": {"50256": -100},
+        "_all_stop_token_ids": [999],
+    }
+    request = vLLMMultimodalRequest(
+        engine_prompt={"prompt_token_ids": [1]},
+        request_id="structured",
+        sampling_params=json.dumps(raw) if legacy_json else raw,
+    )
+    structured = request.sampling_params.structured_outputs
+    assert isinstance(structured, StructuredOutputsParams)
+    assert structured.json == schema
+    assert request.sampling_params.logit_bias == {50256: -100.0}
+    structured._backend = "worker-local"
+    payload = request.model_dump_json()
+    params = json.loads(payload)["sampling_params"]
+    assert "_all_stop_token_ids" not in params
+    assert "_backend" not in params["structured_outputs"]
+    assert "_backend_was_auto" not in params["structured_outputs"]
+    restored = vLLMMultimodalRequest.model_validate_json(payload)
+    assert restored.sampling_params.structured_outputs.json == schema
+    assert restored.sampling_params.structured_outputs.disable_any_whitespace is True
+    assert restored.sampling_params.structured_outputs._backend is None
+    assert structured._backend == "worker-local"
+
+
+def test_multimodal_rejects_unknown_sampling_option():
+    with pytest.raises(ValidationError, match="max_tokenz"):
+        vLLMMultimodalRequest(
+            engine_prompt={"prompt_token_ids": [1]},
+            sampling_params={"max_tokenz": 4},
+            request_id="unknown-option",
+        )
+
+
+def test_multimodal_rejects_conflicting_structured_constraints():
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(
+        (ValidationError, VLLMValidationError),
+        match="one kind of structured outputs constraint",
+    ):
+        vLLMMultimodalRequest(
+            engine_prompt={"prompt_token_ids": [1]},
+            sampling_params={"structured_outputs": {"regex": "a+", "choice": ["a"]}},
+            request_id="conflicting-constraints",
+        )
