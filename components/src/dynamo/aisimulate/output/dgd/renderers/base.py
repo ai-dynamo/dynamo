@@ -267,11 +267,17 @@ def _apply_worker_resources(
 ) -> None:
     """Keep AIC worker resources faithful to the evaluated topology."""
     config = candidate.config
-    roles = (
-        {"worker": "agg"}
-        if config.get("deployment_mode") == "agg"
-        else {"prefill": "prefill", "decode": "decode"}
-    )
+    deployment_mode = config.get("deployment_mode")
+    if deployment_mode is None:
+        return
+    if deployment_mode == "agg":
+        roles = {"worker": "agg"}
+    elif deployment_mode == "disagg":
+        roles = {"prefill": "prefill", "decode": "decode"}
+    else:
+        raise CandidateMaterializationError(
+            f"candidate deployment_mode must be agg or disagg, got {deployment_mode!r}"
+        )
     workers = {
         component.get("type"): component
         for component in dgd.get("spec", {}).get("components", [])
