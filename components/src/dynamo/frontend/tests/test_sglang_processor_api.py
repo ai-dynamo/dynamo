@@ -109,7 +109,7 @@ def test_function_call_parser_enum_keys():
         )
     ]
     # These parser names must remain available
-    for name in ("hermes", "llama3", "qwen25"):
+    for name in ("hermes", "llama3", "qwen"):
         parser = FunctionCallParser(tools=tools, tool_call_parser=name)
         assert parser is not None
 

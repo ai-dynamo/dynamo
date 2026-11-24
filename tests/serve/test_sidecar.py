@@ -171,7 +171,8 @@ TRTLLM_MULTI_ENGINE_ENV = {
     "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
 }
 SGLANG_KV_ROUTING_ARGS = [
-    "--disable-cuda-graph",
+    "--disable-decode-cuda-graph",
+    "--disable-prefill-cuda-graph",
     "--cuda-graph-backend-prefill",
     "disabled",
 ]
@@ -468,7 +469,8 @@ sidecar_configs = {
         script_name="disagg.sh",
         gpu_env=_on_first_gpu("SGLANG_PREFILL_GPU", "SGLANG_DECODE_GPU"),
         script_args=[
-            "--disable-cuda-graph",
+            "--disable-decode-cuda-graph",
+            "--disable-prefill-cuda-graph",
             "--enable-metrics",
             "--decode-log-interval",
             "1",

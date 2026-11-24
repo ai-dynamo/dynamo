@@ -68,7 +68,7 @@ print_launch_banner "Launching Disaggregated DP Attention (2 shared GPUs)" "$MOD
 
 python3 -m dynamo.frontend &
 
-# SGLang DP attention uses tp_size == dp_size: the attention replicas occupy
+# SGLang DP attention uses tp_size == attn_dp_size: the attention replicas occupy
 # the visible GPU pair while MoE weights are tensor-parallel across that pair.
 # Both P/D workers intentionally share the pair; the tiny two-layer model keeps
 # the combined footprint suitable for CI.
@@ -78,8 +78,7 @@ python3 -m dynamo.sglang \
   --served-model-name "$MODEL" \
   --page-size 64 \
   --tp 2 \
-  --dp-size 2 \
-  --enable-dp-attention \
+  --attn-dp-size 2 \
   --dist-init-addr "$PREFILL_DIST_INIT_ADDR" \
   --trust-remote-code \
   --disaggregation-mode prefill \
@@ -88,7 +87,8 @@ python3 -m dynamo.sglang \
   --load-balance-method round_robin \
   --nccl-port "${DYN_SYSTEM_PORT3:-8083}" \
   --context-length 1024 \
-  --disable-cuda-graph \
+  --disable-decode-cuda-graph \
+  --disable-prefill-cuda-graph \
   --disable-piecewise-cuda-graph \
   --enable-metrics \
   $GPU_MEM_ARGS &
@@ -103,8 +103,7 @@ python3 -m dynamo.sglang \
   --served-model-name "$MODEL" \
   --page-size 64 \
   --tp 2 \
-  --dp-size 2 \
-  --enable-dp-attention \
+  --attn-dp-size 2 \
   --dist-init-addr "$DECODE_DIST_INIT_ADDR" \
   --trust-remote-code \
   --disaggregation-mode decode \
@@ -112,7 +111,8 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --nccl-port "${DYN_SYSTEM_PORT4:-8084}" \
   --context-length 1024 \
-  --disable-cuda-graph \
+  --disable-decode-cuda-graph \
+  --disable-prefill-cuda-graph \
   --disable-piecewise-cuda-graph \
   --enable-metrics \
   $GPU_MEM_ARGS &

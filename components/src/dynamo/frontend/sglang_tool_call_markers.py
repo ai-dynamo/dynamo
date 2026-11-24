@@ -54,6 +54,22 @@ def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
     return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
 
 
+# SGLang 1.0 removed these tool-call parser aliases; 0.5.23 maps both
+# spellings to the same detector. Dynamo's parser registry still accepts them.
+# Reasoning parsers keep the glm45 name, so this applies to tool calls only.
+_SGLANG_TOOL_CALL_PARSER_NAME_ALIASES = {
+    "qwen25": "qwen",
+    "glm45": "glm",
+}
+
+
+def _normalize_sglang_tool_call_parser_name(parser_name: str | None) -> str | None:
+    name = _normalize_sglang_parser_name(parser_name)
+    if not name:
+        return name
+    return _SGLANG_TOOL_CALL_PARSER_NAME_ALIASES.get(name, name)
+
+
 @lru_cache(maxsize=64)
 def _callable_accepts_kwarg(func: Any, kwarg: str) -> bool:
     try:
@@ -93,7 +109,7 @@ def tool_call_marker_strings(
     whitespace is dropped (``qwen25`` declares ``<tool_call>\\n``); detectors
     with an empty delimiter on either side return ``None``.
     """
-    name = _normalize_sglang_parser_name(tool_call_parser_name)
+    name = _normalize_sglang_tool_call_parser_name(tool_call_parser_name)
     if not name:
         return None
     detector_cls = FunctionCallParser.ToolCallParserEnum.get(name)

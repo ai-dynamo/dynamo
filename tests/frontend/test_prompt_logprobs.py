@@ -44,7 +44,8 @@ pytestmark = [
                 QWEN,
                 "--context-length",
                 "1024",
-                "--disable-cuda-graph",
+                "--disable-decode-cuda-graph",
+                "--disable-prefill-cuda-graph",
             ],
             marks=[
                 pytest.mark.sglang,

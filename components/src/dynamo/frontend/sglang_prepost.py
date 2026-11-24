@@ -37,6 +37,7 @@ from .sglang_prompt_renderer import (
 from .sglang_tool_call_markers import (
     _callable_accepts_kwarg,
     _normalize_sglang_parser_name,
+    _normalize_sglang_tool_call_parser_name,
     _parser_tokenizer_kwargs,
     tool_call_marker_strings,
     tool_call_marker_token_ids,
@@ -360,7 +361,9 @@ def create_parsers(
         ):
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
-            tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
+            tool_call_parser_name = _normalize_sglang_tool_call_parser_name(
+                tool_call_parser_name
+            )
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
@@ -615,7 +618,9 @@ def build_tool_call_guided_decoding(
                 for tool in guidance_tools or []
                 if tool.function.name == sglang_tool_choice.function.name
             ]
-        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
+        tool_call_parser_name = _normalize_sglang_tool_call_parser_name(
+            tool_call_parser_name
+        )
         try:
             parser = FunctionCallParser(
                 tools=guidance_tools,
@@ -1112,7 +1117,7 @@ class SglangStreamingPostProcessor:
         self._separate_reasoning = separate_reasoning
         self.history_tool_calls_count = history_tool_calls_count
         self._sglang_tools = sglang_tools or []
-        self._tool_call_parser_name = _normalize_sglang_parser_name(
+        self._tool_call_parser_name = _normalize_sglang_tool_call_parser_name(
             tool_call_parser_name
         )
         self._named_zero_arg_tool = named_zero_arg_tool
