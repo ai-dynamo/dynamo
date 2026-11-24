@@ -1929,19 +1929,6 @@ def test_build_sampling_params_forwards_sampling_options_for_openai_requests():
 class TestMultimodalGuard:
     """Tests for multimodal guard when frontend extraction is missing."""
 
-    @staticmethod
-    def _image_message():
-        return {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.com/a.jpg"},
-                },
-                {"type": "text", "text": "describe image"},
-            ],
-        }
-
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):
         with pytest.raises(ValueError, match="supported only by the vLLM backend"):
