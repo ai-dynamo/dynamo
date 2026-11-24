@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -21,7 +22,17 @@ import (
 )
 
 func TestRelayKeepsKnownDiscoveryAliasWithUnrelatedPendingBindings(t *testing.T) {
-	t.Log("A known discovery alias remains usable while final topology ownership is pending")
+	t.Log("A published discovery alias remains usable while unrelated topology bindings are pending")
+	component := podDiscoveryComponentStatus("ns-graph-workers")
+	component.ComponentKind = v1beta1.ComponentKindLeaderWorkerSet
+	leader := &component.Roles[0]
+	leader.Name = "leader"
+	leader.Containers[0].Env["DYN_KUBE_DISCOVERY_MODE"] = v1beta1.EnvironmentValueStatus{Value: new("pod")}
+	leader.Containers[0].Env["PENDING"] = v1beta1.EnvironmentValueStatus{Unresolved: true}
+	leader.Containers[0].Env[consts.DynamoRankEnvVar] = v1beta1.EnvironmentValueStatus{Unresolved: true}
+	worker := leader.DeepCopy()
+	worker.Name = "worker"
+	component.Roles = append(component.Roles, *worker)
 	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
 		Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -33,12 +44,10 @@ func TestRelayKeepsKnownDiscoveryAliasWithUnrelatedPendingBindings(t *testing.T)
 				}}}},
 			}},
 		},
-		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{"worker": {RuntimeNamespace: "ns-graph-workers"}}},
+		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{"worker": component}},
 	}
 	original := dgd.DeepCopy()
-	supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes)
-	require.NoError(t, err)
-	require.True(t, supported)
+	require.Equal(t, metav1.ConditionTrue, podDiscoveryStatus(dgd, configv1alpha1.DiscoveryBackendKubernetes))
 	require.Equal(t, original, dgd)
 
 	t.Log("Reconciliation publishes the relay instead of withdrawing a supported workload")
@@ -49,7 +58,7 @@ func TestRelayKeepsKnownDiscoveryAliasWithUnrelatedPendingBindings(t *testing.T)
 	relay := &v1alpha1.DynamoPoolRelay{Name: "graph", Namespace: "ns", UID: "relay-uid", Spec: relaySpec("cluster")}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, relay).WithStatusSubresource(dgd, relay).Build()
 	reconciler := &reconciler{Client: kube, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
-	_, err = reconciler.Reconcile(t.Context(), ctrl.Request{Name: "graph", Namespace: "ns"})
+	_, err := reconciler.Reconcile(t.Context(), ctrl.Request{Name: "graph", Namespace: "ns"})
 	require.NoError(t, err)
 	key := types.NamespacedName{Name: "graph-pool-relay", Namespace: "ns"}
 	require.NoError(t, kube.Get(t.Context(), key, &corev1.Service{}))
