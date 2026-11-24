@@ -261,6 +261,7 @@ class PlannerEnginePerfModel:
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
             decode_uses_batched_token_budget=self._decode_uses_batched_token_budget(),
+            rank_local_decode_estimator=self._uses_rank_local_decode_estimator(),
         )
 
     def _decode_uses_batched_token_budget(self) -> bool:
@@ -347,7 +348,6 @@ class PlannerEnginePerfModel:
                     if self._config.backend == "mocker"
                     else self._config.backend,
                     worker_type=self._worker_type,
-                    attention_dp=self._attention_dp_size() or 1,
                     estimation_mode="fpm_regression",
                 )
             )
@@ -400,6 +400,7 @@ class PlannerEnginePerfModel:
         return (
             self._worker_type,
             limits,
+            self._attention_dp_size(),
             json.dumps(self._build_ais_config(), sort_keys=True, separators=(",", ":")),
         )
 
@@ -408,6 +409,13 @@ class PlannerEnginePerfModel:
         if caps is not None and caps.speculative_nextn and caps.speculative_nextn > 0:
             return int(caps.speculative_nextn)
         return max(0, int(self._config.speculative_nextn or 0))
+
+    def _uses_rank_local_decode_estimator(self) -> bool:
+        return (
+            self._worker_type == "decode"
+            and self._config.ais_perf_model is None
+            and (self._attention_dp_size() or 1) > 1
+        )
 
     def _attention_dp_size(self) -> Optional[int]:
         if self._config.ais_perf_model is not None:
@@ -521,6 +529,12 @@ class PlannerEnginePerfModel:
         *,
         for_query: bool,
     ) -> list[list[ForwardPassMetrics]]:
+        if not for_query and self._uses_rank_local_decode_estimator():
+            # A snapshot stores each rank's latest frame, which can come from
+            # different iterations. Train the fallback on each frame alone.
+            return [
+                [msgspec.structs.replace(fpm, dp_rank=0)] for fpm in fpm_stats.values()
+            ]
         should_group_for_engine = self._engine_model is not None if for_query else True
         if should_group_for_engine:
             dp_size = self._attention_dp_size()
@@ -568,6 +582,8 @@ class PlannerEnginePerfModel:
         # one FPM per rank.
         # TODO: consume grouped per-rank bootstrap data when profiling exports
         # iteration/rank grouping for attention-DP workloads.
+        if self._uses_rank_local_decode_estimator():
+            return [[msgspec.structs.replace(fpm, dp_rank=0)] for fpm in fpms]
         dp_size = self._attention_dp_size()
         if dp_size is not None and dp_size > 1:
             logger.info(

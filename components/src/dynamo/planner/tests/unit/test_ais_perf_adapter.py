@@ -628,9 +628,12 @@ def test_decode_capacity_respects_registered_topology_without_ais_profile(
 
     capacity = model.find_engine_capacity_rps(isl=32, osl=32)
     assert capacity is not None
-    assert _largest_decode_batch(recorded_forward_passes) == expected_shape
+    assert _largest_decode_batch(recorded_forward_passes) == [max(expected_shape)]
+    assert capacity.rps == pytest.approx(sum(expected_shape) / 0.032)
     if registered_ranks:
-        first_ranks = recorded_forward_passes.call_args_list[0].args[0]
+        first_ranks = [
+            call.args[0][0] for call in recorded_forward_passes.call_args_list[:2]
+        ]
         assert [
             (
                 rank["scheduled_requests"]["num_decode_requests"],
@@ -638,6 +641,45 @@ def test_decode_capacity_respects_registered_topology_without_ais_profile(
             )
             for rank in first_ranks
         ] == [(1, 48), (0, 0)]
+
+
+def test_no_profile_decode_training_keeps_staggered_rank_frames_separate(monkeypatch):
+    native = Mock()
+    native.diagnostics.return_value = {}
+    factory = Mock(return_value=native)
+    monkeypatch.setattr(engine_query.AISForwardPassPerfModel, "best_available", factory)
+    config = _config()
+    config.ais_perf_model = None
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=config,
+        capabilities=EngineCapabilities(
+            max_num_batched_tokens=64,
+            max_num_seqs=128,
+            max_kv_tokens=100_000,
+            data_parallel_size=2,
+        ),
+    )
+    earlier_rank = ForwardPassMetrics(
+        worker_id="w",
+        dp_rank=4,
+        counter_id=3,
+        scheduled_requests=ScheduledRequestMetrics(num_decode_requests=32),
+    )
+    later_rank = ForwardPassMetrics(
+        worker_id="w",
+        dp_rank=5,
+        counter_id=4,
+        scheduled_requests=ScheduledRequestMetrics(num_decode_requests=32),
+    )
+
+    model.add_observations({("w", 4): earlier_rank, ("w", 5): later_rank})
+
+    assert factory.call_args.args[0]["attention_dp"] == 1
+    iterations = native.tune_with_fpms.call_args.args[0]
+    assert [
+        [(fpm["dp_rank"], fpm["counter_id"]) for fpm in group] for group in iterations
+    ] == [[(0, 3)], [(0, 4)]]
 
 
 def test_registered_decode_topology_refresh_drops_single_rank_history(
@@ -667,7 +709,8 @@ def test_registered_decode_topology_refresh_drops_single_rank_history(
     assert not model._retained_iterations
     capacity = model.find_engine_capacity_rps(isl=32, osl=32)
     assert capacity is not None
-    assert _largest_decode_batch(recorded_forward_passes) == [64, 64]
+    assert _largest_decode_batch(recorded_forward_passes) == [64]
+    assert capacity.rps == pytest.approx(4000)
 
 
 def test_decode_capacity_refreshes_when_advertised_default_budget_disappears(
