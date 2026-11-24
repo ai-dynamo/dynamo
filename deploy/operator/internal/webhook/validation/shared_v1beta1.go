@@ -1395,12 +1395,12 @@ func validateComponentRolesUpdate(
 		)...)
 	}
 	if len(newNames) != len(oldByName) {
-		allErrs = append(allErrs, field.Invalid(fldPath, newRoles, "role names are immutable after creation"))
+		allErrs = append(allErrs, field.Forbidden(fldPath, "role names are immutable after creation"))
 		return allErrs
 	}
 	for name := range oldByName {
 		if _, exists := newNames[name]; !exists {
-			allErrs = append(allErrs, field.Invalid(fldPath, newRoles, "role names are immutable after creation"))
+			allErrs = append(allErrs, field.Forbidden(fldPath, "role names are immutable after creation"))
 			break
 		}
 	}
