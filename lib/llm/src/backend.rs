@@ -65,18 +65,27 @@ pub struct Backend {
     validate_engine_decode: bool,     // Enable validation of engine decoding
 }
 
-/// Whether the engine still needs telling to stop: every choice has ended, and
-/// at least one ended here, which the engine cannot know about.
+/// Whether the engine still needs telling to stop: every requested choice has
+/// ended, and at least one ended here, which the engine cannot know about. Only
+/// indices below `choices` count, so a finish for a choice the request never
+/// asked for cannot end the stream.
 fn needs_engine_stop(
     locally_finished: &HashSet<u32>,
     engine_finished: &HashSet<u32>,
     choices: usize,
 ) -> bool {
-    locally_finished
-        .difference(engine_finished)
-        .next()
-        .is_some()
-        && locally_finished.union(engine_finished).count() >= choices
+    let mut ended_here = false;
+    for idx in (0u32..).take(choices) {
+        match (
+            locally_finished.contains(&idx),
+            engine_finished.contains(&idx),
+        ) {
+            (false, false) => return false,
+            (true, false) => ended_here = true,
+            _ => {}
+        }
+    }
+    ended_here
 }
 
 /// Internal state for managing token decoding and stream processing
@@ -2669,6 +2678,22 @@ mod tests {
     ) {
         let chunks = vec![first_finish, scripted(1, 1, Some(FinishReason::Stop))];
         assert_eq!(run_scripted(chunks).await, (false, 2, 2));
+    }
+
+    /// A finish for choice 2, which `n=2` never requested, is not counted, so
+    /// choice 1 keeps streaming until it stops too.
+    #[rstest::rstest]
+    #[case::after_a_local_stop(vec![scripted(2, 0, None), decoded_text_finish(2)])]
+    #[case::before_a_local_stop(vec![decoded_text_finish(2), scripted(2, 0, None)])]
+    #[tokio::test]
+    async fn backend_ignores_finish_for_unrequested_choice(
+        #[case] first: Vec<Annotated<LLMEngineOutput>>,
+    ) {
+        let mut chunks = first;
+        chunks.extend((0..3).map(|_| scripted(1, 1, None)));
+        chunks.push(scripted(2, 1, None));
+        chunks.extend((0..50).map(|_| scripted(1, 1, None)));
+        assert_eq!(run_scripted(chunks).await, (true, 6, 6));
     }
 
     /// Wraps an inner stream and flips a shared flag if it is ever polled again after
