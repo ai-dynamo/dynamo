@@ -520,12 +520,17 @@ pub(crate) fn worker_request_from_runtime_config(
                 .collect()
         })
         .unwrap_or_default();
+    let idempotent_stores = config
+        .runtime_data
+        .get(crate::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY)
+        .and_then(serde_json::Value::as_bool);
     WorkerRequest {
         worker_id,
         model_name: key.model_name.clone(),
         routing_group: key.routing_group.clone(),
         endpoint: Some(format!("dyn://{worker_id}")),
         kv_events_endpoints,
+        idempotent_stores,
         block_size: Some(block_size),
         data_parallel_start_rank: Some(dp_start),
         data_parallel_size: Some(dp_size),
@@ -681,6 +686,16 @@ mod tests {
                 (1, "tcp://engine:5558".to_string())
             ])
         );
+        // Unsaid, the listener counts a remove per store.
+        assert_eq!(request.idempotent_stores, None);
+
+        config.runtime_data.insert(
+            crate::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY
+                .to_string(),
+            true.into(),
+        );
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(request.idempotent_stores, Some(true));
     }
 
     #[test]

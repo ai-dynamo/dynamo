@@ -25,7 +25,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dynamo_llm::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY;
+use dynamo_llm::local_model::runtime_config::{
+    DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY, DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY,
+};
 use dynamo_llm::local_model::{LocalModelBuilder, model_card_instance};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
@@ -669,8 +671,9 @@ fn is_configuration_error(error: &DynamoError) -> bool {
 /// Name the engine's ZMQ KV-event publishers in its runtime data, by rank, so
 /// the frontend subscribes to them itself.
 ///
-/// Only the endpoint and rank reach the router's ZMQ ingress. Unlike the
-/// sidecar's subscriber, that ingress:
+/// The endpoint, the rank and `idempotent_stores` reach the router's ZMQ
+/// ingress; stores are idempotent there only when every publisher of the
+/// engine says so. Unlike the sidecar's subscriber, that ingress:
 /// - subscribes to every topic on the socket, not only `topic`;
 /// - does not rewrite multimodal events with `image_token_id`, so KV routing
 ///   of requests with images is not exact, as when the engine sets none;
@@ -681,16 +684,19 @@ fn record_kv_event_sources(
     sources: Vec<KvEventSource>,
 ) -> Result<(), DynamoError> {
     let mut endpoints = serde_json::Map::new();
+    let mut idempotent_stores = true;
     for source in sources {
         match source {
             KvEventSource::Zmq {
                 endpoint,
                 dp_rank,
+                idempotent_stores: idempotent,
                 topic: _,
                 image_token_id: _,
                 heartbeat_timeout: _,
             } => {
                 endpoints.insert(dp_rank.to_string(), endpoint.into());
+                idempotent_stores &= idempotent;
             }
             KvEventSource::Push { dp_rank, .. } => {
                 return Err(error(
@@ -709,6 +715,12 @@ fn record_kv_event_sources(
         DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY.to_string(),
         endpoints.into(),
     );
+    if idempotent_stores {
+        runtime_data.insert(
+            DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+    }
     Ok(())
 }
 
@@ -892,6 +904,7 @@ mod tests {
                     dp_rank: 0,
                     image_token_id: None,
                     heartbeat_timeout: None,
+                    idempotent_stores: false,
                 })
                 .collect())
         }
@@ -1901,24 +1914,40 @@ mod tests {
 
     #[test]
     fn kv_event_publishers_are_recorded_by_rank() {
-        let mut runtime_data = HashMap::new();
-        record_kv_event_sources(
-            &mut runtime_data,
-            (0..2)
-                .map(|dp_rank| KvEventSource::Zmq {
-                    endpoint: format!("tcp://engine:{}", 5557 + dp_rank),
-                    topic: String::new(),
-                    dp_rank,
-                    image_token_id: None,
-                    heartbeat_timeout: None,
-                })
-                .collect(),
-        )
-        .unwrap();
+        // `idempotent` is whether each rank's publisher sends one remove per
+        // block however many times it stored it.
+        let recorded = |idempotent: [bool; 2]| {
+            let mut runtime_data = HashMap::new();
+            record_kv_event_sources(
+                &mut runtime_data,
+                (0..2)
+                    .map(|dp_rank| KvEventSource::Zmq {
+                        endpoint: format!("tcp://engine:{}", 5557 + dp_rank),
+                        topic: String::new(),
+                        dp_rank,
+                        image_token_id: None,
+                        heartbeat_timeout: None,
+                        idempotent_stores: idempotent[dp_rank as usize],
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            runtime_data
+        };
+        let runtime_data = recorded([false, false]);
         assert_eq!(
             runtime_data[DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY],
             serde_json::json!({"0": "tcp://engine:5557", "1": "tcp://engine:5558"})
         );
+        // Stores are idempotent only when every publisher says so.
+        let idempotent = |runtime_data: &HashMap<String, serde_json::Value>| {
+            runtime_data
+                .get(DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY)
+                .cloned()
+        };
+        assert_eq!(idempotent(&runtime_data), None);
+        assert_eq!(idempotent(&recorded([true, false])), None);
+        assert_eq!(idempotent(&recorded([true, true])), Some(true.into()));
 
         let push = KvEventSource::Push {
             on_ready: Box::new(|_| Ok(())),
