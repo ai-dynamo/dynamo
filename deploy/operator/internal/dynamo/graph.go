@@ -1829,11 +1829,15 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	// Select the failover path once, after GMS has attached the shared resources.
 	// Snapshot: vLLM/SGLang restored election. No snapshot: cold-start failover, vLLM with GMS V0 shadow mode.
 	if IsIntraPodFailoverEnabled(component) {
+		graphArchive := component.Experimental.Failover.GraphArchive
 		var err error
-		if snapshotEnabled {
-			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework)
+		if !snapshotEnabled {
+			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework, graphArchive)
+		} else if graphArchive != nil {
+			// Defend objects that bypassed admission: restored engines already hold their graphs.
+			err = fmt.Errorf("failover.graphArchive is supported only for cold-start (snapshot-less) failover")
 		} else {
-			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework)
+			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)

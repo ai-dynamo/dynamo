@@ -669,8 +669,9 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 							}},
 						},
 						Failover: &v1beta1.FailoverSpec{
-							Mode:       v1beta1.GMSModeIntraPod,
-							NumShadows: 1,
+							Mode:         v1beta1.GMSModeIntraPod,
+							NumShadows:   1,
+							GraphArchive: &v1beta1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))},
 						},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Enabled:             true,
@@ -745,6 +746,43 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 		t.Fatalf("hub checkpoint job GMS clients mismatch (-want +got):\n%s", diff)
 	}
 
+	got := roundTripFromV1alpha1(t, src)
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_FromV1alpha1_FailoverGraphArchiveRoundTripsThroughHub(t *testing.T) {
+	t.Log("Declare an enabled v1alpha1 failover with a graph archive")
+	src := &DynamoGraphDeployment{
+		Name: "alpha-failover-graph-archive", Namespace: "ns",
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType:    string(v1beta1.ComponentTypeWorker),
+					GPUMemoryService: &GPUMemoryServiceSpec{Enabled: true, Mode: GMSModeIntraPod},
+					Failover: &FailoverSpec{
+						Enabled:      true,
+						Mode:         GMSModeIntraPod,
+						NumShadows:   1,
+						GraphArchive: &GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Convert to the hub and verify the archive is a native v1beta1 field")
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	want := &v1beta1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))}
+	if diff := cmp.Diff(want, hub.Spec.Components[0].Experimental.Failover.GraphArchive); diff != "" {
+		t.Fatalf("hub graph archive mismatch (-want +got):\n%s", diff)
+	}
+
+	t.Log("Convert back and verify the v1alpha1 object is unchanged")
 	got := roundTripFromV1alpha1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
@@ -917,9 +955,10 @@ func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 						DeviceClassName: "gpu.nvidia.com",
 					},
 					Failover: &FailoverSpec{
-						Enabled:    false,
-						Mode:       GMSModeIntraPod,
-						NumShadows: 1,
+						Enabled:      false,
+						Mode:         GMSModeIntraPod,
+						NumShadows:   1,
+						GraphArchive: &GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))},
 					},
 				},
 			},
