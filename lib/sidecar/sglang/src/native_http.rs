@@ -822,7 +822,7 @@ mod tests {
                 DisaggregationMode::Prefill,
                 DisaggregationMode::Decode,
             ] {
-                let native = request(&canonical, "priority", mode, None, None)
+                let native = request(&canonical, "priority", mode, target(None, None))
                     .unwrap()
                     .unwrap();
                 assert_eq!(native.body["priority"], expected, "{header:?} {mode:?}");
