@@ -107,20 +107,12 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
   `/router_policy` only on its admin listener, which is off by default and binds `127.0.0.1`.
   See [Configure the frontend](#configure-the-frontend).
 - **One Planner replica.**
-- **An operator that publishes component target configuration.** Router startup checks require
-  `status.components.<name>.roles[].containers[]` and a global `status.observedGeneration` matching
-  `metadata.generation`. Missing, stale, or omitted roles make live retune unavailable; the Planner
-  does not fall back to reconstructing the operator's environment or command defaults from `spec`.
 
 ## Configure the frontend
 
 Add the trace environment, the admin listener and the claim to the frontend container of the
 DGD. The planner checks these values against `retune.dgdr` at startup and whenever the DGD
 changes.
-
-This trace/PVC/admin-listener recipe check remains a separate declaration check. It is not the
-router-environment check: the target status cannot resolve a Pod name or its dependent trace path,
-and does not include PVC mount information. The restrictions below still apply.
 
 ```yaml
 spec:
@@ -336,21 +328,13 @@ configuration error at startup.
 | P5 | `retune.dgdr.engine` is all scalars, as in [Engine section](#engine-section) |
 | P13 | The largest grid shard has at most 100 points and fits the [time budget](#time-budget). With scaling, the Planner points count as one more shard dimension, and the history before a window holds at most 1024 buckets of the shortest throughput interval |
 
-Router startup checks read the [operator's target configuration](../../reference/kubernetes-api/dynamo-component-deployment.mdx#target-role-configuration),
-including already-evaluated environment bindings and declared commands for each role. Known values
-are not expanded again. A missing binding, `valueFrom`, or remaining `$(...)` reference used by an argument is unknown; the
-Planner does not guess its value or safety from an injected name, provider, or DGD origin. The
-declared command and args still undergo argument interpretation; image entrypoints are not inferred.
-These target declarations do not prove which configuration existing Pods currently run. The live
-router checks remain necessary, and runtime-reported startup/rollback configuration is separate.
-
 **Deployment**, checked at startup, when the DGD changes and before every router round. While one
 fails, the Planner launches no windows, resets the routers to their startup parameters, and
 retries:
 
 | Rule | Requirement |
 |---|---|
-| P4 | Current target status is available for the frontend and every worker role. The frontend runs `--router-mode kv` without a shell wrapper; unsearched routing fields remain at their defaults, `kv_event_lag_ms` is unset or 0, the prefill load model is `none`, and no `DYN_ROUTER_WORKER_SELECTION_POLICY` is set. Relevant router bindings must be known. No worker sets `--router-mode` or `DYN_ROUTER_MODE`. Unknown command references that could become options make the configuration unavailable; attach unknown values to their option rather than passing them where an option could stand. A missing declared command is an unknown image entrypoint, not an operator default. Native engines are checked conservatively too; a container named `runtime` alone does not establish a native-sidecar exemption |
+| P4 | The frontend runs `--router-mode kv` with every routing field the Request cannot express at its default, `kv_event_lag_ms` unset or 0, no `DYN_ROUTER_WORKER_SELECTION_POLICY`, a `none` prefill load model, router env given as plain values (no `valueFrom`), and a command that is not wrapped in a shell. The Planner cannot read `envFrom` sources: it assumes they set no router env, only warns about a source whose `prefix` could produce a `DYN_` name, and treats a `$(VAR)` that only an `envFrom` source could define as unreadable. Keep router env out of `envFrom`: P14 catches only a changed policy parameter. No worker advertises its own router configuration: worker components set neither `--router-mode` nor `DYN_ROUTER_MODE`, directly or through the graph-level `spec.env`, because a worker's advertised configuration replaces the frontend's for its workers. The Planner reads a worker's command as the operator runs it: an omitted `command` is `/bin/sh -c` with the first of `args` as the script, and a shell started through `env`, `tini --` or `dumb-init --` is a script too. For a worker whose launches are in role pod templates (`roles[].podTemplate`, no component `podTemplate`), it reads each role's main container and env. A worker with a native `runtime` sidecar is not checked: its main runs the engine, and the sidecar advertises no router configuration. A value the Planner cannot read and that could hold an option (a ConfigMap, Secret or annotation `valueFrom`, or a `$(VAR)` that the container's `env` leaves to an `envFrom` source) must not stand where a worker option could: attach it to its option (`--option=$(VAR)`) or pass it as the separate value right after `--model`, `--model-path`, `--served-model-name`, `--model-name` or `--speculative-config`. A frontend argument follows the same rule, with `--tool-call-parser`, `--reasoning-parser` and `--chat-template` as the options whose separate value it may be. In a worker shell script any such `$(VAR)` fails, since Kubernetes substitutes it before the shell parses the script; use the shell's own `$VAR` instead. A `$VAR` or `${VAR}` of such a value fails when it is unquoted, stands alone as an argument of the worker or of `env`, `export`, `source` or a shell (also by path and behind `exec`, `nohup`, `command` or `builtin`), or sits in text that `eval` or a shell given `-c` parses again; quote it outside the worker's arguments and attach it to its option among them (`--option="$VAR"`). A redirection target, such as `> "$LOG"`, is fine. The Planner does not follow the script's conditions, so the script's own assignment to a ConfigMap, Secret or annotation variable does not clear it. With an `envFrom` source that has no `prefix`, every name the container's `env` leaves undefined counts as such a value, image env such as `PATH` and `LD_LIBRARY_PATH` included, so quote those references too (`export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"`). Names the operator sets on the container do not count: `DYN_NAMESPACE`, `DYN_COMPONENT`, `DYN_PARENT_DGD_K8S_*` and `POD_*`, a worker's `DYN_SYSTEM_*`, `DYN_HEALTH_CHECK_ENABLED`, `NIXL_TELEMETRY_*` and `DYN_FORWARDPASS_METRIC_PORT`, and a multinode component's `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. Other `fieldRef` values, such as the pod name, may stand anywhere except inside an option's name (`--x-$(POD_NAME)`) or as the value of a frontend router flag. The Planner does not evaluate command substitution, backticks, the scripts a worker runs, text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or a script that `su -c` runs, so keep router flags and such values out of them |
 | P7 | The DGD serves one model; the frontend is not an EPP, not a `frontendSidecar`, and has no TLS |
 | P8 | One frontend replica, or `--router-replica-sync` |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
@@ -528,9 +512,8 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 | Load-predictor history beyond 1024 buckets of the shortest throughput interval | The warm-up travels inside every Request and Candidate |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
 | Workers that set their own router mode (`--router-mode` or `DYN_ROUTER_MODE`) | A worker's advertised router configuration replaces the frontend's for its workers, and the Run replays only the frontend's |
-| Missing/stale target roles or a target container without a declared command | The Planner waits for current operator facts; it does not infer an image entrypoint or reconstruct defaults from the authored spec |
-| Worker arguments that put an unknown status value where an option could stand, including an unquoted `$VAR` of one in a worker shell script or one that `eval` or a shell given `-c` parses again (P4 fails) | The Planner cannot read the value, so it cannot rule out a router mode the worker would advertise. No injected name or raw source kind makes an unknown value automatically safe |
-| Router flags that a worker produces through shell command substitution, backticks, script variables, positional parameters, literal text that `eval` or a nested shell parses again, or a script file, and unknown values in text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or that `su -c` runs (P4 does not see them) | The Planner reads the declared target command and does not run its script |
+| Worker arguments that pass a ConfigMap, Secret, annotation or `envFrom` value where an option could stand, including an unquoted `$VAR` of one in a worker shell script or one that `eval` or a shell given `-c` parses again (P4 fails) | The Planner cannot read the value, so it cannot rule out a router mode the worker would advertise |
+| Router flags that a worker produces through shell command substitution, backticks, script variables, positional parameters, literal text that `eval` or a nested shell parses again, or a script file, and ConfigMap, Secret, annotation or `envFrom` values in text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or that `su -c` runs (P4 does not see them) | The Planner reads the worker's spec and does not run its script |
 | Raising `overlap_score_credit` on a frontend that starts it at 0: an omitted credit then searches only 0, and a written positive value fails P4 | A live router rejects a positive credit after starting at 0 |
 | Private, fine-tuned or local-path models | The Run Job has no Hugging Face credentials or model mount |
 | Several frontends without router replica sync | AISimulate simulates one router |
