@@ -19,7 +19,7 @@ use crate::prelude::*;
 
 /// The blocks each residency owner holds on each storage tier. A tier keeps its own parent
 /// and token hash for a block, because an engine can describe one block differently per tier.
-type Residency = FxHashMap<(ResidencyOwner, StorageTier), Ledger>;
+type Residency = FxHashMap<(ResidencyOwner, StorageTier), Ledger<u64>>;
 
 /// A copy of the residency and the tree dump built from it. Requesters that arrive while the
 /// copy's cut is open clone the one dump.

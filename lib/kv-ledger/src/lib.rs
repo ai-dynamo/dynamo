@@ -16,7 +16,12 @@
 //!
 //! [`Replay`] folds each batch into a state the host chooses. [`Ledger`] is that state for the
 //! blocks held in one place: it is keyed by the engine's own block hash, so nothing is hashed
-//! here.
+//! here. It keeps one `Copy` value of the host's per block, and keeps blocks in the order they
+//! were stored, so that cutting chains from it reads memory mostly in sequence.
+//!
+//! What is true of an event and not of a block, such as the session that triggered a store,
+//! is not state: it stays in the batches. Replay returns those as they were applied, and a
+//! copy of the state does not carry them.
 //!
 //! Everything is synchronous and single-owner. There are no threads, locks, channels or async,
 //! and no Dynamo types: the crate depends on `rustc-hash` only, so an engine can build it with
