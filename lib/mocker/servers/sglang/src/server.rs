@@ -5,6 +5,8 @@
 //! shaped like SGLang's Rust server, with typed discovery, `GenerateStreamItem`
 //! frames, and in-stream error items carrying HTTP status codes.
 
+use tonic_v14 as tonic;
+
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,8 +20,8 @@ use dynamo_mocker::live::{
 };
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
-use dynamo_sglang_sidecar::proto as pb;
 use futures::Stream;
+use sglang_api_types::api::v1 as pb;
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
 
@@ -350,172 +352,173 @@ impl SglangMockerService {
     }
 }
 
-#[tonic::async_trait]
-impl pb::sglang_service_server::SglangService for SglangMockerService {
-    type GenerateStream = BoxStream<pb::GenerateStreamItem>;
+crate::impl_sglang_service! {
+    impl SglangMockerService {
+        type GenerateStream = BoxStream<pb::GenerateStreamItem>;
 
-    async fn generate(
-        &self,
-        request: Request<pb::GenerateRequest>,
-    ) -> Result<Response<Self::GenerateStream>, Status> {
-        let permit = self
-            .request_permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
-        let prepared =
-            PreparedRequest::new(request.into_inner(), &self.config).map_err(|status| *status)?;
-        if let Some(message) = prepared.context_error.clone() {
-            let item = error_item(400, message);
-            return Ok(Response::new(Box::pin(futures::stream::once(async move {
+        async fn generate(
+            &self,
+            request: Request<pb::GenerateRequest>,
+        ) -> Result<Response<Self::GenerateStream>, Status> {
+            let permit = self
+                .request_permits
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
+            let prepared =
+                PreparedRequest::new(request.into_inner(), &self.config).map_err(|status| *status)?;
+            if let Some(message) = prepared.context_error.clone() {
+                let item = error_item(400, message);
+                return Ok(Response::new(Box::pin(futures::stream::once(async move {
+                    let _permit = permit;
+                    Ok(item)
+                }))));
+            }
+            let direct = prepared.direct_request();
+            let mut live = if prepared.has_decode_handoff {
+                self.engine.submit_decode(direct).await
+            } else {
+                self.engine.submit(direct).await
+            }
+            .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
+            let stream = async_stream::stream! {
                 let _permit = permit;
-                Ok(item)
-            }))));
-        }
-        let direct = prepared.direct_request();
-        let mut live = if prepared.has_decode_handoff {
-            self.engine.submit_decode(direct).await
-        } else {
-            self.engine.submit(direct).await
-        }
-        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
-        let stream = async_stream::stream! {
-            let _permit = permit;
-            let mut completion_tokens = 0_usize;
-            let mut cached_tokens = 0_usize;
-            // The sidecar contract enables SGLang's incremental streaming output,
-            // so each frame contains only this chunk's token and metadata.
-            while let Some(signal) = live.recv().await {
-                let token_id = match checked_token(&signal) {
-                    Ok(token_id) => token_id,
-                    Err((code, message)) => {
-                        yield Ok(error_item(code, message.to_string()));
+                let mut completion_tokens = 0_usize;
+                let mut cached_tokens = 0_usize;
+                // The sidecar contract enables SGLang's incremental streaming output,
+                // so each frame contains only this chunk's token and metadata.
+                while let Some(signal) = live.recv().await {
+                    let token_id = match checked_token(&signal) {
+                        Ok(token_id) => token_id,
+                        Err((code, message)) => {
+                            yield Ok(error_item(code, message.to_string()));
+                            return;
+                        }
+                    };
+                    completion_tokens = completion_tokens.saturating_add(1);
+                    // The scheduler reports prefix-cache hits on the first signal.
+                    if let Some(tokens) = signal.cached_tokens {
+                        cached_tokens = tokens;
+                    }
+                    yield Ok(pb::GenerateStreamItem {
+                        item: Some(pb::generate_stream_item::Item::Frame(prepared.frame(
+                            &[token_id],
+                            completion_tokens,
+                            cached_tokens,
+                            completion_tokens == 1,
+                            signal.completed,
+                        ))),
+                    });
+                    if signal.completed {
                         return;
                     }
-                };
-                completion_tokens = completion_tokens.saturating_add(1);
-                // The scheduler reports prefix-cache hits on the first signal.
-                if let Some(tokens) = signal.cached_tokens {
-                    cached_tokens = tokens;
                 }
-                yield Ok(pb::GenerateStreamItem {
-                    item: Some(pb::generate_stream_item::Item::Frame(prepared.frame(
-                        &[token_id],
-                        completion_tokens,
-                        cached_tokens,
-                        completion_tokens == 1,
-                        signal.completed,
-                    ))),
-                });
-                if signal.completed {
+                if live.is_aborted() {
+                    yield Ok(error_item(CLIENT_CLOSED_REQUEST, "client disconnected".to_string()));
                     return;
                 }
-            }
-            if live.is_aborted() {
-                yield Ok(error_item(CLIENT_CLOSED_REQUEST, "client disconnected".to_string()));
-                return;
-            }
-            yield Ok(error_item(
-                500,
-                "Mocker output channel closed before a terminal response".to_string(),
-            ));
-        };
-        Ok(Response::new(Box::pin(stream)))
-    }
-
-    async fn health_check(
-        &self,
-        _request: Request<pb::HealthCheckRequest>,
-    ) -> Result<Response<pb::HealthCheckResponse>, Status> {
-        // The Mocker is ready once constructed. It does not simulate SGLang's
-        // one-token probe, which would perturb scheduler-state assertions.
-        Ok(Response::new(pb::HealthCheckResponse { healthy: true }))
-    }
-
-    async fn get_model_info(
-        &self,
-        _request: Request<pb::GetModelInfoRequest>,
-    ) -> Result<Response<pb::GetModelInfoResponse>, Status> {
-        Ok(Response::new(self.model_info()))
-    }
-
-    async fn get_server_info(
-        &self,
-        _request: Request<pb::GetServerInfoRequest>,
-    ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
-        Ok(Response::new(self.server_info()))
-    }
-
-    async fn list_models(
-        &self,
-        _request: Request<pb::ListModelsRequest>,
-    ) -> Result<Response<pb::ListModelsResponse>, Status> {
-        Ok(Response::new(pb::ListModelsResponse {
-            models: vec![pb::ModelCard {
-                id: self.config.model.clone(),
-                root: self.config.model.clone(),
-                parent: None,
-                max_model_len: u64::from(self.config.context_length),
-            }],
-        }))
-    }
-
-    async fn detokenize(
-        &self,
-        _request: Request<pb::DetokenizeRequest>,
-    ) -> Result<Response<pb::DetokenizeResponse>, Status> {
-        // SGLang answers the same way when it runs without a tokenizer.
-        Err(Status::unimplemented("detokenization requires a tokenizer"))
-    }
-
-    async fn abort(
-        &self,
-        request: Request<pb::AbortRequest>,
-    ) -> Result<Response<pb::AbortResponse>, Status> {
-        let request = request.into_inner();
-        if request.abort_all != request.rid.is_empty() {
-            return Err(Status::invalid_argument(
-                "provide either a nonempty rid or abort_all=true, not both",
-            ));
+                yield Ok(error_item(
+                    500,
+                    "Mocker output channel closed before a terminal response".to_string(),
+                ));
+            };
+            Ok(Response::new(Box::pin(stream)))
         }
-        if request.abort_all {
-            return Err(Status::unimplemented(
-                "Abort with abort_all=true is not supported by the Mocker server",
-            ));
+
+        async fn health_check(
+            &self,
+            _request: Request<pb::HealthCheckRequest>,
+        ) -> Result<Response<pb::HealthCheckResponse>, Status> {
+            // The Mocker is ready once constructed. It does not simulate SGLang's
+            // one-token probe, which would perturb scheduler-state assertions.
+            Ok(Response::new(pb::HealthCheckResponse { healthy: true }))
         }
-        let request_id = stable_request_uuid(self.config.seed, &request.rid);
-        let success = self.engine.cancel(request_id).await.map_err(|error| {
-            Status::internal(format!("Mocker request cancellation failed: {error}"))
-        })?;
-        Ok(Response::new(pb::AbortResponse { success }))
-    }
 
-    async fn get_hi_cache_storage(
-        &self,
-        _request: Request<pb::GetHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStatus>, Status> {
-        Err(hicache_unimplemented())
-    }
+        async fn get_model_info(
+            &self,
+            _request: Request<pb::GetModelInfoRequest>,
+        ) -> Result<Response<pb::GetModelInfoResponse>, Status> {
+            Ok(Response::new(self.model_info()))
+        }
 
-    async fn attach_hi_cache_storage(
-        &self,
-        _request: Request<pb::AttachHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
-        Err(hicache_unimplemented())
-    }
+        async fn get_server_info(
+            &self,
+            _request: Request<pb::GetServerInfoRequest>,
+        ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
+            Ok(Response::new(self.server_info()))
+        }
 
-    async fn detach_hi_cache_storage(
-        &self,
-        _request: Request<pb::DetachHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
-        Err(hicache_unimplemented())
-    }
+        async fn list_models(
+            &self,
+            _request: Request<pb::ListModelsRequest>,
+        ) -> Result<Response<pb::ListModelsResponse>, Status> {
+            Ok(Response::new(pb::ListModelsResponse {
+                models: vec![pb::ModelCard {
+                    id: self.config.model.clone(),
+                    root: self.config.model.clone(),
+                    parent: None,
+                    max_model_len: u64::from(self.config.context_length),
+                }],
+            }))
+        }
 
-    async fn clear_hi_cache_storage(
-        &self,
-        _request: Request<pb::ClearHiCacheStorageRequest>,
-    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
-        Err(hicache_unimplemented())
+        async fn detokenize(
+            &self,
+            _request: Request<pb::DetokenizeRequest>,
+        ) -> Result<Response<pb::DetokenizeResponse>, Status> {
+            // SGLang answers the same way when it runs without a tokenizer.
+            Err(Status::unimplemented("detokenization requires a tokenizer"))
+        }
+
+        async fn abort(
+            &self,
+            request: Request<pb::AbortRequest>,
+        ) -> Result<Response<pb::AbortResponse>, Status> {
+            let request = request.into_inner();
+            if request.abort_all != request.rid.is_empty() {
+                return Err(Status::invalid_argument(
+                    "provide either a nonempty rid or abort_all=true, not both",
+                ));
+            }
+            if request.abort_all {
+                return Err(Status::unimplemented(
+                    "Abort with abort_all=true is not supported by the Mocker server",
+                ));
+            }
+            let request_id = stable_request_uuid(self.config.seed, &request.rid);
+            let success = self.engine.cancel(request_id).await.map_err(|error| {
+                Status::internal(format!("Mocker request cancellation failed: {error}"))
+            })?;
+            Ok(Response::new(pb::AbortResponse { success }))
+        }
+
+        async fn get_hi_cache_storage(
+            &self,
+            _request: Request<pb::GetHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStatus>, Status> {
+            Err(hicache_unimplemented())
+        }
+
+        async fn attach_hi_cache_storage(
+            &self,
+            _request: Request<pb::AttachHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+            Err(hicache_unimplemented())
+        }
+
+        async fn detach_hi_cache_storage(
+            &self,
+            _request: Request<pb::DetachHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+            Err(hicache_unimplemented())
+        }
+
+        async fn clear_hi_cache_storage(
+            &self,
+            _request: Request<pb::ClearHiCacheStorageRequest>,
+        ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+            Err(hicache_unimplemented())
+        }
     }
 }
 

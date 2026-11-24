@@ -11,10 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -44,7 +46,7 @@ func ValidateCheckpointCompatibility(experimental *nvidiacomv1beta1.Experimental
 // KUBERNETES_OPTIONAL_ENV_NAMES, and RESTORE_RUNTIME_ENV_NAMES in
 // components/src/dynamo/common/snapshot/constants.py, except HF_HUB_OFFLINE.
 // That policy stays in the persisted v2 identity to preserve existing hashes.
-// Other destination Pod and runtime values are excluded from the identity.
+// Semantic origins retain dependencies that also feed captured, non-restored values.
 var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"CONTAINER_NAME":                        {},
 	"DYN_COMPONENT":                         {},
@@ -110,13 +112,15 @@ type snapshotCompatibilityContract struct {
 // ComputeSnapshotCompatibilityHash returns the portable v2 compatibility
 // identity for one captured process. It deliberately excludes rollout and
 // graph-incarnation identity, along with restore-time environment that Dynamo
-// refreshes in the destination Pod.
+// refreshes in the destination Pod. orderedEnvironment is selected from the
+// authoritative DGD origin; false preserves the historical v2 hash contract.
 func ComputeSnapshotCompatibilityHash(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainerName string,
 	backendFramework string,
 	gmsMode string,
 	gmsDeviceClassName string,
+	orderedEnvironment bool,
 ) (string, error) {
 	if podTemplate == nil {
 		return "", fmt.Errorf("snapshot compatibility pod template is required")
@@ -136,13 +140,14 @@ func ComputeSnapshotCompatibilityHash(
 		return "", fmt.Errorf("snapshot compatibility target container %q not found", targetContainerName)
 	}
 
+	// Semantic origins retain expansion-time inputs to captured, non-restored values.
 	contract := snapshotCompatibilityContract{
 		Version:               consts.SnapshotCompatibilityVersion,
 		BackendFramework:      backendFramework,
 		GMSMode:               gmsMode,
 		GMSDeviceClassName:    gmsDeviceClassName,
 		CUDASharedMemory:      podTemplate.Annotations[podcontract.CuInterposeAnnotation],
-		TargetContainer:       canonicalSnapshotContainer(*target, false),
+		TargetContainer:       canonicalSnapshotContainer(*target, false, orderedEnvironment),
 		HostNetwork:           podTemplate.Spec.HostNetwork,
 		HostPID:               podTemplate.Spec.HostPID,
 		HostIPC:               podTemplate.Spec.HostIPC,
@@ -162,7 +167,7 @@ func ComputeSnapshotCompatibilityHash(
 		return contract.ResourceClaims[i].Name < contract.ResourceClaims[j].Name
 	})
 	for _, container := range podTemplate.Spec.InitContainers {
-		contract.InitContainers = append(contract.InitContainers, canonicalSnapshotContainer(container, true))
+		contract.InitContainers = append(contract.InitContainers, canonicalSnapshotContainer(container, true, orderedEnvironment))
 	}
 	contract.Volumes = snapshotCompatibilityVolumes(&podTemplate.Spec, target)
 	sort.Slice(contract.Volumes, func(i, j int) bool { return contract.Volumes[i].Name < contract.Volumes[j].Name })
@@ -199,19 +204,13 @@ func snapshotCompatibilityVolumes(podSpec *corev1.PodSpec, target *corev1.Contai
 	return volumes
 }
 
-func canonicalSnapshotContainer(container corev1.Container, keepName bool) corev1.Container {
+func canonicalSnapshotContainer(container corev1.Container, keepName, orderedEnvironment bool) corev1.Container {
 	container = *container.DeepCopy()
 	if !keepName {
 		container.Name = ""
 	}
 
-	env := make([]corev1.EnvVar, 0, len(container.Env))
-	for _, variable := range container.Env {
-		if _, restored := snapshotRestoreEnvironmentNames[variable.Name]; !restored {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
+	container.Env = snapshotCompatibilityEnvironment(container, orderedEnvironment)
 	sort.SliceStable(container.VolumeMounts, func(i, j int) bool {
 		if container.VolumeMounts[i].MountPath != container.VolumeMounts[j].MountPath {
 			return container.VolumeMounts[i].MountPath < container.VolumeMounts[j].MountPath
@@ -245,4 +244,36 @@ func canonicalSnapshotContainer(container corev1.Container, keepName bool) corev
 	container.StdinOnce = false
 	container.TTY = false
 	return container
+}
+
+func snapshotCompatibilityEnvironment(container corev1.Container, ordered bool) []corev1.EnvVar {
+	// Kubernetes expands declared argv against the final environment before capture.
+	needed := make(map[string]bool)
+	if ordered {
+		for _, parts := range [][]string{container.Command, container.Args} {
+			for _, value := range parts {
+				for _, name := range semanticenv.References(value) {
+					needed[name] = true
+				}
+			}
+		}
+	}
+
+	// Resolve dependencies backwards so duplicates and self-references select the preceding binding.
+	env := make([]corev1.EnvVar, 0, len(container.Env))
+	for _, variable := range slices.Backward(container.Env) {
+		_, restored := snapshotRestoreEnvironmentNames[variable.Name]
+		keep := !restored || needed[variable.Name]
+		delete(needed, variable.Name)
+		if keep {
+			env = append(env, variable)
+			if ordered && variable.ValueFrom == nil {
+				for _, name := range semanticenv.References(variable.Value) {
+					needed[name] = true
+				}
+			}
+		}
+	}
+	slices.Reverse(env)
+	return env
 }

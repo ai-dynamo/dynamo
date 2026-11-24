@@ -11,7 +11,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
@@ -213,27 +212,22 @@ struct RouterConfigOverrideSerde {
 }
 
 /// Override configuration for router settings that can be specified per-request
-#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(try_from = "RouterConfigOverrideSerde")]
 pub struct RouterConfigOverride {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
     /// load before sampling. Values must be finite and non-negative. Values above
     /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
-    #[builder(default)]
     pub overlap_score_credit: Option<f64>,
 
     /// Scale applied to the adjusted prefill load after device/lower-tier
     /// cache-hit credits have been subtracted.
-    #[builder(default)]
     pub prefill_load_scale: Option<f64>,
 
-    #[builder(default)]
     pub router_temperature: Option<f64>,
 
-    #[builder(default)]
     pub assume_kv_reuse: Option<bool>,
 
-    #[builder(default)]
     pub track_prefill_tokens: Option<bool>,
 }
 

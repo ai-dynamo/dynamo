@@ -23,8 +23,10 @@ import (
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,14 +51,14 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 ) ([]Resource, bool, error) {
 	resources := []Resource{}
 	modified := false
 	syncer := newDGDResourceSyncer(r.client, r.recorder)
 	for _, componentName := range sortedDCDKeys(dcds) {
 		dcd := dcds[componentName]
-		if _, selected := selection.componentToRole[componentName]; selected {
+		if _, selected := selection.ComponentToRole[componentName]; selected {
 			continue
 		}
 		if err := preserveExistingBackendFramework(ctx, r.client, dcd); err != nil {
@@ -64,7 +66,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 		}
 		wasModified, syncedDCD, err := commoncontroller.SyncResource(ctx, &syncer, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 			return dcd, false, nil
-		})
+		}, commoncontroller.WithPreservedListOrder(compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations)))
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to sync non-DisaggregatedSet DynamoComponentDeployment %s: %w", dcd.Name, err)
 		}
@@ -78,7 +80,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 func (r *disaggregatedSetAuxiliaryDCDReconciler) DeleteSelected(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 ) error {
 	dcds, err := r.listOwnedSelectedDCDs(ctx, dgd, selection)
 	if err != nil {
@@ -100,7 +102,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) DeleteSelected(
 func (r *disaggregatedSetAuxiliaryDCDReconciler) listOwnedSelectedDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 ) ([]nvidiacomv1beta1.DynamoComponentDeployment, error) {
 	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
 	if err := r.client.List(ctx, dcdList, client.InNamespace(dgd.Namespace)); err != nil {
@@ -112,7 +114,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) listOwnedSelectedDCDs(
 			continue
 		}
 		componentName := dynamo.GetDCDComponentName(&dcd)
-		if _, selected := selection.componentToRole[componentName]; selected {
+		if _, selected := selection.ComponentToRole[componentName]; selected {
 			selectedDCDs = append(selectedDCDs, dcd)
 		}
 	}

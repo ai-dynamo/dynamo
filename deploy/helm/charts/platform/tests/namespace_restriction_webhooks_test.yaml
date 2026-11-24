@@ -9,12 +9,15 @@ templates:
 tests:
   - it: renders global admission for the cluster-wide installation
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    set:
+      # Enable checkpoint so the pod webhook (webhooks[3] of the mutating configuration) is rendered.
+      dynamo-operator.checkpoint.enabled: true
     asserts:
       - hasDocuments:
           count: 2
       - lengthEqual:
           path: webhooks
-          count: 4
+          count: 6
         documentIndex: 0
       - notExists:
           path: webhooks[0].namespaceSelector
@@ -43,6 +46,8 @@ tests:
   - it: scopes namespace-restricted admission to the target namespace
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
+      # Enable checkpoint so the pod webhook (webhooks[3] of the mutating configuration) is rendered.
+      dynamo-operator.checkpoint.enabled: true
       dynamo-operator.namespaceRestriction.enabled: true
       # Exercise a YAML boolean-like namespace to ensure the rendered selector stays a string.
       dynamo-operator.namespaceRestriction.targetNamespace: "true"
@@ -52,7 +57,7 @@ tests:
           count: 2
       - lengthEqual:
           path: webhooks
-          count: 4
+          count: 6
         documentIndex: 0
       - equal:
           path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
@@ -87,10 +92,11 @@ tests:
           value: "true"
         documentIndex: 1
 
-  - it: registers Run and Candidate admission only when the v1beta2 API is enabled
+  - it: registers Run and Candidate admission by default
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
-      dynamo-operator.dgdrV1Beta2.enabled: true
+      # Enable checkpoint so the mutating configuration keeps its 4 webhooks (incl. the pod webhook).
+      dynamo-operator.checkpoint.enabled: true
     asserts:
       - lengthEqual:
           path: webhooks
@@ -150,7 +156,6 @@ tests:
   - it: scopes Run and Candidate admission to the configured namespace
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
-      dynamo-operator.dgdrV1Beta2.enabled: true
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.namespaceRestriction.targetNamespace: "true"
       dynamo-operator.upgradeCRD: false

@@ -109,3 +109,6 @@
 
 # Preserve historical attribution while this contributor profile is unavailable.
 ^https://github\.com/Spycsh$
+
+# recipes/inkling-2-mini is added in the same PR as its docs page, which links to it on main. Remove this rule once that PR merges.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/recipes/inkling-2-mini
