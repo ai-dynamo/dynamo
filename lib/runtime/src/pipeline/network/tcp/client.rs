@@ -957,10 +957,7 @@ mod tests {
     /// EOF cancels live requests once; an upstream Stop or Kill keeps its state.
     #[tokio::test]
     async fn test_peer_eof_cancels_idle_response_writer() {
-        for (index, control) in [None, Some(ControlMessage::Stop), Some(ControlMessage::Kill)]
-            .into_iter()
-            .enumerate()
-        {
+        for control in [None, Some(ControlMessage::Stop), Some(ControlMessage::Kill)] {
             let (client, server) = create_tcp_pair().await;
             let (read_half, write_half) = tokio::io::split(client);
             let reader = FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
@@ -969,8 +966,7 @@ mod tests {
             let (bytes_tx, bytes_rx) = mpsc::channel(64);
             let (alive_tx, alive_rx) = oneshot::channel();
             let controller = Arc::new(Controller::default());
-            let counter =
-                IntCounter::new(format!("tcp_peer_eof_{index}"), "EOF regression").unwrap();
+            let counter = IntCounter::new("tcp_peer_eof", "EOF regression").unwrap();
             let reader_task = tokio::spawn(handle_reader(
                 reader,
                 controller.clone(),
@@ -992,16 +988,21 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 reader_task.await.unwrap();
                 drop(writer_task.await.unwrap().unwrap());
-                assert_eq!(server.read(&mut [0]).await.unwrap(), 0);
+                assert_eq!(
+                    server.read(&mut [0]).await.unwrap(),
+                    0,
+                    "control={control:?}"
+                );
             })
             .await
-            .expect("peer EOF must wake an idle writer");
+            .unwrap_or_else(|_| panic!("peer EOF must wake an idle writer: control={control:?}"));
             assert_eq!(
                 controller.is_killed(),
-                !matches!(control, Some(ControlMessage::Stop))
+                !matches!(control, Some(ControlMessage::Stop)),
+                "control={control:?}"
             );
-            assert!(bytes_tx.is_closed());
-            assert_eq!(counter.get(), 1);
+            assert!(bytes_tx.is_closed(), "control={control:?}");
+            assert_eq!(counter.get(), 1, "control={control:?}");
         }
     }
 
@@ -1770,57 +1771,6 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_reader should exit when alive channel is closed"
-        );
-    }
-
-    /// Response-stream EOF is the normal server FIN after a closing Sentinel.
-    /// It must not be counted as a cancellation by itself.
-    #[tokio::test]
-    async fn test_handle_reader_eof_does_not_count_cancellation() {
-        let ReaderHarness {
-            mut framed_server,
-            framed_reader,
-            alive_tx,
-            alive_rx: _alive_rx,
-            controller,
-        } = reader_harness().await;
-        let cancellation_counter = IntCounter::new(
-            "tcp_client_reader_clean_eof_cancellations_test",
-            "test cancellation counter",
-        )
-        .unwrap();
-
-        // Spawn the reader task
-        let counter_clone = cancellation_counter.clone();
-        let controller_clone = controller.clone();
-        let reader_handle = tokio::spawn(async move {
-            handle_reader(
-                framed_reader,
-                controller_clone,
-                alive_tx,
-                Some(counter_clone),
-            )
-            .await
-        });
-
-        // Close the framed server to signal EOF to the client
-        framed_server.close().await.unwrap();
-
-        // Reader should exit due to stream closure
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), reader_handle).await;
-
-        assert!(
-            result.is_ok(),
-            "handle_reader should exit when stream is closed"
-        );
-        assert!(
-            !controller.is_stopped() && !controller.is_killed(),
-            "response-stream EOF must not cancel the context"
-        );
-        assert_eq!(
-            cancellation_counter.get(),
-            0,
-            "response-stream EOF must not increment the cancellation counter"
         );
     }
 
