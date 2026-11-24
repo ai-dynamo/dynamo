@@ -69,6 +69,11 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  # fern check and fern generate load every published version, which exceeds
+  # Node's default heap.
+  NODE_OPTIONS: --max-old-space-size=8192
+
 jobs:
   # Detect changed files for conditional job execution
   changed-files:
@@ -751,9 +756,6 @@ jobs:
       github.ref_type == 'tag' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.tag != null)
     runs-on: ubuntu-24.04
-    env:
-      # fern check validates every published version, which exceeds Node's default heap.
-      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - name: Determine version tag
         id: version
