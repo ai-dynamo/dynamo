@@ -22,10 +22,11 @@ import (
 	"fmt"
 	"strings"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -70,7 +71,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha, nil, dynamo.DCDUsesOrderedEnvironment(dcd))...)
 
 	return validation.warnings, invalidDynamoComponentDeploymentError(dcd, allErrs)
 }
@@ -97,14 +98,19 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha)...)
-
-	// Run the source-version old/new ratchet after the stateless traversal.
+	var oldAlpha *nvidiacomv1alpha1.DynamoComponentDeployment
+	var oldEnv []corev1.EnvVar
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
+		oldAlpha, err = alphaDynamoComponentDeploymentForValidation(oldDCD)
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 		}
+		oldEnv = oldAlpha.Spec.Envs
+	}
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, oldEnv, dynamo.DCDUsesOrderedEnvironment(newDCD))...)
+
+	// Run the source-version old/new ratchet after the stateless traversal.
+	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		allErrs = append(allErrs, validation.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
 			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
@@ -137,12 +143,8 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 		return nil
 	}
 
-	controller := metav1.GetControllerOf(dcd)
-	if controller != nil && controller.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
-		groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
-		if err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group {
-			return nil
-		}
+	if dcd.GetGraphDeploymentController() != nil {
+		return nil
 	}
 
 	checkpointRefPath := field.NewPath("spec", "experimental", "checkpoint", "checkpointRef")
@@ -167,14 +169,19 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
-	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)
+	return append(allErrs, v.validateDynamoComponentDeploymentSpec(
+		&dcd.Spec, oldSpec, field.NewPath("spec"),
+		dynamo.DCDUsesOrderedEnvironment(dcd), oldDCD != nil && dynamo.DCDUsesOrderedEnvironment(oldDCD),
+	)...)
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.
+// oldSpec is nil on create; the booleans select the new and old rendering contracts.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
+	orderedEnvironment, oldOrderedEnvironment bool,
 ) field.ErrorList {
 	// Standalone DCDs use neither Grove nor live InferencePool discovery.
 	const (
@@ -185,7 +192,17 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	if oldSpec != nil {
 		oldSharedSpec = &oldSpec.DynamoComponentDeploymentSharedSpec
 	}
-	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+
+	// Entering the semantic contract does not grandfather an ineligible legacy list.
+	var allErrs field.ErrorList
+	if orderedEnvironment {
+		var oldEnv []corev1.EnvVar
+		if oldSpec != nil && oldOrderedEnvironment {
+			oldEnv = oldSpec.Env
+		}
+		allErrs = append(allErrs, v.validateEnvVars(spec.Env, oldEnv, fldPath.Child("env"), orderedEnvironment)...)
+	}
+	allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
 	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,

@@ -8,12 +8,110 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
+
+func TestVLLMRenderedEnvironmentOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name                                  string
+		command, args                         []string
+		explicitBackend                       string
+		role                                  Role
+		ray, elastic, bindHost, native, cycle bool
+		wantBackend                           BackendFramework
+	}{
+		{name: "ordinary worker", wantBackend: BackendFrameworkVLLM},
+		{name: "wrapper model path is not detection", command: []string{"python3", "/app/worker.py"}, args: []string{"--model=/models/dynamo.vllm", "--enable-elastic-ep", "--data-parallel-backend=ray", "$(POD_IP)"}, wantBackend: BackendFrameworkNoop},
+		{name: "elastic EP ray", args: []string{"--enable-elastic-ep", "--data-parallel-backend=ray"}, elastic: true, wantBackend: BackendFrameworkVLLM},
+		{name: "vllm-rs without explicit backend", command: []string{"/usr/local/bin/vllm-rs"}, role: RoleLeader, wantBackend: BackendFrameworkNoop},
+		{name: "vllm-rs explicit backend owns host", command: []string{"/usr/local/bin/vllm-rs"}, explicitBackend: "vllm", role: RoleLeader, bindHost: true, cycle: true, wantBackend: BackendFrameworkVLLM},
+		{name: "automatic ray", role: RoleLeader, ray: true, wantBackend: BackendFrameworkVLLM},
+		{name: "worker inherits leader backend", role: RoleWorker, args: []string{"--distributed-executor-backend=mp"}, bindHost: true, wantBackend: BackendFrameworkVLLM},
+		{name: "native engine leader", role: RoleLeader, native: true, wantBackend: BackendFrameworkVLLM},
+		{name: "native compute-only worker", role: RoleWorker, native: true, wantBackend: BackendFrameworkVLLM},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Authored feature variables stay user-owned unless this launch requires a binding")
+			authored := []corev1.EnvVar{
+				{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "worker-options", Key: "extra-option"}}},
+				{Name: "VLLM_DP_MASTER_IP", Value: "authored"}, {Name: "VLLM_NIXL_SIDE_CHANNEL_HOST", Value: "custom"},
+				{Name: "DYNAMO_RANK", Value: "authored"}, {Name: "DYNAMO_LEADER_ADDRESS", Value: "authored"},
+				{Name: "GMS_SOCKET_DIR", Value: "authored"}, {Name: "DYN_GMS_USE_V1", Value: "authored"},
+				{Name: "ENGINE_ID", Value: "authored"}, {Name: "CONTAINER_NAME", Value: "authored"}, {Name: "FAILOVER_LOCK_PATH", Value: "authored"},
+				{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "authored"}, {Name: "DYN_SYSTEM_PORT", Value: "authored"},
+				{Name: "DYN_SYSTEM_ENABLED", Value: "authored"}, {Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "authored"},
+				{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "authored"}, {Name: "DYN_HEALTH_CHECK_ENABLED", Value: "authored"},
+				{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "authored"}, {Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: "authored"}, {Name: "DYN_VLLM_KV_EVENT_PORT", Value: "authored"},
+				{Name: "DYN_KV_TRANSFER_PREFERRED_WEIGHT", Value: "authored"}, {Name: "DYN_KV_TRANSFER_DOMAIN", Value: "authored"},
+				{Name: "DYN_KV_TRANSFER_ENFORCEMENT", Value: "authored"}, {Name: "DYN_TOPOLOGY_ENABLED", Value: "authored"}, {Name: "DYN_TOPOLOGY_MOUNT_PATH", Value: "authored"},
+			}
+			if test.cycle {
+				findEnvVar(authored, commonconsts.VLLMNixlSideChannelHostEnvVar).Value = "$(USER)"
+			}
+			command := test.command
+			if command == nil {
+				command = []string{"python3", "-m", "dynamo.vllm"}
+			}
+			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{ComponentType: "worker",
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Name: "main", Image: "engine:1.8.0", Command: command, Args: test.args, Env: authored}},
+			})
+			component.ComponentName = "worker"
+			role, nodes := RoleMain, int32(1)
+			if test.role != "" {
+				role, nodes = test.role, 2
+				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: nodes}
+			}
+			if test.ray {
+				component.PodTemplate.Annotations = map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"}
+			}
+			if test.native || test.role == RoleWorker {
+				leader, worker := component.PodTemplate.DeepCopy(), component.PodTemplate.DeepCopy()
+				worker.Spec.Containers[0].Command = []string{"/app/worker"}
+				if test.native {
+					leader.Spec.InitContainers = []corev1.Container{{Name: "runtime", Image: "runtime:1.8.0", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}}
+				}
+				component.PodTemplate = nil
+				component.Roles = []v1beta1.ComponentRoleSpec{{Name: "leader", PodTemplate: leader}, {Name: "worker", PodTemplate: worker}}
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: test.explicitBackend, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{*component}},
+			}
+			if test.cycle {
+				dgd.Spec.Env = []corev1.EnvVar{{Name: "USER", Value: "$(VLLM_NIXL_SIDE_CHANNEL_HOST)"}}
+			}
+			original := dgd.DeepCopy()
+
+			t.Log("Detect the backend across the complete component before rendering the selected role")
+			backend, err := getBackendFrameworkFromComponent(component, dgd)
+			require.NoError(t, err)
+			require.Equal(t, test.wantBackend, backend)
+			pod, err := GeneratePodSpecForComponent(component, backend, nil, dgd, role, nodes, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(1))
+			require.NoError(t, err)
+			for _, expected := range authored {
+				actual := findEnvVar(pod.Containers[0].Env, expected.Name)
+				require.NotNil(t, actual, expected.Name)
+				switch {
+				case nodes > 1 && (expected.Name == "DYNAMO_RANK" || expected.Name == "DYNAMO_LEADER_ADDRESS"):
+					require.NotEqual(t, expected.Value, actual.Value, expected.Name)
+					require.Nil(t, actual.ValueFrom)
+				case test.bindHost && expected.Name == commonconsts.VLLMNixlSideChannelHostEnvVar,
+					test.elastic && (expected.Name == "POD_IP" || expected.Name == "VLLM_DP_MASTER_IP"):
+					require.Empty(t, actual.Value)
+					require.Equal(t, &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}, actual.ValueFrom)
+				default:
+					require.Equal(t, expected, *actual)
+				}
+			}
+			require.Equal(t, original, dgd)
+		})
+	}
+}
 
 func TestVLLMBackendRoleTemplateLaunchAddsOnlyMPMasterPort(t *testing.T) {
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{

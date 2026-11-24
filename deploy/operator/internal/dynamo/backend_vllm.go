@@ -40,13 +40,18 @@ const (
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
 	roleLaunchOwnership       roleLaunchOwnership
+	environment               *podEnvironment
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
 	// A --systemone-serial worker rejects DYN_FORWARDPASS_METRIC_PORT, so drop the
 	// operator default; a port the user set stays and still fails startup.
-	if isSystemOneSerialOptIn(container) && !userSetsEnvVar(component, forwardPassMetricPortEnvVar) {
-		removeEnvVar(container, forwardPassMetricPortEnvVar)
+	userSetsPort := userSetsEnvVar(component, forwardPassMetricPortEnvVar)
+	if b.environment != nil {
+		userSetsPort = userSetsPort || findEnvVar(b.environment.general, forwardPassMetricPortEnvVar) != nil
+	}
+	if isSystemOneSerialOptIn(container) && !userSetsPort {
+		b.environment.omit(container, forwardPassMetricPortEnvVar)
 	}
 
 	// The inter-pod GMS layout (with or without failover) requires the engine
@@ -61,7 +66,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			// on top of --load-format gms. Standalone inter-pod GMS should not set
 			// it: those engines are active clients of the dedicated GMS weight
 			// server, not shadow engines waiting for failover activation.
-			container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"}})
 		}
 	}
 
@@ -88,14 +93,14 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 
 		if roleTemplateMP || (!preserveRoleLaunch && shouldUseMpBackend(annotations)) {
-			container.Env = append(container.Env, corev1.EnvVar{
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
 						FieldPath: "status.podIP",
 					},
 				},
-			})
+			}})
 		}
 
 		// Remove probes for multinode workers.
@@ -131,10 +136,10 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 					},
 				}
 			}
-			container.Env = append(container.Env,
-				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
-				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
-			)
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{
+				{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
+				{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
+			})
 		}
 	}
 
@@ -170,8 +175,8 @@ func isTruthyEnvValue(value string) bool {
 	return false
 }
 
-// userSetsEnvVar reports whether the authored main container, which already
-// carries the graph-level spec.env, sets name.
+// userSetsEnvVar reports whether the authored main container sets name.
+// The legacy renderer also carries graph-level env in that container.
 func userSetsEnvVar(component *v1beta1.DynamoComponentDeploymentSharedSpec, name string) bool {
 	main := GetMainContainer(component)
 	return main != nil && findEnvVar(main.Env, name) != nil
