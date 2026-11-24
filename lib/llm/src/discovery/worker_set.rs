@@ -784,6 +784,29 @@ mod tests {
         assert_ne!(adapter.input_policy(), ChatInputPolicy::Standard);
     }
 
+    #[test]
+    fn adapter_view_applies_base_parser_overrides_and_falls_back_to_adapter_card() {
+        let mut base = make_worker_set("ns1", "abc123");
+        base.native_parser_overrides = crate::local_model::NativeParserOverrides {
+            tool_call_parser: Some("glm47".to_string()),
+            reasoning_parser: None,
+        };
+
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        adapter_card.runtime_config.reasoning_parser = Some("glm45".to_string());
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+
+        let adapter = base.adapter_view(adapter_card);
+        let options = adapter.parsing_options();
+
+        assert_eq!(options.tool_call_parser.as_deref(), Some("glm47"));
+        assert_eq!(options.reasoning_parser.as_deref(), Some("glm45"));
+    }
+
     #[tokio::test]
     async fn adapter_view_routes_generate_requests_with_adapter_identity() {
         let observed_lora = Arc::new(Mutex::new(None));

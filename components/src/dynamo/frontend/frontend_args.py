@@ -232,6 +232,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     response_plane: Optional[str] = None
     event_plane: Optional[str] = None
     chat_processor: str
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
     chat_processor_config: Optional[Dict[str, Any]] = None
     enable_anthropic_api: bool
     enable_systemone_api: bool

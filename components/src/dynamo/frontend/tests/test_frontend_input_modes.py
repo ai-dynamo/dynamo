@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.metadata
+import json
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
+from dynamo.common.config_dump import dump_config
 from dynamo.frontend.main import (
     CHAT_PROCESSOR_ENTRYPOINT_GROUP,
     parse_args,
@@ -107,7 +109,72 @@ def test_http_processor_parser_precedence(
 
     assert config.chat_processor == processor
     assert processor_flags is not None
-    assert getattr(processor_flags, option.replace("-", "_")) == expected
+    assert getattr(config, option.replace("-", "_")) == expected
+
+
+@pytest.mark.parametrize(
+    ("option", "env_var", "valid_name"),
+    [
+        ("tool-call-parser", "DYN_TOOL_CALL_PARSER", "hermes"),
+        ("reasoning-parser", "DYN_REASONING_PARSER", "glm45"),
+    ],
+)
+@pytest.mark.parametrize("source", ["cli", "environment"])
+def test_dynamo_rejects_invalid_resolved_parser(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+    env_var: str,
+    valid_name: str,
+    source: str,
+) -> None:
+    argv = ["dynamo.frontend"]
+    if source == "cli":
+        argv.extend([f"--{option}", "not_a_parser"])
+    else:
+        monkeypatch.setenv(env_var, "not_a_parser")
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args()
+
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert f"Unknown {option.removesuffix('-parser')} parser 'not_a_parser'" in error
+    assert f"--{option}" in error
+    assert env_var in error
+
+    if source == "environment":
+        # Validate after precedence has been resolved, so CLI can replace a bad default.
+        monkeypatch.setattr(sys, "argv", [*argv, f"--{option}", valid_name])
+        config, _, _, _ = parse_args()
+        assert getattr(config, option.replace("-", "_")) == valid_name
+
+
+def test_config_dump_contains_resolved_parser_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "frontend.json"
+    monkeypatch.setenv("DYN_TOOL_CALL_PARSER", "glm47")
+    monkeypatch.setenv("DYN_REASONING_PARSER", "glm45")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dynamo.frontend",
+            "--dump-config-to",
+            str(path),
+            "--tool-call-parser",
+            "hermes",
+        ],
+    )
+
+    config, _, _, _ = parse_args()
+    dump_config(config.dump_config_to, config)
+
+    dumped_config = json.loads(path.read_text())["config"]
+    assert dumped_config["tool_call_parser"] == "hermes"
+    assert dumped_config["reasoning_parser"] == "glm45"
 
 
 def test_http_sglang_processor_keeps_chat_template(

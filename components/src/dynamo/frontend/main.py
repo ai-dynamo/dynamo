@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import uvloop
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.configuration.utils import add_argument
@@ -122,15 +123,13 @@ def setup_sglang_engine_factory(
     """
     from .sglang_processor import SglangEngineFactory
 
-    tool_call_parser = getattr(sglang_flags, "tool_call_parser", None)
-    reasoning_parser = getattr(sglang_flags, "reasoning_parser", None)
     chat_template = getattr(sglang_flags, "chat_template", None)
 
     return SglangEngineFactory(
         config,
         debug_perf=config.debug_perf,
-        tool_call_parser_name=tool_call_parser,
-        reasoning_parser_name=reasoning_parser,
+        tool_call_parser_name=config.tool_call_parser,
+        reasoning_parser_name=config.reasoning_parser,
         chat_template=chat_template,
     )
 
@@ -392,6 +391,26 @@ def parse_args() -> (
         if remaining:
             logger.error(f"Unknown arguments specified: {remaining}")
             sys.exit(1)
+
+        config.tool_call_parser = processor_flags.tool_call_parser or None
+        config.reasoning_parser = processor_flags.reasoning_parser or None
+        if config.chat_processor == "dynamo":
+            if (
+                config.tool_call_parser
+                and config.tool_call_parser not in get_tool_parser_names()
+            ):
+                processor_parser.error(
+                    f"Unknown tool-call parser {config.tool_call_parser!r} for the "
+                    "Dynamo chat processor (--tool-call-parser or DYN_TOOL_CALL_PARSER)"
+                )
+            if (
+                config.reasoning_parser
+                and config.reasoning_parser not in get_reasoning_parser_names()
+            ):
+                processor_parser.error(
+                    f"Unknown reasoning parser {config.reasoning_parser!r} for the "
+                    "Dynamo chat processor (--reasoning-parser or DYN_REASONING_PARSER)"
+                )
     else:
         if unknown:
             logger.error(f"Unknown arguments specified: {unknown}")
@@ -558,8 +577,8 @@ async def async_main():
     elif config.chat_processor == "dynamo":
         if processor_flags is None:
             raise RuntimeError("Dynamo chat processor flags were not parsed")
-        kwargs["native_tool_call_parser"] = processor_flags.tool_call_parser
-        kwargs["native_reasoning_parser"] = processor_flags.reasoning_parser
+        kwargs["native_tool_call_parser"] = config.tool_call_parser
+        kwargs["native_reasoning_parser"] = config.reasoning_parser
     elif chat_processor_provider is not None:
         kwargs["chat_engine_factory"] = setup_custom_chat_engine_factory(
             config, chat_processor_provider
