@@ -17,12 +17,12 @@ for the variant to reproduce its published result.
 
 | Recipe | DGD name | GPUs | `CONCURRENCY` |
 |---|---|---|---|
-| `agg-h200-agentx` | `dsv41-flash-h200-agg` | 4 | 108 |
-| `disagg-h200-agentx` | `dsv41-flash-h200-disagg` | 20 | 480 |
-| `agg-b200-agentx` | `dsv41-flash-b200-agg` | 4 | 400 |
-| `disagg-b200-agentx` | `dsv41-flash-b200-disagg` | 16 | 1408 |
-| `agg-gb300-agentx` | `dsv41-flash-gb300-agg` | 4 | 616 |
-| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 8 | 920 |
+| `agg-h200-agentx` | `dsv41-flash-h200-agg` | 4 | 111 |
+| `disagg-h200-agentx` | `dsv41-flash-h200-disagg` | 16 | 600 |
+| `agg-b200-agentx` | `dsv41-flash-b200-agg` | 4 | 800 |
+| `disagg-b200-agentx` | `dsv41-flash-b200-disagg` | 28 | 6150 |
+| `agg-gb300-agentx` | `dsv41-flash-gb300-agg` | 4 | 1180 |
+| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 4 | 1200 |
 
 tok/s/GPU is the total output tokens per second printed in the aiperf summary, divided by the GPU count. A point passes
 when decode p50 is at least 50 tok/s/user, TTFT p50 is under 2 s and errors are under 5%.
@@ -49,7 +49,7 @@ a different workload and the result is not comparable to the published numbers.
 kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/<recipe>/deploy.yaml -n ${NAMESPACE}
 
 # 2. render and apply the Job (CACHE_SALT must be fresh for every run so earlier runs do not warm the prefix cache)
-CONCURRENCY=616 ENDPOINT=http://dsv41-flash-gb300-agg-frontend:8000 CACHE_SALT=$(openssl rand -hex 12) \
+CONCURRENCY=1180 ENDPOINT=http://dsv41-flash-gb300-agg-frontend:8000 CACHE_SALT=$(openssl rand -hex 12) \
   envsubst '$CONCURRENCY $ENDPOINT $CACHE_SALT' < recipes/deepseek-v4.1-flash-1017/perf/perf.yaml \
   | kubectl apply -f - -n ${NAMESPACE}
 
@@ -66,7 +66,15 @@ summary table; `profile_export_aiperf.csv` is in the pod until then). Delete the
 - **Warmup is part of the run and grows with concurrency.** The agentic scenario completes about 1.07 requests per
   concurrent session before the measured window starts. Warmup sends requests nearly one at a time and speeds up as it
   goes, so the GPUs look idle at first. At concurrency 1,152 it takes about 110 minutes, so with the 60-minute window the
-  Job runs about 3 hours; `activeDeadlineSeconds` is 8 hours.
+  Job runs about 3 hours. At 6,150 (`disagg-b200-agentx`) the Job took about 12 hours end to end;
+  `activeDeadlineSeconds` is 16 hours.
+- **Size the client for the request count.** aiperf keeps every record in memory, about 1 GiB per 1,000 requests; at
+  the default 160 GiB limit it was OOM-killed near 157,000 requests. `disagg-b200-agentx` completes about 315,000
+  requests in the hour, so raise the Job's memory to `requests: 384Gi` and `limits: 768Gi` for it. The other targets
+  stay under 70,000.
+- **Keepalive.** At high concurrency hundreds of requests wait for their first token at the end of warmup. The Job
+  allows 5 keepalive probes and a 5-minute TCP user timeout (`AIPERF_HTTP_TCP_KEEPCNT`, `AIPERF_HTTP_TCP_USER_TIMEOUT`)
+  so aiperf does not drop those connections.
 - **Session affinity needs the header.** The Job sets `AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=1`, which
   makes the Dynamo router pin each trajectory to one worker. Without it, multi-worker results are much worse.
 - On arm64 nodes the Job compiles one dependency (`crick`), so the first minutes show a package build.

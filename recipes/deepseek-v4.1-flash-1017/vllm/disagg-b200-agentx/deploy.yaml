@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# DeepSeek-V4.1-Flash-1017 on B200: disaggregated 3 prefill workers (TP4) + 1 decode worker (DEP4), 16 GPUs,
+# DeepSeek-V4.1-Flash-1017 on B200: conditional disaggregation, 1 prefill worker (TP4) + 6 decode workers (DEP4), 28 GPUs.
+# The router sends prompts with more than 64k uncached tokens to the prefill worker and lets decode workers prefill the
+# rest locally (also when the prefill worker holds 32 requests); decode workers admit that local prefill every 8th step.
+# FlashMLA MEGA attention on both roles; a 32 GiB frontend tokenizer cache keeps the frontend from binding at ~90 req/s.
 # DSpark (5 draft tokens, same config on both roles), AgentX trace replay.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -54,6 +57,9 @@ spec:
           - --active-prefill-tokens-threshold-frac
           - None
           - --router-kv-events
+          - --router-conditional-disagg
+          - --router-conditional-disagg-config
+          - '{"policy":"isl_or_load","eff_isl_threshold":65536,"eff_isl_ratio_threshold":0.7,"prefill_busy_threshold":32}'
           env:
           - name: PYTHONUNBUFFERED
             value: '1'
@@ -65,6 +71,12 @@ spec:
             value: '3600'
           - name: DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT
             value: '10000000'
+          # Cache tokenized prefixes: agentic turns resend the whole history, and the frontend
+          # tokenizer otherwise binds before the workers do.
+          - name: DYN_TOKENIZER_CACHE
+            value: '1'
+          - name: DYN_TOKENIZER_CACHE_BYTES
+            value: '34359738368'
           startupProbe:
             httpGet:
               path: /health
@@ -75,14 +87,14 @@ spec:
           resources:
             requests:
               cpu: '4'
-              memory: 8Gi
+              memory: 64Gi
             limits:
               cpu: '16'
-              memory: 32Gi
+              memory: 128Gi
   - name: PrefillWorker
     type: prefill
     runtimeVersionOverride: 1.7.0
-    replicas: 3
+    replicas: 1
     sharedMemorySize: 64Gi
     podTemplate:
       metadata:
@@ -131,9 +143,13 @@ spec:
           - '96'
           - --long-prefill-token-threshold
           - '8192'
+          - --max-num-batched-tokens
+          - '32768'
+          - --prefix-cache-retention-interval
+          - '32768'
           - --enable-multimodal
           - --attention-config
-          - '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+          - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
           - --kv-cache-dtype
           - fp8
           - --gpu-memory-utilization
@@ -205,7 +221,7 @@ spec:
   - name: DecodeWorker
     type: decode
     runtimeVersionOverride: 1.7.0
-    replicas: 1
+    replicas: 6
     sharedMemorySize: 64Gi
     podTemplate:
       metadata:
@@ -224,6 +240,9 @@ spec:
           - dynamo.vllm
           - --disaggregation-mode
           - decode
+          # Decode workers prefill locally, so they keep a prefix cache and publish its KV events.
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
           - --model
@@ -247,6 +266,8 @@ spec:
           - --data-parallel-address
           - $(POD_IP)
           - --enable-expert-parallel
+          - --prefill-schedule-interval
+          - '8'
           - --max-model-len
           - '1048576'
           - --reasoning-parser
@@ -261,7 +282,7 @@ spec:
           - '96'
           - --enable-multimodal
           - --attention-config
-          - '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+          - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
           - --kv-cache-dtype
           - fp8
           - --gpu-memory-utilization
@@ -272,8 +293,12 @@ spec:
           - '{"cpu_offload":true,"embedding_across_dp":true,"use_thp":true}'
           - --speculative-config
           - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true,"revision":"1bae0e1088993b9b82de08f59de5be5a34e42170"}'
+          - --max-num-batched-tokens
+          - '8192'
           - --compilation-config
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'
+          - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]}'
+          - --max-cudagraph-capture-size
+          - '4092'
           env:
           - name: POD_IP
             valueFrom:
@@ -306,8 +331,8 @@ spec:
             failureThreshold: 720
           resources:
             requests:
-              cpu: '8'
-              memory: 200Gi
+              cpu: '32'
+              memory: 400Gi
               nvidia.com/gpu: '4'
             limits:
               cpu: '64'

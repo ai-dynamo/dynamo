@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# DeepSeek-V4.1-Flash-1017 on B200: aggregated TP4, DSpark (5 draft tokens), AgentX trace replay.
+# DeepSeek-V4.1-Flash-1017 on B200: aggregated DEP4 + FlashMLA MEGA attention + 128 GiB/rank host KV tier, DSpark (5 draft tokens), AgentX trace replay.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -119,8 +119,20 @@ spec:
           - deepseek-ai/DeepSeek-V4.1-Flash-1017
           - --tokenizer-mode
           - deepseek_v41
+          # DEP4: one engine per GPU (data parallel 4) with the experts spread across
+          # them. Each rank holds only its own requests' KV, so the prefix cache is
+          # about 4x larger than under TP4.
           - --tensor-parallel-size
+          - '1'
+          - --data-parallel-size
           - '4'
+          - --data-parallel-size-local
+          - '4'
+          - --data-parallel-rpc-port
+          - '13345'
+          - --data-parallel-address
+          - $(POD_IP)
+          - --enable-expert-parallel
           - --max-model-len
           - '1048576'
           - --reasoning-parser
@@ -131,23 +143,28 @@ spec:
           - deepseek_v41
           - --distributed-executor-backend
           - mp
+          # Per DP rank: 4 x 64 = 256 sequences per worker.
           - --max-num-seqs
-          - '256'
+          - '64'
           - --enable-multimodal
           - --kv-events-config
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
           - --attention-config
-          - '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+          - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
           - --kv-cache-dtype
           - fp8
+          # 128 GiB/rank host KV tier: avoids recomputing long agentic prefixes after
+          # tool-call gaps of 300 s or more (+1.9% on DEP4).
+          - --kv-transfer-config
+          - '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":137438953472,"lazy_offload":false}}'
           - --max-num-batched-tokens
           - '8192'
           - --gpu-memory-utilization
           - '0.92'
           - --kernel-config
-          - '{"enable_flashinfer_autotune":true,"sparse_indexer_topk_backend":"deep_select"}'
+          - '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
           - --engram-config
-          - '{"cpu_offload":true,"use_thp":true}'
+          - '{"cpu_offload":true,"embedding_across_dp":true,"use_thp":true}'
           - --compilation-config
           - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]}'
           - --max-cudagraph-capture-size
@@ -173,14 +190,18 @@ spec:
             value: 'false'
           - name: VLLM_USE_V2_MODEL_RUNNER
             value: '1'
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           resources:
             requests:
               cpu: '32'
-              memory: 400Gi
+              memory: 1000Gi
               nvidia.com/gpu: '4'
             limits:
               cpu: '64'
-              memory: 600Gi
+              memory: 1200Gi
               nvidia.com/gpu: '4'
           securityContext:
             runAsUser: 0

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# DeepSeek-V4.1-Flash-1017 on H200: aggregated TP4, DSpark (5 draft tokens), AgentX trace replay.
+# DeepSeek-V4.1-Flash-1017 on H200: aggregated TP4 + 64 GiB/rank host KV tier + prefill schedule interval 8, DSpark (5 draft tokens), AgentX trace replay.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -135,9 +135,17 @@ spec:
           # capped at 64 sequences (bounds the CUDA-graph and draft memory on TP4).
           - --max-num-seqs
           - '64'
+          # Admit new prefills every 8th engine step so decode steps are not split by
+          # long agentic prefills (+3.5 decode tok/s/user at the same concurrency).
+          - --prefill-schedule-interval
+          - '8'
           - --enable-multimodal
           - --kv-events-config
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+          # 64 GiB/rank host KV tier: sessions that return after a long tool-call gap
+          # reload their prefix from host memory instead of recomputing it.
+          - --kv-transfer-config
+          - '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":68719476736,"lazy_offload":false}}'
           # Real DSpark acceptance (block verification). perf/README.md gives the benchmark-only
           # synthetic-acceptance setting used for the published throughput numbers.
           - --speculative-config
@@ -160,11 +168,11 @@ spec:
           resources:
             requests:
               cpu: '32'
-              memory: 400Gi
+              memory: 700Gi
               nvidia.com/gpu: '4'
             limits:
               cpu: '64'
-              memory: 600Gi
+              memory: 900Gi
               nvidia.com/gpu: '4'
           securityContext:
             runAsUser: 0

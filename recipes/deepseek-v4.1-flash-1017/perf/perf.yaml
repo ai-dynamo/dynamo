@@ -23,7 +23,7 @@ metadata:
   labels: {app: dsv41-flash-agentx-perf}
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 28800
+  activeDeadlineSeconds: 57600
   template:
     metadata:
       labels: {app: dsv41-flash-agentx-perf}
@@ -68,6 +68,11 @@ spec:
         - {name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT, value: "1200"}
         - {name: AIPERF_RECORD_PROCESS_RECORDS_TIMEOUT, value: "1200"}
         - {name: HF_HOME, value: /tmp/hf}
+        # At high concurrency hundreds of requests wait for their first token at the end of warmup; aiperf's default
+        # keepalive (one probe, 30 s user timeout) drops those connections. Allow 5 probes and a 5-minute timeout.
+        - {name: AIPERF_HTTP_TCP_KEEPCNT, value: "5"}
+        - {name: AIPERF_HTTP_TCP_USER_TIMEOUT, value: "300000"}
+        # aiperf keeps every record in memory (about 1 GiB per 1,000 requests); raise to 384Gi / 768Gi for disagg-b200.
         resources:
           requests: {cpu: "16", memory: 64Gi}
           limits: {cpu: "32", memory: 160Gi}
