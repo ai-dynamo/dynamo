@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestComponentRoleStatusChildGeneration(t *testing.T) {
@@ -16,7 +17,7 @@ func TestComponentRoleStatusChildGeneration(t *testing.T) {
 		t.Run(map[bool]string{false: "stale", true: "current"}[current], func(t *testing.T) {
 			t.Log("Observe a child with a target snapshot and independent replica state")
 			dcd := &DynamoComponentDeployment{
-				Name: "child", Generation: 3,
+				ObjectMeta: metav1.ObjectMeta{Name: "child", Generation: 3},
 				Status: DynamoComponentDeploymentStatus{ObservedGeneration: 2, Component: &ComponentReplicaStatus{
 					Replicas: 4, Roles: []ComponentRoleStatus{{Name: "main"}},
 				}},
