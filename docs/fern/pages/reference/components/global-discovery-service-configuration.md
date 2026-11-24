@@ -46,7 +46,7 @@ its default is never refused.
 | `--router-namespace <ns>` | Required | Namespace of the Global Router Service. |
 | `--router-service <name>` | Required | The Global Router Service, exported through MCS. |
 | `--router-port-name <name>` | Required | The router Service's named port for state streams. |
-| `--cluster-region <cluster>=<region>` | None | A pool cluster's region, by the cluster's name in MCS, for a cluster whose region Karmada does not give. Repeat for each cluster; each cluster once. |
+| `--cluster-region <cluster>=<region>` | None | A pool cluster's region, by the cluster's name in MCS, for a cluster whose region neither its imported slices nor Karmada give. Repeat for each cluster; each cluster once. |
 
 These modes list the pools whose Pool Relay Services MCS imports, and take no registrations:
 `POST /pools` answers 501, and `GET /routers` tells Pool Relays not to call it. A pool is listed
@@ -56,9 +56,11 @@ and frontend addresses; export each pool's frontend Service to supply its addres
 learn what each pool serves from its Pool Relays' state streams, so a Pool Relay's `--cluster-id` must
 be the MCS cluster ID or Karmada member cluster name: a stream names its pool by that key.
 
-With `karmada`, a pool's region is the `spec.region` of its member `Cluster` on the Karmada control
-plane. A cluster without one, and every cluster with `mcs`, takes its `--cluster-region`. A cluster with
-no region is listed with its name as the region, and the service logs a warning once per cluster.
+A pool's region is the `topology.kubernetes.io/region` label of its imported EndpointSlices, when the
+MCS implementation sets it, as `deploy/global-discovery-mcs` does. Otherwise, with `karmada`, it is the
+`spec.region` of its member `Cluster` on the Karmada control plane. A cluster without either takes its
+`--cluster-region`. A cluster with no region is listed with its name as the region, and the service logs
+a warning once per cluster.
 
 The service needs read access to `endpointslices`, and with `karmada`, to `clusters.cluster.karmada.io`
 for regions; without that access it logs a warning and uses `--cluster-region` or the cluster's name.
@@ -92,7 +94,8 @@ the service must take registrations without a model before Pool Relays stop send
 2. Upgrade the Global Discovery Service.
    - With `karmada` or `mcs`, first remove `--registration-storage`, `--heartbeat-interval-secs`,
      `--lease-duration-secs` and the DynamoDB flags: they now stop the service at startup.
-   - Also set each cluster's region, in Karmada's `Cluster.spec.region` or with `--cluster-region`.
+   - Also set each cluster's region, through the MCS implementation's region label, in Karmada's
+     `Cluster.spec.region`, or with `--cluster-region`.
      Otherwise its pools are listed under the cluster's name, not the region their Pool Relays
      registered.
    - Replace every replica at once (`strategy: Recreate`). Older replicas list only registered pools,

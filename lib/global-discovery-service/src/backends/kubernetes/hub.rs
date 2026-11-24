@@ -187,6 +187,7 @@ impl PoolNaming {
                 ready: ready_addresses(slice),
                 frontend_port: None,
                 ipv4: slice.address_type == "IPv4",
+                region: mcs::source_region(slice).and_then(PoolLocation::in_region),
             });
         }
         let pool = self.pool_key(slice, &self.frontends.suffix)?;
@@ -209,15 +210,16 @@ impl PoolNaming {
             ready: ready_addresses(slice),
             frontend_port: Some(port),
             ipv4: slice.address_type == "IPv4",
+            region: mcs::source_region(slice).and_then(PoolLocation::in_region),
         })
     }
 }
 
-/// MCS knows only the pool's cluster, so its location is named after it
-/// until [`ClusterRegions`] places the cluster.
-fn location(cluster: &str) -> PoolLocation {
+/// A location with an empty region, which only marks a pool whose slices name
+/// no region until [`ClusterRegions`] places its cluster.
+fn unplaced() -> PoolLocation {
     PoolLocation {
-        region: cluster.to_owned(),
+        region: String::new(),
         availability_zone: None,
         datacenter: None,
     }
@@ -245,6 +247,8 @@ struct SliceEntry {
     frontend_port: Option<u16>,
     /// The slice holds IPv4 addresses.
     ipv4: bool,
+    /// The source cluster's region, when the slice names a valid one.
+    region: Option<PoolLocation>,
 }
 
 #[derive(Default)]
@@ -389,10 +393,18 @@ impl PoolIndex {
             }
             return was_live.then(|| WatchEvent::Removed(key.clone()));
         }
+        // A region that a slice names comes first, from the first such slice in
+        // key order, so every service instance lists the same one.
+        let location = state
+            .slices
+            .iter()
+            .filter_map(|slice| Some((slice, self.slices.get(slice)?.region.as_ref()?)))
+            .min_by_key(|(slice, _)| *slice)
+            .map_or_else(unplaced, |(_, region)| region.clone());
         let relay_identities = relays.into_iter().map(address_identity).collect();
         let listing = PoolListing {
             key: key.clone(),
-            location: location(key.cluster_id()),
+            location,
             frontends,
             relay_identities,
         };
@@ -436,7 +448,9 @@ mod tests {
     use kube::runtime::watcher;
 
     use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache, follow, slice_key};
-    use super::mcs::{KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL};
+    use super::mcs::{
+        KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL, REGION_LABEL,
+    };
     use super::*;
 
     const SUFFIX: &str = "-pool-relay";
@@ -754,8 +768,38 @@ mod tests {
             vec![slice("west", "mocker", "a1b2c", &[("10.43.66.175", true)])],
         );
         let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
-        assert_eq!(listing.location.region, "west");
+        // The slice names no region, so ClusterRegions places the pool.
+        assert_eq!(listing.location.region, "");
         assert_eq!(listing.relay_identities, ["ip:10.43.66.175"]);
+    }
+
+    #[test]
+    fn a_slices_region_label_places_its_pool() {
+        let cache = cache();
+        let pool = key("west", "mocker");
+        let labelled = |suffix: &str, region: &str| {
+            let mut slice = slice("west", "mocker", suffix, &[("10.43.66.175", true)]);
+            if let Some(labels) = slice.metadata.labels.as_mut() {
+                labels.insert(REGION_LABEL.to_owned(), region.to_owned());
+            }
+            slice
+        };
+
+        // The label names the pool's region; an empty one names none.
+        sync(&cache, vec![labelled("b", "us-west-2")]);
+        assert_eq!(listing(&cache, &pool).unwrap().location.region, "us-west-2");
+        sync(&cache, vec![labelled("b", "")]);
+        assert_eq!(listing(&cache, &pool).unwrap().location.region, "");
+
+        // Slices that disagree list the first one's region in key order, so
+        // every instance agrees, and its removal lists the next one's.
+        sync(
+            &cache,
+            vec![labelled("b", "us-west-2"), labelled("a", "us-west-1")],
+        );
+        assert_eq!(listing(&cache, &pool).unwrap().location.region, "us-west-1");
+        sync(&cache, vec![labelled("b", "us-west-2")]);
+        assert_eq!(listing(&cache, &pool).unwrap().location.region, "us-west-2");
     }
 
     #[test]

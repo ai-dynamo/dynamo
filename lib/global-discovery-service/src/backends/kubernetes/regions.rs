@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Each pool cluster's region, for pools that MCS lists: MCS names a pool's
-//! cluster but not where the cluster is.
+//! Each pool cluster's region, for pools whose imported slices name none: MCS
+//! names a pool's cluster, and only some implementations name its region.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -27,9 +27,10 @@ use crate::pool_discovery::PoolListing;
 /// Once one wait runs out, lists stop waiting.
 const FIRST_READ_WAIT: Duration = Duration::from_secs(5);
 
-/// Where each pool cluster is, by the name MCS gives the cluster: with
-/// Karmada, the `spec.region` of its member `Cluster`, then its configured
-/// region, then the cluster's own name, as a stand-in that is logged once.
+/// Where each pool cluster is, by the name MCS gives the cluster, for pools
+/// whose slices name no region: with Karmada, the `spec.region` of its member
+/// `Cluster`, then its configured region, then the cluster's own name, as a
+/// stand-in that is logged once.
 pub struct ClusterRegions {
     configured: HashMap<String, PoolLocation>,
     karmada: Option<KarmadaRegions>,
@@ -58,14 +59,18 @@ impl ClusterRegions {
         }
     }
 
-    /// Gives each listing its cluster's location.
+    /// Gives each listing whose slices named no region (an empty one) its
+    /// cluster's location.
     pub(super) fn locate(&self, listings: &mut [PoolListing]) {
         let karmada = self
             .karmada
             .as_ref()
             .map(KarmadaRegions::locations)
             .unwrap_or_default();
-        for listing in listings {
+        for listing in listings
+            .iter_mut()
+            .filter(|listing| listing.location.region.is_empty())
+        {
             let cluster = listing.key.cluster_id();
             listing.location = karmada
                 .get(cluster)
@@ -262,20 +267,29 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_configured_region_or_the_name_places_a_cluster() {
+    async fn a_slices_region_then_a_configured_one_then_the_name_places_a_pool() {
         let east = PoolLocation::in_region("us-east-2").unwrap();
         let regions = ClusterRegions::new(HashMap::from([("east".to_owned(), east)]), None);
         regions.first_read().await;
-        let listing = |cluster: &str| PoolListing {
+        let listing = |cluster: &str, region: &str| PoolListing {
             key: dynamo_global_common::PoolKey::new(cluster, "dynamo", "mocker").unwrap(),
-            location: PoolLocation::in_region("stand-in").unwrap(),
+            location: PoolLocation {
+                region: region.to_owned(),
+                availability_zone: None,
+                datacenter: None,
+            },
             frontends: Vec::new(),
             relay_identities: Vec::new(),
         };
-        let mut listings = [listing("east"), listing("west")];
+        let mut listings = [
+            listing("east", "eu-west-3"),
+            listing("east", ""),
+            listing("west", ""),
+        ];
         regions.locate(&mut listings);
-        assert_eq!(listings[0].location.region, "us-east-2");
-        assert_eq!(listings[1].location.region, "west");
-        assert_eq!(listings[1].location.availability_zone, None);
+        assert_eq!(listings[0].location.region, "eu-west-3");
+        assert_eq!(listings[1].location.region, "us-east-2");
+        assert_eq!(listings[2].location.region, "west");
+        assert_eq!(listings[2].location.availability_zone, None);
     }
 }
