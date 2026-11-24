@@ -141,7 +141,7 @@ impl AsyncEngine<Input, Output, Error> for FlakyVllmWorker {
                     token_ids: vec![token],
                     finish_reason: last
                         .then_some(dynamo_llm::protocols::common::FinishReason::Length),
-                    engine_data: prompt_logprobs.clone().filter(|_| last),
+                    engine_data: prompt_logprobs.clone().filter(|_| last).map(Box::new),
                     ..Default::default()
                 })
             })
@@ -186,8 +186,8 @@ async fn a_vllm_request_migrated_mid_generation_returns_what_an_unbroken_one_doe
             prompt: 3,
         });
         let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
-        let metrics = Arc::new(dynamo_llm::http::service::metrics::Metrics::new());
-        let migration = dynamo_llm::migration::Migration::for_generate(&card, 3, None, metrics);
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
+        let migration = dynamo_llm::migration::Migration::from_mdc(&card, 3, None, metrics);
         let response = respond(
             state(),
             Arc::new(dynamo_vllm_generate::VllmFormat),
@@ -239,8 +239,8 @@ async fn a_vllm_stream_migrated_mid_generation_streams_what_an_unbroken_one_does
             prompt: 3,
         });
         let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
-        let metrics = Arc::new(dynamo_llm::http::service::metrics::Metrics::new());
-        let migration = dynamo_llm::migration::Migration::for_generate(&card, 3, None, metrics);
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
+        let migration = dynamo_llm::migration::Migration::from_mdc(&card, 3, None, metrics);
         let response = respond(
             state(),
             Arc::new(dynamo_vllm_generate::VllmFormat),
