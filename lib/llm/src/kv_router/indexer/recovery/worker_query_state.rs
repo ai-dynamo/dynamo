@@ -163,11 +163,43 @@ impl RankState {
         self.observe_and_buffer(event);
     }
 
+    /// Drain the buffered events contiguous with `recovered_through`.
+    ///
+    /// Returns them with the first missing ID, if live events were seen beyond
+    /// it. In that case the later events stay buffered and the rank stays in
+    /// recovery so the caller can ask the worker for the missing IDs. With
+    /// nothing missing this matches `drain_advisory_tail_after`.
+    pub(super) fn drain_contiguous_tail_after(
+        &mut self,
+        recovered_through: u64,
+    ) -> (Vec<RouterEvent>, Option<u64>) {
+        self.cursor = CursorState::Initial.advance_to(recovered_through);
+        let mut pending: VecDeque<_> = self.take_failed_recovery_degraded().into();
+        let mut events = Vec::new();
+        let mut last = recovered_through;
+        while pending
+            .front()
+            .is_some_and(|event| event.event.event_id == last + 1)
+        {
+            last += 1;
+            events.extend(pending.pop_front());
+        }
+        self.pending_live_events = pending;
+        self.cursor = self.cursor.advance_to(last);
+        self.recovery_inflight = self
+            .max_seen_live_id
+            .is_some_and(|max_seen| max_seen > last);
+        if !self.recovery_inflight {
+            self.max_seen_live_id = None;
+        }
+        (events, self.recovery_inflight.then_some(last + 1))
+    }
+
     /// Drain the buffered suffix after an advisory recovery response.
     ///
-    /// Missing IDs do not block the suffix. Worker-query recovery calls this on a
-    /// clone and commits it only after queue admission; state-agent recovery owns
-    /// its own admission and fencing policy.
+    /// Missing IDs do not block the suffix. Worker-query recovery uses this only
+    /// once its one re-query is spent, on a clone it commits after queue
+    /// admission; state-agent recovery owns its own admission and fencing policy.
     pub(super) fn drain_advisory_tail_after(&mut self, recovered_through: u64) -> Vec<RouterEvent> {
         self.cursor = CursorState::Initial.advance_to(recovered_through);
         let events = self.take_failed_recovery_degraded();
