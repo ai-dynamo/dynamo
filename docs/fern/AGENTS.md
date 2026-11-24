@@ -115,8 +115,9 @@ source PR that breaks generation fails fast; there is no committed output to dif
 `--since <base>`, which scopes it to what the branch itself changed; on `main` the flag is omitted
 and the strict gate applies. Because these references track source outside `docs/`, a branch's
 output goes stale whenever `main` lands a commit touching a symbol it documents — so regenerate
-immediately before merge rather than earlier in review. Reviewers must separately verify
-that any affected curated Kubernetes page remains aligned with the generated schema.
+immediately before merge rather than earlier in review. The operator reviewer owns the separate
+check that any affected curated Kubernetes page remains aligned with the generated schema, even
+when regeneration does not request a Docs review.
 
 ## Validate
 

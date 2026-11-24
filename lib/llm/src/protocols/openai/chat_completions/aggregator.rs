@@ -220,7 +220,8 @@ fn suppress_tool_call_output(choice: &mut DeltaChoice) {
 
 /// A token-limit finish can interrupt any call that the upstream emitted as provisional.
 /// Unified calls require complete JSON at every position. Legacy backend output
-/// retains its existing final-call-only truncation check.
+/// retains its existing final-call-only truncation check. Mistral's parser-confirmed
+/// calls keep their streamed raw arguments.
 ///
 /// An empty argument string is the MOST truncated shape, not a parameterless call: the
 /// limit landed after the name and before the first argument token. The wire schema does
@@ -231,6 +232,7 @@ fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice, unified: bool) {
         return;
     }
 
+    let confirmed = &choice.parser_confirmed_call_ids;
     let Some(tool_calls) = choice.tool_calls.as_mut() else {
         return;
     };
@@ -240,7 +242,8 @@ fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice, unified: bool) {
         .into_iter()
         .enumerate()
         .filter(|(index, tool_call)| {
-            (!unified && *index != terminal_index)
+            confirmed.contains(&tool_call.id)
+                || (!unified && *index != terminal_index)
                 || serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).is_ok()
         })
         .map(|(_, tool_call)| tool_call)
@@ -2995,9 +2998,11 @@ mod tests {
 
     /// A Mistral call whose closed body is not valid JSON streams to the client as a
     /// tool call. The non-streaming response must return the same calls: neither the
-    /// malformed call nor its valid sibling may be dropped.
+    /// malformed call nor its valid sibling may be dropped. A token-limit finish keeps
+    /// the confirmed calls too, drops a later call the limit cut off, and stays `Length`.
     #[tokio::test]
     async fn mistral_parser_confirmed_call_with_invalid_json_survives_aggregation() {
+        use dynamo_protocols::types::FinishReason;
         if crate::test_utils::run_isolated(
             concat!(
                 module_path!(),
@@ -3019,83 +3024,154 @@ mod tests {
             })),
             strict: None,
         };
-        let tools = vec![tool("cd", "folder"), tool("mkdir", "dir_name")];
-        let raw = create_test_delta(
-            0,
-            r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#,
-            Some(dynamo_protocols::types::Role::Assistant),
-            Some(dynamo_protocols::types::FinishReason::Stop),
-            None,
-            None,
-        );
-        let adapted = super::super::unified_parser::apply_stream(
-            stream::iter(vec![raw]),
-            Some(tools),
-            None,
-            false,
-            dynamo_parsers_v2::UnifiedParserStartingState::Response,
-            super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
-        );
+        let both =
+            r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#;
+        let cut_off = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_na"#;
+        let raw_cut_off = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]dir_na"#;
+        let both_calls: &[(&str, &str)] = &[
+            ("cd", r#"{"workspace"}"#),
+            ("mkdir", r#"{"dir_name": "Projects"}"#),
+        ];
+        let cases = [
+            (
+                FinishReason::Stop,
+                both,
+                FinishReason::ToolCalls,
+                both_calls,
+            ),
+            (FinishReason::Length, both, FinishReason::Length, both_calls),
+            (
+                FinishReason::Length,
+                cut_off,
+                FinishReason::Length,
+                &[("cd", r#"{"workspace"}"#)],
+            ),
+            (
+                FinishReason::Length,
+                raw_cut_off,
+                FinishReason::Length,
+                &[("cd", r#"{"workspace"}"#)],
+            ),
+            (
+                FinishReason::ContentFilter,
+                raw_cut_off,
+                FinishReason::ContentFilter,
+                &[("cd", r#"{"workspace"}"#)],
+            ),
+            (
+                FinishReason::Stop,
+                raw_cut_off,
+                FinishReason::ToolCalls,
+                &[("cd", r#"{"workspace"}"#), ("mkdir", "dir_na")],
+            ),
+        ];
+        for (finish, text, expected_finish, expected_calls) in cases {
+            for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
+            {
+                let raw = create_test_delta(
+                    0,
+                    text,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                    (!separate_finish).then_some(finish),
+                    None,
+                    None,
+                );
+                let mut chunks = vec![raw];
+                if separate_finish {
+                    let mut terminal = create_test_delta(0, "", None, Some(finish), None, None);
+                    if reasoning_finish {
+                        let choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content = None;
+                        choice.delta.reasoning_content = Some("done".into());
+                    }
+                    chunks.push(terminal);
+                }
+                let adapted = super::super::unified_parser::apply_stream(
+                    stream::iter(chunks),
+                    Some(vec![tool("cd", "folder"), tool("mkdir", "dir_name")]),
+                    None,
+                    false,
+                    dynamo_parsers_v2::UnifiedParserStartingState::Response,
+                    super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
+                );
 
-        let adapted: Vec<_> = adapted.collect().await;
-        for authority in [Some(true), None, Some(false)] {
-            let mut wire = Vec::new();
-            for row in &adapted {
-                let mut data = row.data.clone().unwrap();
-                let mut serialized = serde_json::to_value(&data).unwrap();
-                if let Some(evidence) = serialized
-                    .get_mut("tool_call_completion")
-                    .and_then(serde_json::Value::as_array_mut)
-                {
-                    for entry in evidence {
-                        if let Some(authority) = authority {
-                            entry["native_completion_authoritative"] = authority.into();
-                        } else {
-                            entry
-                                .as_object_mut()
-                                .unwrap()
-                                .remove("native_completion_authoritative");
-                        }
+                let adapted: Vec<_> = adapted.collect().await;
+                let authorities: &[Option<Option<bool>>] =
+                    if finish == FinishReason::Stop && text == both && !separate_finish {
+                        &[None, Some(Some(true)), Some(None), Some(Some(false))]
+                    } else {
+                        &[None]
+                    };
+                for &authority in authorities {
+                    let wire = if let Some(authority) = authority {
+                        adapted
+                            .iter()
+                            .map(|row| {
+                                let mut serialized =
+                                    serde_json::to_value(row.data.as_ref().unwrap()).unwrap();
+                                if let Some(evidence) = serialized
+                                    .get_mut("tool_call_completion")
+                                    .and_then(serde_json::Value::as_array_mut)
+                                {
+                                    for entry in evidence {
+                                        if let Some(authority) = authority {
+                                            entry["native_completion_authoritative"] =
+                                                authority.into();
+                                        } else {
+                                            entry
+                                                .as_object_mut()
+                                                .unwrap()
+                                                .remove("native_completion_authoritative");
+                                        }
+                                    }
+                                }
+                                Annotated::from_data(serde_json::from_value(serialized).unwrap())
+                            })
+                            .collect()
+                    } else {
+                        adapted.clone()
+                    };
+                    let response = DeltaAggregator::apply_with_tool_terminal_policy(
+                        stream::iter(wire),
+                        ParsingOptions::new(
+                            Some("mistral".to_string()),
+                            Some("mistral".to_string()),
+                        ),
+                        true,
+                    )
+                    .await
+                    .expect("aggregation should succeed");
+
+                    let choice = &response.inner.choices[0];
+                    assert_eq!(
+                        choice.finish_reason,
+                        Some(expected_finish),
+                        "{finish:?} {text} authority={authority:?}"
+                    );
+                    let calls: Vec<_> = choice
+                        .message
+                        .tool_calls
+                        .iter()
+                        .flatten()
+                        .map(|call| {
+                            (
+                                call.function.name.as_str(),
+                                call.function.arguments.as_str(),
+                            )
+                        })
+                        .collect();
+                    let expected = if authority == Some(Some(false)) {
+                        &expected_calls[1..]
+                    } else {
+                        expected_calls
+                    };
+                    assert_eq!(calls, expected, "{finish:?} {text} authority={authority:?}");
+                    assert!(choice.message.content.is_none(), "{finish:?} {text}");
+                    if reasoning_finish {
+                        assert_eq!(choice.message.reasoning_content.as_deref(), Some("done"));
                     }
                 }
-                data = serde_json::from_value(serialized).unwrap();
-                wire.push(Annotated::from_data(data));
             }
-            let response = DeltaAggregator::apply_with_tool_terminal_policy(
-                stream::iter(wire),
-                ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
-                true,
-            )
-            .await
-            .expect("aggregation should succeed");
-            let choice = &response.inner.choices[0];
-            assert_eq!(
-                choice.finish_reason,
-                Some(dynamo_protocols::types::FinishReason::ToolCalls)
-            );
-            let calls: Vec<_> = choice
-                .message
-                .tool_calls
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|call| {
-                    (
-                        call.function.name.as_str(),
-                        call.function.arguments.as_str(),
-                    )
-                })
-                .collect();
-            let expected = if authority == Some(false) {
-                vec![("mkdir", r#"{"dir_name": "Projects"}"#)]
-            } else {
-                vec![
-                    ("cd", r#"{"workspace"}"#),
-                    ("mkdir", r#"{"dir_name": "Projects"}"#),
-                ]
-            };
-            assert_eq!(calls, expected, "authority={authority:?}");
-            assert!(choice.message.content.is_none());
         }
     }
 

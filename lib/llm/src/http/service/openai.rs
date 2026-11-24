@@ -4311,7 +4311,7 @@ async fn chat_completions(
     }
 
     // Retain API identity here while all engine/parser paths receive functions.
-    let custom_tools =
+    let mut custom_tools =
         crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
             &mut request,
         )
@@ -4425,6 +4425,14 @@ async fn chat_completions(
     let parsing_options =
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
+    custom_tools.keep_parser_confirmed_calls(
+        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ) == Some(
+            crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
+        ),
+    );
 
     // Any force_nonempty_content=true request: surface reasoning as content when
     // the turn produced none. See `wants_reasoning_as_content_when_empty`.
@@ -5303,6 +5311,14 @@ async fn responses(
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
         };
+        converter.keep_parser_confirmed_calls(
+            crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+                parsing_options.tool_call_parser.as_deref(),
+                parsing_options.reasoning_parser.as_deref(),
+            ) == Some(
+                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
+            ),
+        );
 
         let mut http_queue_guard = Some(http_queue_guard);
         let error_signal = StreamErrorSignal::default();

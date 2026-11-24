@@ -174,8 +174,8 @@ strip = false
 
 # Use the parser SDK revision until these changes are published on crates.io.
 [patch.crates-io]
-dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b62edd40a1f5904401d70e37ea12a0a0f7b35a67" }
-dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b62edd40a1f5904401d70e37ea12a0a0f7b35a67" }
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b62edd40a1f5904401d70e37ea12a0a0f7b35a67" }
-dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b62edd40a1f5904401d70e37ea12a0a0f7b35a67" }
-dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b62edd40a1f5904401d70e37ea12a0a0f7b35a67" }
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "97c4b121937c00c3fdad65713a19090c7348f450" }
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "97c4b121937c00c3fdad65713a19090c7348f450" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "97c4b121937c00c3fdad65713a19090c7348f450" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "97c4b121937c00c3fdad65713a19090c7348f450" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "97c4b121937c00c3fdad65713a19090c7348f450" }

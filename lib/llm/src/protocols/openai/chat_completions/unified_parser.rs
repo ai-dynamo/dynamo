@@ -1569,6 +1569,7 @@ pub(crate) struct ChoiceState {
     incomplete_native_call: bool,
     family: String,
     native_completion_authoritative: bool,
+    discard_native_flush_calls_on_truncation: bool,
     preserve_message_phases: bool,
     errors_are_fatal: bool,
     message_boundaries: Vec<Option<super::MessageBoundary>>,
@@ -1799,6 +1800,9 @@ impl ChoiceState {
             native_completion_authoritative: registration
                 .descriptor
                 .native_completion_authoritative,
+            discard_native_flush_calls_on_truncation: registration
+                .descriptor
+                .discard_native_flush_calls_on_truncation,
             tool_output_mode,
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
@@ -2034,6 +2038,26 @@ impl ChoiceState {
     /// Flush buffered partial state at end of stream.
     pub(crate) fn finish(&mut self) -> Vec<UnifiedParserEvent> {
         self.finish_with_eos(false)
+    }
+
+    fn finish_for_terminal(
+        &mut self,
+        terminal: Option<FinishReason>,
+        confirmed_eos: bool,
+    ) -> Vec<UnifiedParserEvent> {
+        let mut flushed = self.finish_with_eos(confirmed_eos);
+        if self.discard_native_flush_calls_on_truncation
+            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
+            && matches!(
+                terminal,
+                Some(FinishReason::Length | FinishReason::ContentFilter)
+            )
+        {
+            // Truncation leaves the flush ambiguity to the registered grammar.
+            // Calls closed before the flush remain intact.
+            flushed.retain(|event| !matches!(event, UnifiedParserEvent::ToolCall(_)));
+        }
+        flushed
     }
 
     fn finish_with_eos(&mut self, confirmed_eos: bool) -> Vec<UnifiedParserEvent> {
@@ -3851,7 +3875,7 @@ where
                         state
                             .pending_parsed_tool_calls
                             .clone_from(&record.pending_parsed_tool_calls);
-                        let deltas = state.finish();
+                        let deltas = state.finish_for_terminal(original.finish_reason, false);
                         if let Some(error) = state.parse_error.take() {
                             yield Annotated::from_error(error.to_string());
                             return;
@@ -4157,7 +4181,8 @@ where
                                 && matches!(guided_tool_constraint, GuidedToolConstraint::BeamTurnGrammar { .. }))
                             && terminal == Some(FinishReason::Stop)
                             && chat.model_eos.contains(&original.index);
-                        deltas.extend(state.finish_with_eos(confirmed_eos));
+                        let flushed = state.finish_for_terminal(terminal, confirmed_eos);
+                        deltas.extend(flushed);
                     }
                     records.entry(original.index).or_default().finished = true;
                 }
@@ -4389,7 +4414,14 @@ pub(crate) mod tests {
             }
 
             fn finish(&mut self) -> anyhow::Result<UnifiedParserOutput> {
-                Ok(UnifiedParserOutput::default())
+                Ok(UnifiedParserOutput {
+                    events: vec![UnifiedParserEvent::ToolCall(ToolCallDelta {
+                        tool_index: 0,
+                        name: Some("flush_only".into()),
+                        arguments: "{}".into(),
+                        complete: true,
+                    })],
+                })
             }
 
             fn finish_at_eos(&mut self) -> anyhow::Result<UnifiedParserOutput> {
@@ -4406,6 +4438,7 @@ pub(crate) mod tests {
             descriptor.text_input = false;
             descriptor.token_id_input = true;
             descriptor.notify_model_eos = true;
+            descriptor.discard_native_flush_calls_on_truncation = true;
             Registration::loaded(descriptor, "fixture".into(), None, None, |_| {
                 Ok(Box::<Tokens>::default())
             })
@@ -4451,6 +4484,7 @@ pub(crate) mod tests {
             let data = event.ok().unwrap().data.unwrap();
             assert!(data.parser_token_ids.is_none());
             for choice in data.inner.choices {
+                assert!(choice.delta.tool_calls.is_none());
                 if let Some(ChatCompletionMessageContent::Text(content)) = choice.delta.content {
                     text.push((choice.index, content));
                 }
@@ -10679,6 +10713,7 @@ pub(crate) mod tests {
         let mut state = ChoiceState {
             errors_are_fatal: false,
             native_completion_authoritative: false,
+            discard_native_flush_calls_on_truncation: false,
             preserve_message_phases: false,
             message_boundaries: Vec::new(),
             native_grammar_state: NativeGrammarState::None,

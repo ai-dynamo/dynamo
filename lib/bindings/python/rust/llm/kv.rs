@@ -3,8 +3,12 @@
 
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+#[cfg(feature = "select-service")]
+use pyo3::sync::GILProtected;
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
+#[cfg(feature = "select-service")]
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -72,6 +76,68 @@ use super::ais_callback::create_ais_prefill_load_estimator;
 use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
+
+#[cfg(feature = "select-service")]
+#[pyclass(frozen)]
+pub(crate) struct WorkerSequenceEventPublisher {
+    // Publishing holds the GIL, so borrows never overlap.
+    inner: GILProtected<RefCell<Option<selection::WorkerSequenceEventPublisher>>>,
+    endpoint: String,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl WorkerSequenceEventPublisher {
+    #[new]
+    #[pyo3(signature = (*, model_name, routing_group, worker_id, dp_rank=0, bind_endpoint="tcp://*:*"))]
+    fn new(
+        model_name: String,
+        routing_group: String,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        bind_endpoint: &str,
+    ) -> PyResult<Self> {
+        let publisher = selection::WorkerSequenceEventPublisher::new(
+            bind_endpoint,
+            model_name,
+            routing_group,
+            dynamo_router_protocol::worker::WorkerWithDpRank::new(worker_id, dp_rank),
+        )
+        .map_err(to_pyerr)?;
+        Ok(Self {
+            endpoint: publisher.endpoint().to_string(),
+            inner: GILProtected::new(RefCell::new(Some(publisher))),
+        })
+    }
+
+    #[getter]
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn mark_prefill_completed(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+            publisher
+                .mark_prefill_completed(request_id)
+                .map_err(to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn free(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.inner.get(py).borrow_mut().as_mut() {
+            publisher.free(request_id).map_err(to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let publisher = self.inner.get(py).borrow_mut().take();
+        // Dropping the publisher terminates its ZMQ context, which can block.
+        py.allow_threads(move || drop(publisher));
+        Ok(())
+    }
+}
 
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
 
@@ -1072,6 +1138,42 @@ impl SelectionService {
     /// List configured selector replica peers.
     fn list_replica_peers(&self) -> Vec<String> {
         self.inner.list_replica_peers()
+    }
+
+    /// Subscribe to a worker's prefill and request completion events.
+    /// Returns `true` if the subscription was added.
+    fn register_worker_publisher<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        crate::future_into_py(py, async move {
+            service
+                .register_worker_publisher(endpoint)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Unsubscribe from a worker publisher. Returns `true` if the subscription was removed.
+    fn deregister_worker_publisher<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        crate::future_into_py(py, async move {
+            service
+                .deregister_worker_publisher(endpoint)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// List subscribed worker publishers.
+    fn list_worker_publishers(&self) -> Vec<String> {
+        self.inner.list_worker_publishers()
     }
 
     /// Export the current indexer state in the standalone `/dump` shape.

@@ -2502,7 +2502,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers"
 version = "11.0.13"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b62edd40a1f5904401d70e37ea12a0a0f7b35a67#b62edd40a1f5904401d70e37ea12a0a0f7b35a67"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=97c4b121937c00c3fdad65713a19090c7348f450#97c4b121937c00c3fdad65713a19090c7348f450"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2526,7 +2526,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.10.9"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b62edd40a1f5904401d70e37ea12a0a0f7b35a67#b62edd40a1f5904401d70e37ea12a0a0f7b35a67"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=97c4b121937c00c3fdad65713a19090c7348f450#97c4b121937c00c3fdad65713a19090c7348f450"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2563,7 +2563,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "10.0.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b62edd40a1f5904401d70e37ea12a0a0f7b35a67#b62edd40a1f5904401d70e37ea12a0a0f7b35a67"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=97c4b121937c00c3fdad65713a19090c7348f450#97c4b121937c00c3fdad65713a19090c7348f450"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2639,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "10.5.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b62edd40a1f5904401d70e37ea12a0a0f7b35a67#b62edd40a1f5904401d70e37ea12a0a0f7b35a67"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=97c4b121937c00c3fdad65713a19090c7348f450#97c4b121937c00c3fdad65713a19090c7348f450"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2856,14 +2856,13 @@ dependencies = [
  "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
- "prost 0.13.5",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "serde_json",
+ "sglang-api-types",
  "tokio",
  "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic 0.14.6",
  "tracing",
  "url",
 ]
@@ -2914,7 +2913,7 @@ dependencies = [
 [[package]]
 name = "dynamo-structural-tag"
 version = "0.1.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b62edd40a1f5904401d70e37ea12a0a0f7b35a67#b62edd40a1f5904401d70e37ea12a0a0f7b35a67"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=97c4b121937c00c3fdad65713a19090c7348f450#97c4b121937c00c3fdad65713a19090c7348f450"
 dependencies = [
  "anyhow",
  "jsonschema",
@@ -2926,7 +2925,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "4.3.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b62edd40a1f5904401d70e37ea12a0a0f7b35a67#b62edd40a1f5904401d70e37ea12a0a0f7b35a67"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=97c4b121937c00c3fdad65713a19090c7348f450#97c4b121937c00c3fdad65713a19090c7348f450"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -8401,6 +8400,20 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sglang-api-types"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "445ae1031a16227c066c3e9dfb338407bed4d62994d0637c8b2fae05fa993344"
+dependencies = [
+ "bytes",
+ "prost 0.14.4",
+ "serde",
+ "serde_json",
+ "tonic 0.14.6",
+ "tonic-prost",
 ]
 
 [[package]]
