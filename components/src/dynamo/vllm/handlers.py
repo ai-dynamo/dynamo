@@ -238,17 +238,38 @@ def _rl_init_weights_timeout_s() -> float:
     )
 
 
+_CHECKPOINT_STATE_POLL_INTERVAL_SEC = 0.1
+_CHECKPOINT_PREPARE_TIMEOUT_SEC = 300.0
+_ENGINE_STATE_READ_TIMEOUT_SEC = 30.0
+
+
 class VllmEnginePauseController:
     def __init__(
         self,
         engine_client: Any,
         *,
         prepare_for_process_checkpoint: bool = False,
+        checkpoint_lifecycle: bool = False,
     ):
+        """
+        Args:
+            prepare_for_process_checkpoint: Prepare the engine for a process
+                checkpoint on pause and restore it on resume (Dynamo Snapshot).
+            checkpoint_lifecycle: The engine has vLLM's process checkpoint
+                lifecycle (``checkpoint_state``). Its ``checkpoint_prepare``
+                drains, releases the KV cache and refuses an engine that
+                sleeps; its ``checkpoint_restore`` wakes the KV cache again.
+                Pause and resume then neither sleep nor wake the engine.
+        """
         self._engine_client = engine_client
         self._prepare_for_process_checkpoint = prepare_for_process_checkpoint
+        self._checkpoint_lifecycle = (
+            prepare_for_process_checkpoint and checkpoint_lifecycle
+        )
         self._is_paused = False
         self._generation_paused = False
+        # Set when a failed checkpoint prepare may have left memory released.
+        self._resume_blocked = False
 
     @property
     def is_paused(self) -> bool:
@@ -263,41 +284,115 @@ class VllmEnginePauseController:
             return False
 
         level = args[0] if args else None
+        # vLLM's is_sleeping() also counts a paused scheduler, so whether the
+        # engine is awake can only be read before generation is paused.
+        was_awake = await self._is_awake() if self._checkpoint_lifecycle else True
         await self._engine_client.pause_generation()
         self._generation_paused = True
         try:
-            if level is None:
+            if self._checkpoint_lifecycle:
+                await self._prepare_checkpoint()
+            elif level is None:
                 await self._engine_client.sleep()
             else:
                 await self._engine_client.sleep(level)
         except Exception:
+            if self._checkpoint_lifecycle and not (
+                was_awake and await self._is_running()
+            ):
+                # The engine slept already, its data-parallel ranks diverged, or
+                # the prepare failed or timed out: memory may be released, so
+                # resuming generation could serve without it.
+                self._resume_blocked = True
+                logger.error(
+                    "vLLM checkpoint prepare failed and the engine was not "
+                    "awake or is no longer running; generation stays paused"
+                )
+                raise
             try:
                 await self._engine_client.resume_generation()
                 self._generation_paused = False
             except Exception:
                 logger.exception(
-                    "Failed to resume generation after native vLLM sleep failure"
+                    "Failed to resume generation after a failed vLLM sleep "
+                    "or checkpoint prepare"
                 )
             raise
         # Prepare before recording the pause: a failed prepare must not leave
         # the controller claiming paused, or the next resume would issue a
         # checkpoint_restore with no matching prepare.
-        if self._prepare_for_process_checkpoint:
+        if self._prepare_for_process_checkpoint and not self._checkpoint_lifecycle:
             await self._engine_client.checkpoint_prepare()
         self._is_paused = True
         return True
 
+    async def _prepare_checkpoint(self) -> None:
+        # vLLM releases the KV cache itself and refuses an engine that sleeps,
+        # so the engine is not put to sleep first. One deadline covers the
+        # prepare call and the wait, including engine calls that stall.
+        try:
+            async with asyncio.timeout(_CHECKPOINT_PREPARE_TIMEOUT_SEC):
+                refusal = await self._engine_client.checkpoint_prepare()
+                if refusal:
+                    raise RuntimeError(
+                        f"vLLM refused to prepare for a process checkpoint: {refusal}"
+                    )
+                # Preparing completes once the engine has drained.
+                while True:
+                    state, error = await self._engine_client.checkpoint_state()
+                    if state == "prepared":
+                        return
+                    if state != "preparing":
+                        raise RuntimeError(
+                            f"vLLM checkpoint prepare ended in state {state}: {error}"
+                        )
+                    await asyncio.sleep(_CHECKPOINT_STATE_POLL_INTERVAL_SEC)
+        except TimeoutError:
+            raise TimeoutError(
+                "vLLM checkpoint prepare did not finish within "
+                f"{_CHECKPOINT_PREPARE_TIMEOUT_SEC} s"
+            ) from None
+
+    # The two reads below decide only whether generation may resume, so any
+    # failure, a timeout included, counts as "no". vLLM reports a failed
+    # engine call as a plain Exception, so the catch cannot be narrower.
+    async def _is_awake(self) -> bool:
+        try:
+            async with asyncio.timeout(_ENGINE_STATE_READ_TIMEOUT_SEC):
+                # Raises when data-parallel ranks disagree.
+                return not await self._engine_client.is_sleeping()
+        except Exception:
+            logger.exception("Failed to read whether the vLLM engine sleeps")
+            return False
+
+    async def _is_running(self) -> bool:
+        try:
+            async with asyncio.timeout(_ENGINE_STATE_READ_TIMEOUT_SEC):
+                state, _ = await self._engine_client.checkpoint_state()
+        except Exception:
+            logger.exception("Failed to read the vLLM checkpoint state")
+            return False
+        return state == "running"
+
     async def resume(self, tags: list[str] | None = None) -> bool:
         if not self._is_paused and not self._generation_paused:
             return False
+        if self._resume_blocked:
+            raise RuntimeError(
+                "Cannot resume after a failed checkpoint prepare that may "
+                "have released engine memory"
+            )
 
         if self._is_paused:
             if self._prepare_for_process_checkpoint:
                 await self._engine_client.checkpoint_restore()
-            if tags is None:
-                await self._engine_client.wake_up()
-            else:
-                await self._engine_client.wake_up(tags)
+            # With the lifecycle, checkpoint_restore() already woke the KV
+            # cache that preparing released, and nothing else was asleep.
+            if not self._checkpoint_lifecycle:
+                if tags is None:
+                    await self._engine_client.wake_up()
+                else:
+                    await self._engine_client.wake_up(tags)
         if self._generation_paused:
             await self._engine_client.resume_generation()
             self._generation_paused = False

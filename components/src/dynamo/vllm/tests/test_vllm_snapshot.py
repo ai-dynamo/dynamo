@@ -54,6 +54,54 @@ async def test_prepare_snapshot_preserves_engine_stat_loggers(monkeypatch):
     assert config.engine_args.enable_sleep_mode is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", [False, True])
+async def test_prepare_snapshot_follows_vllm_checkpoint_lifecycle(
+    monkeypatch, lifecycle
+):
+    """Only a vLLM with the process checkpoint lifecycle (checkpoint_state)
+    is prepared without sleeping; an older vLLM keeps sleep -> prepare."""
+    snapshot_config = Mock()
+    snapshot_config.run_lifecycle = AsyncMock(return_value=True)
+    monkeypatch.setattr(snapshot.SnapshotConfig, "from_env", lambda: snapshot_config)
+    monkeypatch.setattr(snapshot, "configure_snapshot_capture_env", Mock())
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    hooks = {
+        name: AsyncMock()
+        for name in (
+            "pause_generation",
+            "sleep",
+            "checkpoint_prepare",
+            "checkpoint_restore",
+            "wake_up",
+            "resume_generation",
+        )
+    }
+    hooks["checkpoint_prepare"].return_value = None
+    if lifecycle:
+        hooks["checkpoint_state"] = AsyncMock(return_value=("prepared", None))
+        hooks["is_sleeping"] = AsyncMock(return_value=False)
+    engine_client = SimpleNamespace(**hooks)
+    config = SimpleNamespace(
+        headless=False,
+        embedding_worker=False,
+        engine_args=SimpleNamespace(enable_sleep_mode=False),
+    )
+
+    controller = await snapshot.prepare_snapshot_engine(
+        config, Mock(return_value=(engine_client, Mock(), Mock(), Mock(), Mock()))
+    )
+    await controller.pause_controller.pause(*controller.pause_args)
+    await controller.pause_controller.resume()
+
+    engine_client.checkpoint_prepare.assert_awaited_once()
+    engine_client.checkpoint_restore.assert_awaited_once()
+    assert engine_client.sleep.await_count == (0 if lifecycle else 1)
+    assert engine_client.wake_up.await_count == (0 if lifecycle else 1)
+    if lifecycle:
+        engine_client.is_sleeping.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "restore_pod_name, expected",
     [
