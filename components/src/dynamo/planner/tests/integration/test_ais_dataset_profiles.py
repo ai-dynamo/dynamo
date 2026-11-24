@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 import pytest
 from aisim_core import _native
 from aisim_core.datasets import Identity, configuration_id
-from aisim_core.sdk import engine
+from aisim_core.sdk import engine, perf_database
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -309,9 +309,12 @@ def test_profile_estimates_next_request_with_existing_planner_logic(dataset_prof
 def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role):
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
-    # AISim queries only the versions in its window for b200_sxm/vllm.
-    vllm_version = "0.32.0"
     bundled = Path(engine.__file__).parents[1] / "systems"
+    # The data files are stored per version. Use the version that the pinned
+    # AISim marks as current, as the profiler does.
+    vllm_version = perf_database.get_latest_database_version(
+        "b200_sxm", "vllm", systems_paths=str(bundled)
+    )
     root = tmp_path / "dataset"
     systems = root / "systems"
     artifacts = []
