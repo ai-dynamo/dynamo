@@ -3640,7 +3640,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-triton-sidecar"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3649,7 +3649,7 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-llm",
- "dynamo-protocols",
+ "dynamo-protocols 10.0.1",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
