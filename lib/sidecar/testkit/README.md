@@ -133,19 +133,3 @@ The workspace's ordinary `cargo test --locked --all-targets` builds the sidecar 
 cargo test --locked -p dynamo-sidecar-testkit --test sidecar_mocker_integration
 cargo test --locked -p dynamo-sidecar-testkit --test router_sidecar_mocker_integration
 ```
-
-### Upstream TRT-LLM nightly coverage
-
-The upstream TRT-LLM nightly job selects the `upstream_trtllm` cases in
-`tests/serve/test_sidecar.py` for image, video, Whisper and image-cache
-identity. It resolves the latest regular release image to a digest, builds
-Dynamo's runtime wheel and sidecar for that image, and installs test tooling in
-an isolated environment. The native engine stays in its stock interpreter.
-These cases use file discovery and TCP requests without etcd or NATS.
-The accuracy cases send data URIs; the identity case fetches HTTP images.
-The speech fixture and model downloads require network access.
-The regular Dynamo-runtime nightly job excludes this marker.
-
-Manual native tests in `trtllm/src/tests/e2e.rs` retain disaggregation, affinity
-and exact captured ZMQ hash-chain checks. Those checks are separate from the
-HTTP serve cases.
