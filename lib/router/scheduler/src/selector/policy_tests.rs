@@ -4,7 +4,7 @@
 //! Drive `WorkerSelectionPolicy` through the kernel's `WorkerSelector` with a scheduling
 //! request, worker configs, and eligibility: the stage and its adapter together.
 
-use crate::SessionContext;
+use crate::types::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::WorkerInputView;
@@ -18,8 +18,8 @@ use rustc_hash::FxHashMap;
 use super::DefaultWorkerSelector;
 use super::test_support::*;
 use super::{CandidatePreparerExt, WorkerSelectionInput, WorkerSelector};
-use crate::WorkerSelectionInputTrigger;
 use crate::protocols::WorkerConfigLike;
+use crate::types::WorkerSelectionInputTrigger;
 use crate::types::{KvSchedulerError, SchedulingRequest};
 use dynamo_worker_selection::*;
 

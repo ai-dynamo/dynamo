@@ -970,3 +970,26 @@ async fn router_bookkeeping_failures_fail_replay_closed() {
     let free_error = free_runtime.run().await.unwrap_err();
     assert!(free_error.to_string().contains("injected free failure"));
 }
+
+/// Only the SGLang engine models cache salts. Another backend's engine
+/// refuses the request and the replay fails instead of dropping the salt.
+#[test]
+fn online_replay_fails_on_a_cache_salt_the_backend_does_not_model() {
+    for mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
+        let mut salted = request(1, 7, Some(0.0));
+        salted.cache_salt = Some("a".to_owned());
+        let error = simulate_trace_requests_with_stats(replay_args(), vec![salted], 1, 1.0, mode)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cache_salt is supported only for backend=sglang"),
+            "{mode:?}: {error:#}"
+        );
+
+        let mut empty_salt = request(2, 7, Some(0.0));
+        empty_salt.cache_salt = Some(String::new());
+        let (report, _) =
+            simulate_trace_requests_with_stats(replay_args(), vec![empty_salt], 1, 1.0, mode)
+                .unwrap();
+        assert_eq!(report.request_counts.completed_requests, 1, "{mode:?}");
+    }
+}

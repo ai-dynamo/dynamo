@@ -14,7 +14,9 @@ import yaml
 
 try:
     from PIL import Image
+    from vllm.exceptions import VLLMValidationError
 
+    from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _create_engine,
@@ -32,6 +34,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -668,6 +671,79 @@ def test_build_sampling_params_user_overrides_yaml_defaults():
     assert sp.guidance_scale == 5.0  # YAML default preserved
 
 
+def _llm_stage_with_sampling_defaults():
+    return SimpleNamespace(
+        stage_type="llm",
+        default_sampling_params={
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.05,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("temperature", "expected"),
+    [
+        (0.0, (0.0, 1.0, 0, 0.0)),
+        # vLLM raises 0 < temperature < 0.01 to 0.01, so this is not greedy.
+        (1e-6, (0.01, 0.8, 20, 0.05)),
+    ],
+    ids=["greedy", "tiny-temperature"],
+)
+def test_build_sampling_params_llm_applies_vllm_post_init_after_overrides(
+    temperature, expected
+):
+    result = _build_sampling_params(
+        _llm_stage_with_sampling_defaults(), {"temperature": temperature}
+    )
+    assert result is not None
+    sp = result[0]
+    assert (sp.temperature, sp.top_p, sp.top_k, sp.min_p) == expected
+
+
+def test_build_sampling_params_llm_rejects_out_of_range_greedy_values():
+    with pytest.raises(VLLMValidationError, match="top_p"):
+        _build_sampling_params(
+            _llm_stage_with_sampling_defaults(), {"temperature": 0.0, "top_p": 0.0}
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream",
+    [
+        {"engine_inputs": {"prompt": "hi"}},
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[100, 200, 300])]),
+    ],
+    ids=["raw-prompt", "upstream-tokens"],
+)
+async def test_invalid_sampling_override_raises_invalid_argument(upstream):
+    engine = _MockEngine()
+    in_connector = MagicMock()
+    in_connector.get.return_value = upstream
+    stage_config = _llm_stage_with_sampling_defaults()
+    stage_config.engine_input_source = [0]
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=stage_config,
+        connectors={("0", "1"): in_connector},
+        stage_id=1,
+    )
+    request = {
+        "request_id": "req-invalid-top-p",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "sampling_params_list": {"temperature": 0.0, "top_p": 0.0},
+    }
+
+    with pytest.raises(InvalidArgument, match="top_p"):
+        _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert engine.received_prompt is None
+
+
 def test_build_sampling_params_no_defaults_returns_none():
     """No default_sampling_params on stage_config -> returns None."""
     stage_config = SimpleNamespace(stage_type="llm")
@@ -901,7 +977,6 @@ def test_create_engine_omits_env_when_stage_declares_none():
 def test_create_engine_preserves_resolved_stage_config(
     monkeypatch, tmp_path, pipeline, stage_id, model_stage, sampling
 ):
-    from vllm_omni.config import resolve_omni_config
     from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 
     from dynamo.vllm.omni.utils import resolve_stage_configs
@@ -926,19 +1001,6 @@ def test_create_engine_preserves_resolved_stage_config(
             }
         )
     )
-    upstream = resolve_omni_config(
-        model,
-        trust_remote_code=False,
-        deploy_config_path=str(deploy_path),
-        cli_overrides={},
-        stage_overrides=None,
-        strategy_config_path=None,
-    )
-    if not hasattr(upstream.stage_configs[stage_id], "stage_pipeline_config"):
-        pytest.skip(
-            "Requires typed Omni stage configs; the legacy YAML round trip is unsupported"
-        )
-
     _, stages = resolve_stage_configs(
         model, trust_remote_code=False, deploy_config_path=str(deploy_path)
     )

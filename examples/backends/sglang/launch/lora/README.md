@@ -17,7 +17,8 @@ For the full LoRA integration guide (setup, usage, API reference, troubleshootin
 
 ## SGLang-Specific Notes
 
-- The launch script uses `--lora-target-modules all` and `--max-lora-rank 64` by default
+- `agg_lora.sh` uses `--max-lora-rank 64` and the example adapter's target modules (`q_proj k_proj v_proj o_proj gate_proj up_proj down_proj`). For an adapter that also targets `embed_tokens` or `lm_head`, edit the script to use `--lora-target-modules all`
+- `agg_lora_router.sh` uses `--lora-target-modules all` and `--max-lora-rank 64`
 - Override with environment variables: `MODEL`, `LORA_NAME`, `DYN_SYSTEM_PORT`, `DYN_HTTP_PORT`
 - SGLang LoRA loading goes through `engine.tokenizer_manager.load_lora_adapter()`
 - `dynamo.sglang` adds `"format": "dynamo"` to `--kv-events-config` when no format is set. Its events carry the adapter name that LoRA-aware KV routing needs (see `agg_lora_router.sh`)

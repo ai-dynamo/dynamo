@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 
@@ -57,6 +58,18 @@ type DynamoComponentDeploymentSpec struct {
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
+
+	// env supplies general environment defaults for main and declared runtime
+	// containers. Container-specific env overrides entries with the same name.
+	// For origins using semantic environment composition, source-list order is
+	// preserved and cross-layer references are topologically ordered; cycles
+	// fail rendering. Graph-generated DCDs carry the DGD spec.env here so the
+	// original layers remain separate until operator defaults are available.
+	// Older origins retain legacy sorted composition. No default is applied.
+	// For origins >= 1.8.0, admission requires unique names within this list,
+	// even when the list is unchanged on update. Container overrides remain allowed.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component.
@@ -467,6 +480,20 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 		}
 	}
 	return ""
+}
+
+// GetGraphDeploymentController returns the controlling nvidia.com DGD owner,
+// or nil for standalone components and references to other API groups or kinds.
+func (s *DynamoComponentDeployment) GetGraphDeploymentController() *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(s)
+	if owner == nil || owner.Kind != DynamoGraphDeploymentGVK.Kind {
+		return nil
+	}
+	groupVersion, err := schema.ParseGroupVersion(owner.APIVersion)
+	if err != nil || groupVersion.Group != GroupVersion.Group {
+		return nil
+	}
+	return owner
 }
 
 // GetParentGraphDeploymentNamespace returns the namespace of the owning DGD,

@@ -452,7 +452,7 @@ spec:
             ; sleep 2; done; echo \"\u2713 DNS resolved: $worker\"; done; echo \"\
             All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root)\
             \ --oversubscribe -n 2 -H $(LWS_LEADER_ADDRESS),$(echo \"$LWS_LEADER_ADDRESS\"\
-            \ | sed 's/\\./-1\\./') --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o\
+            \ | sed 's/\\./-1\\./') --map-by ppr:1:node --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o\
             \ StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CPATH -x CUDA_VISIBLE_DEVICES\
             \ -x DYNAMO_LEADER_ADDRESS -x DYNAMO_RANK -x DYN_COMPONENT -x DYN_DISCOVERY_BACKEND\
             \ -x DYN_FORWARDPASS_METRIC_PORT -x DYN_HEALTH_CHECK_ENABLED -x DYN_NAMESPACE\

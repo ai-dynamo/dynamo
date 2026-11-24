@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::body::Body;
+use axum::body::{Body, Bytes, HttpBody};
 use axum::http::Response;
-use futures::StreamExt;
+use http_body::{Frame, SizeHint};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -31,10 +33,13 @@ pub async fn echo_request_id_header(
 pub enum ServiceStage {
     /// The frontend is ready to admit new inference requests.
     Ready = 0,
+    /// Readiness is disabled while inference traffic is still admitted, giving
+    /// upstream endpoint propagation time to remove this frontend.
+    Propagating = 1,
     /// The frontend is rejecting new requests while admitted responses drain.
-    Draining = 1,
+    Draining = 2,
     /// The frontend is cancelling runtime state and shutting down.
-    Stopping = 2,
+    Stopping = 3,
 }
 
 impl ServiceStage {
@@ -45,7 +50,8 @@ impl ServiceStage {
     fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::Ready,
-            1 => Self::Draining,
+            1 => Self::Propagating,
+            2 => Self::Draining,
             _ => Self::Stopping,
         }
     }
@@ -55,6 +61,7 @@ impl std::fmt::Display for ServiceStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => f.write_str("ready"),
+            Self::Propagating => f.write_str("propagating"),
             Self::Draining => f.write_str("draining"),
             Self::Stopping => f.write_str("stopping"),
         }
@@ -90,9 +97,45 @@ impl ServiceObserver {
         ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
     }
 
-    /// Return true when the frontend should admit new inference requests.
+    /// Return true when the frontend should report readiness.
     pub fn is_ready(&self) -> bool {
         self.stage() == ServiceStage::Ready
+    }
+
+    /// Return true while new inference requests may still be admitted.
+    pub fn accepts_inference(&self) -> bool {
+        matches!(
+            self.stage(),
+            ServiceStage::Ready | ServiceStage::Propagating
+        )
+    }
+
+    fn advance_to(&self, next: ServiceStage) -> bool {
+        let mut current = self.stage.load(Ordering::Acquire);
+        loop {
+            if current >= next.as_u8() {
+                return false;
+            }
+            match self.stage.compare_exchange_weak(
+                current,
+                next.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Fail readiness while continuing to admit traffic during endpoint removal.
+    pub fn start_propagating(&self) {
+        if self.advance_to(ServiceStage::Propagating) {
+            tracing::info!(
+                inflight_requests = self.inflight_count(),
+                "frontend service entering propagating stage"
+            );
+        }
     }
 
     /// Mark the frontend as draining.
@@ -100,13 +143,12 @@ impl ServiceObserver {
     /// Draining makes readiness fail and causes request admission checks to
     /// reject new inference requests while existing response bodies continue.
     pub fn start_draining(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering draining stage"
-        );
-        self.stage
-            .store(ServiceStage::Draining.as_u8(), Ordering::Release);
+        if self.advance_to(ServiceStage::Draining) {
+            tracing::info!(
+                inflight_requests = self.inflight_count(),
+                "frontend service entering draining stage"
+            );
+        }
     }
 
     /// Mark the frontend as stopping.
@@ -114,13 +156,12 @@ impl ServiceObserver {
     /// Stopping is entered after inflight requests drain or the graceful
     /// shutdown timeout expires.
     pub fn start_stopping(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering stopping stage"
-        );
-        self.stage
-            .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
+        if self.advance_to(ServiceStage::Stopping) {
+            tracing::info!(
+                inflight_requests = self.inflight_count(),
+                "frontend service entering stopping stage"
+            );
+        }
     }
 
     /// Track one admitted inference response body.
@@ -190,9 +231,76 @@ pub fn track_inflight_response(response: Response<Body>, permit: InflightPermit)
     let (parts, body) = response.into_parts();
     // Keep the permit alive until the full response body, including streams,
     // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    Response::from_parts(
+        parts,
+        Body::new(InflightResponseBody {
+            body,
+            _permit: permit,
+        }),
+    )
+}
+
+/// Preserve framing metadata and trailers while holding the response's admission.
+struct InflightResponseBody {
+    body: Body,
+    _permit: InflightPermit,
+}
+
+impl HttpBody for InflightResponseBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header;
+
+    #[tokio::test]
+    async fn inflight_body_preserves_trailers_and_holds_admission() {
+        use http_body_util::{BodyExt, StreamBody};
+
+        let observer = Arc::new(ServiceObserver::default());
+        let trailers = axum::http::HeaderMap::from_iter([(
+            header::HeaderName::from_static("x-checksum"),
+            header::HeaderValue::from_static("done"),
+        )]);
+        let frames = futures::stream::iter([
+            Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
+            Ok(Frame::trailers(trailers.clone())),
+        ]);
+        let mut body = track_inflight_response(
+            Response::new(Body::new(StreamBody::new(frames))),
+            observer.acquire_inflight(),
+        )
+        .into_body();
+
+        assert_eq!(body.size_hint().exact(), None);
+        assert!(!body.is_end_stream());
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), "data");
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_trailers().unwrap(), trailers);
+        assert!(body.frame().await.is_none());
+        assert_eq!(observer.inflight_count(), 1);
+        drop(body);
+        assert_eq!(observer.inflight_count(), 0);
+    }
 }

@@ -7,18 +7,20 @@ use super::reservations::{
 };
 use super::*;
 use crate::config::RouterConfig;
-use crate::kv_hints::{
-    KvCopySource, KvSourceLocationsPayload, KvTransferCandidateSource, kv_copy_locations,
-};
+use crate::kv_hints::{KvCopySource, KvTransferCandidateSource, kv_copy_locations};
 use crate::protocols::RoutingConstraints;
 use crate::replication::HostReplicaChannels;
 use crate::test_utils::{test_core_with, test_router_config};
 use dynamo_kv_events::residency::StorageTier;
-use dynamo_kv_indexer::backend::{RemotePrimary, test_util::store_event};
-use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
+use dynamo_kv_hints::KvSourceLocationsPayload;
+use dynamo_kv_indexer::RemotePrimary;
+use dynamo_kv_indexer::ResidencyOwnerKeyExt;
+use dynamo_kv_indexer::testing::store_event;
 use dynamo_session_affinity::SessionAffinityMode;
-use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
-use dynamo_worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
+use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
+use dynamo_worker_selection::experimental::resident_blocks::{
+    CacheOwnerCapacity, RESIDENT_BLOCKS, ResidentBlocksByRow,
+};
 use dynamo_worker_selection::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
@@ -68,7 +70,7 @@ impl crate::hint_policy::HintPolicy for TestFetch {
     fn build_hints(
         &self,
         context: &crate::hint_policy::HintContext<'_>,
-    ) -> Result<Vec<crate::kv_hints::KvHintAction>, crate::hint_policy::HintPolicyError> {
+    ) -> Result<Vec<dynamo_kv_hints::KvHintAction>, crate::hint_policy::HintPolicyError> {
         let committed = context.committed_kv_copy();
         let Some(copy) = committed.or(context.kv_copy_source()) else {
             return Ok(Vec::new());
@@ -85,7 +87,7 @@ impl crate::hint_policy::HintPolicy for TestFetch {
             source_control_endpoint: locations.source_address().to_string(),
             block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
         };
-        Ok(vec![crate::kv_hints::KvHintAction::unnumbered(
+        Ok(vec![dynamo_kv_hints::KvHintAction::unnumbered(
             "kv.fetch",
             "1.0",
             serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap(),
@@ -174,6 +176,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         data_parallel_size: None,
         max_num_batched_tokens: Some(1024),
         total_kv_blocks: None,
+        cache_owner_capacity_blocks: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
@@ -185,6 +188,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
         engine_owned_mm_identity: None,
+        idempotent_stores: None,
     }
 }
 
@@ -676,33 +680,35 @@ async fn state_agent_workers_are_not_router_hint_sources() {
     assert!(response.kv_hint.is_none());
 }
 
-#[tokio::test]
-async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
-    use crate::identity::{
+/// A cache owner (KVCR instance) in one shared test pool, told apart by `slot`.
+fn cache_owner(slot: u8) -> dynamo_router_protocol::identity::CacheOwnerId {
+    use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
+    CacheOwnerId::new(
+        PoolId::new(
+            IndexerDomainId::new(
+                CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+            ),
+            ClusterId::new(3),
+        ),
+        StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+    )
+}
+
+#[tokio::test]
+async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
     use dynamo_kv_events::event::RouterEvent;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_kv_hashing::routing::{
         BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
 
-    let owner = |id| {
-        CacheOwnerId::new(
-            PoolId::new(
-                IndexerDomainId::new(
-                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
-                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
-                ),
-                ClusterId::new(3),
-            ),
-            StableDpSlotId::new([id; 16], IdentitySource::Explicit),
-        )
-    };
     let tokens: Vec<_> = (0..80).collect();
     let local = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
     let hashes: Vec<_> = local.iter().map(|hash| hash.0).collect();
@@ -758,12 +764,12 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
                 id,
                 event.event,
                 StorageTier::HostPinned,
-                owner(id as u8),
+                cache_owner(id as u8),
             ))
             .await
             .unwrap();
         sources.push((
-            owner(id as u8),
+            cache_owner(id as u8),
             RouterHintSourceMetadata {
                 source_control_endpoint: format!("tcp://source-{id}:9000"),
                 worker_type: "decode".to_string(),
@@ -929,18 +935,20 @@ struct SelectionObservation {
     session_context: Option<SessionContext>,
     affinity_target: Option<WorkerAffinityTarget>,
     shared_beyond_device_blocks: Vec<u32>,
+    /// Per row: worker, cache-owner blocks, cache-owner capacity.
+    cache_owner: Vec<(WorkerId, Option<u64>, Option<u64>)>,
 }
 
-impl crate::selector::WorkerPicker for CapturingPicker {
-    fn required_worker_inputs(&self) -> crate::selector::WorkerInputs {
-        crate::selector::WorkerInputs::CACHE
+impl dynamo_worker_selection::WorkerPicker for CapturingPicker {
+    fn required_worker_inputs(&self) -> dynamo_worker_selection::WorkerInputs {
+        dynamo_worker_selection::WorkerInputs::CACHE | RESIDENT_BLOCKS
     }
 
     fn pick(
         &self,
-        context: &crate::selector::WorkerSelectionContext<'_>,
-        input: crate::selector::WorkerInputView<'_>,
-    ) -> Result<usize, crate::WorkerSelectionPolicyError> {
+        context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+        input: dynamo_worker_selection::WorkerInputView<'_>,
+    ) -> Result<usize, crate::types::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
             affinity_target: context.affinity_target(),
@@ -952,6 +960,16 @@ impl crate::selector::WorkerPicker for CapturingPicker {
                     cache.shared_hits().map_or(0, |hits| {
                         hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32)
                     })
+                })
+                .collect(),
+            cache_owner: (0..input.len())
+                .map(|row| {
+                    let info = input.info(row).expect("row in range");
+                    (
+                        info.worker().worker_id,
+                        input.cache_owner_blocks(row),
+                        info.cache_owner_capacity_blocks(),
+                    )
                 })
                 .collect(),
         });
@@ -976,6 +994,57 @@ fn capturing_policy_factory() -> (
         )
     });
     (factory, observed)
+}
+
+/// KVCR occupancy reaches a policy through the real path: the worker catalog carries the
+/// advertised capacity, and the partition's lower-tier index lends the owner's live count.
+#[tokio::test]
+async fn picker_reads_cache_owner_occupancy() {
+    use dynamo_kv_events::event::RouterEvent;
+    use dynamo_kv_indexer::{ResidencyProjection, ResidencyRoutingSnapshot};
+
+    let (factory, observed) = capturing_policy_factory();
+    let core = core_with(
+        test_config(true),
+        SelectionHost::default(),
+        Some(factory),
+        WorkerType::Aggregated,
+        None,
+    );
+    for id in [1, 2] {
+        core.upsert_worker(WorkerRequest {
+            cache_owner_capacity_blocks: Some(1024),
+            ..worker_with_kv_events(id)
+        })
+        .await
+        .unwrap();
+    }
+    // Worker 1's KVCR instance holds two blocks; worker 2 has none attached.
+    let entry = core.entry(&default_key()).unwrap();
+    let event = store_event(1, 0, 1, &[], &[11, 12], StorageTier::HostPinned);
+    entry
+        .indexer
+        .apply_event_routed(RouterEvent::with_cache_owner(
+            1,
+            event.event,
+            StorageTier::HostPinned,
+            cache_owner(1),
+        ))
+        .await
+        .unwrap();
+    entry
+        .indexer
+        .set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::new([(cache_owner(1), WorkerWithDpRank::new(1, 0))]).unwrap(),
+            Vec::new(),
+        ));
+    entry.indexer.dump_events().await.unwrap();
+
+    core.select(select_request()).await.unwrap();
+    let mut seen = observed.lock()[0].cache_owner.clone();
+    seen.sort_unstable();
+    assert_eq!(seen, [(1, Some(2), Some(1024)), (2, None, Some(1024))]);
+    core.shutdown();
 }
 
 #[rstest::rstest]
@@ -1136,7 +1205,7 @@ async fn declaring_policy_reads_live_resident_blocks() {
 
 #[tokio::test]
 async fn only_a_declaring_policy_tracks_resident_blocks() {
-    let indexer = dynamo_kv_indexer::backend::create_indexer(16, 1);
+    let indexer = dynamo_kv_indexer::create_indexer(16, 1);
     let key = default_key();
     let track = |inputs| super::workers::track_resident_blocks(&key, inputs, &indexer);
     assert!(track(WorkerInputs::CACHE | WorkerInputs::LOAD).is_none());
@@ -1534,6 +1603,13 @@ async fn shared_cache_hits_reach_worker_selection() {
     core.select(request).await.expect("select");
     assert_eq!(calls.lock().len(), 1);
     assert_eq!(observed.lock()[1].shared_beyond_device_blocks, vec![0]);
+
+    // Shared-cache keys carry no adapter, so a LoRA request skips the lookup.
+    let mut request = select_request();
+    request.prompt.lora_name = Some("adapter-a".to_string());
+    core.select(request).await.expect("select");
+    assert_eq!(calls.lock().len(), 1);
+    assert_eq!(observed.lock()[2].shared_beyond_device_blocks, vec![0]);
 }
 
 #[tokio::test]
@@ -1583,7 +1659,7 @@ async fn session_context_reaches_worker_selection() {
         assert_eq!(context.session_final(), Some(true));
         assert_eq!(
             context.input_trigger(),
-            Some(crate::WorkerSelectionInputTrigger::ToolResult)
+            Some(crate::types::WorkerSelectionInputTrigger::ToolResult)
         );
         assert!(std::ptr::eq(
             context.agent_headers(),
@@ -2205,8 +2281,8 @@ async fn shutdown_interrupts_indexer_waits(
 /// releases the id claim.
 #[tokio::test]
 async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() {
+    use dynamo_kv_indexer::RemotePrimary;
     use dynamo_kv_indexer::TieredMatchDetails;
-    use dynamo_kv_indexer::backend::RemotePrimary;
     struct PausedRecord {
         entered: AtomicBool,
         release: tokio::sync::Notify,
@@ -2361,7 +2437,7 @@ async fn explicit_reservation_of_a_live_id_is_a_conflict() {
 
 #[test]
 fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     let index = Arc::new(RwLock::new(HashMap::new()));
     let partition = default_key();
     let observer = ReservationIndexObserver {
@@ -2421,7 +2497,7 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
 
 #[tokio::test]
 async fn index_observer_releases_displaced_affinity_after_unlock() {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     use dynamo_session_affinity::{AffinityReplicaSink, AffinityVersion};
 
     struct UnlockedIndexSink {
@@ -2474,7 +2550,7 @@ async fn index_observer_releases_displaced_affinity_after_unlock() {
 async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
     #[values("drop", "pending", "installed")] replacement: &str,
 ) {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     let core = local_core(test_config(false));
     let key = default_key();
     core.upsert_worker(worker(1)).await.unwrap();
@@ -2720,6 +2796,7 @@ async fn early_peer_accounting_follows_host_policy_without_granting_eligibility(
                         prefill_load_hint: None,
                     },
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 })
                 .await
@@ -2786,6 +2863,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
         worker: WorkerWithDpRank::new(1, 0),
         data,
         router_id: 99,
+        origin: Default::default(),
         lora_name: None,
     };
     let add = |request_id: &str| {
@@ -3632,6 +3710,60 @@ async fn free_releases_reservation_and_affinity_without_actor_progress() {
 }
 
 #[tokio::test]
+async fn worker_free_releases_the_local_booking_without_republishing() {
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    let (inbound_tx, inbound_rx) = mpsc::channel(16);
+    let channels = parking_lot::Mutex::new(Some(HostReplicaChannels {
+        outbound: Some(outbound_tx),
+        inbound_tx: inbound_tx.clone(),
+        inbound_rx,
+        process_id: 1,
+        ingress_observer: None,
+    }));
+    let core = core_with(
+        test_config(false),
+        SelectionHost {
+            replication: HostReplication {
+                channels: Some(Arc::new(move |_| channels.lock().take())),
+                ..HostReplication::default()
+            },
+            ..SelectionHost::default()
+        },
+        None,
+        WorkerType::Aggregated,
+        Some(SessionAffinityConfig::new(Duration::from_secs(10))),
+    );
+    core.upsert_worker(worker(1)).await.unwrap();
+    core.select_and_reserve(session_reservation("r1", "s"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        outbound_rx.recv().await.unwrap().data,
+        ActiveSequenceEventData::AddRequest { .. }
+    ));
+    let entry = core.entry(&default_key()).unwrap();
+
+    inbound_tx
+        .send(ActiveSequenceEvent {
+            request_id: "r1".to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::Free,
+            router_id: 1,
+            origin: dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Worker,
+            lora_name: None,
+        })
+        .await
+        .unwrap();
+    wait_until("worker free", || {
+        !entry.scheduler.has_request("r1") && !core.reservation_index.read().contains_key("r1")
+    })
+    .await;
+    assert_eq!(lease_count(&core, "s"), Some(0));
+    assert_eq!(bound_worker(&core, "s"), Some(1));
+    assert!(outbound_rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn hard_mode_rejects_dispatch_away_from_a_live_binding() {
     let (core, first) = bound_session(SessionAffinityMode::Hard).await;
     let other = if first.worker_id == 1 { 2 } else { 1 };
@@ -3959,6 +4091,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
         data_parallel_size: endpoints.len().max(1) as u32,
         max_num_batched_tokens: None,
         total_kv_blocks: None,
+        cache_owner_capacity_blocks: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
@@ -4039,13 +4172,13 @@ fn hint_source_must_share_the_target_worker_type() {
 
 #[test]
 fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
-    use crate::identity::{
+    use dynamo_kv_events::residency::ResidencyOwner;
+    use dynamo_kv_indexer::{
+        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
-    };
-    use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{
-        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
     let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
     stale.kv_event_source_mode = Some("state_agent_v2".to_string());
@@ -4196,7 +4329,7 @@ fn preferred_island_falls_back_to_a_cross_island_source() {
 
 #[test]
 fn continuation_island_preference_uses_only_sources_reachable_from_local_depth() {
-    use crate::kv_hints::KvTransferSourceInterval;
+    use dynamo_kv_indexer::KvTransferSourceInterval;
 
     let mut candidates = hint_candidates(&[101, 102, 103, 104], Vec::new());
     candidates.source_intervals = vec![
@@ -4242,13 +4375,13 @@ fn continuation_island_preference_uses_only_sources_reachable_from_local_depth()
 
 #[test]
 fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
-    use crate::identity::{
+    use dynamo_kv_events::residency::ResidencyOwner;
+    use dynamo_kv_indexer::{
+        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
-    };
-    use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{
-        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
     let owner = |slot: u8| {
         CacheOwnerId::new(

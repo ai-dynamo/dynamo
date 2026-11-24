@@ -229,6 +229,12 @@ impl HttpServer {
         })
     }
 
+    /// The TLS acceptor built from this server's configuration, for a caller that serves
+    /// a second listener with the same TLS settings through [`serve`].
+    pub fn tls_acceptor(&self) -> Option<TlsAcceptor> {
+        self.tls.clone()
+    }
+
     /// Serve while admitted response bodies drain before cancelling service state.
     pub async fn serve(
         self,
@@ -236,12 +242,29 @@ impl HttpServer {
         state_cancel: CancellationToken,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        let observer = cancel_token.child_token();
+        self.serve_until(
+            state,
+            state_cancel,
+            cancel_token.cancelled(),
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Start draining when `drain` resolves. A force signal interrupts any
+    /// remaining wait and closes the server's active connections.
+    pub async fn serve_until(
+        self,
+        state: Arc<ServiceObserver>,
+        state_cancel: CancellationToken,
+        drain: impl Future<Output = ()>,
+        force: &CancellationToken,
+    ) -> Result<()> {
         let protocol = self.protocol;
         // The server keeps accepting while inflight requests drain, then gives open
         // connections what is left of the shutdown budget.
         let shutdown = async {
-            observer.cancelled().await;
+            drain.await;
             state.start_draining();
             tracing::info!("{protocol} server shutdown requested");
             let shutdown_timeout = Duration::from_secs(get_graceful_shutdown_timeout() as u64);
@@ -254,14 +277,18 @@ impl HttpServer {
             }
             shutdown_timeout.saturating_sub(drain_started.elapsed())
         };
-        serve(
+        let serving = serve(
             self.listener,
             self.tls,
             self.router,
             write_idle_timeout(),
             shutdown,
-        )
-        .await;
+        );
+        tokio::select! {
+            biased;
+            _ = force.cancelled() => tracing::warn!(protocol, "forcing HTTP shutdown"),
+            _ = serving => {}
+        }
         state.start_stopping();
         state_cancel.cancel();
         Ok(())
@@ -275,7 +302,7 @@ fn get_graceful_shutdown_timeout() -> usize {
         .unwrap_or(5)
 }
 
-fn write_idle_timeout() -> Duration {
+pub fn write_idle_timeout() -> Duration {
     std::env::var(env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -317,7 +344,7 @@ pub fn listen_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
 /// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
 /// clients connecting within seconds overflow that, and overflowed connections
 /// are delayed or, depending on host TCP settings, fail.
-fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+pub fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
     let socket = if addr.is_ipv4() {
         tokio::net::TcpSocket::new_v4()?
     } else {

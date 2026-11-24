@@ -4,7 +4,7 @@
 #
 # Disaggregated serving through two TensorRT-LLM OpenEngine gRPC servers (2 workers).
 #
-# Run with `TRTLLM_PYTHON` from `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`.
+# Run with `TRTLLM_PYTHON` from `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009`.
 # The bindings it needs are installed by the helper below.
 #
 # KV cache moves prefill -> decode engine-to-engine over the cache transceiver,

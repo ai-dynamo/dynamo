@@ -1,9 +1,13 @@
 # lib/router/protocol
 
-`dynamo-router-protocol` is data: the identities and the worker-facing wire vocabulary every router crate names (`attempt`, `columns`, `identity`, `session`, `worker`, `worker_type`). A type enters only if it crosses a process boundary to an engine, a worker, or a sidecar, or is an identity every crate names; behavior beyond serde derives and conversions belongs to a consumer crate, and the gate greps `src/` for `dyn`, `async`, `std::fs`, `anyhow`, `tracing`, and `derive_builder`. `AttemptIdMinter::mint` is the only source of attempt ids; the chosen-value constructors stay behind `testing` and `bench`, which no normal dependency may enable.
+`dynamo-router-protocol` holds the identities and worker-facing wire types every router crate names. It is data only (serde derives and conversions) with no async, logging, or Dynamo dependencies; hosts and router crates import it directly.
 
-- Depends on (Dynamo crates): none; `[dependencies]` stays `serde`, `serde_json`, `thiserror`.
-- Must not depend on: the runtime, tokio, any transport, any router crate.
-- Hosts import this crate directly.
-- Check: `bash scripts/router_layering_check.sh` (and `--host`).
-- Design: `lib/router/README.md`.
+## Entry rule
+
+A type enters protocol only if it is serialized across a process boundary to an engine, a worker, or a sidecar, or is an identity every crate names.
+
+Everything else belongs to the crate that produces it. When a second crate needs such a type, it depends on the producer; it does not lift the type here.
+
+## `AttemptId` and `AttemptIdMinter`
+
+`AttemptId` has no public constructor. `AttemptIdMinter::mint` is the only source of a value and yields fresh ids only; the slot tracker holds the one instance and mints at booking. Every other crate receives an `AttemptId` on a replica event, a booking descriptor, or an indexer lease and carries it unchanged. There is no `AttemptId::new`, no `From<u64>`, and no `#[doc(hidden)]` escape. The chosen-value constructors `AttemptId::for_testing` and `AttemptId::for_benchmark` exist only behind the `testing` and `bench` features; no normal dependency may enable either.

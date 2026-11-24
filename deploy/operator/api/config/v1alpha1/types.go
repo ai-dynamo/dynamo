@@ -230,8 +230,17 @@ type LWSConfiguration struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
+// DefaultKaiSchedulerName is the scheduler selected by the KAI integration unless overridden.
+const DefaultKaiSchedulerName = "kai-scheduler"
+
 // KaiSchedulerConfiguration holds Kai-scheduler settings.
 type KaiSchedulerConfiguration struct {
+	// SchedulerName is the pod scheduler name used by the KAI integration.
+	// Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend.
+	// +kubebuilder:default="kai-scheduler"
+	// +optional
+	SchedulerName string `json:"schedulerName,omitempty"`
+
 	// Enabled overrides auto-detection. nil = auto-detect.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`

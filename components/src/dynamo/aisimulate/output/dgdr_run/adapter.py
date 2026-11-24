@@ -58,15 +58,15 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, Protocol
 
 import yaml
-from aisimulate.output_adapter import (
+from aisim.output_adapter import (
     OUTPUT_ADAPTER_API_VERSION,
     RecommendationOutputCallbacks,
 )
-from aisimulate.sweeper.config import Candidate as AISCandidate
-from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
-from aisimulate.sweeper.result import SweepResult
-from aisimulate.sweeper.score import pareto_front as ais_pareto_front
-from aisimulate_core.sdk.perf_database import load_system_spec
+from aisim.sweeper.config import Candidate as AISCandidate
+from aisim.sweeper.config import OptimizationTarget, SmartSearchConfig
+from aisim.sweeper.result import SweepResult
+from aisim.sweeper.score import pareto_front as ais_pareto_front
+from aisim_core.sdk.perf_database import load_system_spec
 from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo.aisimulate.output.dgd.renderers import (
@@ -108,7 +108,7 @@ class CandidateRecordLike(Protocol):
 
     @property
     def status(self) -> Any:
-        ...  # aisimulate.sweeper.result.CandidateStatus
+        ...  # aisim.sweeper.result.CandidateStatus
 
     @property
     def score(self) -> float | None:

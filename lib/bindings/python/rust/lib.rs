@@ -13,18 +13,13 @@ use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError};
-use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
-use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 use std::thread::sleep;
-use std::{
-    fmt::Display,
-    sync::{Arc, Weak},
-};
+use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
@@ -412,6 +407,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(errors::_raise_routed_http_error, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::WorkerSequenceEventPublisher>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SessionBindingStream>()?;
     #[cfg(feature = "select-service")]
@@ -1148,7 +1145,7 @@ struct Client {
 }
 
 /// A read-only view of an instance's transport, wrapping the runtime
-/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp") and its
+/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp" / "direct") and its
 /// `address`; the address format is transport-specific and not a stable parse
 /// target.
 #[pyclass(eq, hash, frozen)]
@@ -1164,6 +1161,7 @@ impl TransportType {
         match &self.inner {
             rs::component::TransportType::Nats(_) => "nats_tcp",
             rs::component::TransportType::Tcp(_) => "tcp",
+            rs::component::TransportType::Direct(_) => "direct",
         }
     }
 
@@ -1559,6 +1557,13 @@ impl DistributedRuntime {
         self.inner.force_shutdown();
     }
 
+    /// The response transport this runtime uses ("tcp", "quic" or "velo"),
+    /// after the default and the TLS fallback are applied.
+    #[getter]
+    fn response_plane(&self) -> &'static str {
+        self.inner.response_plane().name()
+    }
+
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }
@@ -1573,7 +1578,8 @@ impl DistributedRuntime {
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
-    /// Register a component handler under `/engine/{name}/...` on the system listener.
+    /// Register a status-aware handler at `/engine/{name}` on the system listener.
+    /// Single-segment names also handle paths below that prefix.
     /// The callback receives `{method, path, body}` and returns `{status, body}`.
     fn register_engine_http_handler(
         &self,
@@ -1700,21 +1706,6 @@ impl DistributedRuntime {
         self.inner.system_health().lock().set_health_status(status);
         Ok(())
     }
-
-    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
-    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
-    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
-    // from it and share the same crate path. This will allow PyO3 to automatically
-    // recognize that both bindings use the same PyClass.
-    #[pyo3(name = "to_capsule")]
-    fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
-        let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
-
-        let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
-
-        PyCapsule::new(py, weak, Some(name))
-    }
 }
 
 #[pymethods]
@@ -1735,7 +1726,7 @@ impl Endpoint {
         })
     }
 
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, *, track_response_completion = false))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
@@ -1743,6 +1734,7 @@ impl Endpoint {
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
+        track_response_completion: bool,
     ) -> PyResult<Bound<'p, PyAny>> {
         // The network engines read the role per request, so one recorded later
         // by `register_model` takes effect from then on, through the gate of
@@ -1837,8 +1829,12 @@ impl Endpoint {
             ));
         }
 
-        let mut builder = self
-            .inner
+        let endpoint = if track_response_completion {
+            self.inner.clone().track_response_completion()
+        } else {
+            self.inner.clone()
+        };
+        let mut builder = endpoint
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
@@ -1974,6 +1970,11 @@ impl Endpoint {
     #[getter]
     fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
         prometheus_metrics::RuntimeMetrics::from_endpoint(self.inner.clone())
+    }
+
+    /// Active requests on an endpoint configured to track response completion.
+    fn inflight_requests(&self) -> Option<i64> {
+        self.inner.inflight_requests()
     }
 
     /// Unregister this endpoint instance from discovery.
