@@ -303,7 +303,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             help=(
                 "Number of processes that run TensorRT-LLM multimodal input "
                 "preprocessing, each with its own copy of the input processor. 0 "
-                "runs it on threads of the worker process."
+                "runs it on one thread of the worker process."
             ),
         )
         add_frontend_decoding_arg(g, env_prefix="TRTLLM")

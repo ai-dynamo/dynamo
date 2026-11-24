@@ -3,6 +3,8 @@
 
 """Unit tests for the TRTLLM engine wrapper."""
 
+import asyncio
+import threading
 from unittest import mock
 
 import pytest
@@ -95,3 +97,81 @@ async def test_get_llm_engine_runs_a_preprocess_pool_on_request():
 
     # The pool closes before the LLM shuts down.
     assert calls.mock_calls == [mock.call.pool.close(), mock.call.llm.shutdown()]
+
+
+@pytest.fixture
+def engine():
+    """An engine with a mock LLM, shut down after the test."""
+    engine = TensorRTLLMEngine(engine_args={})
+    engine._llm = mock.Mock()
+    yield engine
+    engine.shutdown()
+
+
+@pytest.mark.multimodal
+class TestPreprocess:
+    @pytest.mark.asyncio
+    async def test_preprocesses_one_request_per_pool_process(self, engine):
+        with mock.patch("dynamo.trtllm.engine.PreprocessPool.start"):
+            await engine.start_preprocess_pool(3)
+        # Each request waits until all three are being preprocessed at once.
+        barrier = threading.Barrier(3, timeout=10)
+
+        def preprocess(inputs, *args):
+            barrier.wait()
+            return inputs
+
+        engine._llm.preprocess.side_effect = preprocess
+        results = await asyncio.gather(
+            *(engine.preprocess(i, None, None) for i in range(3))
+        )
+        assert results == [0, 1, 2]
+
+    @pytest.mark.asyncio
+    async def test_drops_a_request_cancelled_while_it_waits_for_the_thread(
+        self, engine
+    ):
+        started, finish = threading.Event(), threading.Event()
+
+        def preprocess(inputs, *args):
+            started.set()
+            assert finish.wait(timeout=10)
+            return inputs
+
+        engine._llm.preprocess.side_effect = preprocess
+        first = asyncio.create_task(engine.preprocess("first", None, None))
+        assert await asyncio.to_thread(started.wait, 10)
+        # Without a pool, the second request waits for the first one's thread.
+        second = asyncio.create_task(engine.preprocess("second", None, None))
+        await asyncio.sleep(0)
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+
+        finish.set()
+        assert await first == "first"
+        engine._llm.preprocess.assert_called_once_with("first", None, None)
+
+    @pytest.mark.asyncio
+    async def test_releases_the_inputs_of_a_request_cancelled_while_preprocessing(
+        self, engine
+    ):
+        started, finish, released = (threading.Event() for _ in range(3))
+        preprocessed = mock.Mock()
+        preprocessed.multimodal_params.release_handles.side_effect = released.set
+
+        def preprocess(*args):
+            started.set()
+            assert finish.wait(timeout=10)
+            return preprocessed
+
+        engine._llm.preprocess.side_effect = preprocess
+        task = asyncio.create_task(engine.preprocess("inputs", None, None))
+        assert await asyncio.to_thread(started.wait, 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Preprocessing finishes after the request was cancelled.
+        finish.set()
+        assert await asyncio.to_thread(released.wait, 10)
