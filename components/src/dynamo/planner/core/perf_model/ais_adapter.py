@@ -250,14 +250,17 @@ class PlannerEnginePerfModel:
             return None
         max_num_batched_tokens, max_num_seqs, max_kv_tokens = values
         mixed_chunk = True
+        chunk_size = None
         if self._config.backend == "sglang":
             caps = self._capabilities
             mixed_chunk = caps.sglang_mixed_chunk if caps is not None else None
+            chunk_size = caps.sglang_prefill_chunk_size if caps is not None else None
         return EnginePerfLimits(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
             prefill_shares_decode_budget=mixed_chunk,
+            prefill_chunk_size=chunk_size,
         )
 
     def _build_options(self) -> dict[str, int]:

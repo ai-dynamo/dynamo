@@ -16,6 +16,7 @@ _MDC_REFRESH_FIELDS = (
     "context_length",
     "speculative_nextn",
     "sglang_mixed_chunk",
+    "sglang_prefill_chunk_size",
 )
 
 

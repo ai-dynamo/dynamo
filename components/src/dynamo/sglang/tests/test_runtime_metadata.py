@@ -459,6 +459,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
     assert json.loads(runtime_config.runtime_data["enable_mixed_chunk"]) is True
+    assert json.loads(runtime_config.runtime_data["prefill_chunk_size"]) == 256
     assert json.loads(runtime_config.runtime_data[TOKEN_BUDGET_RUNTIME_KEY]) == {
         "combined_limit": 4092,
         "reject_prompt_overflow": True,

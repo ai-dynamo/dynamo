@@ -74,6 +74,7 @@ def _model(
     max_kv_tokens: int = 100_000,
     attention_dp_size: int = 1,
     prefill_shares_decode_budget: Optional[bool] = True,
+    prefill_chunk_size: Optional[int] = None,
 ) -> tuple[AISCoreEnginePerfModel, _FakeForwardPassModel]:
     forward_pass_model = _FakeForwardPassModel(estimate)
     model = AISCoreEnginePerfModel(
@@ -84,6 +85,7 @@ def _model(
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
             prefill_shares_decode_budget=prefill_shares_decode_budget,
+            prefill_chunk_size=prefill_chunk_size,
         ),
         attention_dp_size=attention_dp_size,
         max_observations=16,
@@ -264,8 +266,9 @@ def test_aggregate_prefill_pricing_uses_the_scheduler_mode(mixed_chunk, expected
     model, forward = _model(
         worker_type="aggregated",
         estimate=lambda _: 10.0,
-        max_num_batched_tokens=256,
+        max_num_batched_tokens=1024,
         prefill_shares_decode_budget=mixed_chunk,
+        prefill_chunk_size=256,
     )
     fpm = ForwardPassMetrics(
         scheduled_requests=ScheduledRequestMetrics(
@@ -295,10 +298,11 @@ def test_sglang_aggregate_query_rebuilds_on_mixed_chunk_change(monkeypatch):
     )
     config = PlannerConfig.model_construct(mode="agg", backend="sglang")
     limits = EngineCapabilities(
-        max_num_batched_tokens=256,
+        max_num_batched_tokens=1024,
         max_num_seqs=128,
         max_kv_tokens=100_000,
         sglang_mixed_chunk=False,
+        sglang_prefill_chunk_size=256,
     )
     model = PlannerEnginePerfModel(
         worker_type="aggregated", config=config, capabilities=limits
@@ -322,6 +326,47 @@ def test_sglang_aggregate_query_rebuilds_on_mixed_chunk_change(monkeypatch):
     assert estimate() == pytest.approx(0.02)
 
 
+@pytest.mark.parametrize("osl", [1, 1000])
+def test_standalone_prefill_is_priced_once_per_request(osl):
+    model, forward = _model(
+        worker_type="aggregated",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=64,
+        max_num_seqs=1,
+        prefill_shares_decode_budget=False,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=1, osl=osl))
+
+    assert capacity is not None
+    assert capacity.ttft_s == pytest.approx(0.01)
+    assert capacity.e2e_latency_s == pytest.approx(osl * 0.01)
+    assert capacity.rps == pytest.approx(100 / osl)
+    assert len(forward.estimate_calls) == (2 if osl > 1 else 1)
+
+
+@pytest.mark.parametrize("ranks, expected", [(1, [(2, 64)]), (2, [(1, 32), (1, 32)])])
+def test_standalone_prefill_prices_whole_prompts(ranks, expected):
+    model, forward = _model(
+        worker_type="aggregated",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=64,
+        max_num_seqs=2,
+        attention_dp_size=ranks,
+        prefill_shares_decode_budget=False,
+    )
+    result = model.find_engine_capacity_rps(EngineCapacityRequest(isl=32, osl=10))
+    assert result is not None
+    largest_prefill = forward.estimate_calls[-1]
+    assert [
+        (
+            rank["scheduled_requests"]["num_prefill_requests"],
+            rank["scheduled_requests"]["sum_prefill_tokens"],
+        )
+        for rank in largest_prefill
+    ] == expected
+
+
 def test_separate_prefill_mode_prices_aggregate_capacity_as_separate_steps():
     model, forward = _model(
         worker_type="aggregated",
@@ -337,6 +382,9 @@ def test_separate_prefill_mode_prices_aggregate_capacity_as_separate_steps():
     assert max(row["num_decode_requests"] for row in rows) == 16
     assert all(
         not row["sum_prefill_tokens"] or not row["num_decode_requests"] for row in rows
+    )
+    assert all(
+        row["sum_decode_kv_tokens"] == row["num_decode_requests"] * 18 for row in rows
     )
 
 

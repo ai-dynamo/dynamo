@@ -134,11 +134,13 @@ def worker_info_from_mdc(
         runtime_cfg = {}
 
     runtime_data = runtime_cfg.get("runtime_data")
-    mixed_chunk = (
-        runtime_data.get("enable_mixed_chunk")
-        if backend == "sglang" and isinstance(runtime_data, dict)
-        else None
+    sglang_data = (
+        runtime_data if backend == "sglang" and isinstance(runtime_data, dict) else {}
     )
+    mixed_chunk = sglang_data.get("enable_mixed_chunk")
+    chunk_size = sglang_data.get("prefill_chunk_size")
+    if type(chunk_size) is not int or chunk_size <= 0:
+        chunk_size = None
 
     component_name = entry.component or defaults.component_name
     endpoint = entry.endpoint or defaults.endpoint
@@ -171,4 +173,5 @@ def worker_info_from_mdc(
         context_length=context_length,
         speculative_nextn=_parse_speculative_nextn(runtime_cfg),
         sglang_mixed_chunk=mixed_chunk if isinstance(mixed_chunk, bool) else None,
+        sglang_prefill_chunk_size=chunk_size,
     )
