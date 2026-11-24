@@ -20,6 +20,8 @@ USER root
 # The NIM base removes some packages but keeps their conffiles (dpkg state rc).
 # Purge them so compliance does not attribute packages that no longer ship.
 RUN dpkg -l | awk '/^rc/ {print $2}' | xargs -r dpkg --purge
+# Dynamo resets the NIM entrypoint and never starts the NIM nginx proxy.
+RUN rm -rf /opt/nim/.local/nginx
 {% endif %}
 
 {% set has_transformers_pin = context.vllm[device_key].transformers_version is defined -%}
@@ -90,9 +92,8 @@ COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
@@ -103,6 +104,8 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 # rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -113,10 +116,21 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
         libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
@@ -248,7 +262,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisim-*.whl && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
@@ -348,21 +362,36 @@ RUN apt-get update && \
 # safe. dpkg-query keeps the match robust across base-image/arch version
 # suffixes (e.g. libavcodec58 vs 60).
 #
-# This grep is the COMPLETE, auditable set of what leaves the image: there is
-# deliberately NO apt-get autoremove, so the removal can never cascade into
-# unrelated auto-installed packages. That matters because the base image marks
-# both the gcc/g++/make toolchain (torch.inductor/Triton JIT shell out to it at
-# runtime) and the CUDA math libs (libcublas/libcusolver/libcusparse — the torch
-# wheels here ship no bundled cublas and load the system copies) as
-# auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
-# which broke runtime JIT (missing C compiler) in the 1.3.0 rc image. Any
-# LGPL/BSD media libs left orphaned (libva, libvdpau, ...) are license-clean
-# dead weight, not a compliance issue.
+# This grep, together with `dependents` below, is the COMPLETE, auditable set
+# of what leaves the image: there is deliberately NO apt-get autoremove, so the
+# removal never sweeps up unrelated auto-installed packages. That matters
+# because the base image marks both the gcc/g++/make toolchain
+# (torch.inductor/Triton JIT shell out to it at runtime) and the CUDA math libs
+# (libcublas/libcusolver/libcusparse — the torch wheels here ship no bundled
+# cublas and load the system copies) as auto-installed. A bare
+# `autoremove --purge` sweeps all of those as "orphaned", which broke runtime
+# JIT (missing C compiler) in the 1.3.0 rc image. Any LGPL/BSD media libs left
+# orphaned (libva, libvdpau, ...) are license-clean dead weight, not a
+# compliance issue. librist, and the mbedTLS and cJSON libraries that only
+# librist uses, are named because nothing else links them.
+#
+# apt-get purge does remove each installed package that depends on a purged
+# one. In the current base, those are the seven packages in `dependents`. A
+# simulated purge runs first, and the build fails unless it removes every
+# matched package and nothing outside the match and `dependents`. A new
+# dependent in a later base then stops the build instead of leaving the image
+# unnoticed.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite|librist[0-9]|libmbedcrypto|libmbedtls|libmbedx509|libcjson)' \
         || true); \
+    dependents="libjack-jackd2-0 libopenmpt0t64 libpocketsphinx3 libpulse0 libsdl2-2.0-0 libsndfile1 libsphinxbase3t64"; \
     if [ -n "$purge" ]; then \
+        removed=$(apt-get -s purge $purge | awk '/^(Remv|Purg) /{sub(/:.*/, "", $2); print $2}'); \
+        [ -n "$removed" ] || { echo "ERROR: a simulated purge of the matched packages removes nothing" >&2; exit 1; }; \
+        kept=$(printf '%s\n' $purge | grep -vxF "$removed" || true); \
+        extra=$(printf '%s\n' $removed | grep -vxF "$(printf '%s\n' $purge $dependents)" || true); \
+        [ -z "$kept$extra" ] || { echo "ERROR: the purge would keep: ${kept:-none}; and also remove: ${extra:-none}" >&2; exit 1; }; \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
     fi; \
     rm -rf /var/lib/apt/lists/*

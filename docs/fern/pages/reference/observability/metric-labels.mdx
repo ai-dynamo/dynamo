@@ -137,12 +137,6 @@ Added by an individual metric family. Each label appears only on the metrics not
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ok</Badge> <Badge intent="note" minimal>parent_block_not_found</Badge> <Badge intent="note" minimal>block_not_found</Badge> <Badge intent="note" minimal>invalid_block</Badge> <Badge intent="note" minimal>capacity_exhausted</Badge> <Badge intent="note" minimal>allocation_failed</Badge> <Badge intent="note" minimal>ownership_degree_overflow</Badge> <Badge intent="note" minimal>indexer_invariant_violation</Badge></span>
 </ParamField>
 
-<ParamField path="outcome" type="string">
-  `[Shared]` On `dynamo_component_ckf_mutation_total`, and on `dynamo_kvrouter_ckf_mutation_total` from the standalone indexer — the block-level CKF mutation outcome. Both counters are registered but never incremented today, so no series carries this label in practice.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>unknown_remove</Badge> <Badge intent="note" minimal>capacity_exhausted</Badge></span>
-</ParamField>
-
 <ParamField path="event_type" type="string">
   `[Shared]` On `dynamo_component_kv_cache_events_applied` — the kind of KV cache event.
 
@@ -203,7 +197,7 @@ Values you will see in the `dynamo_component` label on `dynamo_component_*` seri
 | `encode` | The encode worker for vLLM, SGLang, and TRT-LLM. |
 | `diffusion` | The diffusion worker for TRT-LLM. |
 
-Internal subsystems (e.g. `kvbm` from the block manager, `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
+Internal subsystems (e.g. `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
 
 <Note>
   The name `backend` for the decode worker is historical. The runtime has a TODO to introduce a `decode` constant and migrate to it (see `lib/runtime/src/metrics/prometheus_names.rs::component_names`).

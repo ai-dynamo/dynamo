@@ -10,7 +10,7 @@ use dynamo_kv_events::event::KvCacheEvent;
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_tokens::Token;
 
-pub use aisimulate_core::engine::{G2Scope, NativeHostOffloadConfig};
+pub use aisim_core::engine::{G2Scope, NativeHostOffloadConfig};
 
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
@@ -163,7 +163,7 @@ impl KvEventPublishers {
 }
 
 /// Replay-neutral per-pass metrics shared by offline and Live Mocker drivers.
-pub use aisimulate_core::replay::ForwardPassSnapshot;
+pub use aisim_core::replay::ForwardPassSnapshot;
 
 /// Trait for publishing forward pass metrics snapshots.
 /// This abstracts the FPM publishing pipeline so mocker schedulers remain generic.
@@ -194,7 +194,7 @@ impl FpmPublisher {
 /// Replay-owned request DTO shared by Dynamo's compatibility and Live Mocker
 /// drivers. The type remains provider-neutral; Dynamo-specific metadata is
 /// interpreted only by Dynamo adapters.
-pub use aisimulate_core::replay::{DirectRequest, ReplayRequestContext};
+pub use aisim_core::replay::{DirectRequest, ReplayRequestContext};
 
 /// Signal for output token generation with completion status
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,7 +219,7 @@ pub struct OutputSignal {
 }
 
 pub use crate::config::MockerConfig;
-pub use aisimulate_core::engine::{
+pub use aisim_core::engine::{
     Backend as EngineType, PreemptionMode, TransferTimingMode as KvTransferTimingMode, WorkerType,
 };
 

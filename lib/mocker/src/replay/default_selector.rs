@@ -21,6 +21,8 @@ pub struct DefaultWorkerSelector {
     worker_type: &'static str,
     policy: Arc<Mutex<WorkerSelectionPolicy>>,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
+    /// Factory and worker role of a configured policy; `None` runs Dynamo's default.
+    configured: Option<(WorkerSelectionPolicyFactory, WorkerType)>,
 }
 impl DefaultWorkerSelector {
     pub fn new(config: Option<SelectionConfig>, worker_type: &'static str) -> Self {
@@ -52,6 +54,24 @@ impl DefaultWorkerSelector {
             kv_router_config: config,
             worker_type,
             rng,
+            configured: None,
+        }
+    }
+    /// Run the policy `factory` builds for the `role` pool instead of Dynamo's default. The
+    /// factory builds it as it does for a live router, so no replay seed reaches it.
+    pub fn with_policy_factory(
+        config: SelectionConfig,
+        worker_type: &'static str,
+        factory: WorkerSelectionPolicyFactory,
+        role: WorkerType,
+    ) -> Self {
+        let partition = RoutingPartitionRef::new("replay", "default");
+        Self {
+            policy: Arc::new(Mutex::new(factory(&config, role, partition))),
+            kv_router_config: config,
+            worker_type,
+            rng: None,
+            configured: Some((factory, role)),
         }
     }
     /// Handle that reads and updates this selector's runtime parameters from another owner.
@@ -68,11 +88,19 @@ impl DefaultWorkerSelector {
 /// the random stream of the original.
 impl Clone for DefaultWorkerSelector {
     fn clone(&self) -> Self {
-        Self::with_rng(
-            self.kv_router_config.clone(),
-            self.worker_type,
-            self.rng.clone(),
-        )
+        match &self.configured {
+            Some((factory, role)) => Self::with_policy_factory(
+                self.kv_router_config.clone(),
+                self.worker_type,
+                factory.clone(),
+                *role,
+            ),
+            None => Self::with_rng(
+                self.kv_router_config.clone(),
+                self.worker_type,
+                self.rng.clone(),
+            ),
+        }
     }
 }
 impl std::fmt::Debug for DefaultWorkerSelector {
@@ -88,7 +116,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         <WorkerSelectionPolicy as WorkerSelector<C>>::required_worker_inputs(&self.policy.lock())
     }
     fn uses_exclusive_affinity_target(&self) -> bool {
-        true
+        self.policy.lock().uses_exclusive_affinity_target()
     }
     fn applies_worker_filters(&self) -> bool {
         <WorkerSelectionPolicy as WorkerSelector<C>>::applies_worker_filters(&self.policy.lock())

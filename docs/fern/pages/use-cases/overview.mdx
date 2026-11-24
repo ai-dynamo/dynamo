@@ -11,6 +11,10 @@ sidebar-title: Overview
     Keeps rollout workers busy and healthy with KV-aware routing, fast policy refresh through ModelExpress, and recovery from worker loss.
   </Card>
 
+  <Card title="Decision Model" icon="list-check" href="decision-model/apis.md">
+    Classify text, evaluate predicates, and score inputs through OpenAI Decisions and Jev System One APIs. Launch the experimental SGLang worker profile, then try the curl and SDK examples.
+  </Card>
+
   <Card title="Agents" icon="users" href="agents/overview.md">
     Faster multi-turn sessions by keeping each session's KV cache on one worker and putting interactive turns ahead of background work.
   </Card>

@@ -13,19 +13,19 @@ import (
 	"path/filepath"
 	"testing"
 
-	"capnproto.org/go/capnp/v3"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
+	commoncapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
+	deploymentcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/testfixture"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
 
 const (
-	otherFixtureValue  = "other"
-	v2TestBuildName    = "v2-test-build"
-	v3HXTopologyFamily = "HX16x8x2"
-	v3OpaqueTopology   = "opaque-v3-topology"
+	v2TestBuildName = "v2-test-build"
+
+	v3OpaqueTopology = "opaque-v3-topology"
 )
 
 type staticModelRegistry map[string]*Build
@@ -37,7 +37,7 @@ func (staticModelRegistry) EnsureDownloaded(_ context.Context, buildURL url.URL)
 	return false, fmt.Errorf("unexpected build download for %q", buildURL.String())
 }
 func (staticModelRegistry) EnsureCheckpointDownloaded(_ context.Context, checkpoint *Checkpoint) (bool, error) {
-	return false, fmt.Errorf("unexpected checkpoint download for %q", CheckpointKey(checkpoint))
+	return false, fmt.Errorf("unexpected checkpoint download for %q", checkpoint.Key())
 }
 
 func (source staticModelRegistry) AcquireBuild(_ context.Context, buildID string) (*Build, error) {
@@ -90,7 +90,7 @@ func projectTestBuild(t *testing.T, snapshot *Build, pipeline Pipeline) *ModelPr
 	t.Helper()
 
 	t.Log("Project the caller-owned normalized build for the selected pipeline")
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
+	projectionBatch, err := projectModels(ModelProjectionInput{
 		Pipeline: pipeline, Models: []string{"default"}, Build: snapshot,
 	})
 	require.NoError(t, err)
@@ -104,12 +104,12 @@ func writeV2CompilerFixture(t *testing.T) string {
 
 func newV2CompilerFixture() testV3CapnpFixture {
 	fixture := newV3CompilerFixture()
-	fixture.architecture = "polaris"
+	fixture.architecture = lp20
 	fixture.buildDirectoryName = v2TestBuildName
-	fixture.selectedPropSyncChains = [][]uint32{{7, 8}}
+	fixture.units = []testLPUUnit{{Reservations: []testLPUReservation{testNodesReservation(2, 7), testNodesReservation(2, 8)}, Connectors: []testLPUConnector{{}}}}
 	fixture.partitions = []testV3CapnpPartition{
-		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, topology: registryTestTopology, numChips: 16, devicesPerNode: 8},
-		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, topology: registryTestTopology, numChips: 16, devicesPerNode: 8},
+		{id: 7, deviceType: commoncapnp.DeviceType_lpu, devicesPerNode: 8},
+		{id: 8, deviceType: commoncapnp.DeviceType_lpu, devicesPerNode: 8},
 	}
 	return fixture
 }
@@ -120,38 +120,29 @@ func writeV3CompilerFixture(t *testing.T) string {
 }
 
 type testV3CapnpFixture struct {
-	buildDirectoryName     string
-	contractRevision       uint32
-	pipelineName           string
-	compilationMode        manifestcapnp.CompilationMode
-	architecture           string
-	selectedPropSyncChains [][]uint32
-	partSelect             bool
-	cpuEmbeddings          bool
-	partitions             []testV3CapnpPartition
+	buildDirectoryName string
+	contractRevision   uint32
+
+	architecture lpuArchitecture
+	units        []testLPUUnit
+
+	partitions []testV3CapnpPartition
 }
 
 type testV3CapnpPartition struct {
 	id             uint32
-	deviceType     manifestcapnp.DeviceType
-	topology       string
-	numChips       uint32
+	deviceType     commoncapnp.DeviceType
 	devicesPerNode uint32
-	topologyFamily string
-	partitionShape []uint32
 }
 
 func newV3CompilerFixture() testV3CapnpFixture {
 	return testV3CapnpFixture{
-		contractRevision: manifestcapnp.CurrentContractRevision,
-		pipelineName:     "default",
-		compilationMode:  manifestcapnp.CompilationMode_lpuOnly,
-		architecture:     "polarisB0",
+		contractRevision: deploymentcapnp.CurrentContractRevision,
+		units:            testSingleUnits(testHXReservation(1, 1, 1, 1)),
+		architecture:     lp30,
 		partitions: []testV3CapnpPartition{{
 			id:             1,
-			deviceType:     manifestcapnp.DeviceType_lpu,
-			topology:       v3OpaqueTopology,
-			numChips:       16,
+			deviceType:     commoncapnp.DeviceType_lpu,
 			devicesPerNode: 16,
 		}},
 	}
@@ -167,131 +158,20 @@ func writeCompilerFixture(t *testing.T, fixture testV3CapnpFixture) string {
 		require.NoError(t, os.Mkdir(buildDir, 0o700))
 	}
 
-	t.Log("Write the revision-2 compiler manifest fixture")
+	t.Log("Write the units deployment fixture")
 	writeTestV3CapnpManifest(t, buildDir, fixture)
 	return buildDir
 }
 
 func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3CapnpFixture) {
 	t.Helper()
-
-	t.Log("Encode the revision-2 manifest header and model metadata")
-	message, segment := capnp.NewSingleSegmentMessage(nil)
-	manifest, err := manifestcapnp.NewRootManifest(segment)
-	require.NoError(t, err)
+	partitions := make([]testfixture.Partition, len(fixture.partitions))
+	for index, partition := range fixture.partitions {
+		partitions[index] = testfixture.Partition{ID: partition.id, DeviceType: partition.deviceType, Architecture: fixture.architecture, DevicesPerNode: partition.devicesPerNode}
+	}
+	manifest := testfixture.NewDeployment(t, partitions, fixture.units, 1, 1)
 	manifest.SetContractRevision(fixture.contractRevision)
-	model, err := manifest.NewModel()
+	data, err := manifest.Message().Marshal()
 	require.NoError(t, err)
-	tokenizer, err := model.NewTokenizer()
-	require.NoError(t, err)
-	require.NoError(t, tokenizer.SetPath("tokenizer"))
-	stopTokens, err := tokenizer.NewStopTokens(1)
-	require.NoError(t, err)
-	stopTokens.Set(0, 1)
-
-	t.Log("Encode the deployment program, runtime I/O, and selected prop-sync chains")
-	deployment, err := manifest.NewDeployment()
-	require.NoError(t, err)
-	deployment.SetCompilationMode(fixture.compilationMode)
-	program, err := deployment.NewProgram()
-	require.NoError(t, err)
-	require.NoError(t, program.SetProgramName(fixture.pipelineName))
-	program.SetSequenceLength(8192)
-	program.SetInputSize(1)
-	program.SetOutputSize(1)
-	program.SetNumKvCaches(1)
-	program.SetSupportsCpuEmbeddings(fixture.cpuEmbeddings)
-	program.SetStandaloneTokenEmbeddings(fixture.cpuEmbeddings)
-	runtimeIO, err := deployment.NewRuntimeIo()
-	require.NoError(t, err)
-	runtimeIO.SetReserved1(0)
-	runtimeIO.SetIoFpgaCount(1)
-	runtimeIO.SetFanoutFactor(1)
-	if fixture.selectedPropSyncChains != nil {
-		chains, err := deployment.NewSelectedPropSyncChains(int32(len(fixture.selectedPropSyncChains)))
-		require.NoError(t, err)
-		for chainIndex, partitionIDs := range fixture.selectedPropSyncChains {
-			chain := chains.At(chainIndex)
-			ids, err := chain.NewPartitionIds(int32(len(partitionIDs)))
-			require.NoError(t, err)
-			for idIndex, partitionID := range partitionIDs {
-				ids.Set(idIndex, partitionID)
-			}
-		}
-	}
-
-	t.Log("Encode the flat revision-2 artifact inventory")
-	artifacts, err := manifest.NewArtifacts()
-	require.NoError(t, err)
-	if fixture.cpuEmbeddings {
-		assets, err := artifacts.NewRuntimeAssets()
-		require.NoError(t, err)
-		require.NoError(t, assets.SetTokenEmbeddingsPath("part-0/text_embeddings.npz"))
-	}
-	if fixture.partSelect {
-		partSelect, err := artifacts.NewPartSelect()
-		require.NoError(t, err)
-		selected, err := partSelect.NewPartitions(1)
-		require.NoError(t, err)
-		selected.At(0).SetDeviceType(manifestcapnp.DeviceType_lpu)
-		selected.At(0).SetPartitionId(fixture.partitions[0].id)
-	}
-	partitions, err := artifacts.NewPartitions(int32(len(fixture.partitions)))
-	require.NoError(t, err)
-	for index, fixturePartition := range fixture.partitions {
-		partition := partitions.At(index)
-		ref, err := partition.NewPartition()
-		require.NoError(t, err)
-		ref.SetDeviceType(fixturePartition.deviceType)
-		ref.SetPartitionId(fixturePartition.id)
-		switch fixturePartition.deviceType {
-		case manifestcapnp.DeviceType_lpu:
-			detail, err := partition.Detail().NewLpu()
-			require.NoError(t, err)
-			require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", fixturePartition.id)))
-			require.NoError(t, detail.SetTopology(fixturePartition.topology))
-			detail.SetNumChips(fixturePartition.numChips)
-			detail.SetDevicesPerNode(fixturePartition.devicesPerNode)
-			setManifestChipArchitectures(t, detail, []string{fixture.architecture})
-			if fixturePartition.topologyFamily != "" || fixturePartition.partitionShape != nil {
-				metadata, err := detail.NewTopologyMetadata()
-				require.NoError(t, err)
-				require.NoError(t, metadata.SetTopologyFamily(fixturePartition.topologyFamily))
-				shape, err := metadata.NewPartitionShape(int32(len(fixturePartition.partitionShape)))
-				require.NoError(t, err)
-				for dimension, extent := range fixturePartition.partitionShape {
-					shape.Set(dimension, extent)
-				}
-			}
-		case manifestcapnp.DeviceType_cuda:
-			_, err := partition.Detail().NewCuda()
-			require.NoError(t, err)
-		case manifestcapnp.DeviceType_cpu:
-			_, err := partition.Detail().NewCpu()
-			require.NoError(t, err)
-		default:
-			t.Fatalf("unsupported test device type %q", fixturePartition.deviceType)
-		}
-	}
-
-	t.Log("Publish the revision-2 compiler manifest")
-	data, err := message.Marshal()
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestV2CapnpFile), data, 0o600))
-}
-
-func setManifestChipArchitectures(t *testing.T, detail manifestcapnp.LpuPartitionArtifact, architectures ...[]string) {
-	t.Helper()
-
-	programs, err := capnp.NewCompositeList(detail.Segment(), capnp.ObjectSize{PointerCount: 2}, int32(len(architectures)))
-	require.NoError(t, err)
-	require.NoError(t, detail.SetReserved4(programs.ToPtr()))
-	for index, values := range architectures {
-		chips, err := capnp.NewCompositeList(programs.Struct(index).Segment(), capnp.ObjectSize{DataSize: 8, PointerCount: 2}, int32(len(values)))
-		require.NoError(t, err)
-		require.NoError(t, programs.Struct(index).SetPtr(1, chips.ToPtr()))
-		for chip, architecture := range values {
-			require.NoError(t, chips.Struct(chip).SetText(1, architecture))
-		}
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildDeploymentV1CapnpFile), data, 0o600))
 }

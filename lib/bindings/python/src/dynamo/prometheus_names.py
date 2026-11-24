@@ -334,41 +334,6 @@ class kv_publisher:
     ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
 
 
-class kvbm:
-    """KVBM"""
-
-    # The number of offload blocks from device to host
-    OFFLOAD_BLOCKS_D2H = "offload_blocks_d2h"
-    # The number of offload blocks from host to disk
-    OFFLOAD_BLOCKS_H2D = "offload_blocks_h2d"
-    # The number of offload blocks from device to disk (bypassing host memory)
-    OFFLOAD_BLOCKS_D2D = "offload_blocks_d2d"
-    # The number of onboard blocks from host to device
-    ONBOARD_BLOCKS_H2D = "onboard_blocks_h2d"
-    # The number of onboard blocks from disk to device
-    ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
-    # The number of matched tokens
-    MATCHED_TOKENS = "matched_tokens"
-    # Host cache hit rate (0.0-1.0) from the sliding window
-    HOST_CACHE_HIT_RATE = "host_cache_hit_rate"
-    # Disk cache hit rate (0.0-1.0) from the sliding window
-    DISK_CACHE_HIT_RATE = "disk_cache_hit_rate"
-    # Object storage cache hit rate (0.0-1.0) from the sliding window
-    OBJECT_CACHE_HIT_RATE = "object_cache_hit_rate"
-    # Number of blocks offloaded from device to object storage
-    OFFLOAD_BLOCKS_D2O = "offload_blocks_d2o"
-    # Number of blocks onboarded from object storage to device
-    ONBOARD_BLOCKS_O2D = "onboard_blocks_o2d"
-    # Bytes transferred to object storage (offload)
-    OFFLOAD_BYTES_OBJECT = "offload_bytes_object"
-    # Bytes transferred from object storage (onboard)
-    ONBOARD_BYTES_OBJECT = "onboard_bytes_object"
-    # Number of failed object storage read operations (blocks)
-    OBJECT_READ_FAILURES = "object_read_failures"
-    # Number of failed object storage write operations (blocks)
-    OBJECT_WRITE_FAILURES = "object_write_failures"
-
-
 class kvindexer:
     """Standalone KV indexer HTTP service metrics"""
 

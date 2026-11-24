@@ -15,13 +15,13 @@ use tmq::{
 use tokio::sync::Mutex;
 
 pub(crate) type MultipartMessage = Vec<Vec<u8>>;
-#[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) type SharedPubSocket = Arc<Mutex<Publish>>;
 pub(crate) type SubSocket = Subscribe;
 pub(crate) type PullSocket = Pull;
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
-#[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
 const ZMQ_RECONNECT_IVL_MS: i32 = 100;
 const ZMQ_RECONNECT_IVL_MAX_MS: i32 = 5000;
@@ -46,7 +46,7 @@ where
     configure_common_builder(builder).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
-#[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 fn configure_send_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
     T: tmq::FromZmqSocket<T>,
@@ -83,7 +83,7 @@ pub(crate) async fn connect_sub_socket_with_monitor(
     Ok((socket, monitor))
 }
 
-#[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedPubSocket> {
     let ctx = Context::new();
     let socket = configure_send_builder(publish(&ctx))
@@ -113,7 +113,7 @@ pub(crate) fn multipart_message(multipart: Multipart) -> MultipartMessage {
     multipart.into_iter().map(|frame| frame.to_vec()).collect()
 }
 
-#[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn send_multipart<S>(
     socket: &Arc<Mutex<S>>,
     frames: MultipartMessage,

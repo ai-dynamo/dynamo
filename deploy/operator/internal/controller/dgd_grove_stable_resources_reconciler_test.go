@@ -21,6 +21,9 @@ import (
 	"context"
 	"testing"
 
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -134,7 +137,9 @@ func TestIsSinglePodElasticEPLeader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Classify the component against the single-pod elastic-EP leader gate")
 			component := tt.component()
-			got := isSinglePodElasticEPLeader(&component)
+			container := dynamo.GetMainContainer(&component)
+			elasticRayLaunch := container != nil && dynamo.IsElasticEPRayLaunch(container)
+			got := grove.RenderElasticEPLeaderService(&component, componentdeployment.ServiceParams{}, elasticRayLaunch) != nil
 
 			t.Log("Verify only a component that renders as exactly one Ray head qualifies")
 			if got != tt.want {
@@ -200,7 +205,7 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 			t.Log("Verify the leader Service exists only for the single-pod elastic-EP shape")
 			service := &corev1.Service{}
 			err := kubeClient.Get(ctx, types.NamespacedName{
-				Name:      dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
+				Name:      grove.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
 				Namespace: dgd.Namespace,
 			}, service)
 			if tt.wantEmitted {
@@ -288,7 +293,7 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 				}
 				require.Equal(t, wantType, podLabels[commonconsts.KubeLabelDynamoComponentType])
 				componentServiceName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
-				for _, name := range []string{componentServiceName, dynamo.ElasticEPLeaderServiceName(componentServiceName)} {
+				for _, name := range []string{componentServiceName, grove.ElasticEPLeaderServiceName(componentServiceName)} {
 					service := &corev1.Service{}
 					require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: name}, service))
 					require.True(t, labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Set(podLabels)),
@@ -318,7 +323,7 @@ func TestGroveStableResourcesReconcilerDeletesElasticEPLeaderServiceWhenEligibil
 	}
 
 	serviceKey := types.NamespacedName{
-		Name:      dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
+		Name:      grove.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
 		Namespace: dgd.Namespace,
 	}
 	if err := kubeClient.Get(ctx, serviceKey, &corev1.Service{}); err != nil {
@@ -342,7 +347,7 @@ func TestGroveStableResourcesReconcilerLeavesAnUnownedNameCollisionAlone(t *test
 	t.Log("Pre-create a Service this DGD does not own, at the name the leader Service would take")
 	ctx := context.Background()
 	dgd := newElasticEPTestDGD(newElasticEPComponent("python3 -m dynamo.vllm"))
-	serviceName := dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, ""))
+	serviceName := grove.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, ""))
 	unowned := &corev1.Service{
 		Name:      serviceName,
 		Namespace: dgd.Namespace,
@@ -371,7 +376,7 @@ func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t 
 	ctx := context.Background()
 	dgd := newElasticEPTestDGD(newElasticEPComponent("python3 -m dynamo.vllm"))
 	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	serviceName := dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, ""))
+	serviceName := grove.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, ""))
 	owned := &corev1.Service{
 		Name:      serviceName,
 		Namespace: dgd.Namespace,
@@ -436,7 +441,7 @@ func TestGroveStableResourcesReconcilerConvergesLeaderServiceAnnotations(t *test
 	t.Log("Verify the edit converged onto the Service, which SyncResource alone would not do")
 	service := &corev1.Service{}
 	key := types.NamespacedName{
-		Name:      dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
+		Name:      grove.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
 		Namespace: dgd.Namespace,
 	}
 	if err := kubeClient.Get(ctx, key, service); err != nil {
