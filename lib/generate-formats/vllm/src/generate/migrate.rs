@@ -22,6 +22,34 @@ impl Continuation {
     /// `Err` says why a failed attempt cannot continue on another worker.
     pub(crate) fn new(request: &GenerateRequest) -> Result<Self, String> {
         let sampling = &request.sampling_params;
+        // Without the client's limit, the worker resolves a default the
+        // frontend cannot see, and a retry would get the full default again.
+        if sampling.max_tokens.is_none() {
+            return Err(
+                "without `sampling_params.max_tokens`, the effective token budget is unknown"
+                    .into(),
+            );
+        }
+        let raw = |field| sampling.raw.get(field).filter(|value| !value.is_null());
+        // Canonical replay holds one choice.
+        if raw("n").is_some_and(|n| n.as_u64() != Some(1)) {
+            return Err(
+                "`sampling_params.n` other than 1 has per-choice state a retry cannot rebuild"
+                    .into(),
+            );
+        }
+        // The grammar state lives in the engine; the canonical guided-decoding
+        // guard cannot see it in the native body.
+        if raw("structured_outputs").is_some() {
+            return Err(
+                "`sampling_params.structured_outputs` keeps grammar state a retry cannot rebuild"
+                    .into(),
+            );
+        }
+        // A stop string can start in the delivered text and end in the retry.
+        if raw("stop").is_some_and(|stop| stop.as_array().is_none_or(|stop| !stop.is_empty())) {
+            return Err("`sampling_params.stop` matches across the retry boundary".into());
+        }
         if sampling.seed.is_some() {
             return Err("`sampling_params.seed` keeps RNG state a retry cannot rebuild".into());
         }
@@ -111,7 +139,12 @@ mod tests {
     #[test]
     fn stateful_requests_cannot_migrate() {
         for sampling in [
-            json!({"seed": 7}),
+            json!({}),
+            json!({"max_tokens": 4, "seed": 7}),
+            json!({"max_tokens": 4, "n": 2}),
+            json!({"max_tokens": 4, "structured_outputs": {"json": {}}}),
+            json!({"max_tokens": 4, "stop": "x"}),
+            json!({"max_tokens": 4, "stop": ["x"]}),
             json!({"frequency_penalty": 0.5}),
             json!({"presence_penalty": -0.5}),
             json!({"bad_words": ["x"]}),
@@ -119,11 +152,11 @@ mod tests {
         ] {
             assert!(continuation(sampling).is_err());
         }
-        let stateless = json!({"frequency_penalty": 0, "presence_penalty": 0,
+        let stateless = json!({"max_tokens": 4, "n": 1, "stop": [], "frequency_penalty": 0, "presence_penalty": 0,
             "repetition_penalty": 1.2, "logprobs": 1, "prompt_logprobs": 1, "min_tokens": 2});
         assert!(continuation(stateless).is_ok());
         let pinned: GenerateRequest = serde_json::from_value(json!({
-            "token_ids": [1], "sampling_params": {}, "kv_transfer_params": {"do_remote_prefill": true},
+            "token_ids": [1], "sampling_params": {"max_tokens": 4}, "kv_transfer_params": {"do_remote_prefill": true},
         }))
         .unwrap();
         assert!(Continuation::new(&pinned).is_err());
