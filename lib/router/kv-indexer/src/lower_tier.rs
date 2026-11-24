@@ -1104,6 +1104,34 @@ impl LowerTierIndexer {
         }
     }
 
+    /// The deepest block of `local_hashes` that `owner` itself holds, following the chain
+    /// from the root. A match credits a worker with every owner projected to it and with
+    /// its own blocks in this tier; this reads one exact owner.
+    pub(crate) fn exact_owner_prefix_end(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        owner: ResidencyOwnerKey,
+    ) -> Option<ExternalSequenceBlockHash> {
+        let id = self
+            .owners
+            .snapshot
+            .load()
+            .ids
+            .get(&IndexedResidencyOwner::Exact(owner))
+            .copied()?;
+        let mut end = None;
+        for &local_hash in local_hashes {
+            let Some(edge) = self.edges.get(&TransitionKey::new(end, local_hash)) else {
+                break;
+            };
+            if !edge.contains_exact_owner(owner, Some(id)) {
+                break;
+            }
+            end = Some(edge.child_hash());
+        }
+        end
+    }
+
     pub fn root_workers(
         &self,
         local_hash: LocalBlockHash,

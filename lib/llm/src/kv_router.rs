@@ -1478,6 +1478,16 @@ impl KvRouter {
         // Indexing failures never affect routing.
         if let (Some(session_id), Some(block_hashes)) =
             (session_index_context.as_ref(), routing_hashes.as_deref())
+            && let Err(err) = self.indexer.enqueue_session_cache_owner_match(
+                session_id,
+                response.best_worker,
+                block_hashes,
+            )
+        {
+            tracing::warn!(%err, "failed to record session cache-owner match");
+        }
+        if let (Some(session_id), Some(block_hashes)) =
+            (session_index_context.as_ref(), routing_hashes.as_deref())
             && let Some(mut residency_version) =
                 self.indexer.session_residency_version(response.best_worker)
         {
@@ -2634,8 +2644,15 @@ mod tests {
     #[case::concurrent(2)]
     #[tokio::test]
     async fn session_prefix_tracking_survives_shared_core_selection(#[case] threads: u32) {
-        use dynamo_kv_events::residency::StorageTier;
+        use dynamo_kv_events::residency::{ResidencyOwner, StorageTier};
         use dynamo_kv_hashing::ExternalSequenceBlockHash;
+        use dynamo_kv_indexer::host::{
+            ResidencyOwnerKeyExt, ResidencyProjection, SessionResidencyOwner,
+        };
+        use dynamo_router_protocol::identity::{
+            CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+            RoutingScopeId, StableDpSlotId,
+        };
 
         let component = make_test_component("session-prefix-core").await;
         let endpoint = component.endpoint("backend");
@@ -2709,6 +2726,39 @@ mod tests {
         .await
         .unwrap();
 
+        // The worker's cache owner holds the same chain in host memory.
+        let owner = CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                ClusterId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        );
+        router
+            .indexer
+            .set_residency_projection(ResidencyProjection::new([(owner, worker)]).unwrap());
+        let host_store = indexer::test_util::store_event(
+            7,
+            0,
+            2,
+            &[],
+            &hashes.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+            StorageTier::HostPinned,
+        );
+        router
+            .indexer
+            .try_apply_event(RouterEvent::with_cache_owner(
+                7,
+                host_store.event,
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+
         for (session, admission, update_states, return_hashes) in [
             (
                 "advisory",
@@ -2780,6 +2830,23 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // The owner's store credited the seeded session; admitted routing credited the rest.
+        let owner_lineage = |session: &str| {
+            session_index
+                .get_session_block_lineage_in_tier(
+                    session,
+                    SessionResidencyOwner::CacheOwner(
+                        ResidencyOwner::cache_owner(owner).compact_key(),
+                    ),
+                    StorageTier::HostPinned,
+                    None,
+                )
+                .unwrap()
+        };
+        for session in ["seed", "query", "booked"] {
+            assert_eq!(owner_lineage(session), vec![expected.clone()]);
+        }
+        assert!(owner_lineage("advisory").is_empty());
         assert_eq!(session_index.session_count(), 3);
     }
 

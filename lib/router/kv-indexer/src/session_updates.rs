@@ -10,8 +10,9 @@ use std::{
 };
 
 use crate::prelude::{
-    ExternalSequenceBlockHash, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
-    WorkerId, WorkerWithDpRank,
+    ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, ResetScope, ResidencyDomain,
+    ResidencyOwner, ResidencyOwnerKey, ResidencyOwnerKeyExt, RouterEvent, StorageTier, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::{
     ConcurrentRadixTreeCompressed, KvIndexer, KvRouterError, LowerTierIndexers,
@@ -32,6 +33,7 @@ struct ResidencyVersions {
     by_rank: DashMap<WorkerWithDpRank, AtomicU64>,
     lifecycle_by_rank: DashMap<WorkerWithDpRank, AtomicU64>,
     lifecycle_by_worker_id: DashMap<WorkerId, AtomicU64>,
+    lifecycle_by_cache_owner: DashMap<ResidencyOwnerKey, AtomicU64>,
 }
 
 impl ResidencyVersions {
@@ -94,6 +96,27 @@ impl ResidencyVersions {
             }
         }
     }
+
+    /// Lifecycle of the owner a store names. A cache owner outlives its worker, so only
+    /// its own clear advances it.
+    fn lifecycle_of(&self, owner: SessionResidencyOwner) -> u64 {
+        match owner {
+            SessionResidencyOwner::Worker(worker) => self.current_lifecycle(worker),
+            SessionResidencyOwner::CacheOwner(owner) => self
+                .lifecycle_by_cache_owner
+                .get(&owner)
+                .map_or(0, |version| version.load(Ordering::Acquire)),
+            SessionResidencyOwner::SharedCache(_) => 0,
+        }
+    }
+
+    fn advance_cache_owner_lifecycle(&self, owner: ResidencyOwnerKey) {
+        let next_version = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+        self.lifecycle_by_cache_owner
+            .entry(owner)
+            .or_default()
+            .store(next_version, Ordering::Release);
+    }
 }
 
 enum SessionUpdateMessage {
@@ -108,8 +131,16 @@ pub(super) enum SessionMutation {
         matched_hash: ExternalSequenceBlockHash,
         residency_version: u64,
     },
+    /// A routed request's chain, matched against the cache owner attached to the selected
+    /// worker. The owner's depth is read when the update applies, behind the lower-tier
+    /// barrier, so a removal queued later still recedes it.
+    CacheOwnerMatched {
+        owner: ResidencyOwnerKey,
+        session_id: String,
+        block_hashes: Vec<LocalBlockHash>,
+    },
     Stored {
-        worker: WorkerWithDpRank,
+        owner: SessionResidencyOwner,
         tier: StorageTier,
         session_id: String,
         parent_hash: Option<ExternalSequenceBlockHash>,
@@ -117,20 +148,22 @@ pub(super) enum SessionMutation {
         lifecycle_version: u64,
     },
     /// A tier stored blocks without naming a session, such as a device offload to host
-    /// memory or a host load-back to the device.
+    /// memory, a host load-back to the device, or any store by a cache owner.
     Inherited {
-        worker: WorkerWithDpRank,
+        owner: SessionResidencyOwner,
         tier: StorageTier,
         block_hashes: Vec<ExternalSequenceBlockHash>,
         lifecycle_version: u64,
     },
     Removed {
-        worker: WorkerWithDpRank,
+        owner: SessionResidencyOwner,
         tier: StorageTier,
         block_hashes: Vec<ExternalSequenceBlockHash>,
     },
+    /// A reset of a worker rank, of a cache owner, or of both.
     Cleared {
-        worker: WorkerWithDpRank,
+        worker: Option<WorkerWithDpRank>,
+        cache_owner: Option<ResidencyOwnerKey>,
     },
     WorkerRemoved {
         worker_id: WorkerId,
@@ -138,24 +171,36 @@ pub(super) enum SessionMutation {
 }
 
 impl SessionMutation {
-    /// Session frontiers follow device events and worker-owned lower tiers. Shared
-    /// cache-owner residency is not attributed to a worker rank.
-    pub(super) fn from_event(
+    /// Session frontiers follow device events, worker-owned lower tiers, and cache-owner
+    /// tiers. A cache-owner event names its owner in `state_source`; its worker id is not
+    /// validated, so it is never read as the owner.
+    fn from_event(
         event: &RouterEvent,
         targets_primary: bool,
-        lifecycle_version: u64,
+        residency_versions: &ResidencyVersions,
     ) -> Option<Self> {
-        if !targets_primary && event.resolved_residency_domain() != Ok(ResidencyDomain::Worker) {
-            return None;
-        }
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
         let tier = event.storage_tier;
+        // The owner of a store or a removal.
+        let owner = || {
+            if targets_primary || event.resolved_residency_domain() == Ok(ResidencyDomain::Worker) {
+                return Some(SessionResidencyOwner::Worker(worker));
+            }
+            match event.residency_owner() {
+                Ok(owner @ ResidencyOwner::CacheOwner(_)) => {
+                    Some(SessionResidencyOwner::CacheOwner(owner.compact_key()))
+                }
+                _ => None,
+            }
+        };
         match &event.event.data {
             KvCacheEventData::Stored(stored) => {
+                let owner = owner()?;
                 let block_hashes = stored.blocks.iter().map(|block| block.block_hash).collect();
+                let lifecycle_version = residency_versions.lifecycle_of(owner);
                 match event.session_id.clone() {
                     Some(session_id) => Some(Self::Stored {
-                        worker,
+                        owner,
                         tier,
                         session_id,
                         parent_hash: stored.parent_hash,
@@ -163,7 +208,7 @@ impl SessionMutation {
                         lifecycle_version,
                     }),
                     None => Some(Self::Inherited {
-                        worker,
+                        owner,
                         tier,
                         block_hashes,
                         lifecycle_version,
@@ -171,22 +216,42 @@ impl SessionMutation {
                 }
             }
             KvCacheEventData::Removed(removed) => Some(Self::Removed {
-                worker,
+                owner: owner()?,
                 tier,
                 block_hashes: removed.block_hashes.clone(),
             }),
-            KvCacheEventData::Cleared => Some(Self::Cleared { worker }),
+            KvCacheEventData::Cleared => {
+                let cache_owner = event
+                    .state_source
+                    .map(|source| ResidencyOwner::cache_owner(source).compact_key());
+                // The same scopes the lower-tier index clears.
+                match event.reset_scope().ok()?? {
+                    ResetScope::All => Some(Self::Cleared {
+                        worker: Some(worker),
+                        cache_owner,
+                    }),
+                    ResetScope::Domain(ResidencyDomain::Worker) => Some(Self::Cleared {
+                        worker: Some(worker),
+                        cache_owner: None,
+                    }),
+                    ResetScope::Domain(ResidencyDomain::CacheOwner) => Some(Self::Cleared {
+                        worker: None,
+                        cache_owner: Some(cache_owner?),
+                    }),
+                }
+            }
         }
     }
 
+    /// The worker rank whose index lanes this mutation follows.
     pub(super) fn worker(&self) -> Option<WorkerWithDpRank> {
         match self {
-            Self::Matched { worker, .. }
-            | Self::Stored { worker, .. }
-            | Self::Inherited { worker, .. }
-            | Self::Removed { worker, .. }
-            | Self::Cleared { worker } => Some(*worker),
-            Self::WorkerRemoved { .. } => None,
+            Self::Matched { worker, .. } => Some(*worker),
+            Self::Stored { owner, .. }
+            | Self::Inherited { owner, .. }
+            | Self::Removed { owner, .. } => owner.as_worker(),
+            Self::Cleared { worker, .. } => *worker,
+            Self::CacheOwnerMatched { .. } | Self::WorkerRemoved { .. } => None,
         }
     }
 
@@ -195,7 +260,10 @@ impl SessionMutation {
             Self::Stored { tier, .. }
             | Self::Inherited { tier, .. }
             | Self::Removed { tier, .. } => Some(*tier),
-            Self::Matched { .. } | Self::Cleared { .. } | Self::WorkerRemoved { .. } => None,
+            Self::Matched { .. }
+            | Self::CacheOwnerMatched { .. }
+            | Self::Cleared { .. }
+            | Self::WorkerRemoved { .. } => None,
         }
     }
 
@@ -236,60 +304,92 @@ impl SessionMutation {
                     tracing::warn!(%error, %session_id, ?worker, "failed to record session prefix match");
                 }
             }
+            Self::CacheOwnerMatched {
+                owner,
+                session_id,
+                block_hashes,
+            } => {
+                for (tier, lower_tier) in barrier.lower_tier.entries() {
+                    let Some(matched_hash) = lower_tier
+                        .backend()
+                        .exact_owner_prefix_end(&block_hashes, owner)
+                    else {
+                        continue;
+                    };
+                    if let Err(error) = index.update_session_from_match_in_tier(
+                        &session_id,
+                        SessionResidencyOwner::CacheOwner(owner),
+                        tier,
+                        matched_hash,
+                    ) {
+                        tracing::warn!(%error, %session_id, ?owner, ?tier, "failed to record session cache-owner match");
+                    }
+                }
+            }
             Self::Stored {
-                worker,
+                owner,
                 tier,
                 session_id,
                 parent_hash,
                 block_hashes,
                 lifecycle_version,
             } => {
-                if residency_versions.current_lifecycle(worker) != lifecycle_version {
+                if residency_versions.lifecycle_of(owner) != lifecycle_version {
                     return;
                 }
                 if let Err(error) = index.update_session_from_stored_blocks_in_tier(
                     &session_id,
-                    SessionResidencyOwner::Worker(worker),
+                    owner,
                     tier,
                     parent_hash,
                     &block_hashes,
                 ) {
-                    tracing::warn!(%error, %session_id, ?worker, ?tier, "failed to record stored session blocks");
+                    tracing::warn!(%error, %session_id, ?owner, ?tier, "failed to record stored session blocks");
                 }
             }
             Self::Inherited {
-                worker,
+                owner,
                 tier,
                 block_hashes,
                 lifecycle_version,
             } => {
-                if residency_versions.current_lifecycle(worker) != lifecycle_version {
+                if residency_versions.lifecycle_of(owner) != lifecycle_version {
                     return;
                 }
-                index.inherit_stored_blocks(
-                    SessionResidencyOwner::Worker(worker),
-                    tier,
-                    &block_hashes,
-                );
+                // A cache owner stores what its attached worker deposits.
+                let attached = match owner {
+                    SessionResidencyOwner::CacheOwner(owner) => barrier
+                        .lower_tier
+                        .projected_worker(owner)
+                        .map(SessionResidencyOwner::Worker),
+                    _ => None,
+                };
+                index.inherit_stored_blocks_from(owner, tier, attached, &block_hashes);
             }
             Self::Removed {
-                worker,
+                owner,
                 tier,
                 block_hashes,
             } => {
                 // Versions guard route-time device matches only.
-                if tier.is_gpu() {
+                if tier.is_gpu()
+                    && let Some(worker) = owner.as_worker()
+                {
                     residency_versions.advance(worker);
                 }
-                index.update_session_from_removed_blocks_in_tier(
-                    SessionResidencyOwner::Worker(worker),
-                    tier,
-                    &block_hashes,
-                );
+                index.update_session_from_removed_blocks_in_tier(owner, tier, &block_hashes);
             }
-            Self::Cleared { worker } => {
-                residency_versions.advance(worker);
-                index.clear_owner_frontiers(SessionResidencyOwner::Worker(worker));
+            Self::Cleared {
+                worker,
+                cache_owner,
+            } => {
+                if let Some(worker) = worker {
+                    residency_versions.advance(worker);
+                    index.clear_owner_frontiers(SessionResidencyOwner::Worker(worker));
+                }
+                if let Some(owner) = cache_owner {
+                    index.clear_owner_frontiers(SessionResidencyOwner::CacheOwner(owner));
+                }
             }
             Self::WorkerRemoved { worker_id } => {
                 index.clear_worker_id_frontiers(worker_id);
@@ -335,8 +435,9 @@ impl PrimaryBarrier {
 }
 
 /// Orders session mutations after the physical indexes they describe: the primary
-/// for every worker in a batch, and the lower-tier lane for each `(worker, tier)` a
-/// lower-tier mutation names.
+/// for every worker in a batch, the lower-tier lane for each `(worker, tier)` a
+/// lower-tier mutation names, and every lower-tier lane when one names a cache owner,
+/// whose lane is keyed by the owner and not by a worker.
 struct ResidencyBarrier {
     primary: PrimaryBarrier,
     lower_tier: LowerTierIndexers,
@@ -353,6 +454,12 @@ impl ResidencyBarrier {
         for (worker, tier) in lanes {
             if let Some(indexer) = self.lower_tier.get(tier) {
                 indexer.flush_worker_lane_and_wait(worker).await?;
+            }
+        }
+        // A mutation with no worker lane names a cache owner (or removes a worker).
+        if mutations.iter().any(|mutation| mutation.worker().is_none()) {
+            for indexer in self.lower_tier.all() {
+                indexer.flush_and_wait().await?;
             }
         }
         Ok(())
@@ -439,20 +546,24 @@ impl SessionUpdateSender {
         event: &RouterEvent,
         targets_primary: bool,
     ) -> Option<SessionMutation> {
-        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-        SessionMutation::from_event(
-            event,
-            targets_primary,
-            self.residency_versions.current_lifecycle(worker),
-        )
+        SessionMutation::from_event(event, targets_primary, &self.residency_versions)
     }
 
     pub(super) fn enqueue(&self, mutation: SessionMutation) -> Result<(), KvRouterError> {
         // Lifecycle generations advance in ingestion order, so a store ingested after a
         // clear carries the new generation even before the clear itself is applied.
         match &mutation {
-            SessionMutation::Cleared { worker } => {
-                self.residency_versions.advance_rank_lifecycle(*worker);
+            SessionMutation::Cleared {
+                worker,
+                cache_owner,
+            } => {
+                if let Some(worker) = worker {
+                    self.residency_versions.advance_rank_lifecycle(*worker);
+                }
+                if let Some(owner) = cache_owner {
+                    self.residency_versions
+                        .advance_cache_owner_lifecycle(*owner);
+                }
             }
             SessionMutation::WorkerRemoved { worker_id } => {
                 self.residency_versions.advance_worker_lifecycle(*worker_id);
