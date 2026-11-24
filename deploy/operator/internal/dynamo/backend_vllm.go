@@ -43,9 +43,8 @@ type VLLMBackend struct {
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
-	// The worker rejects DYN_FORWARDPASS_METRIC_PORT under --systemone-serial,
-	// so drop the worker default for an opted-in worker. A port the user set
-	// stays, and the worker still rejects it at startup.
+	// A --systemone-serial worker rejects DYN_FORWARDPASS_METRIC_PORT, so drop the
+	// operator default; a port the user set stays and still fails startup.
 	if isSystemOneSerialOptIn(container) && !userSetsEnvVar(component, forwardPassMetricPortEnvVar) {
 		removeEnvVar(container, forwardPassMetricPortEnvVar)
 	}
@@ -142,11 +141,8 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	return nil
 }
 
-// isSystemOneSerialOptIn resolves --systemone-serial the way dynamo.vllm does:
-// the last --systemone-serial or --no-systemone-serial wins, and only without
-// either flag does DYN_VLLM_SYSTEMONE_SERIAL apply, with parse_bool's truthy
-// values. A value set through valueFrom cannot be read at render time, so it
-// does not count as opting in; the worker then fails at startup as before.
+// isSystemOneSerialOptIn mirrors dynamo.vllm: the last (--no-)systemone-serial flag wins,
+// else a literal truthy DYN_VLLM_SYSTEMONE_SERIAL; valueFrom does not count.
 func isSystemOneSerialOptIn(container *corev1.Container) bool {
 	for _, arg := range slices.Backward(getExpandedCommandLine(container)) {
 		switch arg {

@@ -7130,9 +7130,8 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	}
 }
 
-// TestGenerateBasePodSpec_VLLMSystemOneSerialOmitsFPMPort renders vLLM workers end
-// to end: one that opts in to --systemone-serial gets no operator
-// DYN_FORWARDPASS_METRIC_PORT, while an ordinary worker and a user-set port keep it.
+// TestGenerateBasePodSpec_VLLMSystemOneSerialOmitsFPMPort: a --systemone-serial worker gets
+// no operator FPM port; an ordinary worker and a user-set port keep it.
 func TestGenerateBasePodSpec_VLLMSystemOneSerialOmitsFPMPort(t *testing.T) {
 	tests := []struct {
 		name        string

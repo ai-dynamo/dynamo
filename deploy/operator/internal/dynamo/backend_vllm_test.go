@@ -1467,9 +1467,8 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 	}
 }
 
-// TestVLLMBackend_UpdateContainer_SystemOneSerial covers the worker FPM default
-// for a --systemone-serial opt-in: dynamo.vllm rejects DYN_FORWARDPASS_METRIC_PORT
-// under that profile, so the operator default goes.
+// TestVLLMBackend_UpdateContainer_SystemOneSerial checks that a --systemone-serial
+// opt-in drops the operator DYN_FORWARDPASS_METRIC_PORT default.
 func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 	operatorDefault := corev1.EnvVar{Name: forwardPassMetricPortEnvVar, Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)}
 	optInEnv := func(value string) corev1.EnvVar { return corev1.EnvVar{Name: systemOneSerialEnvVar, Value: value} }
