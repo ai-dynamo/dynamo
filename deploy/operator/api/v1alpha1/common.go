@@ -376,6 +376,11 @@ type FailoverSpec struct {
 	// cold-start (snapshot-less) failover with the vLLM backend.
 	// +optional
 	GraphArchive *GraphArchiveSpec `json:"graphArchive,omitempty"`
+	// EngineLauncher starts each engine container through the pre-imported
+	// engine launcher (`python3 -m dynamo.vllm.launcher -- <args>`), which
+	// replaces a dead engine in the same container. Same as the v1beta1 field.
+	// +optional
+	EngineLauncher bool `json:"engineLauncher,omitempty"`
 }
 
 // GraphArchiveSpec configures the pod-local CUDA graph archive shared by the

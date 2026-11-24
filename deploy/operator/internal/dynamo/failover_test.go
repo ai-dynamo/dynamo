@@ -36,6 +36,7 @@ import (
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -989,6 +990,273 @@ func TestIsIntraPodFailoverEnabled(t *testing.T) {
 
 func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
 	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames())
+}
+
+// --- Engine launcher ---
+
+func TestUseEngineLauncher_CommandShapes(t *testing.T) {
+	tests := []struct {
+		name         string
+		command      []string
+		args         []string
+		launcherArgs []string
+		wantCommand  []string
+		wantArgs     []string
+		wantErr      string
+	}{
+		{
+			name:        "module in command",
+			command:     []string{"python3", "-m", "dynamo.vllm"},
+			args:        []string{"--model", "Qwen/Qwen3-0.6B"},
+			wantCommand: []string{"python3", "-m", "dynamo.vllm.launcher", "--"},
+			wantArgs:    []string{"--model", "Qwen/Qwen3-0.6B"},
+		},
+		{
+			name:        "arguments in command",
+			command:     []string{"/usr/bin/python3.12", "-m", "dynamo.vllm", "--model", "m"},
+			wantCommand: []string{"/usr/bin/python3.12", "-m", "dynamo.vllm.launcher", "--", "--model", "m"},
+		},
+		{
+			name:        "module in args",
+			command:     []string{"python"},
+			args:        []string{"-m", "dynamo.vllm", "--model", "m"},
+			wantCommand: []string{"python"},
+			wantArgs:    []string{"-m", "dynamo.vllm.launcher", "--", "--model", "m"},
+		},
+		{
+			name:         "launcher options",
+			command:      []string{"python3", "-m", "dynamo.vllm", "--model", "m"},
+			launcherArgs: []string{"--liveness-url", "http://127.0.0.1:9090/live"},
+			wantCommand:  []string{"python3", "-m", "dynamo.vllm.launcher", "--liveness-url", "http://127.0.0.1:9090/live", "--", "--model", "m"},
+		},
+		{
+			name:         "launcher options, module in args",
+			command:      []string{"python3"},
+			args:         []string{"-m", "dynamo.vllm"},
+			launcherArgs: []string{"--liveness-period", "5"},
+			wantCommand:  []string{"python3"},
+			wantArgs:     []string{"-m", "dynamo.vllm.launcher", "--liveness-period", "5", "--"},
+		},
+		{name: "shell", command: []string{"sh", "-c"}, args: []string{"python3 -m dynamo.vllm --model m"}, wantErr: "separate items `python3`, `-m`, `dynamo.vllm`"},
+		{name: "interpreter flag", command: []string{"python3", "-u", "-m", "dynamo.vllm"}, wantErr: "separate items"},
+		{name: "other backend", command: []string{"python3", "-m", "dynamo.sglang"}, wantErr: "separate items"},
+		{name: "already a launcher", command: []string{"python3", "-m", "dynamo.vllm.launcher", "--"}, wantErr: "separate items"},
+		// Rendering runs an empty command through a shell, so the image entrypoint form cannot be rewritten.
+		{name: "no command, engine in args", args: []string{"python3", "-m", "dynamo.vllm"}, wantErr: "separate items"},
+		{name: "no command", wantErr: "separate items"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := corev1.Container{Command: tt.command, Args: tt.args}
+			err := useEngineLauncher(&c, tt.launcherArgs...)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCommand, c.Command)
+			assert.Equal(t, tt.wantArgs, c.Args)
+		})
+	}
+}
+
+func TestApplyEngineLauncher_ColdStartEngines(t *testing.T) {
+	t.Log("Build the cold-start engine pair, one engine with its own OpenBLAS setting")
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B"}
+	require.NoError(t, buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil))
+	ps.Containers[1].Env = append(ps.Containers[1].Env, corev1.EnvVar{Name: openBLASThreadsEnvVar, Value: "4"})
+	before := ps.DeepCopy()
+
+	t.Log("Start both engines through the launcher")
+	require.NoError(t, applyEngineLauncher(&ps, 1, false))
+
+	t.Log("Only the command, the liveness probe and the OpenBLAS default change: engine arguments, startup and readiness probes stay")
+	want := before.DeepCopy()
+	for i := range failoverEngineCount {
+		liveFile := fmt.Sprintf("/tmp/dynamo-launcher-engine-%d.live", i)
+		want.Containers[i].Command = []string{
+			"python3", "-m", "dynamo.vllm.launcher",
+			// The engine's own probe (Kubernetes defaults: 10 s, 1 s, 3) and
+			// startup budget (3 x 10 s), now run by the launcher.
+			"--liveness-url", fmt.Sprintf("http://127.0.0.1:%d/health", 9090+i),
+			"--liveness-period", "10", "--liveness-timeout", "1", "--liveness-failure-threshold", "3",
+			"--startup-timeout", "30", "--liveness-file", liveFile,
+			"--",
+		}
+		want.Containers[i].LivenessProbe = &corev1.Probe{
+			Exec: &corev1.ExecAction{Command: []string{
+				"sh", "-c", fmt.Sprintf(`test "$(cut -d. -f1 /proc/uptime)" -lt "$(cat %s)"`, liveFile),
+			}},
+			PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 3,
+		}
+	}
+	want.Containers[0].Env = append(want.Containers[0].Env, corev1.EnvVar{Name: openBLASThreadsEnvVar, Value: "1"})
+	assert.Equal(t, want, &ps)
+}
+
+func TestMoveLivenessProbeToLauncher(t *testing.T) {
+	gracePeriod := int64(45)
+	liveFile := "/tmp/dynamo-launcher-engine-1.live"
+	execOnFile := &corev1.ExecAction{Command: []string{
+		"sh", "-c", `test "$(cut -d. -f1 /proc/uptime)" -lt "$(cat /tmp/dynamo-launcher-engine-1.live)"`,
+	}}
+	for _, tt := range []struct {
+		name      string
+		liveness  *corev1.Probe
+		startup   *corev1.Probe
+		wantArgs  []string
+		wantProbe *corev1.Probe
+		wantErr   string
+	}{
+		{name: "no liveness probe"},
+		{
+			name: "named port, explicit host, no startup probe",
+			liveness: &corev1.Probe{
+				HTTPGet:             &corev1.HTTPGetAction{Host: "10.0.0.7", Path: "/live", Port: intstr.FromString("system-1")},
+				InitialDelaySeconds: 20, PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 1,
+				TerminationGracePeriodSeconds: &gracePeriod,
+			},
+			wantArgs: []string{
+				"--liveness-url", "http://10.0.0.7:9091/live",
+				"--liveness-period", "5", "--liveness-timeout", "4", "--liveness-failure-threshold", "1",
+				// Without a startup probe the liveness probe's own delay and threshold bound the start.
+				"--startup-timeout", "25", "--liveness-file", liveFile,
+			},
+			// The delay and the grace period stay with the container's probe.
+			wantProbe: &corev1.Probe{
+				Exec:                execOnFile,
+				InitialDelaySeconds: 20, PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 1,
+				TerminationGracePeriodSeconds: &gracePeriod,
+			},
+		},
+		{
+			name:     "Kubernetes defaults, startup probe budget",
+			liveness: &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system-1")}},
+			startup:  &corev1.Probe{InitialDelaySeconds: 60, PeriodSeconds: 10, FailureThreshold: 720},
+			wantArgs: []string{
+				"--liveness-url", "http://127.0.0.1:9091/live",
+				"--liveness-period", "10", "--liveness-timeout", "1", "--liveness-failure-threshold", "3",
+				"--startup-timeout", "7260", "--liveness-file", liveFile,
+			},
+			wantProbe: &corev1.Probe{Exec: execOnFile, PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 3},
+		},
+		{
+			// Kubelet inserts the slash and keeps the query; so must the launcher's URL.
+			name:     "numeric port, path without a leading slash, query",
+			liveness: &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "live?full=true", Port: intstr.FromInt32(9191)}},
+			wantArgs: []string{
+				"--liveness-url", "http://127.0.0.1:9191/live?full=true",
+				"--liveness-period", "10", "--liveness-timeout", "1", "--liveness-failure-threshold", "3",
+				"--startup-timeout", "30", "--liveness-file", liveFile,
+			},
+			wantProbe: &corev1.Probe{Exec: execOnFile, PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 3},
+		},
+		{
+			name:     "empty path, IPv6 host",
+			liveness: &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Host: "::1", Port: intstr.FromInt32(9191)}},
+			wantArgs: []string{
+				"--liveness-url", "http://[::1]:9191/",
+				"--liveness-period", "10", "--liveness-timeout", "1", "--liveness-failure-threshold", "3",
+				"--startup-timeout", "30", "--liveness-file", liveFile,
+			},
+			wantProbe: &corev1.Probe{Exec: execOnFile, PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 3},
+		},
+		{name: "exec probe", liveness: &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"true"}}}, wantErr: "plain HTTP GET"},
+		{name: "https", liveness: &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Scheme: corev1.URISchemeHTTPS, Port: intstr.FromInt32(9091)}}, wantErr: "plain HTTP GET"},
+		{name: "headers", liveness: &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Port: intstr.FromInt32(9091), HTTPHeaders: []corev1.HTTPHeader{{Name: "a", Value: "b"}}}}, wantErr: "plain HTTP GET"},
+		{name: "unknown port name", liveness: &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Port: intstr.FromString("system")}}, wantErr: `port "system" to be a port of container engine-1`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Hand the engine container's liveness probe to the launcher")
+			c := &corev1.Container{
+				Name:          "engine-1",
+				Ports:         []corev1.ContainerPort{{Name: "system-1", ContainerPort: 9091}},
+				LivenessProbe: tt.liveness,
+				StartupProbe:  tt.startup,
+			}
+			args, err := moveLivenessProbeToLauncher(c)
+
+			t.Log("Check the launcher options and the probe left on the container")
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantArgs, args)
+			assert.Equal(t, tt.wantProbe, c.LivenessProbe)
+			assert.Equal(t, tt.startup, c.StartupProbe)
+		})
+	}
+}
+
+func TestApplyEngineLauncher_RejectsUnsupportedLayouts(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		numberOfNodes   int32
+		snapshotEnabled bool
+		command         []string
+		wantErr         string
+	}{
+		{name: "checkpoint", numberOfNodes: 1, snapshotEnabled: true, command: []string{"python3", "-m", "dynamo.vllm"}, wantErr: "checkpoint"},
+		{name: "multinode", numberOfNodes: 2, command: []string{"python3", "-m", "dynamo.vllm"}, wantErr: "single node"},
+		{name: "shell command", numberOfNodes: 1, command: []string{"sh", "-c", "python3 -m dynamo.vllm"}, wantErr: "failover.engineLauncher requires the main container's command"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build the cold-start engine pair")
+			ps := intraPodFailoverPodSpec()
+			ps.Containers[0].Command = tt.command
+			require.NoError(t, buildColdStartFailoverPod(&ps, tt.numberOfNodes, BackendFrameworkVLLM, nil))
+			before := ps.DeepCopy()
+
+			t.Log("The launcher is refused and neither engine is changed")
+			require.ErrorContains(t, applyEngineLauncher(&ps, tt.numberOfNodes, tt.snapshotEnabled), tt.wantErr)
+			assert.Equal(t, before, &ps)
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_EngineLauncherWithGraphArchive(t *testing.T) {
+	t.Log("Declare a cold-start vLLM failover worker with both the graph archive and the engine launcher")
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: v1beta1.ComponentTypeWorker,
+		Experimental: &v1beta1.ExperimentalSpec{
+			GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+			Failover: &v1beta1.FailoverSpec{
+				Mode:           v1beta1.GMSModeIntraPod,
+				GraphArchive:   &v1beta1.GraphArchiveSpec{},
+				EngineLauncher: true,
+			},
+		},
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: commonconsts.MainContainerName, Image: "runtime:1.6.0", Command: []string{"python3", "-m", "dynamo.vllm"},
+			Args:      []string{"--model", "Qwen/Qwen3-0.6B"},
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("1")}},
+		}}}},
+	}
+
+	t.Log("Admission accepts the combination")
+	assert.Empty(t, ValidateFailoverGraphArchive(component, field.NewPath("spec"), ""))
+	assert.Empty(t, ValidateEngineLauncher(component, field.NewPath("spec"), ""))
+
+	t.Log("Render the worker pod")
+	podSpec, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{}, "test-deployment", "default", RoleMain, 1,
+		&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(1))
+	require.NoError(t, err)
+	require.True(t, hasVolume(podSpec, gmsGraphArchiveVolumeName), "archive volume")
+
+	t.Log("Both engines keep the archive mount and path and start through the launcher")
+	archiveMount := corev1.VolumeMount{Name: gmsGraphArchiveVolumeName, MountPath: gmsGraphArchiveMountPath}
+	for i, engine := range podSpec.Containers[:failoverEngineCount] {
+		assert.Equal(t, fmt.Sprintf("engine-%d", i), engine.Name)
+		assert.Contains(t, engine.VolumeMounts, archiveMount, "%s archive mount", engine.Name)
+		assert.Equal(t, gmsGraphArchiveMountPath, envToMap(engine.Env)[gmsGraphArchiveEnvVar], "%s archive env", engine.Name)
+		assert.Equal(t, []string{"python3", "-m", engineLauncherModule}, engine.Command[:3], "%s command", engine.Name)
+		assert.Equal(t, "--", engine.Command[len(engine.Command)-1], "%s command", engine.Name)
+		assert.Equal(t, []string{"--model", "Qwen/Qwen3-0.6B"}, engine.Args[:2], "%s engine args", engine.Name)
+		require.NotNil(t, engine.LivenessProbe, "%s liveness probe", engine.Name)
+		assert.NotNil(t, engine.LivenessProbe.Exec, "%s liveness probe checks the launcher", engine.Name)
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
