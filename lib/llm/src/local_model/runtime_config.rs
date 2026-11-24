@@ -47,6 +47,10 @@ pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
+/// The worker's resolved engine configuration can compile structural tags.
+pub const TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_supported";
+
 /// Runtime-data key indicating that the backend compiles a lark
 /// `guided_decoding.grammar` with llguidance, so `<[id]>` special tokens and
 /// `%json` schemas are valid. Absence means `false`.

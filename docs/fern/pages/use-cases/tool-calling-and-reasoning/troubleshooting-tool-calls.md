@@ -136,22 +136,31 @@ the parser configuration, or the parser logic.
 
 Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on workers that build parser-dependent guidance. Workers publish `--dyn-tool-call-parser` and `--dyn-reasoning-parser`; the frontend runs parsing. Restart after changing the environment because version selection is cached. For release-specific parser versions, inspect `Cargo.toml` and `Cargo.lock` in your release checkout. The development [Cargo.toml](https://github.com/ai-dynamo/dynamo/blob/main/Cargo.toml) and [Cargo.lock](https://github.com/ai-dynamo/dynamo/blob/main/Cargo.lock) links track `main`. The frontend-crates library examples may target a newer release.
 
-To inspect the parser capabilities linked into your Dynamo installation, run:
+To list the parsers available in your Dynamo installation, run:
 
 ```bash
-python -m dynamo.frontend --list-parser-capabilities
+python -m dynamo.frontend --list-parsers
 ```
 
-The command prints JSON and exits before serving starts. Save the exact linked catalog with `python -m dynamo.frontend --list-parser-capabilities > parser-capabilities.json`. To inspect one selector mapping, run `python -m dynamo.frontend --list-parser-capabilities | jq ' .unified[] | select(.family == "mistral_4" or (.aliases | index("mistral"))) '`. `unified` maps canonical families to aliases, compatible tool selectors, automatic-selection restrictions, vocabulary requirements, input capabilities, token preservation, and grammar guidance. `legacy` lists the registered V1 tool and reasoning selectors with their capabilities. For example, `mistral` maps to `mistral_4`, whose vocabulary requirements include `[ARGS]`. This is library capability discovery; model setup still checks the configured selector pair and tokenizer, and request preparation negotiates backend guidance. Rust integrations must register vendor parsers before the first Dynamo parser discovery or model setup. Dynamo retains that effective catalog for the process; restart after changing registrations.
+The command prints JSON and exits before serving starts. Save the exact linked catalog with `python -m dynamo.frontend --list-parsers > parser-capabilities.json`. To inspect one selector mapping, run `python -m dynamo.frontend --list-parsers | jq ' .unified[] | select(.family == "mistral_4" or (.aliases | index("mistral"))) '`. `unified` maps canonical families to aliases, compatible tool selectors, automatic-selection restrictions, vocabulary requirements, input capabilities, token preservation, and grammar guidance. `legacy` lists the registered V1 tool and reasoning selectors with their capabilities. For example, `mistral` maps to `mistral_4`, whose vocabulary requirements include `[ARGS]`. This is library capability discovery; model setup still checks the configured selector pair and tokenizer, and request preparation negotiates backend guidance. Rust integrations must register vendor parsers before the first Dynamo parser discovery or model setup. Dynamo retains that effective catalog for the process; restart after changing registrations.
 
 To inspect or serve with a trusted Rust parser plugin, supply its absolute library path. Plugins should be built against the compatible frontend-crates SDK. The library executes in the Dynamo process.
 
 ```bash
-python -m dynamo.frontend --list-parser-capabilities \
+python -m dynamo.frontend --list-parsers \
   --tool-parser-plugin /opt/dynamo/plugins/libacme_parser.so
 ```
 
-Use the same `--tool-parser-plugin` flag on the frontend and on the worker that publishes the model. On the worker, pass the plugin's registered name as `--dyn-tool-call-parser`, `--dyn-reasoning-parser`, or both as appropriate for that parser. The worker and frontend must use the same library build for a selected parser. The first plugin ABI supports decoded text and optional triggered structural tags on Unified V2 routes.
+Use the same `--tool-parser-plugin` flag on the frontend and on the worker that publishes the model. On the worker, pass the plugin's registered name as `--dyn-tool-call-parser`, `--dyn-reasoning-parser`, or both as appropriate for that parser. The worker and frontend must use the same library build for a selected parser. Plugin ABI v1 accepts decoded text and optional triggered structural tags. ABI v2 also supports token-only parsers, parser checkpoints, and required structural tags. A worker must advertise structural-tag support before Dynamo can use a plugin that requires a tag for the request.
+
+For example, a vLLM worker that selects the plugin for tool calls can be launched with:
+
+```bash
+python -m dynamo.frontend --tool-parser-plugin /opt/dynamo/plugins/libacme_parser.so
+python -m dynamo.vllm --model /models/acme --tool-parser-plugin /opt/dynamo/plugins/libacme_parser.so --dyn-tool-call-parser acme
+```
+
+Use `python -m dynamo.sglang` for an SGLang worker and pass its model path with `--model-path`. For a built-in parser, the worker selects the registered name with the same `--dyn-tool-call-parser` flag and both processes can omit `--tool-parser-plugin`.
 
 | `DYN_PARSER_VERSION` | Compatible Unified configuration | Unavailable or incompatible configuration |
 | --- | --- | --- |

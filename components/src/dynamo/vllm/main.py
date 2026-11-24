@@ -1065,6 +1065,12 @@ async def register_vllm_model(
         config.exclude_tools_when_tool_choice_none
     )
     runtime_config.set_structural_tag(config.structural_tag)
+    runtime_config.set_engine_specific(
+        "tool_call_structural_tag_supported",
+        json.dumps(
+            vllm_config.structured_outputs_config.backend in ("auto", "xgrammar")
+        ),
+    )
 
     # Propagate stream_interval so the frontend can respect --stream-interval.
     # set_engine_specific requires a JSON-encoded string (the Rust binding

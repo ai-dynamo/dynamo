@@ -70,6 +70,7 @@ use super::NvCreateChatCompletionStreamResponse;
 #[cfg(test)]
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
+#[cfg(test)]
 fn create_unified_parser_for_family(
     family: &str,
     tools: &[Tool],
@@ -97,6 +98,7 @@ pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
 /// The empty thought channel Gemma 4 opens with thinking off.
 pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
+#[cfg(test)]
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
 #[cfg(test)]
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
@@ -104,6 +106,7 @@ pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
 /// parser, so the `beam` + `beam` pair routes to the unified parser without
 /// `DYN_PARSER_VERSION=2`, like DeepSeek V4.1.
 pub(crate) const BEAM_UNIFIED_FAMILY: &str = "beam";
+#[cfg(test)]
 pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
 /// Nemotron 3 (Ultra, Super, 3.5 Super): `nemotron_v3` forced reasoning over the
 /// Qwen3-Coder XML tool grammar. Model cards pair `--dyn-tool-call-parser qwen3_coder`
@@ -111,18 +114,8 @@ pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
 #[cfg(test)]
 pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 /// The Mistral v11+ native grammar.
+#[cfg(test)]
 pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
-const MISTRAL_REASONING_START: &str = "[THINK]";
-// TODO(parser removal): Let the parser own native boundary detection after
-// a pre-parsed chunk. Verify quoted markers and partial calls across splits.
-const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
-
-fn uses_qwen_xml_grammar(family: &str) -> bool {
-    self::registration(family).is_some_and(|entry| {
-        entry.descriptor.native_grammar == dynamo_parsers_v2::unified::NativeGrammar::QwenXml
-    })
-}
-
 /// Register vendors before first parser discovery or model setup. The process uses one
 /// effective catalog for selector storage, descriptors, factories, and request policy.
 type Registration = dynamo_parsers_v2::UnifiedParserRegistration;
@@ -170,11 +163,10 @@ pub(super) fn load_plugins(paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
     dynamo_parsers_v2::unified::register_loaded_unified_parsers(entries)
 }
 
-pub(crate) fn registration(selector: &str) -> Option<dynamo_parsers_v2::UnifiedParserRegistration> {
+pub(crate) fn registration(selector: &str) -> Option<&'static Registration> {
     registrations()
         .iter()
         .find(|entry| entry.descriptor.accepts(selector))
-        .cloned()
 }
 
 pub(crate) fn plugin_identities(
@@ -187,7 +179,7 @@ pub(crate) fn plugin_identities(
         .filter_map(|selector| {
             let entry = registration(selector)?;
             let identity = entry.plugin_identity()?.to_owned();
-            Some((entry.descriptor.family, identity))
+            Some((entry.descriptor.family.clone(), identity))
         })
         .collect()
 }
@@ -200,10 +192,7 @@ pub(crate) fn validate_auto_pair(
 }
 
 pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
-    registrations()
-        .iter()
-        .find(|entry| entry.descriptor.accepts(parser))
-        .map(|entry| entry.descriptor.family.as_str())
+    registration(parser).map(|entry| entry.descriptor.family.as_str())
 }
 
 /// Aliases that still route but are scheduled for removal, paired with the family
@@ -213,7 +202,7 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
 /// TODO(next minor): remove the deprecated selector from the upstream descriptor so
 /// the alias becomes a startup error.
 pub(crate) fn deprecated_alias_warning(parser: &str) -> Option<String> {
-    let descriptor = registration(parser)?.descriptor;
+    let descriptor = &registration(parser)?.descriptor;
     if !descriptor
         .deprecated_aliases
         .iter()
@@ -421,7 +410,10 @@ impl UnifiedRequestPolicy {
         family: &str,
         prefix: Option<std::sync::Arc<str>>,
     ) -> Option<HarmonyPrefill> {
-        if family == "gpt_oss" && self.multiple_choices {
+        if self.multiple_choices
+            && self::registration(family)
+                .is_some_and(|entry| entry.descriptor.token_prompt_prefix.is_some())
+        {
             prefix.map(HarmonyPrefill::new)
         } else {
             None
@@ -436,7 +428,8 @@ impl UnifiedRequestPolicy {
         has_explicit_guided_decoding: bool,
         harmony_required_array: impl FnOnce() -> bool,
     ) -> StreamPrefill {
-        if family == "gpt_oss"
+        if self::registration(family)
+            .is_some_and(|entry| entry.descriptor.token_prompt_prefix.is_some())
             && (has_explicit_guided_decoding
                 || constraint.installs_guided_json() && !harmony_required_array())
         {
@@ -711,28 +704,14 @@ impl JsonPrefillProbe {
         family: &str,
         terminal: bool,
     ) -> Option<UnifiedParserStartingState> {
-        // Muse Spark's prompt ends at `<|start|>assistant`, so every turn opens with
-        // a ` to=<recipient>` header whose `t` would otherwise read as JSON `true`.
-        if self::registration(family).is_some_and(|entry| entry.descriptor.preserve_message_phases)
+        if let Some(prefix) =
+            self::registration(family).and_then(|entry| entry.descriptor.native_response_prefix)
         {
-            const HEADER: &str = "to=";
-            let text = self.text.trim_start();
-            if text.starts_with(HEADER) {
+            let (text, marker) = prefix(&self.text);
+            if text.starts_with(marker) {
                 return Some(UnifiedParserStartingState::None);
             }
-            if !terminal && !text.is_empty() && HEADER.starts_with(text) {
-                return None;
-            }
-        }
-        // Mistral output starts in content and `[THINK]` opens reasoning, which looks
-        // like a JSON array root; hand it to the native parser instead, and hold a
-        // split opener until it is complete or disproved.
-        if family == MISTRAL_UNIFIED_FAMILY {
-            let text = self.text.trim_start_matches([' ', '\r', '\n', '\t']);
-            if text.starts_with(MISTRAL_REASONING_START) {
-                return Some(UnifiedParserStartingState::None);
-            }
-            if !terminal && MISTRAL_REASONING_START.starts_with(text) {
+            if !terminal && marker.starts_with(text) {
                 return None;
             }
         }
@@ -908,10 +887,13 @@ impl HarmonyPrefill {
         true
     }
 
-    fn token_ids(&mut self) -> anyhow::Result<&[u32]> {
+    fn token_ids(
+        &mut self,
+        encode: fn(&str) -> anyhow::Result<Vec<u32>>,
+    ) -> anyhow::Result<&[u32]> {
         if self.token_ids.is_none() {
             self.token_ids = Some(
-                dynamo_parsers_v2::unified::harmony::encode_harmony(
+                encode(
                     self.prefix
                         .as_deref()
                         .ok_or_else(|| anyhow::anyhow!("consumed prefix was released"))?,
@@ -1228,19 +1210,21 @@ fn batch_tool_output_mode(
     content: &str,
     constraint: &GuidedToolConstraint,
 ) -> UnifiedToolOutputMode {
-    let tool_parser = if uses_qwen_xml_grammar(family) {
-        QWEN3_TOOL_CALL_PARSER
-    } else {
-        family
-    };
-    let native_call = if let Some(entry) = self::registration(family)
-        && entry.descriptor.batch_prefill == dynamo_parsers_v2::unified::BatchPrefill::NamedChannels
-    {
-        entry.descriptor.has_native_call(content)
-    } else {
-        self::registration(family).is_some_and(|entry| entry.descriptor.has_native_call(content))
-            || first_unquoted_native_tool_call_marker(content, tool_parser).is_some()
-    };
+    let entry = self::registration(family);
+    let native_call = entry.is_some_and(|entry| entry.descriptor.has_native_call(content))
+        || match entry.map(|entry| &entry.descriptor) {
+            Some(descriptor)
+                if descriptor.batch_prefill
+                    == dynamo_parsers_v2::unified::BatchPrefill::NamedChannels =>
+            {
+                false
+            }
+            Some(descriptor) if descriptor.native_tool_boundary.is_some() => descriptor
+                .native_tool_boundary
+                .and_then(|boundary| boundary().first_call_marker(content))
+                .is_some(),
+            _ => first_unquoted_native_tool_call_marker(content, family).is_some(),
+        };
     if constraint.installs_guided_json() && native_call {
         UnifiedToolOutputMode::Native
     } else {
@@ -1248,37 +1232,11 @@ fn batch_tool_output_mode(
     }
 }
 
-/// Ask the grammar owner which source bytes remain uncommitted. A literal tool
-/// closer inside an argument must not hide an unfinished sibling from recovery.
+#[cfg(test)]
 fn glm_unfinished_call(input: &str) -> anyhow::Result<Option<usize>> {
-    let mut parser = create_unified_parser_for_family(GLM47_UNIFIED_FAMILY, &[])?;
-    let mut output = UnifiedParserOutput::default();
-    parser.parse_into(input, &mut output)?;
-    let pending = parser.reset();
-    let prefix = input
-        .strip_suffix(&pending)
-        .ok_or_else(|| anyhow::anyhow!("GLM pending input is not a source suffix"))?;
-    // Only prose after the last completed call can quote a pending marker.
-    // Argument quotes belong to the native grammar and cannot span sibling calls.
-    let mut prose = String::new();
-    for event in output.events {
-        match event {
-            UnifiedParserEvent::ToolCall(call) if call.complete => prose.clear(),
-            UnifiedParserEvent::Text(text) | UnifiedParserEvent::Reasoning(text) => {
-                prose.push_str(&text)
-            }
-            _ => {}
-        }
-    }
-    let pending_offset = prose.len();
-    prose.push_str(&pending);
-    let markers = native_tool_call_start_tokens(GLM47_UNIFIED_FAMILY)
-        .expect("registered GLM native grammar has start tokens");
-    Ok(markers
-        .iter()
-        .filter_map(|marker| first_unquoted_marker_position_after(&prose, marker, pending_offset))
-        .min()
-        .map(|start| prefix.len() + start - pending_offset))
+    self::registration(GLM47_UNIFIED_FAMILY)
+        .and_then(|entry| entry.descriptor.unfinished_native_call_start)
+        .expect("registered unfinished-call probe")(input)
 }
 
 /// Merge adjacent same-kind text/reasoning deltas so one `push` does not become three
@@ -1379,9 +1337,8 @@ enum NativeGrammarState {
 
 /// Adapter ordering state for the Qwen XML dialect; source responses live longer
 /// than a parser instance and remain in `ChoiceRecord`.
-#[derive(Default)]
 struct QwenXmlStreamState {
-    lexical_state: QwenNativeLexicalState,
+    lexical_state: Box<dyn dynamo_parsers_v2::unified::NativeToolBoundary>,
     /// Buffered text whose interpretation is unresolved, rather than a source position.
     pending_opener: String,
     /// Must follow recovered opener text on mismatch and precede completed call events.
@@ -1395,141 +1352,9 @@ struct QwenXmlStreamState {
     deferred_reasoning_choice_indices: HashSet<usize>,
 }
 
-#[derive(Default)]
 struct GlmNativeStreamState {
     input_for_truncation_check: String,
-}
-
-/// Per-choice streaming state: one parser instance plus the bookkeeping the OpenAI
-/// streaming tool-call contract needs. One instance parses exactly one choice of one
-/// request, which is what gives per-stream isolation by construction.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum QwenNativeLexicalMode {
-    #[default]
-    OutsideBlock,
-    InsideBlock,
-    ParameterHeader,
-    ParameterValue,
-}
-
-#[derive(Clone, Default)]
-struct QwenNativeLexicalState {
-    mode: QwenNativeLexicalMode,
-    marker_tail: String,
-}
-
-impl QwenNativeLexicalState {
-    fn observe(&mut self, text: &str) {
-        const BLOCK_START: &str = "<tool_call>";
-        const BLOCK_END: &str = "</tool_call>";
-        const PARAMETER_START: &str = "<parameter=";
-        const PARAMETER_END: &str = "</parameter>";
-        const FUNCTION_END: &str = "</function>";
-
-        let mut input = std::mem::take(&mut self.marker_tail);
-        input.push_str(text);
-        loop {
-            match self.mode {
-                QwenNativeLexicalMode::OutsideBlock => {
-                    if let Some(start) = input.find(BLOCK_START) {
-                        input.drain(..start + BLOCK_START.len());
-                        self.mode = QwenNativeLexicalMode::InsideBlock;
-                    } else {
-                        self.retain_partial_suffix(&input, &[BLOCK_START]);
-                        return;
-                    }
-                }
-                QwenNativeLexicalMode::InsideBlock => {
-                    let parameter = input.find(PARAMETER_START);
-                    let block_end = input.find(BLOCK_END);
-                    match (parameter, block_end) {
-                        (Some(parameter), Some(block_end)) if block_end < parameter => {
-                            input.drain(..block_end + BLOCK_END.len());
-                            self.mode = QwenNativeLexicalMode::OutsideBlock;
-                        }
-                        (Some(parameter), _) => {
-                            input.drain(..parameter + PARAMETER_START.len());
-                            self.mode = QwenNativeLexicalMode::ParameterHeader;
-                        }
-                        (None, Some(block_end)) => {
-                            input.drain(..block_end + BLOCK_END.len());
-                            self.mode = QwenNativeLexicalMode::OutsideBlock;
-                        }
-                        (None, None) => {
-                            self.retain_partial_suffix(&input, &[PARAMETER_START, BLOCK_END]);
-                            return;
-                        }
-                    }
-                }
-                QwenNativeLexicalMode::ParameterHeader => {
-                    let header_end = input.find('>');
-                    if let Some(function_end) = input.find(FUNCTION_END)
-                        && header_end.is_none_or(|end| function_end < end)
-                    {
-                        input.drain(..function_end + FUNCTION_END.len());
-                        self.mode = QwenNativeLexicalMode::InsideBlock;
-                    } else if let Some(header_end) = header_end {
-                        input.drain(..header_end + 1);
-                        self.mode = QwenNativeLexicalMode::ParameterValue;
-                    } else {
-                        self.retain_partial_suffix(&input, &[FUNCTION_END]);
-                        return;
-                    }
-                }
-                QwenNativeLexicalMode::ParameterValue => {
-                    // Native parameter values own literal function/block markers.
-                    // Only their own delimiter permits a detour to start another call.
-                    if let Some(at) = input.find(PARAMETER_END) {
-                        input.drain(..at + PARAMETER_END.len());
-                        self.mode = QwenNativeLexicalMode::InsideBlock;
-                    } else {
-                        self.retain_partial_suffix(&input, &[PARAMETER_END]);
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    fn retain_partial_suffix(&mut self, input: &str, markers: &[&str]) {
-        let suffix_length = markers
-            .iter()
-            .flat_map(|marker| (1..marker.len()).map(move |length| &marker[..length]))
-            .filter(|prefix| input.ends_with(prefix))
-            .map(str::len)
-            .max()
-            .unwrap_or_default();
-        self.marker_tail = input[input.len() - suffix_length..].to_string();
-    }
-}
-
-fn qwen_opener_resolution(held: &str, text: &str) -> Option<(usize, bool)> {
-    const BLOCK_START: &str = "<tool_call>";
-    for (start, character) in text.char_indices() {
-        let end = start + character.len_utf8();
-        let candidate = format!("{held}{}", &text[..end]);
-        if candidate == BLOCK_START {
-            return Some((end, true));
-        }
-        if !BLOCK_START.starts_with(&candidate) {
-            return Some((end, false));
-        }
-    }
-    None
-}
-
-fn qwen_partial_opener_suffix_start(
-    lexical_state: &QwenNativeLexicalState,
-    text: &str,
-) -> Option<usize> {
-    const BLOCK_START: &str = "<tool_call>";
-    let start = (1..BLOCK_START.len())
-        .rev()
-        .find(|length| text.ends_with(&BLOCK_START[..*length]))
-        .map(|length| text.len() - length)?;
-    let mut before_candidate = lexical_state.clone();
-    before_candidate.observe(&text[..start]);
-    (before_candidate.mode == QwenNativeLexicalMode::OutsideBlock).then_some(start)
+    unfinished_call_start: fn(&str) -> anyhow::Result<Option<usize>>,
 }
 
 #[derive(Default)]
@@ -1744,6 +1569,7 @@ pub(crate) struct ChoiceState {
     incomplete_native_call: bool,
     family: String,
     native_completion_authoritative: bool,
+    preserve_message_phases: bool,
     errors_are_fatal: bool,
     message_boundaries: Vec<Option<super::MessageBoundary>>,
     parser: Box<dyn UnifiedParser>,
@@ -1814,7 +1640,8 @@ impl ChoiceState {
             guided_streaming,
             argument_framing,
             cache,
-            registration.as_ref(),
+            registration,
+            None,
         )
     }
 
@@ -1827,22 +1654,20 @@ impl ChoiceState {
         argument_framing: ArgumentFraming,
         mut cache: Option<&mut HarmonyPrefill>,
         registration: Option<&dynamo_parsers_v2::UnifiedParserRegistration>,
+        parser_prompt_token_ids: Option<&[u32]>,
     ) -> anyhow::Result<Self> {
-        // TODO(parser removal): Move continuation preparation to the parser.
-        // Verify cached and uncached initialization produce the same choice events.
-        // The built-in Harmony initializer resets its call counter. Replay consumed
-        // tokens afterward so the open call and later calls share that counter.
-        // Guided JSON inherits only the resolved channel, since its request constraint
-        // owns the tool envelope. Vendor overrides retain their initialization contract.
-        let harmony = family == "gpt_oss";
-        let native_harmony = harmony && matches!(&tool_output_mode, UnifiedToolOutputMode::Native);
+        // Replay native token prefixes after initialization so open and subsequent
+        // calls share the same counter. Vendor factories own their initialization.
         let registration =
             registration.ok_or_else(|| anyhow::anyhow!("unknown parser family '{family}'"))?;
-        let vendor_harmony = harmony && registration.is_vendor();
-        let builtin_native_harmony = native_harmony && !vendor_harmony;
+        let token_prefix = registration.descriptor.token_prompt_prefix;
+        let native_mode = matches!(&tool_output_mode, UnifiedToolOutputMode::Native);
+        let native_token_prefix = token_prefix.filter(|_| native_mode);
+        let vendor_token_prefix = token_prefix.filter(|_| registration.is_vendor());
+        let builtin_native_prefix = native_token_prefix.is_some() && !registration.is_vendor();
         let continuation = cache
             .as_deref()
-            .filter(|cache| builtin_native_harmony && cache.matches_prefix(prefill.prefix.as_ref()))
+            .filter(|cache| builtin_native_prefix && cache.matches_prefix(prefill.prefix.as_ref()))
             .and_then(|cache| cache.continuation.as_ref());
         let mut parser = if let Some(continuation) = continuation {
             let mut parser = continuation.fork()?;
@@ -1850,34 +1675,37 @@ impl ChoiceState {
             parser
         } else {
             let mut parser = registration.create(tools)?;
-            let replay_harmony = builtin_native_harmony && parser.input_capabilities().token_ids;
-            let mut harmony_prefix_tokens = if native_harmony || vendor_harmony {
+            let replay_prefix = builtin_native_prefix && parser.input_capabilities().token_ids;
+            let mut prefix_tokens = if let Some(codec) = native_token_prefix.or(vendor_token_prefix)
+            {
                 prefill
                     .prefix
                     .as_deref()
                     .or_else(|| {
-                        (native_harmony
-                            && prefill.starting_state == UnifiedParserStartingState::None)
-                            .then_some("<|start|>assistant")
+                        (native_mode && prefill.starting_state == UnifiedParserStartingState::None)
+                            .then_some(codec.empty_assistant_prefix)
                     })
                     .map(|prefix| {
-                        if replay_harmony
+                        if replay_prefix
                             && let Some(cache) = cache.as_deref_mut()
                             && cache.matches_prefix(prefill.prefix.as_ref())
                         {
-                            return cache.token_ids().map(std::borrow::Cow::Borrowed);
+                            return cache
+                                .token_ids(codec.encode)
+                                .map(std::borrow::Cow::Borrowed);
                         }
-                        dynamo_parsers_v2::unified::harmony::encode_harmony(prefix)
-                            .map(std::borrow::Cow::Owned)
+                        (codec.encode)(prefix).map(std::borrow::Cow::Owned)
                     })
                     .transpose()?
             } else {
                 None
             };
-            let prompt_token_ids = if replay_harmony {
+            let prompt_token_ids = if let Some(ids) = parser_prompt_token_ids {
+                ids.to_vec()
+            } else if replay_prefix {
                 Vec::new()
             } else {
-                harmony_prefix_tokens
+                prefix_tokens
                     .take()
                     .map(std::borrow::Cow::into_owned)
                     .unwrap_or_default()
@@ -1894,7 +1722,10 @@ impl ChoiceState {
             parser.initialize_request(UnifiedParserInit {
                 prompt_token_ids,
                 starting_state: if prefill.prefix.is_some()
-                    && (!harmony || native_harmony || vendor_harmony)
+                    && registration.descriptor.text_input
+                    && (token_prefix.is_none()
+                        || native_token_prefix.is_some()
+                        || vendor_token_prefix.is_some())
                 {
                     UnifiedParserStartingState::None
                 } else {
@@ -1904,12 +1735,12 @@ impl ChoiceState {
                 invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
             })?;
             apply_argument_framing(family, parser.as_mut(), argument_framing)?;
-            if let Some(tokens) = harmony_prefix_tokens {
+            if let Some(tokens) = prefix_tokens {
                 // Consumed prompt deltas stay private; token replay preserves literal
                 // delimiter fragments without joining them to generated text.
                 replay_consumed_harmony(parser.as_mut(), &tokens, 256)?;
             }
-            if replay_harmony
+            if replay_prefix
                 && let Some(cache) = cache
                 && cache.matches_prefix(prefill.prefix.as_ref())
             {
@@ -1922,7 +1753,8 @@ impl ChoiceState {
             }
             parser
         };
-        if family != "gpt_oss"
+        if token_prefix.is_none()
+            && registration.descriptor.text_input
             && let Some(prefix) = prefill.prefix
         {
             // Replay only consumed structural bytes; the grammar retains ownership
@@ -1936,13 +1768,22 @@ impl ChoiceState {
         }
         Ok(Self {
             native_grammar_state: if matches!(&tool_output_mode, UnifiedToolOutputMode::Native) {
-                if uses_qwen_xml_grammar(family) {
-                    NativeGrammarState::QwenXml(QwenXmlStreamState::default())
-                } else if self::registration(family).is_some_and(|entry| {
-                    entry.descriptor.native_grammar
-                        == dynamo_parsers_v2::unified::NativeGrammar::GlmXml
-                }) {
-                    NativeGrammarState::Glm(GlmNativeStreamState::default())
+                if let Some(boundary) = registration.descriptor.native_tool_boundary {
+                    NativeGrammarState::QwenXml(QwenXmlStreamState {
+                        lexical_state: boundary(),
+                        pending_opener: String::new(),
+                        deferred_reasoning: Vec::new(),
+                        deferred_logprobs: None,
+                        deferred_reasoning_event_indices: HashSet::new(),
+                        deferred_reasoning_choice_indices: HashSet::new(),
+                    })
+                } else if let Some(unfinished_call_start) =
+                    registration.descriptor.unfinished_native_call_start
+                {
+                    NativeGrammarState::Glm(GlmNativeStreamState {
+                        input_for_truncation_check: String::new(),
+                        unfinished_call_start,
+                    })
                 } else {
                     NativeGrammarState::None
                 }
@@ -1954,6 +1795,7 @@ impl ChoiceState {
             message_boundaries: Vec::new(),
             parser,
             errors_are_fatal: registration.descriptor.errors_are_fatal,
+            preserve_message_phases: registration.descriptor.preserve_message_phases,
             native_completion_authoritative: registration
                 .descriptor
                 .native_completion_authoritative,
@@ -2008,13 +1850,11 @@ impl ChoiceState {
             return text_delta(text.to_string());
         }
         if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state
-            && qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+            && qwen.lexical_state.outside_call()
         {
             let held = std::mem::take(&mut qwen.pending_opener);
             if !qwen.deferred_reasoning.is_empty() && !held.is_empty() {
-                if let Some((_resolution_end, opener_completed)) =
-                    qwen_opener_resolution(&held, text)
-                {
+                if let Some(opener_completed) = qwen.lexical_state.resolve_opener(&held, text) {
                     let mut combined = held.clone();
                     combined.push_str(text);
                     let mut events = self.parse_segment(&combined);
@@ -2035,7 +1875,7 @@ impl ChoiceState {
 
             let mut combined = held;
             combined.push_str(text);
-            if let Some(start) = qwen_partial_opener_suffix_start(&qwen.lexical_state, &combined) {
+            if let Some(start) = qwen.lexical_state.partial_opener_suffix_start(&combined) {
                 let safe_text = combined[..start].to_string();
                 qwen.pending_opener = combined[start..].to_string();
                 return if safe_text.is_empty() {
@@ -2049,14 +1889,15 @@ impl ChoiceState {
         self.parse_segment(text)
     }
 
-    fn qwen_resumed_marker_can_start_call(&self) -> bool {
+    fn can_restart_native_call(&self, text: &str) -> bool {
         matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
-            if qwen.lexical_state.mode != QwenNativeLexicalMode::ParameterValue)
+            if qwen.lexical_state.can_restart_call()
+                && qwen.lexical_state.first_call_marker(text).is_some_and(|marker| text[..marker].trim().is_empty()))
     }
 
     fn has_pending_qwen_xml_opener(&self) -> bool {
         matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
-            if qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+            if qwen.lexical_state.outside_call()
                 && !qwen.pending_opener.is_empty())
     }
 
@@ -2092,6 +1933,15 @@ impl ChoiceState {
                 output.events
             }
         }
+    }
+
+    fn push_token_ids(&mut self, ids: &[u32]) -> Vec<UnifiedParserEvent> {
+        let mut output = UnifiedParserOutput::default();
+        if let Err(error) = self.parser.parse_token_ids_into(ids, &mut output) {
+            self.failed = true;
+            self.parse_error = Some(error);
+        }
+        output.events
     }
 
     /// Scores held since the previous queued reasoning were generated before this
@@ -2192,7 +2042,7 @@ impl ChoiceState {
         }
         if let NativeGrammarState::Glm(glm) = &self.native_grammar_state {
             let input = &glm.input_for_truncation_check;
-            match glm_unfinished_call(input) {
+            match (glm.unfinished_call_start)(input) {
                 Ok(Some(start)) => {
                     self.incomplete_native_call = true;
                     tracing::warn!(
@@ -2206,7 +2056,7 @@ impl ChoiceState {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    tracing::warn!(%error, why = "glm_pending_input_failed", "using parser finish recovery")
+                    tracing::warn!(%error, why = "native_pending_input_failed", "using parser finish recovery")
                 }
             }
         }
@@ -2374,7 +2224,7 @@ impl ChoiceState {
         for (position, delta) in deltas.into_iter().enumerate() {
             // Muse Spark boundaries feed the Responses API through the sidecar.
             // Other families must not create empty chunks for optional metadata.
-            if self.family != MUSE_SPARK_UNIFIED_FAMILY
+            if !self.preserve_message_phases
                 && matches!(
                     delta,
                     UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd
@@ -2769,7 +2619,7 @@ pub(crate) fn parse_complete_with_eos(
         mode.clone(),
         policy,
         confirmed_eos,
-        &registration,
+        registration,
     ) {
         Err(guided_error) if !matches!(mode, UnifiedToolOutputMode::Native) => {
             match parse_complete_in_mode(
@@ -2780,7 +2630,7 @@ pub(crate) fn parse_complete_with_eos(
                 UnifiedToolOutputMode::Native,
                 policy,
                 confirmed_eos,
-                &registration,
+                registration,
             ) {
                 Ok(parsed)
                     if !parsed.tool_calls.is_empty()
@@ -2816,9 +2666,7 @@ fn parse_complete_in_mode(
 ) -> anyhow::Result<CompleteOutput> {
     let tools = to_v2_tools(Some(tool_definitions));
     let mut parser = registration.create(&tools)?;
-    parser.preserve_message_phases(
-        self::registration(family).is_some_and(|entry| entry.descriptor.preserve_message_phases),
-    );
+    parser.preserve_message_phases(registration.descriptor.preserve_message_phases);
     // `batch_tool_output_mode` drops to `Native` on observed markup even when the
     // constraint reconstructed a `GuidedJsonNamed` pin. That native fallback recovers
     // whatever tool name the markup happens to contain, so it must be checked against
@@ -2831,19 +2679,24 @@ fn parse_complete_in_mode(
         }
         _ => None,
     };
-    let incomplete_start = (self::registration(family).is_some_and(|entry| {
-        entry.descriptor.native_grammar == dynamo_parsers_v2::unified::NativeGrammar::GlmXml
-    }) && matches!(&effective_mode, UnifiedToolOutputMode::Native))
-    .then(|| glm_unfinished_call(content))
-    .transpose()?
-    .flatten();
+    let incomplete_start = match (
+        registration.descriptor.unfinished_native_call_start,
+        &effective_mode,
+    ) {
+        (Some(probe), UnifiedToolOutputMode::Native) => probe(content)?,
+        _ => None,
+    };
     let content = &content[..incomplete_start.unwrap_or(content.len())];
     parser.initialize_request(UnifiedParserInit {
-        prompt_token_ids: if family == "gpt_oss"
-            && matches!(&effective_mode, UnifiedToolOutputMode::Native)
-            && content.trim_start().starts_with("to=")
-        {
-            dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+        prompt_token_ids: if matches!(&effective_mode, UnifiedToolOutputMode::Native) {
+            registration
+                .descriptor
+                .token_prompt_prefix
+                .and_then(|codec| {
+                    (codec.batch_prefix)(content).map(|prefix| (codec.encode)(prefix))
+                })
+                .transpose()?
+                .unwrap_or_default()
         } else {
             Vec::new()
         },
@@ -3652,6 +3505,7 @@ where
         guided_streaming,
         policy,
         registration,
+        None,
     )
 }
 
@@ -3663,7 +3517,8 @@ pub(crate) fn apply_stream_with_registration<S>(
     family: &'static str,
     guided_streaming: bool,
     policy: UnifiedRequestPolicy,
-    registration: Option<dynamo_parsers_v2::UnifiedParserRegistration>,
+    registration: Option<&'static Registration>,
+    parser_prompt_token_ids: Option<std::sync::Arc<[u32]>>,
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -3674,14 +3529,15 @@ where
     } = prefill.into();
     let policy = policy.under(&guided_tool_constraint);
     let prefill = policy.starting_state(family, prefill);
+    let uses_token_prefix =
+        registration.is_some_and(|entry| entry.descriptor.token_prompt_prefix.is_some());
     let mut prefill_prefix = prefill_prefix.filter(|_| {
-        family == "gpt_oss"
+        uses_token_prefix
             || prefill == UnifiedParserStartingState::Reasoning
-            || registration
-                .as_ref()
-                .is_some_and(Registration::has_plugin_prompt)
+            || registration.is_some_and(Registration::has_plugin_prompt)
     });
-    let has_consumed_harmony_prefix = family == "gpt_oss" && prefill_prefix.is_some();
+    let has_consumed_token_prefix = uses_token_prefix && prefill_prefix.is_some();
+    let token_input = registration.is_some_and(|entry| !entry.descriptor.text_input);
     let argument_framing = argument_framing(family, &guided_tool_constraint);
     let mut harmony_prefill_cache = policy.harmony_prefill_cache(family, prefill_prefix.clone());
     let tools = to_v2_tools(tool_definitions.as_deref());
@@ -3717,6 +3573,11 @@ where
                 yield response;
                 continue;
             };
+            let parser_token_ids = chat.parser_token_ids.take();
+            if parser_token_ids.is_some() && chat.inner.choices.len() != 1 {
+                yield Annotated::from_error("parser token delta must belong to exactly one choice");
+                return;
+            }
 
             {
                 let mut next = Annotated::from_data(chat.clone());
@@ -3880,7 +3741,6 @@ where
                             .reasoning_content
                             .as_ref()
                             .is_some_and(|reasoning| !reasoning.is_empty())
-                        && uses_qwen_xml_grammar(family)
                         && states.get(&original.index).is_some_and(ChoiceState::has_pending_qwen_xml_opener);
                     if preserve_reasoning_only_state {
                         // Reasoning is an ordered event between generated bytes, not a
@@ -4037,24 +3897,14 @@ where
                 let new_native_call_after_detour = records
                     .get(&original.index)
                     .is_some_and(|record| record.detoured)
-                    && uses_qwen_xml_grammar(family)
-                    && states
-                        .get(&original.index)
-                        .is_some_and(|state| {
-                            matches!(&state.tool_output_mode, UnifiedToolOutputMode::Native)
-                                && !state.pending_tool_calls.is_empty()
-                                && state.qwen_resumed_marker_can_start_call()
-                        })
-                    && match original.delta.content.as_ref() {
-                        Some(ChatCompletionMessageContent::Text(text)) => {
-                            first_unquoted_structural_tool_call_marker(
-                                text,
-                                QWEN3_TOOL_CALL_PARSER,
-                            )
-                                .is_some_and(|marker| text[..marker].trim().is_empty())
-                        }
-                        _ => false,
-                    };
+                    && states.get(&original.index).is_some_and(|state| {
+                        let Some(ChatCompletionMessageContent::Text(text)) = original.delta.content.as_ref() else {
+                            return false;
+                        };
+                        matches!(&state.tool_output_mode, UnifiedToolOutputMode::Native)
+                            && !state.pending_tool_calls.is_empty()
+                            && state.can_restart_native_call(text)
+                    });
                 if new_native_call_after_detour
                     && let Some(mut state) = states.remove(&original.index)
                 {
@@ -4085,10 +3935,11 @@ where
 
                 let mut detected_prefill = prefill;
                 if !states.contains_key(&original.index)
+                    && !token_input
                     && (prefill == UnifiedParserStartingState::Reasoning
                         || policy.structured_response && prefill == UnifiedParserStartingState::None)
                     && policy.inspects_json_prefill(&guided_tool_constraint)
-                    && !has_consumed_harmony_prefix
+                    && !has_consumed_token_prefix
                     && !records.get(&original.index).is_some_and(|record| record.detoured)
                 {
                     let text = match original.delta.content.as_ref() {
@@ -4154,8 +4005,9 @@ where
                         {
                             UnifiedParserStartingState::Response
                         } else if prefill == UnifiedParserStartingState::Reasoning
+                            && !token_input
                             && policy.inspects_json_prefill(&guided_tool_constraint)
-                            && !has_consumed_harmony_prefix
+                            && !has_consumed_token_prefix
                         {
                             if policy.structured_response {
                                 match original.delta.content.as_ref() {
@@ -4214,9 +4066,9 @@ where
                             prefix: uses_request_prefill.then(|| prefill_prefix.clone()).flatten(),
                         };
                         let cache = if uses_request_prefill { harmony_prefill_cache.as_mut() } else { None };
-                        match ChoiceState::new_with_registration(family, &tools, choice_prefill, mode, guided_streaming, argument_framing, cache, registration.as_ref()) {
+                        match ChoiceState::new_with_registration(family, &tools, choice_prefill, mode, guided_streaming, argument_framing, cache, registration, uses_request_prefill.then_some(parser_prompt_token_ids.as_deref()).flatten()) {
                             Ok(mut state) => {
-                                state.preserve_message_phases(self::registration(family).is_some_and(|entry| entry.descriptor.preserve_message_phases));
+                                state.preserve_message_phases(registration.is_some_and(|entry| entry.descriptor.preserve_message_phases));
                                 // Only a successful checkpoint replaces the request seed.
                                 // Detours use a fresh response parser and never this seed.
                                 if harmony_prefill_cache.as_mut().is_some_and(HarmonyPrefill::release_prefix) {
@@ -4264,6 +4116,10 @@ where
                                 entry.insert(state)
                             }
                             Err(error) => {
+                                if registration.is_some_and(|entry| entry.descriptor.errors_are_fatal) {
+                                    yield Annotated::from_error(error.to_string());
+                                    return;
+                                }
                                 tracing::warn!(
                                     error = %error,
                                     family,
@@ -4278,7 +4134,14 @@ where
                 };
 
                 let mut deltas = Vec::new();
-                if let Some(ChatCompletionMessageContent::Text(text)) =
+                if token_input {
+                    if let Some(ids) = parser_token_ids.as_deref() {
+                        deltas.extend(state.push_token_ids(ids));
+                    } else if original.delta.content.is_some() {
+                        yield Annotated::from_error("token parser received text without backend token IDs");
+                        return;
+                    }
+                } else if let Some(ChatCompletionMessageContent::Text(text)) =
                     original.delta.content.as_ref()
                 {
                     deltas.extend(state.push(text));
@@ -4289,8 +4152,9 @@ where
                     .is_some_and(|record| record.finished);
                 if terminal.is_some() {
                     if !already_finished {
-                        let confirmed_eos = registration.as_ref().is_some_and(|entry| entry.descriptor.guidance.eos_completes_calls)
-                            && matches!(guided_tool_constraint, GuidedToolConstraint::BeamTurnGrammar { .. })
+                        let confirmed_eos = registration.is_some_and(|entry| entry.descriptor.notify_model_eos
+                            || entry.descriptor.guidance.eos_completes_calls
+                                && matches!(guided_tool_constraint, GuidedToolConstraint::BeamTurnGrammar { .. }))
                             && terminal == Some(FinishReason::Stop)
                             && chat.model_eos.contains(&original.index);
                         deltas.extend(state.finish_with_eos(confirmed_eos));
@@ -4494,9 +4358,112 @@ pub(crate) mod tests {
             llm_metrics: None,
             prompt_logprobs: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         };
         Annotated::from_data(response)
+    }
+
+    #[tokio::test]
+    async fn registered_token_input_keeps_prompt_and_choice_tokens_separate() {
+        #[derive(Default)]
+        struct Tokens(Vec<u32>);
+
+        impl UnifiedParser for Tokens {
+            fn initialize_request(&mut self, init: UnifiedParserInit) -> anyhow::Result<()> {
+                self.0 = init.prompt_token_ids;
+                Ok(())
+            }
+
+            fn parse_into(&mut self, _: &str, _: &mut UnifiedParserOutput) -> anyhow::Result<()> {
+                anyhow::bail!("this fixture accepts token IDs");
+            }
+
+            fn parse_token_ids_into(
+                &mut self,
+                ids: &[u32],
+                _: &mut UnifiedParserOutput,
+            ) -> anyhow::Result<()> {
+                self.0.extend_from_slice(ids);
+                Ok(())
+            }
+
+            fn finish(&mut self) -> anyhow::Result<UnifiedParserOutput> {
+                Ok(UnifiedParserOutput::default())
+            }
+
+            fn finish_at_eos(&mut self) -> anyhow::Result<UnifiedParserOutput> {
+                Ok(UnifiedParserOutput {
+                    events: vec![UnifiedParserEvent::Text(format!("{:?}", self.0))],
+                })
+            }
+        }
+
+        // Supply an unfamiliar registration directly, as model setup does.
+        static REGISTRATION: LazyLock<Registration> = LazyLock::new(|| {
+            let mut descriptor =
+                dynamo_parsers_v2::UnifiedParserDescriptor::new("test_token_input");
+            descriptor.text_input = false;
+            descriptor.token_id_input = true;
+            descriptor.notify_model_eos = true;
+            Registration::loaded(descriptor, "fixture".into(), None, None, |_| {
+                Ok(Box::<Tokens>::default())
+            })
+        });
+
+        let item = |choice: u32, token, terminal, eos| {
+            let mut item = chunk("decoded text should be ignored", false);
+            let data = item.data.as_mut().unwrap();
+            data.inner.choices[0].index = choice;
+            data.inner.choices[0].finish_reason = terminal;
+            data.parser_token_ids = Some(vec![token]);
+            if eos {
+                data.model_eos.push(choice);
+            }
+            item
+        };
+        let input = stream::iter([
+            item(1, 21, None, false),
+            item(0, 11, None, false),
+            item(1, 22, Some(FinishReason::Length), false),
+            item(0, 12, Some(FinishReason::Stop), true),
+        ]);
+        let output = apply_stream_with_registration(
+            input,
+            None,
+            GuidedToolConstraint::None,
+            UnifiedParserStartingState::None,
+            "test_token_input",
+            false,
+            UnifiedRequestPolicy {
+                multiple_choices: true,
+                ..Default::default()
+            },
+            Some(&REGISTRATION),
+            Some(std::sync::Arc::from([7, 8])),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let mut text = vec![];
+        let mut terminals = vec![];
+        for event in output {
+            let data = event.ok().unwrap().data.unwrap();
+            assert!(data.parser_token_ids.is_none());
+            for choice in data.inner.choices {
+                if let Some(ChatCompletionMessageContent::Text(content)) = choice.delta.content {
+                    text.push((choice.index, content));
+                }
+                if let Some(finish) = choice.finish_reason {
+                    terminals.push((choice.index, finish));
+                }
+            }
+        }
+        assert_eq!(text, [(0, "[7, 8, 11, 12]".to_string())]);
+        assert_eq!(
+            terminals,
+            [(1, FinishReason::Length), (0, FinishReason::Stop)]
+        );
     }
 
     fn weather_tools() -> Vec<ToolDefinition> {
@@ -5684,6 +5651,7 @@ pub(crate) mod tests {
                     ArgumentFraming::default(),
                     Some(&mut cache),
                     dynamo_parsers_v2::resolve_unified_parser("gpt_oss").as_ref(),
+                    None,
                 )
                 .unwrap();
                 assert_eq!(
@@ -6285,7 +6253,7 @@ pub(crate) mod tests {
                         UnifiedToolOutputMode::Native,
                         QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY,
                     ) => {
-                        assert!(qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock);
+                        assert!(qwen.lexical_state.outside_call());
                         assert!(qwen.pending_opener.is_empty());
                         assert!(qwen.deferred_reasoning.is_empty());
                         assert!(qwen.deferred_reasoning_event_indices.is_empty());
@@ -6617,7 +6585,10 @@ pub(crate) mod tests {
         assert_eq!(actual, expected);
         assert_eq!(phased.take_message_boundaries(), vec![None]);
 
-        phased.family = MUSE_SPARK_UNIFIED_FAMILY.to_owned();
+        phased.preserve_message_phases = self::registration(MUSE_SPARK_UNIFIED_FAMILY)
+            .unwrap()
+            .descriptor
+            .preserve_message_phases;
         let actual = phased.choices_for(&original, deltas, true, Some(FinishReason::Stop));
         assert_eq!(actual.len(), 3);
         assert_eq!(actual[1].delta.content, expected[0].delta.content);
@@ -8784,6 +8755,7 @@ pub(crate) mod tests {
                 llm_metrics: None,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             };
             Annotated::from_data(response)
@@ -10381,6 +10353,7 @@ pub(crate) mod tests {
                 llm_metrics: None,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             };
             Annotated::from_data(response)
@@ -10706,6 +10679,7 @@ pub(crate) mod tests {
         let mut state = ChoiceState {
             errors_are_fatal: false,
             native_completion_authoritative: false,
+            preserve_message_phases: false,
             message_boundaries: Vec::new(),
             native_grammar_state: NativeGrammarState::None,
             incomplete_native_call: false,

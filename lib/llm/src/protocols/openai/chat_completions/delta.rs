@@ -54,6 +54,7 @@ pub struct DeltaGenerator {
     emitted_role_choices: HashSet<u32>,
     suppress_top_logprobs: bool,
     tool_call_eos_enabled: bool,
+    parser_token_ids_enabled: bool,
     /// Whether the unary response should include prompt logprobs at its root.
     should_return_prompt_logprobs: bool,
     /// Prompt logprobs may arrive before the terminal backend delta.
@@ -73,6 +74,7 @@ impl DeltaGenerator {
             emitted_role_choices: HashSet::new(),
             suppress_top_logprobs: false,
             tool_call_eos_enabled: false,
+            parser_token_ids_enabled: false,
             should_return_prompt_logprobs: false,
             prompt_logprobs: None,
         }
@@ -81,6 +83,10 @@ impl DeltaGenerator {
     /// Only the installed native turn grammar permits implicit tool termination.
     pub(crate) fn enable_tool_call_eos(&mut self, enabled: bool) {
         self.tool_call_eos_enabled = enabled;
+    }
+
+    pub(crate) fn enable_parser_token_ids(&mut self, enabled: bool) {
+        self.parser_token_ids_enabled = enabled;
     }
 
     /// Returns the request tracker. Tracking is enabled. For sharing with PreprocessedRequest.
@@ -209,6 +215,7 @@ impl DeltaGenerator {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         }
     }
@@ -237,6 +244,7 @@ impl DeltaGenerator {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         }
     }
@@ -388,6 +396,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             }
         }
 
+        if self.parser_token_ids_enabled {
+            stream_response.parser_token_ids = Some(delta.token_ids);
+        }
         Ok(stream_response)
     }
 

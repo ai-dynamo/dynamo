@@ -3796,6 +3796,7 @@ mod tests {
                 ..Default::default()
             }),
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         };
         let annotated = crate::types::Annotated::from_data(data);
@@ -5671,6 +5672,7 @@ mod tests {
                     prompt_logprobs: None,
                     llm_metrics: None,
                     tool_call_completion: Vec::new(),
+                    parser_token_ids: None,
                     model_eos: Vec::new(),
                 },
             ),
@@ -6064,6 +6066,7 @@ mod tests {
                 llm_metrics,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             };
             Annotated {

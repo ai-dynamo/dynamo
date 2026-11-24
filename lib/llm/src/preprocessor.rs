@@ -248,6 +248,7 @@ pub struct PromptReasoningPrefill {
     unified: bool,
     unified_starting_state: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
     prefix: Option<Arc<str>>,
+    parser_prompt_token_ids: Option<Arc<[u32]>>,
     /// Whether the rendered generation prompt closed reasoning. MiniMax M3
     /// treats an unclosed prompt as open; GLM requires an explicit boundary.
     /// `None` leaves the request's thinking controls authoritative.
@@ -291,6 +292,7 @@ impl From<bool> for PromptReasoningPrefill {
             unified: value,
             unified_starting_state: None,
             prefix: None,
+            parser_prompt_token_ids: None,
             reasoning_closed_by_prompt: None,
             response: false,
             beam_channel: None,
@@ -2057,7 +2059,7 @@ pub struct OpenAIPreprocessor {
     tool_call_parser: Option<String>,
     // Resolved at model setup so requests do not construct parsers to inspect their grammar.
     parser_requires_special_tokens: bool,
-    unified_registration: Option<dynamo_parsers_v2::UnifiedParserRegistration>,
+    unified_registration: Option<&'static dynamo_parsers_v2::UnifiedParserRegistration>,
     /// The model is served by the Beam unified family (`beam` tool-call and reasoning
     /// parsers). Gates Beam-only request semantics: `preserve_thinking`, the
     /// `builtin_tools` rendering view and stop-token visibility for the parser.
@@ -5815,11 +5817,8 @@ impl OpenAIPreprocessor {
 
     /// The Unified family that parses this model's output.
     fn unified_family(&self) -> Option<&'static str> {
-        self.unified_registration.as_ref().and_then(|entry| {
-            crate::protocols::openai::chat_completions::unified_parser::canonical_family(
-                &entry.descriptor.family,
-            )
-        })
+        self.unified_registration
+            .map(|entry| entry.descriptor.family.as_str())
     }
 
     fn tool_processing_route(
@@ -6035,7 +6034,8 @@ impl OpenAIPreprocessor {
                     family,
                     guided_tool_streaming,
                     policy,
-                    self.unified_registration.clone(),
+                    self.unified_registration,
+                    prompt_prefill.parser_prompt_token_ids,
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
@@ -6805,8 +6805,8 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
         let pending_in = Arc::clone(&pending);
 
-        // TODO(parser removal): Have the parser report unfinished native calls
-        // in both streaming and batch before removing the GLM jail recovery.
+        // TODO(remove hard-code names): Use the registered parser's unfinished
+        // native call outcome in streaming and batch to remove GLM jail recovery.
         // The legacy jail recognizes markers with a substring search. Retain
         // GLM47 text per choice so the terminal chunk can use the shared
         // quote-aware marker policy before exposing content to the client.
@@ -6815,15 +6815,20 @@ impl OpenAIPreprocessor {
             input_text: String,
             emitted_text: String,
         }
-        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
-        let glm47_config = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
-        let glm47_start = glm47_config.tool_call_start;
-        let glm47_end = glm47_config.tool_call_end;
+        let recovery_parser = tool_call_parser
+            .as_deref()
+            .and_then(|selector| {
+                dynamo_parsers::tool_calling::parsers::get_tool_parser_map().get_key_value(selector)
+            })
+            .and_then(|(&selector, config)| match &config.parser_config {
+                dynamo_parsers::tool_calling::config::ParserConfig::Glm47(config) => {
+                    Some((selector, config))
+                }
+                _ => None,
+            });
         let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let choice_recovery_in = Arc::clone(&choice_recovery);
-        let glm47_start_in = glm47_start.clone();
-        let glm47_end_in = glm47_end.clone();
 
         // The jail's own (vendored, out-of-scope) finalize logic cannot tell an
         // error-terminated input stream from one that genuinely completed — it
@@ -6912,7 +6917,7 @@ impl OpenAIPreprocessor {
                     }
                 }
             }
-            if is_glm47 && let Some(data) = &a.data {
+            if let (Some((parser, config)), Some(data)) = (recovery_parser, &a.data) {
                 let mut recovery = choice_recovery_in
                     .lock()
                     .expect("choice recovery buffer poisoned");
@@ -6925,17 +6930,17 @@ impl OpenAIPreprocessor {
                         // the suffix after it, so terminal recovery examines the
                         // final unfinished call while the shared scanner decides
                         // whether each opener is real or quoted prose.
-                        while let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47") {
+                        while let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, parser) {
                             let after_marker =
-                                &state.input_text[marker_start + glm47_start_in.len()..];
-                            let Some(end) = after_marker.find(&glm47_end_in) else {
+                                &state.input_text[marker_start + config.tool_call_start.len()..];
+                            let Some(end) = after_marker.find(&config.tool_call_end) else {
                                 break;
                             };
                             state.input_text.drain(
                                 ..marker_start
-                                    + glm47_start_in.len()
+                                    + config.tool_call_start.len()
                                     + end
-                                    + glm47_end_in.len(),
+                                    + config.tool_call_end.len(),
                             );
                             state.emitted_text.clear();
                         }
@@ -6951,7 +6956,7 @@ impl OpenAIPreprocessor {
                         // A response that quotes on every chunk keeps the old growth.
                         if !state.emitted_text.is_empty()
                             && !state.input_text.contains(['"', '\'', '`'])
-                            && crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47").is_none()
+                            && crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, parser).is_none()
                             && let Some(unemitted) =
                                 state.input_text.strip_prefix(state.emitted_text.as_str())
                         {
@@ -7046,6 +7051,7 @@ impl OpenAIPreprocessor {
                     prompt_logprobs,
                     llm_metrics,
                     tool_call_completion: Vec::new(),
+                    parser_token_ids: None,
                     model_eos: Vec::new(),
                 }),
                 id: a.id,
@@ -7056,32 +7062,32 @@ impl OpenAIPreprocessor {
                 error: None,
             };
 
-            if is_glm47 && let Some(data) = &mut nv_chunk.data {
+            if let (Some((parser, _)), Some(data)) = (recovery_parser, &mut nv_chunk.data) {
                 let mut recovery = choice_recovery
                     .lock()
                     .expect("choice recovery buffer poisoned");
                 for choice in &mut data.inner.choices {
                     let state = recovery.entry(choice.index).or_default();
-                    if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
+                    if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, parser) {
                         let desired_content = &state.input_text[..marker_start];
                         // An EOS inside a tool call is incomplete even if the engine reports stop.
                         let dropped_call_reported_as_length = choice.finish_reason
                             == Some(dynamo_protocols::types::FinishReason::Stop)
                             && choice.delta.tool_calls.is_none()
-                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, parser).is_some();
                         if dropped_call_reported_as_length {
                             tracing::warn!(
                                 choice_index = choice.index,
                                 why = "dropped_native_tool_call_reported_as_length",
                                 dropped_bytes = state.input_text.len() - desired_content.len(),
-                                "glm47 streaming: reporting length instead of stop for a tool call dropped at end of stream"
+                                "legacy parser reporting length instead of stop for a tool call dropped at end of stream"
                             );
                             choice.finish_reason =
                                 Some(dynamo_protocols::types::FinishReason::Length);
                         }
                         if choice.finish_reason
                             == Some(dynamo_protocols::types::FinishReason::Length)
-                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, parser).is_some()
                         {
                             // Count EOS drops separately from max_tokens truncation.
                             if !dropped_call_reported_as_length {
@@ -7089,7 +7095,7 @@ impl OpenAIPreprocessor {
                                     choice_index = choice.index,
                                     why = "truncated_native_tool_call_suppressed",
                                     suppressed_bytes = state.input_text.len() - desired_content.len(),
-                                    "glm47 streaming: suppressing incomplete native tool output on length finish"
+                                    "legacy parser suppressing incomplete native tool output on length finish"
                                 );
                             }
                             let replacement = desired_content
@@ -7199,6 +7205,7 @@ impl OpenAIPreprocessor {
                                 prompt_logprobs,
                                 llm_metrics,
                                 tool_call_completion: Vec::new(),
+                                parser_token_ids: None,
                                 model_eos: Vec::new(),
                             }),
                             id: None,
@@ -7535,6 +7542,7 @@ impl OpenAIPreprocessor {
                 unified: resolved.reasoning,
                 unified_starting_state: resolved.starting_state,
                 prefix: resolved.prefix.map(Arc::from),
+                parser_prompt_token_ids: None,
                 reasoning_closed_by_prompt: reasoning_parser.and(resolved.reasoning_closed),
                 response: resolved.channel
                     == Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
@@ -7565,6 +7573,7 @@ impl OpenAIPreprocessor {
             unified,
             unified_starting_state: None,
             prefix: None,
+            parser_prompt_token_ids: None,
             reasoning_closed_by_prompt,
             response: false,
             beam_channel: None,
@@ -7639,7 +7648,7 @@ impl OpenAIPreprocessor {
         if let Some(family) = unified_family {
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
             let descriptor =
-                crate::protocols::openai::chat_completions::unified_parser::registration(family)
+                &crate::protocols::openai::chat_completions::unified_parser::registration(family)
                     .expect("selected registration")
                     .descriptor;
             use dynamo_parsers_v2::unified::ReasoningControl;
@@ -8606,7 +8615,7 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
+        let (mut common_request, annotations, mut prompt_injected_reasoning, image_tokens) = self
             .preprocess_request_with_options(
                 &request,
                 tracker.as_deref(),
@@ -8681,10 +8690,20 @@ impl
         let mm_counts = MultimodalCounts::from_preprocessed(&common_request);
 
         let mut response_generator = Box::new(response_generator);
-        response_generator.enable_tool_call_eos(matches!(
-            guided_tool_constraint,
-            crate::protocols::openai::GuidedToolConstraint::BeamTurnGrammar { .. }
-        ));
+        let registered_input = self.unified_registration.map(|entry| &entry.descriptor);
+        let native_tokens = registered_input.is_some_and(|entry| !entry.text_input);
+        if native_tokens {
+            prompt_injected_reasoning.parser_prompt_token_ids =
+                Some(Arc::from(common_request.token_ids.as_slice()));
+        }
+        response_generator.enable_parser_token_ids(native_tokens);
+        response_generator.enable_tool_call_eos(
+            registered_input.is_some_and(|entry| entry.notify_model_eos)
+                || matches!(
+                    guided_tool_constraint,
+                    crate::protocols::openai::GuidedToolConstraint::BeamTurnGrammar { .. }
+                ),
+        );
 
         // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
         if common_request.prompt_embeds.is_none() {
@@ -12637,6 +12656,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         })
     }
@@ -14792,6 +14812,8 @@ mod tests {
         );
     }
 
+    /// Hermes is the built-in control. The vendor and plugin modes test dynamic
+    /// registry entries through discovery, model-card validation, stream, and batch.
     #[tokio::test]
     async fn registered_family_round_trips_through_model_card_stream_and_batch() {
         let selector =

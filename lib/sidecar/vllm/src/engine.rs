@@ -812,6 +812,11 @@ impl LLMEngine for VllmSidecarEngine {
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
         let mut engine_config = observed.engine_config(!self.mode.is_encode())?;
+        engine_config.runtime_data.insert(
+            dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY
+                .to_string(),
+            Value::Bool(observed.compiles_structural_tags()),
+        );
         if self.engine_gates_reasoning {
             // vLLM applies the tool grammar after reasoning ends, so the
             // frontend must not include a second reasoning phase in it.

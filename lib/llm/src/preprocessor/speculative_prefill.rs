@@ -710,6 +710,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         })
     }

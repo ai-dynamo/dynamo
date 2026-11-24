@@ -385,6 +385,10 @@ pub struct ToolCallCompletion {
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionStreamResponse {
+    /// Token IDs for the single backend choice before in-process parsing.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub parser_token_ids: Option<Vec<u32>>,
     #[serde(skip)]
     pub message_boundary: Option<MessageBoundary>,
     #[serde(flatten)]
@@ -408,7 +412,7 @@ pub struct NvCreateChatCompletionStreamResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(ignore)]
     pub tool_call_completion: Vec<ToolCallCompletion>,
-    /// Choice indices with confirmed model EOS under an installed Beam turn grammar.
+    /// Choice indices with confirmed model EOS for parsers that need that distinction.
     /// User stops, unconstrained output and transport EOF never authorize closure.
     /// Defaulting makes older frontend/worker transports conservative; HTTP removes it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -488,6 +492,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     data.tool_call_completion.clear();
     data.message_boundary = None;
     data.model_eos.clear();
+    data.parser_token_ids = None;
     data.nvext = None;
     data.prompt_logprobs = None;
     Some(())

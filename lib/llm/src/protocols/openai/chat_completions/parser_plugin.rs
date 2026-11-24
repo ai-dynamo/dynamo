@@ -7,15 +7,21 @@ use std::ptr::{NonNull, null_mut};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use dynamo_parsers_v2::unified::plugin::{ABI_VERSION, Command, Entry, Reply};
+use dynamo_parsers_v2::unified::plugin::{
+    ABI_VERSION, ABI_VERSION_V2, Command, CommandV2, Entry, Reply, ReplyV2,
+};
 use dynamo_parsers_v2::{
     UnifiedParser, UnifiedParserInit, UnifiedParserOutput,
-    unified::{LoadedGuidance, LoadedPrompt, ToolCallPolicy, UnifiedParserRegistration},
+    unified::{
+        LoadedGuidance, LoadedPrompt, ToolCallPolicy, UnifiedParserContinuation,
+        UnifiedParserInputCapabilities, UnifiedParserRegistration,
+    },
 };
 use libloading::Library;
 
 struct Plugin {
     entry: Entry,
+    abi: u32,
     _library: Library,
 }
 
@@ -30,23 +36,60 @@ pub(super) fn load(path: &Path) -> Result<UnifiedParserRegistration> {
     // SAFETY: an explicitly configured native plugin is trusted process code.
     let library = unsafe { Library::new(path) }.context("open native parser library")?;
     // SAFETY: this versioned symbol has the signature specified by the SDK.
-    let entry = *unsafe { library.get::<Entry>(b"dynamo_parser_plugin_v1\0") }
-        .context("library does not export parser plugin ABI v1")?;
+    let (entry, abi) = unsafe {
+        match library.get::<Entry>(b"dynamo_parser_plugin_v2\0") {
+            Ok(entry) => (*entry, ABI_VERSION_V2),
+            Err(_) => (
+                *library
+                    .get::<Entry>(b"dynamo_parser_plugin_v1\0")
+                    .context("library does not export parser plugin ABI v1 or v2")?,
+                ABI_VERSION,
+            ),
+        }
+    };
     let plugin = Arc::new(Plugin {
         entry,
+        abi,
         _library: library,
     });
-    let (reply, _) = plugin.call(null_mut(), Command::Describe)?;
-    let manifest = reply
-        .checked()?
-        .manifest
-        .context("missing parser manifest")?;
+    let (mut descriptor, capabilities, continuation, inspect_prompt) = if abi == ABI_VERSION_V2 {
+        let (reply, _) = plugin.call_v2(null_mut(), CommandV2::Describe, None)?;
+        reply.base.checked()?;
+        let manifest = reply.manifest_v2.context("missing v2 parser manifest")?;
+        manifest.validate()?;
+        let capabilities = manifest.input_capabilities();
+        let continuation = manifest.continuation;
+        let inspect_prompt = manifest.base.inspect_prompt;
+        (
+            manifest.descriptor(),
+            capabilities,
+            continuation,
+            inspect_prompt,
+        )
+    } else {
+        let (reply, _) = plugin.call(null_mut(), Command::Describe)?;
+        let manifest = reply
+            .checked()?
+            .manifest
+            .context("missing parser manifest")?;
+        let inspect_prompt = manifest.inspect_prompt;
+        (
+            manifest.descriptor(),
+            UnifiedParserInputCapabilities::default(),
+            false,
+            inspect_prompt,
+        )
+    };
     ensure!(
         identity == digest()?,
         "parser library changed during startup"
     );
-    let preserve = manifest.preserve_special_tokens;
-    let guidance = manifest.structural_tag.then(|| {
+    let features = ParserFeatures {
+        preserve: descriptor.preserve_special_tokens,
+        input: capabilities,
+        continuation,
+    };
+    let guidance = descriptor.guidance.structural_tag.then(|| {
         let plugin = Arc::clone(&plugin);
         let build: Arc<LoadedGuidance> = Arc::new(move |request| {
             let (reply, _) = plugin.call(null_mut(), Command::Guide(Box::new(request)))?;
@@ -54,7 +97,7 @@ pub(super) fn load(path: &Path) -> Result<UnifiedParserRegistration> {
         });
         build
     });
-    let inspect_prompt = manifest.inspect_prompt.then(|| {
+    let inspect_prompt = inspect_prompt.then(|| {
         let plugin = Arc::clone(&plugin);
         let inspect: Arc<LoadedPrompt> = Arc::new(move |request| {
             let (reply, _) = plugin.call(null_mut(), Command::InspectPrompt(request))?;
@@ -65,12 +108,11 @@ pub(super) fn load(path: &Path) -> Result<UnifiedParserRegistration> {
         });
         inspect
     });
-    let mut descriptor = manifest.descriptor();
     descriptor.aliases.sort_unstable();
     descriptor.aliases.dedup();
     Ok(UnifiedParserRegistration::loaded(
         descriptor,
-        format!("v{ABI_VERSION}:{identity}"),
+        format!("v{abi}:{identity}"),
         guidance,
         inspect_prompt,
         move |tools| {
@@ -79,7 +121,7 @@ pub(super) fn load(path: &Path) -> Result<UnifiedParserRegistration> {
             let parser = NonNull::new(handle).map(|handle| PluginParser {
                 plugin: Arc::clone(&plugin),
                 handle,
-                preserve,
+                features,
                 ids: Default::default(),
                 pending_error: None,
             });
@@ -110,13 +152,35 @@ unsafe extern "C" fn receive(context: *mut c_void, data: *const u8, len: usize) 
 
 impl Plugin {
     fn call(&self, handle: *mut c_void, command: Command) -> Result<(Reply, *mut c_void)> {
-        let creates = matches!(command, Command::Create(_));
-        let input = serde_json::to_vec(&command)?;
+        let creates = matches!(command, Command::Create(_)).then_some(HandleKind::Parser);
+        if self.abi == ABI_VERSION_V2 {
+            let (reply, handle) = self.call_v2(handle, CommandV2::V1(command), creates)?;
+            return Ok((reply.base, handle));
+        }
+        self.exchange(handle, &command, creates)
+    }
+
+    fn call_v2(
+        &self,
+        handle: *mut c_void,
+        command: CommandV2,
+        creates: Option<HandleKind>,
+    ) -> Result<(ReplyV2, *mut c_void)> {
+        self.exchange(handle, &command, creates)
+    }
+
+    fn exchange<T: serde::de::DeserializeOwned>(
+        &self,
+        handle: *mut c_void,
+        command: &impl serde::Serialize,
+        creates: Option<HandleKind>,
+    ) -> Result<(T, *mut c_void)> {
+        let input = serde_json::to_vec(command)?;
         let mut response = Response::default();
         // SAFETY: owned input and response slot outlive the synchronous call.
         let returned = unsafe {
             (self.entry)(
-                ABI_VERSION,
+                self.abi,
                 handle,
                 input.as_ptr(),
                 input.len(),
@@ -124,10 +188,10 @@ impl Plugin {
                 (&mut response as *mut Response).cast(),
             )
         };
-        let decoded = (|| -> Result<Reply> {
+        let decoded = (|| -> Result<T> {
             ensure!(!response.invalid, "invalid parser plugin reply");
             ensure!(
-                creates || returned.is_null(),
+                creates.is_some() || returned.is_null(),
                 "unexpected parser plugin handle"
             );
             Ok(serde_json::from_slice(
@@ -137,22 +201,33 @@ impl Plugin {
         match decoded {
             Ok(reply) => Ok((reply, returned)),
             Err(error) => {
-                if creates && !returned.is_null() {
-                    self.destroy(returned);
+                if let Some(kind) = creates
+                    && !returned.is_null()
+                {
+                    self.destroy(returned, kind);
                 }
                 Err(error)
             }
         }
     }
 
-    fn destroy(&self, handle: *mut c_void) {
-        if let Err(error) = self
-            .call(handle, Command::Destroy)
-            .and_then(|(reply, _)| reply.checked())
-        {
+    fn destroy(&self, handle: *mut c_void, kind: HandleKind) {
+        let reply = match kind {
+            HandleKind::Parser => self.call(handle, Command::Destroy).map(|(reply, _)| reply),
+            HandleKind::Checkpoint => self
+                .call_v2(handle, CommandV2::DropCheckpoint, None)
+                .map(|(reply, _)| reply.base),
+        };
+        if let Err(error) = reply.and_then(Reply::checked) {
             tracing::error!(%error, "native parser plugin destructor failed");
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum HandleKind {
+    Parser,
+    Checkpoint,
 }
 
 trait CheckReply {
@@ -172,9 +247,16 @@ impl CheckReply for Reply {
 struct PluginParser {
     plugin: Arc<Plugin>,
     handle: NonNull<c_void>,
-    preserve: bool,
+    features: ParserFeatures,
     ids: std::collections::HashMap<usize, String>,
     pending_error: Option<anyhow::Error>,
+}
+
+#[derive(Clone, Copy)]
+struct ParserFeatures {
+    preserve: bool,
+    input: UnifiedParserInputCapabilities,
+    continuation: bool,
 }
 
 // SAFETY: the SDK requires a Send parser and this wrapper exclusively owns the handle.
@@ -182,7 +264,8 @@ unsafe impl Send for PluginParser {}
 
 impl Drop for PluginParser {
     fn drop(&mut self) {
-        self.plugin.destroy(self.handle.as_ptr());
+        self.plugin
+            .destroy(self.handle.as_ptr(), HandleKind::Parser);
     }
 }
 
@@ -197,7 +280,11 @@ impl PluginParser {
         if let Some(error) = self.pending_error.take() {
             return Err(error);
         }
-        let mut reply = self.call(command)?;
+        let reply = self.call(command)?;
+        self.commit(reply, output)
+    }
+
+    fn commit(&mut self, mut reply: Reply, output: &mut UnifiedParserOutput) -> Result<()> {
         self.ids.extend(std::mem::take(&mut reply.tool_ids));
         output.events.append(&mut reply.events);
         reply.checked()?;
@@ -211,7 +298,71 @@ impl PluginParser {
     }
 }
 
+struct PluginCheckpoint {
+    plugin: Arc<Plugin>,
+    handle: NonNull<c_void>,
+    features: ParserFeatures,
+    ids: std::collections::HashMap<usize, String>,
+}
+
+// SAFETY: this wrapper exclusively owns the Send checkpoint and cannot be shared.
+unsafe impl Send for PluginCheckpoint {}
+
+impl Drop for PluginCheckpoint {
+    fn drop(&mut self) {
+        self.plugin
+            .destroy(self.handle.as_ptr(), HandleKind::Checkpoint);
+    }
+}
+
+impl UnifiedParserContinuation for PluginCheckpoint {
+    fn fork(&self) -> Result<Box<dyn UnifiedParser>> {
+        let (reply, handle) = self.plugin.call_v2(
+            self.handle.as_ptr(),
+            CommandV2::Fork,
+            Some(HandleKind::Parser),
+        )?;
+        let parser = NonNull::new(handle).map(|handle| PluginParser {
+            plugin: Arc::clone(&self.plugin),
+            handle,
+            features: self.features,
+            ids: self.ids.clone(),
+            pending_error: None,
+        });
+        reply.base.checked()?;
+        Ok(Box::new(
+            parser.context("plugin did not fork a parser instance")?,
+        ))
+    }
+}
+
 impl UnifiedParser for PluginParser {
+    fn continuation(&mut self) -> Result<Option<Box<dyn UnifiedParserContinuation>>> {
+        if let Some(error) = self.pending_error.take() {
+            return Err(error);
+        }
+        if !self.features.continuation {
+            return Ok(None);
+        }
+        let (reply, handle) = self.plugin.call_v2(
+            self.handle.as_ptr(),
+            CommandV2::Checkpoint,
+            Some(HandleKind::Checkpoint),
+        )?;
+        let checkpoint = NonNull::new(handle).map(|handle| PluginCheckpoint {
+            plugin: Arc::clone(&self.plugin),
+            handle,
+            features: self.features,
+            ids: self.ids.clone(),
+        });
+        reply.base.checked()?;
+        Ok(checkpoint.map(|checkpoint| Box::new(checkpoint) as Box<dyn UnifiedParserContinuation>))
+    }
+
+    fn input_capabilities(&self) -> UnifiedParserInputCapabilities {
+        self.features.input
+    }
+
     fn initialize_request(&mut self, init: UnifiedParserInit) -> Result<()> {
         self.call(Command::Initialize(init))?.checked()?;
         Ok(())
@@ -232,7 +383,31 @@ impl UnifiedParser for PluginParser {
     }
 
     fn parse_into(&mut self, delta: &str, output: &mut UnifiedParserOutput) -> Result<()> {
+        ensure!(
+            self.features.input.text,
+            "plugin does not accept decoded text"
+        );
         self.advance(Command::Push(delta.into()), output)
+    }
+
+    fn parse_token_ids_into(
+        &mut self,
+        ids: &[u32],
+        output: &mut UnifiedParserOutput,
+    ) -> Result<()> {
+        if let Some(error) = self.pending_error.take() {
+            return Err(error);
+        }
+        ensure!(
+            self.features.input.token_ids,
+            "plugin does not accept token IDs"
+        );
+        let (reply, _) = self.plugin.call_v2(
+            self.handle.as_ptr(),
+            CommandV2::PushTokenIds(ids.to_vec()),
+            None,
+        )?;
+        self.commit(reply.base, output)
     }
 
     fn finish(&mut self) -> Result<UnifiedParserOutput> {
@@ -256,7 +431,7 @@ impl UnifiedParser for PluginParser {
     }
 
     fn preserve_special_tokens(&self) -> bool {
-        self.preserve
+        self.features.preserve
     }
 
     fn tool_call_id(&self, index: usize) -> Option<&str> {

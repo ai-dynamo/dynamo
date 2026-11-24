@@ -23,11 +23,14 @@ pub(crate) enum StructuralTagBuilder {
 
 impl StructuralTagBuilder {
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
-        let family = crate::protocols::openai::chat_completions::unified_parser::canonical_family(
-            parser_name,
-        )?;
         let registration =
-            crate::protocols::openai::chat_completions::unified_parser::registration(family)?;
+            crate::protocols::openai::chat_completions::unified_parser::registration(parser_name)?;
+        Self::for_registration(registration)
+    }
+
+    pub(super) fn for_registration(
+        registration: &dynamo_parsers_v2::UnifiedParserRegistration,
+    ) -> Option<Self> {
         if let Some(builder) = registration.plugin_guidance() {
             return Some(Self::Loaded(builder));
         }

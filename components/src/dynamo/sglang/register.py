@@ -670,11 +670,12 @@ async def get_runtime_config(
     # Frontend-decoded media uses the regular LLM handlers, which forward the
     # reasoning gate. Dedicated multimodal pipelines register through an encoder;
     # diffusion handlers do not forward the gate.
-    if (
+    forwards_structured_output = (
         not dynamo_args.multimodal_worker
         and not dynamo_args.multimodal_encode_worker
         and not getattr(server_args, "dllm_algorithm", None)
-    ):
+    )
+    if forwards_structured_output:
         publish_sglang_structural_tag_reasoning_policy(
             runtime_config, engine, server_args
         )
@@ -687,6 +688,15 @@ async def get_runtime_config(
         dynamo_args.exclude_tools_when_tool_choice_none
     )
     runtime_config.set_structural_tag(dynamo_args.structural_tag)
+    runtime_config.set_engine_specific(
+        "tool_call_structural_tag_supported",
+        json.dumps(
+            engine is not None
+            and forwards_structured_output
+            and server_args.grammar_backend == "xgrammar"
+            and not server_args.skip_tokenizer_init
+        ),
+    )
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (

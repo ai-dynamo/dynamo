@@ -21,10 +21,11 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 def test_capability_cli_reports_linked_registry_before_runtime_setup(
     monkeypatch, capsys
 ):
-    monkeypatch.setattr(sys, "argv", ["dynamo.frontend", "--list-parser-capabilities"])
+    monkeypatch.setattr(sys, "argv", ["dynamo.frontend", "--list-parsers"])
     frontend.main()
     catalog = json.loads(capsys.readouterr().out)
     assert catalog == get_parser_capabilities()
+    # Built-in examples pin the metadata values exposed through discovery.
     families = {entry["family"]: entry for entry in catalog["unified"]}
     assert "mistral" in families["mistral_4"]["aliases"]
     assert families["mistral_4"]["required_tokens"][0]["token"] == "[ARGS]"
@@ -50,7 +51,7 @@ def test_capability_cli_reports_linked_registry_before_runtime_setup(
 
 def test_capability_cli_rejects_unknown_arguments(monkeypatch, capsys):
     monkeypatch.setattr(
-        sys, "argv", ["dynamo.frontend", "--list-parser-capabilities", "--misspelled"]
+        sys, "argv", ["dynamo.frontend", "--list-parsers", "--misspelled"]
     )
     with pytest.raises(SystemExit) as result:
         frontend.main()
@@ -71,7 +72,7 @@ def test_module_cli_does_not_import_serving_runtime():
         [
             sys.executable,
             "-c",
-            "import runpy,sys; sys.argv=['dynamo.frontend','--list-parser-capabilities']; runpy.run_module('dynamo.frontend',run_name='__main__'); assert 'dynamo.frontend.main' not in sys.modules; assert 'dynamo.runtime' not in sys.modules",
+            "import runpy,sys; sys.argv=['dynamo.frontend','--list-parsers']; runpy.run_module('dynamo.frontend',run_name='__main__'); assert 'dynamo.frontend.main' not in sys.modules; assert 'dynamo.runtime' not in sys.modules",
         ],
         capture_output=True,
         text=True,
@@ -82,13 +83,14 @@ def test_module_cli_does_not_import_serving_runtime():
 
 
 def test_independently_built_plugin_is_discoverable():
+    """The fixture name and alias enter the registry when its library loads."""
     library = os.environ.get("DYNAMO_REGISTRY_FIXTURE_PLUGIN")
     if not library:
         pytest.skip(
             "set DYNAMO_REGISTRY_FIXTURE_PLUGIN to the independently built fixture"
         )
 
-    command = [sys.executable, "-m", "dynamo.frontend", "--list-parser-capabilities"]
+    command = [sys.executable, "-m", "dynamo.frontend", "--list-parsers"]
     environment = subprocess_environment()
     linked = subprocess.run(
         command, capture_output=True, text=True, check=True, env=environment

@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use crate::preprocessor::mistral_grammar::CallMode;
 use crate::preprocessor::structural_tag::{
-    SelectedStructuralTagBuilder, is_beam_parser, requires_native_tool_call_format,
+    SelectedStructuralTagBuilder, guidance, requires_native_tool_call_format,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest, PromptReasoningPrefill};
 use crate::protocols::openai::chat_completions::{NvCreateChatCompletionRequest, unified_parser};
@@ -277,11 +277,10 @@ impl OpenAIPreprocessor {
         // If the structural-tag layer did not compose this response format with
         // auto tool calls, it remains the sole assistant-output constraint.
         if !is_forced_tool_choice && has_response_format_constraint {
-            if let Some((parser_name @ "gpt_oss", builder)) =
-                SelectedStructuralTagBuilder::for_unified_parser(
-                    self.tool_call_parser.as_deref(),
-                    self.runtime_config.reasoning_parser.as_deref(),
-                )
+            if let Some((parser_name, builder)) = SelectedStructuralTagBuilder::for_unified_parser(
+                self.tool_call_parser.as_deref(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            ) && guidance(Some(parser_name)).frames_structured_output
             {
                 let schema = match request.inner.response_format.as_ref() {
                     Some(ResponseFormat::JsonSchema { json_schema }) => {
@@ -592,7 +591,7 @@ pub(crate) fn declare_legacy_builtin_tools_for_beam(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> usize {
-    if !(is_beam_parser(tool_call_parser) || is_beam_parser(reasoning_parser)) {
+    if !guidance(tool_call_parser).whole_turn && !guidance(reasoning_parser).whole_turn {
         return 0;
     }
     let Some(entries) = request
@@ -985,7 +984,7 @@ fn forced_choice_keeps_native_format(
     requires_native_tool_call_format(tool_call_parser, tool_choice)
         || requires_native_tool_call_format(reasoning_parser, tool_choice)
         || (matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))
-            && unified_family == Some(unified_parser::MISTRAL_UNIFIED_FAMILY))
+            && guidance(unified_family).mistral_lark)
 }
 
 /// Whether either configured parser selects the Muse Spark native grammar.
@@ -2431,6 +2430,7 @@ mod tests {
             unified: false,
             unified_starting_state: None,
             prefix: None,
+            parser_prompt_token_ids: None,
             reasoning_closed_by_prompt: None,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
@@ -2502,6 +2502,7 @@ mod tests {
             unified: false,
             unified_starting_state: None,
             prefix: None,
+            parser_prompt_token_ids: None,
             reasoning_closed_by_prompt: None,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),

@@ -126,6 +126,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             };
 
@@ -1439,6 +1440,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             }),
             event: None,
@@ -2212,6 +2214,7 @@ fn make_glm47_chunk(
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         }),
         event: None,
@@ -2438,6 +2441,7 @@ fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamR
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         }),
         event: None,

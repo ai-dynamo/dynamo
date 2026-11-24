@@ -10384,6 +10384,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
@@ -11042,6 +11043,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
@@ -11136,6 +11138,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                parser_token_ids: None,
                 model_eos: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
@@ -11551,6 +11554,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         };
         Annotated {
@@ -12702,6 +12706,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            parser_token_ids: None,
             model_eos: Vec::new(),
         }
     }

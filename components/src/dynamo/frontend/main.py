@@ -301,9 +301,9 @@ def parse_args() -> (
     )
 
     parser.add_argument(
-        "--list-parser-capabilities",
+        "--list-parsers",
         action="store_true",
-        help="Print the linked frontend-crates parser capability and selector mapping as JSON, then exit.",
+        help="List available parsers, aliases, and capabilities as JSON, then exit.",
     )
     load_plugins_from_args()
     add_parser_plugin_argument(parser)
@@ -311,7 +311,7 @@ def parse_args() -> (
 
     args, unknown = parser.parse_known_args()
 
-    if args.list_parser_capabilities:
+    if args.list_parsers:
         if unknown:
             parser.error(f"unrecognized arguments: {' '.join(unknown)}")
         print_parser_capabilities()

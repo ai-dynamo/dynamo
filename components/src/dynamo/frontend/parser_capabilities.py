@@ -16,12 +16,8 @@ def print_parser_capabilities() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Inspect linked frontend-crates capabilities"
-    )
-    parser.add_argument(
-        "--list-parser-capabilities", action="store_true", required=True
-    )
+    parser = argparse.ArgumentParser(description="List available Dynamo parsers")
+    parser.add_argument("--list-parsers", action="store_true", required=True)
     add_parser_plugin_argument(parser)
     args = parser.parse_args()
     load_configured_plugins(parser, args.tool_parser_plugin)
