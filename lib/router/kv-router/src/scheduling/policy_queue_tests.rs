@@ -628,6 +628,60 @@ fn full_recheck_asks_each_shared_lane_once_and_leaves_the_rest_in_place() {
 }
 
 #[test]
+fn full_recheck_with_room_admits_one_shared_lane_and_leaves_the_rest_in_place() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    for (id, payload) in [(1, "s1"), (2, "s2"), (3, "s3"), (4, "s4")] {
+        enqueue_due(&mut queue, None, None, lane_of(id), payload);
+    }
+    let room = std::cell::Cell::new(false);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+        asked.borrow_mut().push(*payload);
+        if room.get() {
+            LaneCheck::Dispatch
+        } else {
+            LaneCheck::Blocked(BlockReason::SharedCapacity)
+        }
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(queue.class_blocked_lane_count(0), 4);
+
+    // The gate's wake finds a slot free, so every lane may go. Only the group's best leaves
+    // it, to dispatch, and the next best stands in: the other two are not moved.
+    room.set(true);
+    asked.borrow_mut().clear();
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s1");
+    let mut all = asked.borrow().clone();
+    all.sort_unstable();
+    assert_eq!(all, ["s1", "s1", "s2", "s3", "s4"]);
+    assert_eq!(queue.class_blocked_lane_count(0), 2);
+
+    // The slot is taken: the stand-in alone is asked, and it rejoins the group.
+    room.set(false);
+    asked.borrow_mut().clear();
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asked.borrow().as_slice(), ["s2"]);
+    for id in 2..=4 {
+        assert_eq!(
+            queue.class_lane_block_reason(0, lane_of(id)),
+            Some(BlockReason::SharedCapacity)
+        );
+    }
+
+    // A stand-in promoted before a wake is still a candidate after it, ahead of the lane the
+    // wake promotes: both dispatch, in the group's order.
+    room.set(true);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s2");
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s3");
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s4");
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(queue.class_blocked_lane_count(0), 0);
+}
+
+#[test]
 fn full_recheck_asks_a_lane_the_gate_lets_go_once() {
     let mut queue = PolicyQueue::new(&edf_profile());
     enqueue_due(&mut queue, None, None, lane_of(1), "session");
