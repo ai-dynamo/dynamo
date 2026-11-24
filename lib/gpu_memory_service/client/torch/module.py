@@ -196,22 +196,42 @@ def materialize_module_from_gms(
                 setattr(mod, attr, tensor.detach().clone())
             continue
 
-        # Parameters: in-place update or replace meta tensors
+        # Parameters: replace meta placeholders (which predate post-load
+        # weight transforms like reshaping or quantized repacking) or update
+        # live parameters in place.
         if hasattr(mod, "_parameters") and attr in mod._parameters:
             param = mod._parameters[attr]
             if param is not None:
-                if param.shape != tensor.shape or param.dtype != tensor.dtype:
-                    raise RuntimeError(
-                        f"Shape/dtype mismatch for {name}: "
-                        f"param={tuple(param.shape)}/{param.dtype}, "
-                        f"gms={tuple(tensor.shape)}/{tensor.dtype}"
+                if param.is_meta:
+                    if param.shape != tensor.shape or param.dtype != tensor.dtype:
+                        logger.debug(
+                            "[GMS] Replacing meta parameter %s with post-processed "
+                            "tensor: meta=%s/%s, gms=%s/%s",
+                            name,
+                            tuple(param.shape),
+                            param.dtype,
+                            tuple(tensor.shape),
+                            tensor.dtype,
+                        )
+                    requires_grad = param.requires_grad and (
+                        tensor.is_floating_point() or tensor.is_complex()
                     )
-                if param.is_meta or param.device != tensor.device:
                     mod._parameters[attr] = torch.nn.Parameter(
-                        tensor, requires_grad=param.requires_grad
+                        tensor, requires_grad=requires_grad
                     )
                 else:
-                    param.data = tensor
+                    if param.shape != tensor.shape or param.dtype != tensor.dtype:
+                        raise RuntimeError(
+                            f"Shape/dtype mismatch for {name}: "
+                            f"param={tuple(param.shape)}/{param.dtype}, "
+                            f"gms={tuple(tensor.shape)}/{tensor.dtype}"
+                        )
+                    if param.device != tensor.device:
+                        mod._parameters[attr] = torch.nn.Parameter(
+                            tensor, requires_grad=param.requires_grad
+                        )
+                    else:
+                        param.data = tensor
                 continue
 
         # Fallback: set as attribute
