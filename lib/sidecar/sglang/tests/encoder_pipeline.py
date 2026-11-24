@@ -86,7 +86,7 @@ LAYOUT_ID = "ab" * 32
 
 
 class Encoder(StagedEncoderFixture):
-    def __init__(self, model, sockets):
+    def __init__(self, model, sockets, signer):
         self.sockets = sockets
         self.parts = {}
         self.encodes = []
@@ -112,12 +112,8 @@ class Encoder(StagedEncoderFixture):
             capacity=4,
             ttl=30,
             stage_timeout=5,
+            signer=signer,
         )
-
-    def bind_signer(self, port, key):
-        self._handoff_signer = EncoderHandoffSigner(f"grpc://127.0.0.1:{port}", key)
-        self._info.handoff_key_id = self._handoff_signer.key_id
-        self._info.handoff_peer = self._handoff_signer.peer
 
     def _describe_part(self, part):
         return encoder_pb2.DescribeResponse(
@@ -197,6 +193,7 @@ class Encoder(StagedEncoderFixture):
                 )
                 for audio in audios
             ],
+            16,
         )
 
     async def send(self, state, destination):
@@ -416,10 +413,10 @@ async def run(args, tmp, stack):
                         {"error": {"message": str(exc)}}, status=400
                     )
                 assert body["mm_hashes"] == (
-                    ["0xd1", "0xa1", "0xc1", "0xd2"]
+                    ["0xa1", "0xc1", "0xd1", "0xd2"]
                     if audio_token in ids
                     else (
-                        ["0xc1", "0xa1", "0xc2"]
+                        ["0xa1", "0xc1", "0xc2"]
                         if video_token in ids
                         else ["0xa1", "0xb2"]
                     )
@@ -446,13 +443,14 @@ async def run(args, tmp, stack):
             await stack.enter_async_context(server)
             self.http_port = server.port
 
-    async def serve(add, service):
+    def listener():
         server = grpc.aio.server()
+        return server, server.add_insecure_port("127.0.0.1:0")
+
+    async def serve(server, add, service):
         add(service, server)
-        port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
         stack.push_async_callback(server.stop, 0)
-        return port
 
     env = {
         **os.environ,
@@ -500,15 +498,24 @@ async def run(args, tmp, stack):
         if args.sidecar
         else [args.frontend_python, "-m", "dynamo.sglang.sidecar"]
     )
-    encoders = [Encoder(model, sockets) for _ in range(2)]
-    endpoints = [EncoderEndpoint(encoder) for encoder in encoders]
+
+    def create_encoder(port):
+        signer = EncoderHandoffSigner(f"grpc://127.0.0.1:{port}", handoff_key)
+        return Encoder(model, sockets, signer)
+
+    encoders = []
+    endpoints = []
     encoder_workers = []
     encoder_ports = []
-    for i, endpoint in enumerate(endpoints):
-        port = await serve(
-            encoder_pb2_grpc.add_SglangEncoderServicer_to_server, endpoint
+    for i in range(2):
+        server, port = listener()
+        encoder = create_encoder(port)
+        endpoint = EncoderEndpoint(encoder)
+        await serve(
+            server, encoder_pb2_grpc.add_SglangEncoderServicer_to_server, endpoint
         )
-        encoders[i].bind_signer(port, handoff_key)
+        encoders.append(encoder)
+        endpoints.append(endpoint)
         encoder_ports.append(port)
         encoder_workers.append(
             await start(
@@ -526,8 +533,9 @@ async def run(args, tmp, stack):
     for i, service in enumerate(languages):
         if args.native_generate:
             await service.serve_http()
-        port = await serve(
-            service_pb2_grpc.add_SglangServiceServicer_to_server, service
+        server, port = listener()
+        await serve(
+            server, service_pb2_grpc.add_SglangServiceServicer_to_server, service
         )
         opts = ["--route-to-encoder"] if service.role != "decode" else []
         if service.role == "prefill":
@@ -780,7 +788,7 @@ async def run(args, tmp, stack):
             ],
             "image_data": IMAGES[0],
             "video_data": VIDEOS,
-            "mm_hashes": ["0xc1", "0xa1", "0xc2"],
+            "mm_hashes": ["0xa1", "0xc1", "0xc2"],
         }
         before = len(requests)
         result = await exchange("/generate", mixed)
@@ -795,7 +803,7 @@ async def run(args, tmp, stack):
             "audio_data": AUDIOS,
             "image_data": IMAGES[0],
             "video_data": VIDEOS[0],
-            "mm_hashes": ["0xd1", "0xa1", "0xc1", "0xd2"],
+            "mm_hashes": ["0xa1", "0xc1", "0xd1", "0xd2"],
         }
         before = len(requests)
         result = await exchange("/generate", audio_mixed)
@@ -882,8 +890,7 @@ async def run(args, tmp, stack):
     )
     print("deliveries per receiver", [len(language.receives) for language in languages])
 
-    replacement = Encoder(model, sockets)
-    replacement.bind_signer(encoder_ports[1], handoff_key)
+    replacement = create_encoder(encoder_ports[1])
     endpoints[1].serving = replacement
     before_requests = len(requests)
     try:

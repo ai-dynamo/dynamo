@@ -11,11 +11,11 @@ encoder uses the separate `sglang.grpc.encoder` service. [SGLang schema](https:/
 
 The vendored language service is based on SGLang `37f3b2730bca1cc875126f8b94c4487ec1331a95`.
 Its staged extensions and the standalone encoder schema come from SGLang commit
-[`447c122319d6ce267082f4531d3440a0f51cb649`](https://github.com/sgl-project/sglang/commit/447c122319d6ce267082f4531d3440a0f51cb649).
+[`b2accdf7856ba359b204f1cd5135ae0ac8efdd14`](https://github.com/sgl-project/sglang/commit/b2accdf7856ba359b204f1cd5135ae0ac8efdd14).
 
-- [GenerateRequest](https://github.com/sgl-project/sglang/blob/447c122319d6ce267082f4531d3440a0f51cb649/proto/sglang/api/v1/generate.proto) adds the signed handoff in field 41.
-- [GetServerInfoResponse](https://github.com/sgl-project/sglang/blob/447c122319d6ce267082f4531d3440a0f51cb649/proto/sglang/api/v1/service.proto) advertises the staged layout, key and transfer backend in fields 17–24.
-- [The standalone encoder schema](https://github.com/sgl-project/sglang/blob/447c122319d6ce267082f4531d3440a0f51cb649/proto/sglang/encoder/v1/encoder.proto) is copied verbatim, including the Stage, Deliver and Release RPCs and GetEncoderInfoResponse's transfer backend and layout ID in fields 12 and 13.
+- [GenerateRequest](https://github.com/sgl-project/sglang/blob/b2accdf7856ba359b204f1cd5135ae0ac8efdd14/proto/sglang/api/v1/generate.proto) adds the signed handoff in field 41.
+- [GetServerInfoResponse](https://github.com/sgl-project/sglang/blob/b2accdf7856ba359b204f1cd5135ae0ac8efdd14/proto/sglang/api/v1/service.proto) advertises the staged layout, key and transfer backend in fields 17–24.
+- [The standalone encoder schema](https://github.com/sgl-project/sglang/blob/b2accdf7856ba359b204f1cd5135ae0ac8efdd14/proto/sglang/encoder/v1/encoder.proto) is copied verbatim, including the Stage, Deliver and Release RPCs and the staged layout and transport discovery fields. DescribeResponse field 4 reports E's send timeout for NIXL write recovery.
 
 The table lists SHA-256 digests for the vendored files.
 
@@ -27,7 +27,7 @@ The table lists SHA-256 digests for the vendored files.
 | `sglang/api/v1/hicache.proto` | `3224ff3d64234d23678d1a6f899c35b131ebc73eddeabf4a6b25fa983852e736` |
 | `sglang/api/v1/sampling.proto` | `64621faa7bc31835a52973db9ce8e961c14e66c7d95b21282399d5049531fa6f` |
 | `sglang/api/v1/service.proto` | `2229836152336b143eca9fc281b350a82cc52a9f924d93f8538d412c0b3e8f0b` |
-| `sglang/encoder/v1/encoder.proto` | `bd05dca8c9c59f2b3c7db9b080e271007462b1edc3e1e9f11ba2dfe6f4327512` |
+| `sglang/encoder/v1/encoder.proto` | `201f4d5c6d7e4895c6f70e6b9190ade65ca2ed1c37ce136b160ef01bb523620c` |
 | `sglang/json/v1/options.proto` | `d1aa73d1a5ee39b180ccc5967dae55d061a4e6e10f9a01d4c116d3a269b111fe` |
 
 All of them are excluded from Dynamo's formatting and copyright-header checks.

@@ -1140,20 +1140,15 @@ fn external_handoff_preserves_token_layout_and_hashes_without_raw_media() {
 }
 
 #[test]
-fn grouped_hashes_require_complete_order_only_for_mixed_media() {
-    let mut req = request();
+fn staged_hashes_follow_source_lists_even_when_the_prompt_is_interleaved() {
+    let grouped = json!({"audio": ["03"], "video": ["02"], "image": ["01"]});
     assert_eq!(
-        ordered_media_hashes(&req, &json!({"video":["01", "02"]})).unwrap(),
-        ["01", "02"]
+        grouped_media_hashes(&grouped, [1, 1, 1]).unwrap(),
+        ["01", "02", "03"]
     );
-    let grouped = json!({"video":["01"], "image":["02"]});
-    assert!(ordered_media_hashes(&req, &grouped).is_err());
-    req.multi_modal_order = serde_json::from_value(json!([
-        {"modality":"video_url", "index":0},
-        {"modality":"video_url", "index":0}
-    ]))
-    .unwrap();
-    assert!(ordered_media_hashes(&req, &grouped).is_err());
+    assert!(grouped_media_hashes(&grouped, [1, 2, 0]).is_err());
+    assert!(grouped_media_hashes(&json!({"video": [null]}), [0, 1, 0]).is_err());
+    assert!(grouped_media_hashes(&json!({"unknown": ["01"]}), [0, 0, 0]).is_err());
 }
 
 #[test]
@@ -1220,7 +1215,7 @@ fn staged_mixed_media_gates_each_peer_and_preserves_native_layout() {
             handoff
         );
         assert!(
-            matches!(generated.mm_hashes.unwrap().value,Some(pb::string_list_or_list::Value::One(list)) if list.items==["01","02","03"])
+            matches!(generated.mm_hashes.unwrap().value,Some(pb::string_list_or_list::Value::One(list)) if list.items==["02","01","03"])
         );
     }
     for invalid in [json!([-0.2, 0.5]), json!([0.6, 0.5]), json!([0.5])] {

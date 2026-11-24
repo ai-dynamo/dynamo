@@ -144,8 +144,8 @@ pub(crate) fn build_generate_request(
     } else {
         media_data(request)?
     };
-    let mm_hashes = if encoder_handoff.is_some() {
-        caller_hashes(request)?.map(|items| pb::StringListOrList {
+    let mm_hashes = if let Some(handoff) = &request.encoder_result {
+        caller_hashes(request, handoff)?.map(|items| pb::StringListOrList {
             value: Some(pb::string_list_or_list::Value::One(pb::StringList {
                 items,
             })),
@@ -217,8 +217,9 @@ pub(crate) fn build_generate_request(
 
 /// Dynamo's frontend supplies these scalar cache-key overrides independently
 /// of the native encoder's 32-byte content identities.
-pub(crate) fn caller_hashes(
+fn caller_hashes(
     request: &PreprocessedRequest,
+    handoff: &Value,
 ) -> Result<Option<Vec<String>>, DynamoError> {
     let Some(extra) = request.extra_args.as_ref() else {
         return Ok(None);
@@ -228,60 +229,40 @@ pub(crate) fn caller_hashes(
             client::invalid_request("extra_args.mm_hashes must be a list of strings")
         })?
     } else if let Some(value) = extra.get("mm_hashes_by_modality") {
-        ordered_media_hashes(request, value)?
+        let counts =
+            ["images", "videos", "audios"].map(|key| handoff[key].as_array().map_or(0, Vec::len));
+        grouped_media_hashes(value, counts)?
     } else {
         return Ok(None);
     };
     Ok(Some(items))
 }
 
-/// Map the frontend's grouped cache identities into SGLang's one hash per
-/// source. Only a mixed-modality list needs explicit prompt ordering.
-fn ordered_media_hashes(
-    request: &PreprocessedRequest,
-    value: &Value,
-) -> Result<Vec<String>, DynamoError> {
-    let mut grouped: std::collections::HashMap<&str, Vec<Option<&str>>> =
-        serde::Deserialize::deserialize(value).map_err(|_| {
-            client::invalid_request("mm_hashes_by_modality must contain lists of strings")
-        })?;
-    let Some(order) = request.multi_modal_order.as_deref() else {
-        if grouped.len() > 1 {
-            return Err(client::invalid_request(
-                "mixed media hashes require multi_modal_order",
-            ));
-        }
-        return grouped
-            .into_values()
-            .flatten()
-            .map(|hash| {
-                hash.map(str::to_owned).ok_or_else(|| {
-                    client::invalid_request("mm_hashes_by_modality must contain lists of strings")
-                })
-            })
-            .collect();
-    };
-    if order.len() != grouped.values().map(Vec::len).sum::<usize>() {
+/// Staged SGLang accepts one routing hint per source, grouped in wire order.
+fn grouped_media_hashes(value: &Value, counts: [usize; 3]) -> Result<Vec<String>, DynamoError> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Hashes {
+        image: Vec<String>,
+        video: Vec<String>,
+        audio: Vec<String>,
+    }
+    let groups: Hashes = serde::Deserialize::deserialize(value).map_err(|_| {
+        client::invalid_request(
+            "mm_hashes_by_modality must contain image, video or audio string lists",
+        )
+    })?;
+    if [groups.image.len(), groups.video.len(), groups.audio.len()] != counts {
         return Err(client::invalid_request(
-            "multi_modal_order must cover every grouped media hash",
+            "mm_hashes_by_modality must match the staged source count for each modality",
         ));
     }
-    order
-        .iter()
-        .map(|item| {
-            item.modality
-                .strip_suffix("_url")
-                .and_then(|modality| grouped.get_mut(modality))
-                .and_then(|hashes| hashes.get_mut(item.index))
-                .and_then(Option::take)
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    client::invalid_request(
-                        "multi_modal_order references a missing or repeated media hash",
-                    )
-                })
-        })
-        .collect()
+    Ok(groups
+        .image
+        .into_iter()
+        .chain(groups.video)
+        .chain(groups.audio)
+        .collect())
 }
 
 /// The request's image, video and audio items, one list per modality. SGLang

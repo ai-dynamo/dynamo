@@ -146,7 +146,8 @@ for ((i=1; i<=roles; i++)); do
     sidecar_args=(--grpc-endpoint "$host:$grpc_port")
     if ((i <= encoders)); then
         # SglangEncoder is the encoder-only Python service. Its listener uses --port.
-        CUDA_VISIBLE_DEVICES="$gpu" SGLANG_RUST_SERVER=0 "$sgpy" -m sglang.launch_server \
+        CUDA_VISIBLE_DEVICES="$gpu" SGLANG_RUST_SERVER=0 SGLANG_ENABLE_EXTERNAL_ENCODER_HANDOFF=1 \
+            "$sgpy" -m sglang.launch_server \
             "${args[@]}" --encoder-only --grpc-mode --port "$grpc_port" &
     else
         http_port=$(dyn_port DYN_ENGINE_HTTP_PORT "$i" "$((30000 + 3*i))")
@@ -162,7 +163,7 @@ for ((i=1; i<=roles; i++)); do
         if $split; then
             args+=(--disaggregation-transfer-backend "${SGLANG_KV_TRANSFER_BACKEND:-nixl}")
         fi
-        CUDA_VISIBLE_DEVICES="$gpu" SGLANG_RUST_SERVER=1 SGLANG_EXTERNAL_ENCODER_HANDOFF=1 \
+        CUDA_VISIBLE_DEVICES="$gpu" SGLANG_RUST_SERVER=1 SGLANG_ENABLE_EXTERNAL_ENCODER_HANDOFF=1 \
             SGLANG_ENCODER_MM_RECEIVER_MODE=grpc "$sgpy" -m sglang.launch_server \
             "${args[@]}" "${lang_args[@]}" "${mem_args[@]}" --port "$http_port" --grpc-port "$grpc_port" &
     fi

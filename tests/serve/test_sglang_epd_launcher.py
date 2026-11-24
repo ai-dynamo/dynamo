@@ -97,6 +97,8 @@ def test_epd_workers_share_handoff_key(tmp_path, existing_key):
         """import os, sys
 from pathlib import Path
 if "sglang.launch_server" in sys.argv:
+    assert os.environ["SGLANG_ENABLE_EXTERNAL_ENCODER_HANDOFF"] == "1"
+    assert os.environ["SGLANG_RUST_SERVER"] == ("0" if "--encoder-only" in sys.argv else "1")
     key = Path(os.environ["SGLANG_ENCODER_HANDOFF_KEY_FILE"])
     assert len(key.read_bytes()) == 32
     port = sys.argv[sys.argv.index("--nccl-port") + 1]
