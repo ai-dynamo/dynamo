@@ -402,6 +402,14 @@ class lifecycle:
     DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
+class metrics_merge:
+    """Metrics about merging a DistributedRuntime's registry tree into one gather"""
+
+    # Metric families skipped because their help or type conflicted with an
+    # earlier family of the same name
+    CONFLICTS_TOTAL = "merge_conflicts_total"
+
+
 class model_info:
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
@@ -429,6 +437,8 @@ class name_prefix:
     WORK_HANDLER = "dynamo_work_handler"
     # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     TOKIO = "dynamo_tokio"
+    # Prefix for metrics about the metrics system itself (combined gathers).
+    METRICS = "dynamo_metrics"
     # Prefix for per-phase routing overhead latency (hashing, scheduling).
     # Raw Prometheus, not component-scoped.
     ROUTING_OVERHEAD = "dynamo_routing_overhead"
