@@ -8,6 +8,7 @@ input processors, so no TensorRT-LLM install, model, or GPU is needed.
 """
 
 import functools
+import logging
 import multiprocessing.spawn
 import operator
 import pickle
@@ -18,7 +19,11 @@ from unittest import mock
 
 import pytest
 
-from dynamo.trtllm.preprocess_pool import InputProcessorSpec, PreprocessPool
+from dynamo.trtllm.preprocess_pool import (
+    InputProcessorSpec,
+    PreprocessPool,
+    record_input_processor_calls,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -50,21 +55,20 @@ def _module():
     )
 
 
-def _llm(tmp_path, video_pruning_rate=None, encoder_cache_max_bytes=0):
+def _llm(encoder_cache_max_bytes=0):
     return SimpleNamespace(
-        _hf_model_dir=tmp_path,
         input_processor=object(),
-        tokenizer={"vocab": 3},
         args=SimpleNamespace(
-            enable_tokenization_cache=True,
             multimodal_config=SimpleNamespace(
-                video_pruning_rate=video_pruning_rate,
-                encoder_cache_max_bytes=encoder_cache_max_bytes,
-            ),
-            checkpoint_format="HF",
-            trust_remote_code=False,
+                encoder_cache_max_bytes=encoder_cache_max_bytes
+            )
         ),
     )
+
+
+def _calls(llm):
+    """The create_input_processor call that built ``llm``'s input processor."""
+    return [(("model-dir", {"vocab": 3}), {}, llm.input_processor)]
 
 
 @pytest.mark.timeout(60)
@@ -142,11 +146,29 @@ def test_routes_only_the_llm_input_processor(pool):
     ]
 
 
-def test_start_routes_once_the_processes_are_ready(tmp_path):
-    module, llm = _module(), _llm(tmp_path)
+def test_warns_once_when_the_llm_input_processor_is_hashed_differently(pool, caplog):
+    module = _module()
+    processor = object()
+    pool.route(module, processor, encoder_cache_enabled=True)
+    create = module.create_input_processor_with_hash
+
+    with caplog.at_level(logging.DEBUG, logger="dynamo.trtllm.preprocess_pool"):
+        create(processor)
+        create(processor, hash_lib="hasher")
+        create(object(), encoder_cache_enabled=True)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "processing multimodal requests in the worker process" in (
+        warnings[0].getMessage()
+    )
+
+
+def test_start_routes_once_the_processes_are_ready():
+    module, llm = _module(), _llm()
     original = module.create_input_processor_with_hash
     with mock.patch.object(PreprocessPool, "wait_until_ready") as wait_until_ready:
-        pool = PreprocessPool.start(module, llm, 2)
+        pool = PreprocessPool.start(module, llm, _calls(llm), 2)
     try:
         wait_until_ready.assert_called_once_with()
         original.assert_called_once_with(
@@ -161,33 +183,45 @@ def test_start_routes_once_the_processes_are_ready(tmp_path):
     assert module.create_input_processor_with_hash is original
 
 
-def test_start_does_not_route_when_the_processes_fail(tmp_path):
-    module, llm = _module(), _llm(tmp_path)
+def test_start_does_not_route_when_the_processes_fail():
+    module, llm = _module(), _llm()
     original = module.create_input_processor_with_hash
     with mock.patch.object(
         PreprocessPool, "wait_until_ready", side_effect=TimeoutError("slow")
     ):
         with pytest.raises(TimeoutError):
-            PreprocessPool.start(module, llm, 2)
+            PreprocessPool.start(module, llm, _calls(llm), 2)
 
     assert module.create_input_processor_with_hash is original
 
 
-@pytest.mark.parametrize(
-    ("video_pruning_rate", "encoder_cache_max_bytes"), [(None, 0), (0.5, 1024)]
-)
-def test_spec_mirrors_how_the_llm_built_its_input_processor(
-    tmp_path, video_pruning_rate, encoder_cache_max_bytes
-):
-    llm = _llm(tmp_path, video_pruning_rate, encoder_cache_max_bytes)
-    spec = InputProcessorSpec.from_llm(llm)
+def test_records_input_processor_calls_until_the_block_ends():
+    module = SimpleNamespace(create_input_processor=mock.Mock(return_value="built"))
+    original = module.create_input_processor
+    with record_input_processor_calls(module) as calls:
+        assert module.create_input_processor("model-dir", tokenizer=None) == "built"
+    module.create_input_processor("other-dir")
 
-    assert spec.model_dir == str(tmp_path)
-    assert pickle.loads(spec.tokenizer) == {"vocab": 3}
-    assert spec.checkpoint_format == "HF"
-    assert spec.trust_remote_code is False
-    expected_kwargs = {"enable_tokenization_cache": True}
-    if video_pruning_rate is not None:
-        expected_kwargs["video_pruning_rate"] = video_pruning_rate
-    assert spec.kwargs == expected_kwargs
+    assert calls == [(("model-dir",), {"tokenizer": None}, "built")]
+    assert module.create_input_processor is original
+
+
+@pytest.mark.parametrize("encoder_cache_max_bytes", [0, 1024])
+def test_spec_takes_the_call_that_built_the_llm_input_processor(
+    encoder_cache_max_bytes,
+):
+    llm = _llm(encoder_cache_max_bytes)
+    args = ("model-dir", {"vocab": 3}, "HF")
+    # Arguments this module does not know about are passed on as well.
+    kwargs = {"trust_remote_code": False, "vision_gpu_normalize": True}
+    calls = [(("draft-dir",), {}, object()), (args, kwargs, llm.input_processor)]
+    spec = InputProcessorSpec.from_llm(llm, calls)
+
+    assert pickle.loads(spec.arguments) == (args, kwargs)
     assert spec.encoder_cache_enabled is (encoder_cache_max_bytes > 0)
+
+
+def test_spec_needs_the_call_that_built_the_llm_input_processor():
+    llm = _llm()
+    with pytest.raises(RuntimeError, match="did not build its input processor"):
+        InputProcessorSpec.from_llm(llm, [(("model-dir",), {}, object())])

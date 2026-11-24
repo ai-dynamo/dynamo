@@ -18,7 +18,11 @@ from transformers import PretrainedConfig
 
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
-from dynamo.trtllm.preprocess_pool import PreprocessPool
+from dynamo.trtllm.preprocess_pool import (
+    PreprocessPool,
+    ProcessorCall,
+    record_input_processor_calls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,12 @@ def _release_preprocessed_inputs(future: Future[Any]) -> None:
     multimodal_params = future.result().multimodal_params
     if multimodal_params is not None:
         multimodal_params.release_handles()
+
+
+def _close_started_pool(future: Future[PreprocessPool]) -> None:
+    """Close a preprocessing pool that started after startup was cancelled."""
+    if not future.cancelled() and future.exception() is None:
+        future.result().close()
 
 
 class Backend(str, enum.Enum):
@@ -118,11 +128,32 @@ class TensorRTLLMEngine:
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)
                 self._llm = self._llm_cls(**self.engine_args)
 
-    async def start_preprocess_pool(self, num_processes: int) -> None:
-        """Run the LLM's multimodal input processing in ``num_processes`` processes."""
-        self._preprocess_pool = await asyncio.to_thread(
-            PreprocessPool.start, trtllm_llm_module, self.llm, num_processes
+    async def start_preprocess_pool(
+        self, num_processes: int, processor_calls: list[ProcessorCall]
+    ) -> None:
+        """Run the LLM's multimodal input processing in ``num_processes`` processes.
+
+        ``processor_calls`` are the create_input_processor calls recorded while the
+        LLM was built.
+        """
+        starter = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="mm-preprocess-start"
         )
+        future = starter.submit(
+            PreprocessPool.start,
+            trtllm_llm_module,
+            self.llm,
+            processor_calls,
+            num_processes,
+        )
+        starter.shutdown(wait=False)
+        try:
+            pool = await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            # The processes keep starting, so close the pool once they have.
+            future.add_done_callback(_close_started_pool)
+            raise
+        self._preprocess_pool = pool
         self._preprocess_threads = num_processes
 
     async def preprocess(
@@ -138,7 +169,7 @@ class TensorRTLLMEngine:
                 max_workers=self._preprocess_threads,
                 thread_name_prefix="mm-preprocess",
             )
-        # Run it in a copy of the caller's context, as asyncio.to_thread does.
+        # Keep the caller's context variables, as asyncio.to_thread does.
         future = self._preprocess_executor.submit(
             contextvars.copy_context().run,
             self.llm.preprocess,
@@ -274,8 +305,15 @@ async def get_llm_engine(
     start_time = time.time()
 
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
+    processor_calls: list[ProcessorCall] = []
     try:
-        await engine.initialize()
+        if mm_preprocess_processes:
+            # The preprocessing processes build their input processors with the
+            # LLM's create_input_processor call, so record it as the LLM is built.
+            with record_input_processor_calls(trtllm_llm_module) as processor_calls:
+                await engine.initialize()
+        else:
+            await engine.initialize()
         load_time = time.time() - start_time
         logger.debug(f"TensorRT-LLM engine initialized in {load_time:.2f}s")
 
@@ -284,7 +322,7 @@ async def get_llm_engine(
             component_gauges.set_model_load_time(load_time)
 
         if mm_preprocess_processes:
-            await engine.start_preprocess_pool(mm_preprocess_processes)
+            await engine.start_preprocess_pool(mm_preprocess_processes, processor_calls)
 
         yield engine
     except Exception as e:

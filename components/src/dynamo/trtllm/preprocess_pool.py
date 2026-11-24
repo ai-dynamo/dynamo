@@ -9,6 +9,7 @@ imports only the standard library at module level.
 """
 
 import concurrent.futures
+import contextlib
 import dataclasses
 import functools
 import logging
@@ -18,52 +19,74 @@ import multiprocessing.synchronize
 import os
 import pickle
 import signal
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from types import ModuleType, SimpleNamespace
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Intra-op threads per process, so that the processes do not oversubscribe the CPUs.
+# Threads PyTorch may use in each process, so that the processes do not overload
+# the CPUs.
 TORCH_THREADS_PER_PROCESS = 4
 STARTUP_TIMEOUT_S = 600.0
 
 # A processor returned by create_input_processor_with_hash.
 Processor = Callable[[Any, Any], Any]
 
+# The positional and keyword arguments of a create_input_processor call, and the
+# input processor it returned.
+ProcessorCall = tuple[tuple[Any, ...], dict[str, Any], Any]
+
 # The processor and ready barrier, set in each pool process by _init_process.
 _state = SimpleNamespace()
 
 
+@contextlib.contextmanager
+def record_input_processor_calls(
+    llm_module: ModuleType,
+) -> Iterator[list[ProcessorCall]]:
+    """Record the create_input_processor calls that ``llm_module`` makes."""
+    original = llm_module.create_input_processor
+    calls: list[ProcessorCall] = []
+
+    def create_input_processor(*args, **kwargs):
+        processor = original(*args, **kwargs)
+        calls.append((args, kwargs, processor))
+        return processor
+
+    setattr(llm_module, "create_input_processor", create_input_processor)
+    try:
+        yield calls
+    finally:
+        setattr(llm_module, "create_input_processor", original)
+
+
 @dataclasses.dataclass
 class InputProcessorSpec:
-    """The arguments an LLM built its hashing input processor from."""
+    """How an LLM built its hashing input processor."""
 
-    model_dir: str
-    # Pickled so that pool processes unpickle it after TRT_LLM_NO_LIB_INIT is set.
-    tokenizer: bytes
-    checkpoint_format: Optional[str]
-    trust_remote_code: bool
-    kwargs: dict[str, Any]
+    # The create_input_processor arguments, pickled so that pool processes unpickle
+    # them after TRT_LLM_NO_LIB_INIT is set.
+    arguments: bytes
     encoder_cache_enabled: bool
 
     @classmethod
-    def from_llm(cls, llm: Any) -> "InputProcessorSpec":
-        """Mirror how TensorRT-LLM's LLM creates and hashes its input processor."""
-        multimodal_config = llm.args.multimodal_config
-        kwargs: dict[str, Any] = {
-            "enable_tokenization_cache": llm.args.enable_tokenization_cache
-        }
-        if multimodal_config.video_pruning_rate is not None:
-            kwargs["video_pruning_rate"] = multimodal_config.video_pruning_rate
-        return cls(
-            # The local checkpoint directory the LLM resolved its model to.
-            model_dir=str(llm._hf_model_dir),
-            tokenizer=pickle.dumps(llm.tokenizer),
-            checkpoint_format=llm.args.checkpoint_format,
-            trust_remote_code=llm.args.trust_remote_code,
-            kwargs=kwargs,
-            encoder_cache_enabled=multimodal_config.encoder_cache_max_bytes > 0,
+    def from_llm(
+        cls, llm: Any, processor_calls: list[ProcessorCall]
+    ) -> "InputProcessorSpec":
+        """Take the recorded call that built ``llm``'s input processor, so that pool
+        processes build theirs with exactly the same arguments."""
+        for args, kwargs, processor in processor_calls:
+            if processor is llm.input_processor:
+                return cls(
+                    arguments=pickle.dumps((args, kwargs)),
+                    encoder_cache_enabled=(
+                        llm.args.multimodal_config.encoder_cache_max_bytes > 0
+                    ),
+                )
+        raise RuntimeError(
+            "The LLM did not build its input processor with create_input_processor, "
+            "so preprocessing processes cannot build the same one"
         )
 
 
@@ -83,13 +106,8 @@ def build_input_processor(spec: InputProcessorSpec) -> Processor:
     # passes a file descriptor per tensor over a socket, and that handshake
     # stalls whenever the worker's event loop holds the GIL.
     torch.multiprocessing.set_sharing_strategy("file_system")
-    processor = create_input_processor(
-        spec.model_dir,
-        pickle.loads(spec.tokenizer),
-        spec.checkpoint_format,
-        trust_remote_code=spec.trust_remote_code,
-        **spec.kwargs,
-    )
+    args, kwargs = pickle.loads(spec.arguments)
+    processor = create_input_processor(*args, **kwargs)
     return create_input_processor_with_hash(
         processor, encoder_cache_enabled=spec.encoder_cache_enabled
     )
@@ -159,6 +177,7 @@ class PreprocessPool:
         self._num_processes = num_processes
         self._local = local
         self._fallback_logged = False
+        self._bypass_logged = False
         self._restore: Optional[Callable[[], None]] = None
         # Forking would copy the worker's CUDA, MPI and thread state.
         mp_context = _SpawnContext()
@@ -171,14 +190,20 @@ class PreprocessPool:
 
     @classmethod
     def start(
-        cls, llm_module: ModuleType, llm: Any, num_processes: int
+        cls,
+        llm_module: ModuleType,
+        llm: Any,
+        processor_calls: list[ProcessorCall],
+        num_processes: int,
     ) -> "PreprocessPool":
         """Start a pool and route ``llm``'s multimodal input processing to it.
 
         ``llm_module`` is the module whose ``create_input_processor_with_hash``
         TensorRT-LLM's LLM calls to process each multimodal request.
+        ``processor_calls`` are the create_input_processor calls recorded while
+        the LLM was built.
         """
-        spec = InputProcessorSpec.from_llm(llm)
+        spec = InputProcessorSpec.from_llm(llm, processor_calls)
         local = llm_module.create_input_processor_with_hash(
             llm.input_processor, encoder_cache_enabled=spec.encoder_cache_enabled
         )
@@ -214,13 +239,23 @@ class PreprocessPool:
         original = llm_module.create_input_processor_with_hash
 
         def create_input_processor_with_hash(processor, *args, **kwargs):
-            # Other processors and arguments keep the in-process path.
+            # Other processors keep the in-process path.
+            if processor is not input_processor:
+                return original(processor, *args, **kwargs)
             if (
-                processor is not input_processor
-                or args
+                args
                 or kwargs.keys() - {"encoder_cache_enabled"}
                 or kwargs.get("encoder_cache_enabled", False) != encoder_cache_enabled
             ):
+                log = logger.debug if self._bypass_logged else logger.warning
+                self._bypass_logged = True
+                log(
+                    "TensorRT-LLM hashed the input processor with arguments the "
+                    "preprocessing processes were not built for (%s, %s); "
+                    "processing multimodal requests in the worker process",
+                    args,
+                    kwargs,
+                )
                 return original(processor, *args, **kwargs)
             return self
 
