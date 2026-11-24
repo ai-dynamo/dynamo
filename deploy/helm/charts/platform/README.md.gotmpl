@@ -134,7 +134,7 @@ unchanged. Review API migration notes before future upgrades.
 Kubernetes would reject. Service names must be DNS-1035 labels: at most 63 characters, starting
 with a letter. Selector values and the DGD-name label allow at most 63 characters. Checks follow
 the selected workload's actual rendering, including worker hashes, optional discovery Services,
-and provider headless Services. Generated names remain unchanged.
+provider headless Services, and native child or role names. Generated names remain unchanged.
 
 **Affected:** New objects and updates that introduce a new naming failure. A frontend DCD named
 `70b-llama-production`, for example, is rejected. This strict Service rule also applies on clusters
@@ -149,8 +149,9 @@ and [DCD name limits](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pa
 be rendered. On the Component and DisaggregatedSet paths, failed normalization into DCD inputs rejects
 new graphs and updates whose old lowering succeeded. When both versions fail to lower, this check
 allows the update even if the inputs or errors differ; other validation rules still apply. Grove
-admission does not perform that normalization check. Repairing an unrenderable graph requires valid
-generated names because old identities cannot be compared.
+admission does not perform that normalization check. Repairing failed normalization checks names of
+newly renderable DCD resources. Native DisaggregatedSet role names and headless Service names remain
+checkable without normalized DCD inputs and can retain identical existing failures.
 New DCDs require valid names, including children created by the operator during a DGD rollout.
 Changing or removing an owner reference preserves an unchanged naming failure.
 

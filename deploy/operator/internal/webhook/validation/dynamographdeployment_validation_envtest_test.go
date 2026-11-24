@@ -238,7 +238,51 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	legacyInvalidNew := legacyInvalidOld.DeepCopy()
 	legacyInvalidNew.Labels = map[string]string{"updated": "true"}
 
+	t.Log("Prepare provider-native identities without discovery Services")
+	groveNativeName := alphaDGDForAdmissionWithServiceNames("worker_1")
+	groveNativeName.Name = "graph"
+	groveNativeName.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+	groveNativeMaintenance := groveNativeName.DeepCopy()
+	groveNativeMaintenance.Labels = map[string]string{"updated": "true"}
+	groveNativeNameError := fmt.Sprintf("spec.services[worker_1]: Invalid value: %q: generated Grove child name is invalid: %s", "graph-0-worker_1", strings.Join(k8svalidation.IsDNS1123Subdomain("graph-0-worker_1"), "; "))
+
+	dsNativeNames := alphaDGDForAdmissionWithServiceNames("worker_1", "worker_2")
+	dsNativeNames.Name = "graph"
+	dsNativeNames.Annotations = map[string]string{
+		consts.KubeAnnotationWorkloadProvider:       consts.WorkloadProviderDisaggregatedSet,
+		consts.KubeAnnotationEnableGrove:            "false",
+		consts.KubeAnnotationEnableDisaggregatedSet: "true",
+		consts.KubeAnnotationDynamoDiscoveryBackend: "etcd",
+	}
+	for _, component := range dsNativeNames.Spec.Services {
+		component.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+	}
+	dsNativeMaintenance := dsNativeNames.DeepCopy()
+	dsNativeMaintenance.Labels = map[string]string{"updated": "true"}
+	dsCanonicalRoles := dsNativeNames.DeepCopy()
+	dsCanonicalRoles.Spec.Services["worker_1"].ComponentType = consts.ComponentTypePrefill
+	dsCanonicalRoles.Spec.Services["worker_2"].ComponentType = consts.ComponentTypeDecode
+	dsNativeTransition := dsNativeNames.DeepCopy()
+	delete(dsNativeTransition.Annotations, consts.KubeAnnotationWorkloadProvider)
+	dsPreviousProvider := dsNativeTransition.DeepCopy()
+	dsPreviousProvider.Annotations[consts.KubeAnnotationEnableDisaggregatedSet] = "false"
+	dsNativeFailure := dsNativeTransition.DeepCopy()
+	dsNativeFailure.Spec.Services["worker_1"].ExtraPodSpec.MainContainer.Env = []corev1.EnvVar{{Name: "DYN_DEPLOYMENT_CONFIG", Value: "{"}}
+	dsPreviousFailure := dsPreviousProvider.DeepCopy()
+	dsPreviousFailure.Spec.Services["worker_1"].ExtraPodSpec.MainContainer.Env = []corev1.EnvVar{{Name: "DYN_DEPLOYMENT_CONFIG", Value: "{"}}
+	dsNativeNameErrors := []string{
+		fmt.Sprintf("spec.services[worker_1]: Invalid value: %q: generated DisaggregatedSet role name is invalid: %s", "worker_1", strings.Join(k8svalidation.IsDNS1123Label("worker_1"), "; ")),
+		fmt.Sprintf("spec.services[worker_2]: Invalid value: %q: generated DisaggregatedSet role name is invalid: %s", "worker_2", strings.Join(k8svalidation.IsDNS1123Label("worker_2"), "; ")),
+	}
+
 	tests := []dgdAdmissionTestCase{
+		{name: "native Grove child names reject alpha underscores with etcd", deployment: groveNativeName, wantWebhookErrs: []string{groveNativeNameError}},
+		{name: "native Grove child names preserve unchanged legacy failures", seedWithoutWebhook: true, oldDeployment: groveNativeName, deployment: groveNativeMaintenance},
+		{name: "native DS role names reject alpha underscores with etcd", lwsEnabled: true, deployment: dsNativeNames, wantWebhookErrs: dsNativeNameErrors},
+		{name: "native DS role names preserve unchanged legacy failures", lwsEnabled: true, seedWithoutWebhook: true, oldDeployment: dsNativeNames, deployment: dsNativeMaintenance},
+		{name: "native DS canonical roles allow alpha label underscores", lwsEnabled: true, deployment: dsCanonicalRoles},
+		{name: "native DS role changes reject newly invalid identities", lwsEnabled: true, seedWithoutMutation: true, oldDeployment: dsPreviousProvider, deployment: dsNativeTransition, wantWebhookErrs: dsNativeNameErrors},
+		{name: "native DS role names remain independent of failed DCD preparation", lwsEnabled: true, seedWithoutMutation: true, oldDeployment: dsPreviousFailure, deployment: dsNativeFailure, wantWebhookErrs: dsNativeNameErrors},
 		{name: "Grove does not normalize component launch config", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_DEPLOYMENT_CONFIG", Value: "{"}}
 		})},
@@ -1212,9 +1256,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.components[1].name: Invalid value: "": spec.components[1].name in body should be at least 1 chars long`,
 		},
 		{
-			name:            "v1alpha1 empty service map key is rejected",
-			deployment:      alphaDGDForAdmissionWithServiceNames(""),
-			wantWebhookErrs: []string{"spec.services[]: Required value: component name must not be empty", selectorAdmissionError("spec.services[]", "test-graph-"), serviceNameAdmissionError("spec.services[]", "test-graph-")},
+			name:       "v1alpha1 empty service map key is rejected",
+			deployment: alphaDGDForAdmissionWithServiceNames(""),
+			wantWebhookErrs: []string{
+				"spec.services[]: Required value: component name must not be empty",
+				selectorAdmissionError("spec.services[]", "test-graph-"),
+				fmt.Sprintf("spec.services[]: Invalid value: %q: generated Grove child name is invalid: %s", "test-graph-0-", strings.Join(k8svalidation.IsDNS1123Subdomain("test-graph-0-"), "; ")),
+				serviceNameAdmissionError("spec.services[]", "test-graph-"),
+			},
 		},
 		{
 			name: "v1beta1 component names are unique case-insensitively in CEL",

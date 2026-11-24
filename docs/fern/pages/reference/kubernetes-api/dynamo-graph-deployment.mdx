@@ -65,6 +65,10 @@ rejected. Paths that emit a v1beta1 DCD also enforce that child's `spec.name` sc
 ASCII letters, digits, and hyphens, but excludes dots and underscores. Grove and directly owned
 DisaggregatedSet roles do not create that child. Generated resource names are validated separately.
 
+Grove PodClique and scaling-group child names must be DNS-1123 subdomains. DisaggregatedSet role names
+must be DNS-1123 labels. A key such as `worker_1` is a valid label value but is rejected when that
+underscore remains in the provider's generated child or role name.
+
 Grove Pods use `<dgd>-<component>` as `nvidia.com/selector`. Outside Grove, worker DCD names add an
 eight-character hash suffix; single-node Pods use that full DCD name as their selector. Selector
 values allow at most 63 characters. LeaderWorkerSet and DisaggregatedSet Pod templates omit this
@@ -85,8 +89,9 @@ normalizes components into DCD inputs. If that normalization fails (for example,
 `DYN_DEPLOYMENT_CONFIG` contains invalid JSON), admission rejects new graphs and updates whose old
 lowering succeeded. When both the old and new lowerings fail, this check allows the update even if
 the inputs or errors differ; other validation rules still apply. This normalization check does not
-run on the Grove path. Repairing an unrenderable graph requires valid generated names: admission
-cannot grandfather identities it could not render from the old object.
+run on the Grove path. Repairing failed normalization requires valid names for the DCD resources
+that become available. Native DisaggregatedSet role names and headless Service names are checked
+independently of DCD normalization and can retain identical existing failures.
 
 New DCD children require valid names, including children created by the operator during a rollout. See
 [DCD generated name limits](dynamo-component-deployment.mdx#generated-name-limits).

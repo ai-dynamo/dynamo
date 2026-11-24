@@ -1169,17 +1169,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponent
 		return v.validateDynamoGraphDeploymentComponentsGrove(newDGD, oldDGD, fldPath)
 	}
 
-	// The provider's headless Service name does not depend on prepared children.
+	// Provider-native identities do not depend on prepared DCD children.
 	disaggregatedSet := newRendering.provider == consts.WorkloadProviderDisaggregatedSet
 	oldDisaggregatedSet := oldRendering.provider == consts.WorkloadProviderDisaggregatedSet
 	var allErrs field.ErrorList
 	if disaggregatedSet {
-		name := disaggregatedset.Name(newDGD)
-		var oldService *corev1.Service
+		var oldDS *nvidiacomv1beta1.DynamoGraphDeployment
 		if oldDisaggregatedSet {
-			oldService = &corev1.Service{Name: disaggregatedset.Name(oldDGD)}
+			oldDS = oldDGD
 		}
-		allErrs = append(allErrs, v.validateService(&corev1.Service{Name: name}, oldService, field.NewPath("metadata", "name"))...)
+		allErrs = append(allErrs, v.validateDynamoGraphDeploymentComponentsDisaggregatedSet(newDGD, oldDS, fldPath)...)
 	}
 
 	// Collection-level failures must refer to fields present in the submitted version.
@@ -1190,7 +1189,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponent
 		return append(allErrs, field.Forbidden(fldPath, "cannot render component resources: "+renderErr.Error()))
 	}
 
-	// A previously failing lowering supplies no new child identities to inspect.
+	// A previously failing lowering supplies no new DCD identities to inspect.
 	if newRendering.deployments == nil {
 		return allErrs
 	}
@@ -1246,11 +1245,57 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponent
 	return allErrs
 }
 
-// validateDynamoGraphDeploymentComponentsGrove checks actual Grove Pod metadata and optional Services.
+// validateDynamoGraphDeploymentComponentsDisaggregatedSet checks native identities independently of DCD preparation.
+// newDGD and fldPath must be non-nil; oldDGD is nil when no previous DS lowering existed.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponentsDisaggregatedSet(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment, fldPath *field.Path) field.ErrorList {
+	var oldService *corev1.Service
+	if oldDGD != nil {
+		oldService = &corev1.Service{Name: disaggregatedset.Name(oldDGD)}
+	}
+	allErrs := v.validateService(&corev1.Service{Name: disaggregatedset.Name(newDGD)}, oldService, field.NewPath("metadata", "name"))
+
+	// Match only identities from complete provider selections, never partial failed selections.
+	selection, diagnostic := disaggregatedset.Select(newDGD)
+	if diagnostic != "" {
+		return allErrs
+	}
+	var oldRoleNames map[string]string
+	if oldDGD != nil {
+		if oldSelection, oldDiagnostic := disaggregatedset.Select(oldDGD); oldDiagnostic == "" {
+			oldRoleNames = oldSelection.ComponentToRole
+		}
+	}
+	for i := range newDGD.Spec.Components {
+		component := &newDGD.Spec.Components[i]
+		name, selected := selection.ComponentToRole[component.ComponentName]
+		if !selected {
+			continue
+		}
+		oldName, existed := oldRoleNames[component.ComponentName]
+		if existed && name == oldName {
+			continue
+		}
+		if messages := k8svalidation.IsDNS1123Label(name); len(messages) > 0 {
+			namePath := fldPath.Index(i).Child("name")
+			if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+				namePath = field.NewPath("spec", "services").Key(component.ComponentName)
+			}
+			allErrs = append(allErrs, field.Invalid(namePath, name, "generated DisaggregatedSet role name is invalid: "+strings.Join(messages, "; ")))
+		}
+	}
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentComponentsGrove checks Grove child names, Pod metadata, and optional Services.
 // newDGD and fldPath must be non-nil; oldDGD is nil on create.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponentsGrove(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	hasOrdinaryWorkload := false
+	pcsName := dynamo.PCSNameForDGD(newDGD, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)
+	var oldPCSName string
+	if oldDGD != nil {
+		oldPCSName = dynamo.PCSNameForDGD(oldDGD, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)
+	}
 	for i := range newDGD.Spec.Components {
 		component := &newDGD.Spec.Components[i]
 		hasOrdinaryWorkload = hasOrdinaryWorkload || !component.ManagedByExternalController()
@@ -1272,6 +1317,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponent
 		if component.ManagedByExternalController() {
 			continue
 		}
+
+		// The provider's PodClique or scaling-group child has its own metadata.name constraint.
+		childName := dynamo.GroveComponentResourceName(pcsName, component.ComponentName)
+		unchangedChildName := oldComponent != nil && !oldComponent.ManagedByExternalController() &&
+			childName == dynamo.GroveComponentResourceName(oldPCSName, oldComponent.ComponentName)
+		if !unchangedChildName {
+			if messages := k8svalidation.IsDNS1123Subdomain(childName); len(messages) > 0 {
+				allErrs = append(allErrs, field.Invalid(namePath, childName, "generated Grove child name is invalid: "+strings.Join(messages, "; ")))
+			}
+		}
+
 		params := componentdeployment.ServiceParams{ServiceName: dynamo.GetDCDResourceName(newDGD, component.ComponentName, ""), ComponentType: string(component.ComponentType), IsK8sDiscovery: commoncontroller.IsK8sDiscoveryEnabled(v.discoveryBackend, newDGD.Annotations)}
 		service, _ := componentdeployment.RenderService(params)
 		var oldService *corev1.Service
@@ -1295,12 +1351,12 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponent
 		}
 	}
 	if hasOrdinaryWorkload {
-		service := &corev1.Service{Name: grovecommon.GenerateHeadlessServiceName(grovecommon.ResourceNameReplica{Name: dynamo.PCSNameForDGD(newDGD, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)})}
+		service := &corev1.Service{Name: grovecommon.GenerateHeadlessServiceName(grovecommon.ResourceNameReplica{Name: pcsName})}
 		var oldService *corev1.Service
 		if oldDGD != nil {
 			for i := range oldDGD.Spec.Components {
 				if !oldDGD.Spec.Components[i].ManagedByExternalController() {
-					oldService = &corev1.Service{Name: grovecommon.GenerateHeadlessServiceName(grovecommon.ResourceNameReplica{Name: dynamo.PCSNameForDGD(oldDGD, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)})}
+					oldService = &corev1.Service{Name: grovecommon.GenerateHeadlessServiceName(grovecommon.ResourceNameReplica{Name: oldPCSName})}
 					break
 				}
 			}
