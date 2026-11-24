@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
@@ -40,6 +40,9 @@ WorkerType = Literal["prefill", "decode", "aggregated"]
 class EnginePerfLimits:
     """Runtime limits used by Planner engine-level queries."""
 
+    prefill_kv_allocation: Optional[tuple[int, Optional[int], int]] = field(
+        default=None, kw_only=True
+    )
     max_num_batched_tokens: int
     max_num_seqs: int
     max_kv_tokens: int
@@ -580,9 +583,17 @@ class AISCoreEnginePerfModel:
         step_slots = max(1, budget_per_rank // fresh_isl)
         if self._attention_dp_size == 1:
             return min(step_slots, self._limits.max_num_seqs)
-        # Cached prefix tokens still occupy KV space. Use the full context.
-        kv_slots = self._limits.max_kv_tokens // context_length
-        slots_per_rank = min(step_slots, kv_slots, self._limits.max_num_seqs)
+        slots_per_rank = min(step_slots, self._limits.max_num_seqs)
+        allocation = self._limits.prefill_kv_allocation
+        if allocation is not None:
+            block_size, max_admission_blocks, reserved_blocks = allocation
+            blocks_per_prompt = (context_length + block_size - 1) // block_size
+            if max_admission_blocks is not None:
+                blocks_per_prompt = min(blocks_per_prompt, max_admission_blocks)
+            pool_blocks = max(
+                0, self._limits.max_kv_tokens // block_size - reserved_blocks
+            )
+            slots_per_rank = min(slots_per_rank, pool_blocks // blocks_per_prompt)
         return slots_per_rank * self._attention_dp_size
 
     def _decode_max_batch(self, context_length: int) -> int:

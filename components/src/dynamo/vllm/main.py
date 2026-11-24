@@ -66,7 +66,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 from . import envs
 from .args import Config, configure_rl_logprobs_mode, parse_args_with_model_fetch
 from .backend_args import _configured_artifact_router_profile
-from .cache_info import get_configured_kv_event_block_size
+from .cache_info import PREFILL_KV_ALLOCATION_KEY, get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -1044,6 +1044,13 @@ async def register_vllm_model(
     )
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+    allocation = (getattr(vllm_config, "additional_config", None) or {}).get(
+        PREFILL_KV_ALLOCATION_KEY
+    )
+    if allocation is not None:
+        runtime_config.set_engine_specific(
+            PREFILL_KV_ALLOCATION_KEY, json.dumps(allocation)
+        )
     runtime_config.enable_local_indexer = config.enable_local_indexer
     runtime_config.kv_event_publishing_enabled = config.use_kv_events
     runtime_config.kv_state_endpoint = config.kv_state_endpoint

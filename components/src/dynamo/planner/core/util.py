@@ -11,6 +11,7 @@ from dynamo.planner.monitoring.worker_info import WorkerInfo
 _MDC_REFRESH_FIELDS = (
     "total_kv_blocks",
     "kv_cache_block_size",
+    "prefill_kv_allocation",
     "max_num_seqs",
     "max_num_batched_tokens",
     "context_length",

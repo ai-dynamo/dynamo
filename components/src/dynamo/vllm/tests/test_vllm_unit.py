@@ -2693,6 +2693,50 @@ def test_build_sampling_params_openai_root_thinking_token_budget_overrides_nvext
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "window", "expected"),
+    [
+        (
+            "full_attention",
+            None,
+            {"block_size": 16, "max_admission_blocks": None, "reserved_blocks": 1},
+        ),
+        (
+            "sliding_window",
+            4096,
+            {"block_size": 16, "max_admission_blocks": 261, "reserved_blocks": 1},
+        ),
+        ("mamba", None, None),
+    ],
+)
+async def test_configured_prefill_kv_allocation_follows_single_group(
+    kind, window, expected
+):
+    from dynamo.vllm.cache_info import (
+        PREFILL_KV_ALLOCATION_KEY,
+        configure_kv_event_block_size,
+    )
+
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16),
+        additional_config=None,
+        max_in_flight_tokens=64,
+        model_config=SimpleNamespace(max_model_len=32768),
+        speculative_config=None,
+    )
+
+    async def group_metadata(_method):
+        return [{"kind": kind, "block_size": 16, "sliding_window": window}]
+
+    engine = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=group_metadata)
+    )
+
+    await configure_kv_event_block_size(engine, config)
+    assert config.additional_config.get(PREFILL_KV_ALLOCATION_KEY) == expected
+
+
+@pytest.mark.asyncio
 async def test_generate_text_mode_applies_nvext_cache_salt():
     from dynamo.vllm.handlers import DecodeWorkerHandler
 

@@ -251,6 +251,9 @@ class PlannerEnginePerfModel:
         return EnginePerfLimits(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            prefill_kv_allocation=(
+                self._capabilities.prefill_kv_allocation if self._capabilities else None
+            ),
             max_kv_tokens=max_kv_tokens,
         )
 
@@ -374,6 +377,7 @@ class PlannerEnginePerfModel:
             self._worker_type,
             values,
             json.dumps(self._build_ais_config(), sort_keys=True, separators=(",", ":")),
+            self._capabilities.prefill_kv_allocation if self._capabilities else None,
         )
 
     def _effective_speculative_nextn(self) -> int:
