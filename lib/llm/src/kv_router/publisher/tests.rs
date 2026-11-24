@@ -865,7 +865,7 @@ mod tests_startup_helpers {
     use bytes::Bytes;
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_indexer::host::{
-        GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
+        GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, WorkerKvQueryResponse,
     };
     use dynamo_runtime::discovery::{
         Discovery, DiscoveryQuery, EventSourceQuery, MockDiscovery, SharedMockRegistry,
@@ -1052,8 +1052,7 @@ mod tests_startup_helpers {
 
         // Create a local indexer
         let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+        let local_indexer = Arc::new(LocalKvIndexer::new(100));
 
         // Create BlockStored event
         let event = KvCacheEvent {
@@ -1129,8 +1128,7 @@ mod tests_startup_helpers {
         let (component, published) = MockComponent::new();
 
         let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+        let local_indexer = Arc::new(LocalKvIndexer::new(100));
 
         // First, store a block
         let store_event = KvCacheEvent {
@@ -1208,8 +1206,7 @@ mod tests_startup_helpers {
         let (component, published) = MockComponent::new();
 
         let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+        let local_indexer = Arc::new(LocalKvIndexer::new(100));
 
         // Store a block
         let store_event = KvCacheEvent {
@@ -1275,54 +1272,6 @@ mod tests_startup_helpers {
         );
 
         token.cancel();
-    }
-
-    //--------------------------------------------------------------------
-    // Test that local indexer failure doesn't break NATS publishing
-    //--------------------------------------------------------------------
-    #[tokio::test]
-    async fn test_event_processor_local_indexer_failure_continues() {
-        let (component, published) = MockComponent::new();
-
-        let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
-
-        // cancel indexer immediately to simulate failure
-        token.cancel();
-
-        let event = KvCacheEvent {
-            event_id: 1,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![ExternalSequenceBlockHash(1)],
-            }),
-            dp_rank: 0,
-        };
-
-        let new_token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
-        tx.send(local_gpu_event(1, event).into()).unwrap();
-        drop(tx);
-
-        // Despite local indexer being cancelled, event processor should continue
-        let handle = tokio::spawn(start_event_processor(
-            component,
-            1,
-            new_token,
-            rx,
-            Some(local_indexer),
-            Some(10_000),
-            EventDedupPolicy::RefCounted,
-        ));
-
-        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
-            .await
-            .unwrap()
-            .unwrap();
-
-        // Verify event was still published to NATS despite local indexer failure
-        let published_events = published.lock().unwrap();
-        assert_eq!(published_events.len(), 1);
     }
 
     //--------------------------------------------------------------------
@@ -1857,12 +1806,7 @@ mod tests_startup_helpers {
 
         // === SETUP: Worker Components ===
         let (worker_component, worker_published) = MockComponent::new();
-        let local_indexer_1 = Arc::new(LocalKvIndexer::new(
-            token.clone(),
-            block_size,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            100, // buffer size
-        ));
+        let local_indexer_1 = Arc::new(LocalKvIndexer::new(100));
 
         let (worker_tx, worker_rx) = mpsc::unbounded_channel::<PublisherInput>();
 
@@ -2305,14 +2249,9 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn recovery_barrier_waits_for_the_index_like_live_ingestion() {
-        use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer, WorkerKvQueryResponse};
+        use dynamo_kv_indexer::host::{LocalKvIndexer, WorkerKvQueryResponse};
         for is_unreachable in [false, true] {
-            let indexer = Arc::new(LocalKvIndexer::new(
-                CancellationToken::new(),
-                4,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
-                16,
-            ));
+            let indexer = Arc::new(LocalKvIndexer::new(16));
             let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
             let cancel = CancellationToken::new();
             let publisher = MockPublisher::new();

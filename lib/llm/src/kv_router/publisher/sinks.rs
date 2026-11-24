@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
-use dynamo_kv_indexer::host::{KvRouterError, LocalKvIndexer};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_scheduler::host::RouterEventSink;
 
@@ -150,20 +150,9 @@ pub(super) fn event_plane_event_batches(
     })
 }
 
-/// Apply one canonical event to the local indexer, which holds it when this returns.
-///
-/// Callers own logging and fail-open/fail-closed policy.
-pub(super) async fn admit_local_event(
-    local_indexer: Option<&LocalKvIndexer>,
-    event: &RouterEvent,
-) -> Result<(), KvRouterError> {
-    let Some(local_indexer) = local_indexer else {
-        return Ok(());
-    };
-    local_indexer.apply_event_with_buffer(event.clone()).await
-}
-
-pub(super) async fn emit(
+/// Builds the canonical event, applies it to the local indexer (which holds it when this
+/// returns) and queues it for publication.
+pub(super) fn emit(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
     storage_tier: StorageTier,
@@ -171,17 +160,12 @@ pub(super) async fn emit(
     event: KvCacheEvent,
     session_id: Option<String>,
     output: &mut Vec<RouterEvent>,
-) -> bool {
+) {
     let mut router_event =
         RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
     router_event.session_id = session_id;
-    let applied = match admit_local_event(local_indexer.as_deref(), &router_event).await {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(worker_id, %error, "Failed to apply event to local indexer");
-            false
-        }
-    };
+    if let Some(local_indexer) = local_indexer {
+        local_indexer.apply_event_with_buffer(router_event.clone());
+    }
     output.push(router_event);
-    applied
 }

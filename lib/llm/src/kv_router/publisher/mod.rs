@@ -27,7 +27,7 @@ use dynamo_kv_events::zmq_wire::{
 use dynamo_kv_hashing::multimodal::parse_mm_hash_from_extra_key;
 #[cfg(test)]
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
-use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::discovery::{DiscoverySpec, EventScope};
@@ -457,13 +457,7 @@ impl KvEventPublisher {
         }
 
         let local_indexer = if enable_local_indexer {
-            let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-            Some(Arc::new(LocalKvIndexer::new(
-                cancellation_token.clone(),
-                kv_block_size,
-                metrics,
-                WORKER_KV_INDEXER_BUFFER_SIZE,
-            )))
+            Some(Arc::new(LocalKvIndexer::new(WORKER_KV_INDEXER_BUFFER_SIZE)))
         } else {
             None
         };

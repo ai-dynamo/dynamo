@@ -13,7 +13,6 @@ mod local_indexer_tests {
     use std::time::Duration;
 
     use tokio::time;
-    use tokio_util::sync::CancellationToken;
 
     use crate::prelude::*;
     use crate::testing::{make_clear_event_with_dp_rank, make_store_event_with_dp_rank};
@@ -73,12 +72,7 @@ mod local_indexer_tests {
     #[tokio::test]
     async fn test_local_indexer_get_events_in_id_range_all_cases() {
         // Create indexer with small buffer (5 events max)
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
+        let indexer = LocalKvIndexer::new(5);
 
         // Helper to create a test event
         let make_event = |id: u64| {
@@ -102,10 +96,7 @@ mod local_indexer_tests {
 
         // Add 10 events (IDs 5-14), buffer keeps last 5: events 10-14
         for id in 5..15 {
-            indexer
-                .apply_event_with_buffer(make_event(id))
-                .await
-                .unwrap();
+            indexer.apply_event_with_buffer(make_event(id));
         }
 
         let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
@@ -199,12 +190,7 @@ mod local_indexer_tests {
         let result = indexer.get_events_in_id_range(Some(100), Some(200)).await;
         assert!(matches!(result, WorkerKvQueryResponse::TooNew { .. }));
 
-        let empty_indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
+        let empty_indexer = LocalKvIndexer::new(5);
         let result = empty_indexer.get_events_in_id_range(None, None).await;
         match result {
             WorkerKvQueryResponse::TreeDump {
@@ -224,12 +210,7 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_buffer_response_starts_at_last_all_domain_clear() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            16,
-        );
+        let indexer = LocalKvIndexer::new(16);
 
         for event in [
             make_local_store_event(10, 10),
@@ -239,7 +220,7 @@ mod local_indexer_tests {
             make_local_clear_event(14),
             make_local_store_event(15, 15),
         ] {
-            indexer.apply_event_with_buffer(event).await.unwrap();
+            indexer.apply_event_with_buffer(event);
         }
         let event_ids = |response: WorkerKvQueryResponse| -> (Vec<u64>, u64) {
             match response {
@@ -270,9 +251,7 @@ mod local_indexer_tests {
     #[tokio::test]
     async fn test_local_indexer_buffer_and_serialization() {
         let worker_id = 42u64;
-        let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(LocalKvIndexer::new(token, 4, metrics, 100));
+        let local_indexer = Arc::new(LocalKvIndexer::new(100));
 
         let test_event = RouterEvent::new(
             worker_id,
@@ -291,10 +270,7 @@ mod local_indexer_tests {
             },
         );
 
-        local_indexer
-            .apply_event_with_buffer(test_event)
-            .await
-            .unwrap();
+        local_indexer.apply_event_with_buffer(test_event);
 
         let buffered_events = local_indexer.get_all_events_in_buffer();
         assert_eq!(buffered_events.len(), 1);
@@ -347,12 +323,7 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_clear_only_clears_target_rank() {
-        let local_indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
+        let local_indexer = LocalKvIndexer::new(5);
 
         let events = [
             make_store_event_with_dp_rank(7, &[101], 0),
@@ -361,7 +332,7 @@ mod local_indexer_tests {
         ];
         for (event_id, mut event) in (1..).zip(events) {
             event.event.event_id = event_id;
-            local_indexer.apply_event_with_buffer(event).await.unwrap();
+            local_indexer.apply_event_with_buffer(event);
         }
 
         let (events, _) = tree_dump_parts(local_indexer.get_events_in_id_range(None, None).await);
@@ -375,16 +346,8 @@ mod local_indexer_tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_local_indexer_runs_one_dump_build_at_a_time() {
-        let indexer = Arc::new(LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            16,
-        ));
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = Arc::new(LocalKvIndexer::new(16));
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         indexer.set_dump_build_delay(Some(Duration::from_millis(50)));
         let dump = || {
             let indexer = indexer.clone();
@@ -398,10 +361,7 @@ mod local_indexer_tests {
 
         // The clear closes the cut the first build is working from, so the second request
         // needs a build of its own. It must not start one beside the build in flight.
-        indexer
-            .apply_event_with_buffer(make_local_clear_event(2))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_clear_event(2));
         let second = dump();
         for _ in 0..10 {
             tokio::task::yield_now().await;
@@ -453,17 +413,12 @@ mod local_indexer_tests {
             &[10, 13],
         ];
 
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            32,
-        );
+        let indexer = LocalKvIndexer::new(32);
         let mut live = RadixTree::new();
         for event in events {
             let event_id = event.event.event_id;
             live.apply_event(event.clone()).unwrap();
-            indexer.apply_event_with_buffer(event).await.unwrap();
+            indexer.apply_event_with_buffer(event);
             // Compare before the clear and at the end.
             if event_id != 6 && event_id != 9 {
                 continue;
@@ -495,26 +450,15 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_shared_dump_covers_events_applied_after_it() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            16,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(16);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let (first_events, first_last_event_id) =
             tree_dump_parts(indexer.get_events_in_id_range(None, None).await);
 
         // The second requester shares the dump cut at event 1, so its response must extend
         // through the events applied since.
         for (event_id, block_hash) in [(2, 202), (3, 303)] {
-            indexer
-                .apply_event_with_buffer(make_local_store_event(event_id, block_hash))
-                .await
-                .unwrap();
+            indexer.apply_event_with_buffer(make_local_store_event(event_id, block_hash));
         }
         let (second_events, second_last_event_id) =
             tree_dump_parts(indexer.get_events_in_id_range(None, None).await);
@@ -536,44 +480,22 @@ mod local_indexer_tests {
     #[tokio::test]
     async fn test_local_indexer_frees_expired_snapshot_without_query() {
         // Buffer of 4 gives an append budget of 2 events past the snapshot base.
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            4,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(4);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let _ = indexer.get_events_in_id_range(None, None).await;
 
         for event_id in 2..=3 {
-            indexer
-                .apply_event_with_buffer(make_local_store_event(event_id, event_id * 101))
-                .await
-                .unwrap();
+            indexer.apply_event_with_buffer(make_local_store_event(event_id, event_id * 101));
             assert!(indexer.has_cached_recovery_snapshot());
         }
-        indexer
-            .apply_event_with_buffer(make_local_store_event(4, 404))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_store_event(4, 404));
         assert!(!indexer.has_cached_recovery_snapshot());
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_local_indexer_reuses_cached_tree_dump_without_time_expiry() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(5);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let first = indexer.get_events_in_id_range(None, None).await;
         time::advance(Duration::from_secs(60)).await;
         let second = indexer.get_events_in_id_range(None, None).await;
@@ -585,61 +507,33 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_rebuilds_when_cumulative_append_budget_exceeded() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(5);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 1);
 
-        indexer
-            .apply_event_with_buffer(make_local_store_event(2, 202))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_store_event(2, 202));
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 1);
 
-        indexer
-            .apply_event_with_buffer(make_local_store_event(3, 303))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_store_event(3, 303));
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 1);
 
-        indexer
-            .apply_event_with_buffer(make_local_store_event(4, 404))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_store_event(4, 404));
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 2);
     }
 
     #[tokio::test]
     async fn test_local_indexer_appends_safe_tail_to_cached_dump() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(5);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let first = indexer.get_events_in_id_range(None, None).await;
         assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
         assert_eq!(indexer.dump_build_count(), 1);
 
-        indexer
-            .apply_event_with_buffer(make_local_remove_event(2, &[101]))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_remove_event(2, &[101]));
 
         match indexer.get_events_in_id_range(None, None).await {
             WorkerKvQueryResponse::TreeDump {
@@ -662,23 +556,12 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_invalidates_cache_on_clear() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(5);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 1);
 
-        indexer
-            .apply_event_with_buffer(make_local_clear_event(2))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_clear_event(2));
 
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 2);
@@ -686,23 +569,12 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_invalidates_cache_on_event_gap() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(5);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 1);
 
-        indexer
-            .apply_event_with_buffer(make_local_store_event(3, 303))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_store_event(3, 303));
 
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 2);
@@ -710,27 +582,13 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_invalidates_cache_on_missing_tail_coverage() {
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            1,
-        );
-        indexer
-            .apply_event_with_buffer(make_local_store_event(1, 101))
-            .await
-            .unwrap();
+        let indexer = LocalKvIndexer::new(1);
+        indexer.apply_event_with_buffer(make_local_store_event(1, 101));
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 1);
 
-        indexer
-            .apply_event_with_buffer(make_local_store_event(2, 202))
-            .await
-            .unwrap();
-        indexer
-            .apply_event_with_buffer(make_local_store_event(3, 303))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(make_local_store_event(2, 202));
+        indexer.apply_event_with_buffer(make_local_store_event(3, 303));
 
         let _ = indexer.get_events_in_id_range(None, None).await;
         assert_eq!(indexer.dump_build_count(), 2);

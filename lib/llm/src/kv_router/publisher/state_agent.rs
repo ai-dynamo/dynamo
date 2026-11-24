@@ -38,9 +38,8 @@ use dynamo_kv_events::zmq_wire::{
     EventDedupFilter, EventDedupPolicy, KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer,
 };
 use dynamo_kv_indexer::host::{
-    CanonicalIdentityMaterial, ExplicitIdentityMap, KvIndexerMetrics, KvStateAgentIdentity,
-    KvStateAgentStatus, KvStateAttachmentStatus, KvStateProtocolVersion, LocalKvIndexer,
-    RouterHintSourceMetadata,
+    CanonicalIdentityMaterial, ExplicitIdentityMap, KvStateAgentIdentity, KvStateAgentStatus,
+    KvStateAttachmentStatus, KvStateProtocolVersion, LocalKvIndexer, RouterHintSourceMetadata,
 };
 use dynamo_router_protocol::identity::{CacheOwnerId, StableDpSlotId};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
@@ -73,7 +72,7 @@ use crate::{
 use super::{
     DEFAULT_MAX_BATCH_BLOCKS,
     batching::PlacementEventCoalescer,
-    sinks::{EventPlanePublisher, RouterEventBatchSink, admit_local_event},
+    sinks::{EventPlanePublisher, RouterEventBatchSink},
     zmq_listener::{DecodedZmqKvBatch, decode_zmq_kv_batch},
 };
 
@@ -656,7 +655,6 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         let event_worker_id = attachment_worker.worker_id;
         let mut output = Vec::with_capacity(coalesced.len());
         let mut cleared_domains = Vec::new();
-        let mut failed_barrier = None;
 
         for placement_event in coalesced {
             let domain = placement_event.placement.residency_domain;
@@ -740,33 +738,12 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ),
             };
             router_event.session_id = session_id;
-            // NOTE: Stored/Removed intentionally use the legacy lossy contract: queue
-            // admission and one best-effort publish, with no completion acknowledgement.
-            // Cleared is stronger and completes every affected tier before publication.
-            // Do not add per-event completion or listener stop-and-wait without changing
-            // this invariant and revalidating ingestion throughput.
-            if let Err(error) = admit_local_event(Some(&self.local_indexer), &router_event).await {
-                if matches!(router_event.event.data, KvCacheEventData::Cleared) {
-                    self.fail_domain(
-                        self.attachment
-                            .as_ref()
-                            .expect("attachment was checked above")
-                            .generation,
-                        domain,
-                        "local reset barrier failed",
-                    );
-                    failed_barrier =
-                        Some(anyhow::Error::new(error).context("local reset barrier failed"));
-                    break;
-                }
-                tracing::warn!(
-                    worker_id = event_worker_id,
-                    dp_rank = router_event.event.dp_rank,
-                    ?domain,
-                    %error,
-                    "Failed to admit ordinary residency event locally; continuing lossy stream"
-                );
-            }
+            // NOTE: The local indexer holds the event when this call returns. Publication of
+            // Stored/Removed is one best-effort attempt with no completion acknowledgement.
+            // Do not add per-event completion or listener stop-and-wait without revalidating
+            // ingestion throughput.
+            self.local_indexer
+                .apply_event_with_buffer(router_event.clone());
             if matches!(router_event.event.data, KvCacheEventData::Cleared) {
                 cleared_domains.push(domain);
             }
@@ -798,9 +775,6 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         // Lifecycle changes publish the full snapshot; a chunk only advances
         // the cursor, still after publish_events.
         self.status.store_outbound_cursor(self.outbound_cursor());
-        if let Some(error) = failed_barrier {
-            return Err(error);
-        }
         Ok(())
     }
 
@@ -897,12 +871,7 @@ impl KvStateAgent {
         }
         let component = config.endpoint.component().clone();
         let cancel = component.drt().primary_token().child_token();
-        let local_indexer = Arc::new(LocalKvIndexer::new(
-            cancel.child_token(),
-            config.kv_block_size,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            WORKER_KV_INDEXER_BUFFER_SIZE,
-        ));
+        let local_indexer = Arc::new(LocalKvIndexer::new(WORKER_KV_INDEXER_BUFFER_SIZE));
 
         if !config.ingress_protocol.supports_owned_residency() {
             anyhow::bail!("external state-agent slots require an owned-residency ingress");
@@ -2479,12 +2448,7 @@ mod tests {
             cache_owner_ready: true,
             outbound_cursor: 0,
         }));
-        let local_indexer = Arc::new(LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            32,
-        ));
+        let local_indexer = Arc::new(LocalKvIndexer::new(32));
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
         let mut coordinator = Coordinator {
@@ -2679,12 +2643,7 @@ mod tests {
             outbound_cursor: 0,
         }));
         let cancel = CancellationToken::new();
-        let local_indexer = Arc::new(LocalKvIndexer::new(
-            cancel.child_token(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            32,
-        ));
+        let local_indexer = Arc::new(LocalKvIndexer::new(32));
         let sink = RecordingSink::default();
         let output = sink.events.clone();
         let publications = sink.publications.clone();
@@ -2835,12 +2794,7 @@ mod tests {
             cache_owner_ready: true,
             outbound_cursor: 0,
         }));
-        let local_indexer = Arc::new(LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            32,
-        ));
+        let local_indexer = Arc::new(LocalKvIndexer::new(32));
         let sink = RecordingSink::default();
         let output = sink.events.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
@@ -2936,13 +2890,7 @@ mod tests {
             cache_owner_ready: true,
             outbound_cursor: 0,
         }));
-        let cancel = CancellationToken::new();
-        let local_indexer = Arc::new(LocalKvIndexer::new(
-            cancel,
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            32,
-        ));
+        let local_indexer = Arc::new(LocalKvIndexer::new(32));
         let sink = RecordingSink::default();
         let output = sink.events.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
@@ -3102,12 +3050,7 @@ mod tests {
             cache_owner_ready: true,
             outbound_cursor: 0,
         }));
-        let local_indexer = Arc::new(LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            32,
-        ));
+        let local_indexer = Arc::new(LocalKvIndexer::new(32));
         let sink = RecordingSink::default();
         let fail_publication = sink.fail.clone();
         let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);

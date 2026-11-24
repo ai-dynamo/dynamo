@@ -1356,12 +1356,7 @@ mod tests {
     impl LocalIndexerTransport {
         fn new(buffer_size: usize) -> Self {
             Self {
-                indexer: LocalKvIndexer::new(
-                    CancellationToken::new(),
-                    4,
-                    Arc::new(KvIndexerMetrics::new_unregistered()),
-                    buffer_size,
-                ),
+                indexer: LocalKvIndexer::new(buffer_size),
                 requests: Mutex::new(Vec::new()),
                 snapshots: Mutex::new(Vec::new()),
                 response_ready: Notify::new(),
@@ -2542,11 +2537,7 @@ mod tests {
         let (kv_indexer, indexer) = indexer();
         let transport = Arc::new(LocalIndexerTransport::new(buffer_size));
         for event in [store(1), store(2)] {
-            transport
-                .indexer
-                .apply_event_with_buffer(event)
-                .await
-                .unwrap();
+            transport.indexer.apply_event_with_buffer(event);
         }
         let target = RecordingTarget {
             indexer: Some(IndexerRecoveryTarget::new(indexer)),
@@ -2580,11 +2571,7 @@ mod tests {
             block_hashes: vec![ExternalSequenceBlockHash(2)],
         });
         for event in [remove, dependent_store(4, 1), dependent_store(5, 4)] {
-            transport
-                .indexer
-                .apply_event_with_buffer(event)
-                .await
-                .unwrap();
+            transport.indexer.apply_event_with_buffer(event);
         }
 
         client
@@ -2694,11 +2681,7 @@ mod tests {
             logs.0.lock().unwrap().clear();
             let (client, transport, kv_indexer, target) = start_local_recovery(16, None).await;
             for id in [3, 4] {
-                transport
-                    .indexer
-                    .apply_event_with_buffer(store(id))
-                    .await
-                    .unwrap();
+                transport.indexer.apply_event_with_buffer(store(id));
             }
             client.handle_live_batch(100, vec![store(4)]).await;
             transport.wait_for_response().await;
@@ -2745,11 +2728,7 @@ mod tests {
             if final_cursor == 7 {
                 // A later independent live gap still issues the ordinary next-ID request.
                 for id in 5..=9 {
-                    transport
-                        .indexer
-                        .apply_event_with_buffer(store(id))
-                        .await
-                        .unwrap();
+                    transport.indexer.apply_event_with_buffer(store(id));
                 }
                 client.handle_live_batch(100, vec![store(9)]).await;
                 transport.wait_for_response().await;
@@ -2768,11 +2747,7 @@ mod tests {
     async fn buffered_recovery_admission_failure_preserves_cursor_and_fences_rank() {
         let (client, transport, kv_indexer, target) = start_local_recovery(16, Some(6)).await;
         for id in [3, 4] {
-            transport
-                .indexer
-                .apply_event_with_buffer(store(id))
-                .await
-                .unwrap();
+            transport.indexer.apply_event_with_buffer(store(id));
         }
         client.handle_live_batch(100, vec![store(4)]).await;
         transport.wait_for_response().await;

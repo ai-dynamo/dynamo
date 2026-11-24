@@ -6,11 +6,8 @@ use std::sync::{Arc, OnceLock};
 
 use dynamo_kv_ledger::{Applied, Effect, Ledger, Replay};
 use rustc_hash::FxHashMap;
-use tokio_util::sync::CancellationToken;
 
-use super::{
-    KvIndexerMetrics, KvRouterError, WorkerKvQueryResponse, record_unsupported_residency_event,
-};
+use super::{WorkerKvQueryResponse, record_unsupported_residency_event};
 use crate::prelude::*;
 
 // -------------------------------------------------
@@ -59,7 +56,6 @@ pub struct LocalKvIndexer {
     /// Held while a dump is cut and built, so one build and one copy of the residency exist
     /// at a time.
     dump_gate: Arc<tokio::sync::Mutex<()>>,
-    metrics: Arc<KvIndexerMetrics>,
     #[cfg(test)]
     dump_builds: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -69,21 +65,13 @@ pub struct LocalKvIndexer {
 impl LocalKvIndexer {
     /// `max_buffer_size` is how many recent events are kept for replay
     /// (`WORKER_KV_INDEXER_BUFFER_SIZE` on a worker).
-    ///
-    /// `_token` and `_kv_block_size` are unused: nothing here runs a task or hashes tokens.
-    pub fn new(
-        _token: CancellationToken,
-        _kv_block_size: u32,
-        metrics: Arc<KvIndexerMetrics>,
-        max_buffer_size: usize,
-    ) -> Self {
+    pub fn new(max_buffer_size: usize) -> Self {
         Self {
             inner: parking_lot::Mutex::new(Inner {
                 replay: Replay::new(Residency::default(), max_buffer_size),
                 dump: None,
             }),
             dump_gate: Arc::default(),
-            metrics,
             #[cfg(test)]
             dump_builds: Default::default(),
             #[cfg(test)]
@@ -239,17 +227,13 @@ impl LocalKvIndexer {
         self.inner.lock().replay.last_seq().unwrap_or(0)
     }
 
-    /// Applies an event to the residency and records it for replay.
-    ///
-    /// The update is synchronous: when this returns, a recovery query sees the event. It
-    /// cannot fail; the `Result` is what callers already handle.
-    pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+    /// Applies an event to the residency and records it for replay. When this returns, a
+    /// recovery query sees the event.
+    pub fn apply_event_with_buffer(&self, event: RouterEvent) {
         let (worker_id, event_id) = (event.worker_id, event.event.event_id);
         let (applied, retired) = {
             let mut inner = self.inner.lock();
-            let applied = inner.replay.apply(event_id, event, |event, residency| {
-                fold(event, residency, &self.metrics)
-            });
+            let applied = inner.replay.apply(event_id, event, fold);
             // A dump whose cut has closed can never be served again. Take it out so it is
             // freed after the lock is released.
             let retired = if inner.replay.tail().is_none() {
@@ -269,7 +253,6 @@ impl LocalKvIndexer {
                 "Non-consecutive KV event id; replay restarts at this event"
             );
         }
-        Ok(())
     }
 
     #[cfg(test)]
@@ -320,13 +303,13 @@ fn from_last_all_domain_clear<'a>(
 
 /// Applies one event to the residency.
 ///
-/// An event whose residency cannot be resolved changes nothing and is counted; it is still
+/// An event whose residency cannot be resolved changes nothing and is logged; it is still
 /// recorded for replay, so event ids stay consecutive.
-fn fold(event: &RouterEvent, residency: &mut Residency, metrics: &KvIndexerMetrics) -> Effect {
+fn fold(event: &RouterEvent, residency: &mut Residency) -> Effect {
     let placement = || match event.residency_owner() {
         Ok(owner) => Some((owner, event.storage_tier)),
         Err(_) => {
-            record_unsupported_residency_event(Some(metrics), event);
+            record_unsupported_residency_event(None, event);
             None
         }
     };
@@ -371,7 +354,7 @@ fn fold(event: &RouterEvent, residency: &mut Residency, metrics: &KvIndexerMetri
                     [cache_owner, None]
                 }
                 _ => {
-                    record_unsupported_residency_event(Some(metrics), event);
+                    record_unsupported_residency_event(None, event);
                     [None, None]
                 }
             };
@@ -465,18 +448,15 @@ fn stored_event(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use rustc_hash::FxHashSet;
-    use tokio_util::sync::CancellationToken;
 
     use super::LocalKvIndexer;
+    use crate::WorkerKvQueryResponse;
     use crate::prelude::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain, RouterEvent,
         StorageTier,
     };
-    use crate::{KvIndexerMetrics, WorkerKvQueryResponse};
     use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
@@ -496,12 +476,7 @@ mod tests {
     }
 
     fn make_indexer() -> LocalKvIndexer {
-        LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            16,
-        )
+        LocalKvIndexer::new(16)
     }
 
     fn lower_tier_store_event(
@@ -614,10 +589,7 @@ mod tests {
         let indexer = make_indexer();
         let event = lower_tier_store_event(7, 0, 1, 900, 11, 101, StorageTier::HostPinned);
 
-        indexer
-            .apply_event_with_buffer(event.clone())
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(event.clone());
 
         assert_eq!(indexer.get_all_events_in_buffer(), vec![event]);
         // On the host tier only: nothing is dumped for the device tier.
@@ -631,30 +603,24 @@ mod tests {
     async fn lower_tier_events_are_partitioned_by_storage_tier() {
         let indexer = make_indexer();
 
-        indexer
-            .apply_event_with_buffer(lower_tier_store_event(
-                19,
-                0,
-                1,
-                1000,
-                31,
-                301,
-                StorageTier::HostPinned,
-            ))
-            .await
-            .unwrap();
-        indexer
-            .apply_event_with_buffer(lower_tier_store_event(
-                19,
-                0,
-                2,
-                2000,
-                31,
-                302,
-                StorageTier::Disk,
-            ))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(lower_tier_store_event(
+            19,
+            0,
+            1,
+            1000,
+            31,
+            301,
+            StorageTier::HostPinned,
+        ));
+        indexer.apply_event_with_buffer(lower_tier_store_event(
+            19,
+            0,
+            2,
+            2000,
+            31,
+            302,
+            StorageTier::Disk,
+        ));
 
         assert_eq!(
             dumped_blocks(&indexer).await,
@@ -669,52 +635,40 @@ mod tests {
     async fn scoped_clear_history_and_all_tier_snapshot_preserve_cache_owner() {
         let indexer = make_indexer();
 
-        indexer
-            .apply_event_with_buffer(lower_tier_store_event_in_domain(
-                19,
-                1,
-                900,
-                11,
-                101,
-                ResidencyDomain::CacheOwner,
-            ))
-            .await
-            .unwrap();
-        indexer
-            .apply_event_with_buffer(lower_tier_store_event_in_domain(
-                19,
-                2,
-                900,
-                11,
-                101,
-                ResidencyDomain::Worker,
-            ))
-            .await
-            .unwrap();
-        indexer
-            .apply_event_with_buffer(RouterEvent::with_residency_domain(
-                19,
-                KvCacheEvent {
-                    event_id: 3,
-                    data: KvCacheEventData::Cleared,
-                    dp_rank: 0,
-                },
-                StorageTier::Device,
-                ResidencyDomain::Worker,
-            ))
-            .await
-            .unwrap();
-        indexer
-            .apply_event_with_buffer(lower_tier_store_event_in_domain(
-                19,
-                4,
-                101,
-                12,
-                102,
-                ResidencyDomain::CacheOwner,
-            ))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(lower_tier_store_event_in_domain(
+            19,
+            1,
+            900,
+            11,
+            101,
+            ResidencyDomain::CacheOwner,
+        ));
+        indexer.apply_event_with_buffer(lower_tier_store_event_in_domain(
+            19,
+            2,
+            900,
+            11,
+            101,
+            ResidencyDomain::Worker,
+        ));
+        indexer.apply_event_with_buffer(RouterEvent::with_residency_domain(
+            19,
+            KvCacheEvent {
+                event_id: 3,
+                data: KvCacheEventData::Cleared,
+                dp_rank: 0,
+            },
+            StorageTier::Device,
+            ResidencyDomain::Worker,
+        ));
+        indexer.apply_event_with_buffer(lower_tier_store_event_in_domain(
+            19,
+            4,
+            101,
+            12,
+            102,
+            ResidencyDomain::CacheOwner,
+        ));
 
         let WorkerKvQueryResponse::Events { events, .. } =
             indexer.get_events_in_id_range(Some(1), Some(4)).await
@@ -742,7 +696,7 @@ mod tests {
         // An indexer fed the dump holds what the first one held.
         let restored = make_indexer();
         for event in events {
-            restored.apply_event_with_buffer(event).await.unwrap();
+            restored.apply_event_with_buffer(event);
         }
         let expected = FxHashSet::from_iter([
             (StorageTier::HostPinned, 0, 0, Some(900), 101, 11),
@@ -756,43 +710,34 @@ mod tests {
     async fn cleared_event_only_clears_target_rank_across_lower_tiers() {
         let indexer = make_indexer();
 
-        indexer
-            .apply_event_with_buffer(lower_tier_store_event(
-                11,
-                0,
-                1,
-                1000,
-                21,
-                201,
-                StorageTier::HostPinned,
-            ))
-            .await
-            .unwrap();
-        indexer
-            .apply_event_with_buffer(lower_tier_store_event(
-                11,
-                1,
-                2,
-                2000,
-                22,
-                202,
-                StorageTier::HostPinned,
-            ))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(lower_tier_store_event(
+            11,
+            0,
+            1,
+            1000,
+            21,
+            201,
+            StorageTier::HostPinned,
+        ));
+        indexer.apply_event_with_buffer(lower_tier_store_event(
+            11,
+            1,
+            2,
+            2000,
+            22,
+            202,
+            StorageTier::HostPinned,
+        ));
 
-        indexer
-            .apply_event_with_buffer(RouterEvent::with_storage_tier(
-                11,
-                KvCacheEvent {
-                    event_id: 3,
-                    data: KvCacheEventData::Cleared,
-                    dp_rank: 0,
-                },
-                StorageTier::HostPinned,
-            ))
-            .await
-            .unwrap();
+        indexer.apply_event_with_buffer(RouterEvent::with_storage_tier(
+            11,
+            KvCacheEvent {
+                event_id: 3,
+                data: KvCacheEventData::Cleared,
+                dp_rank: 0,
+            },
+            StorageTier::HostPinned,
+        ));
 
         assert_eq!(
             dumped_blocks(&indexer).await,
@@ -824,19 +769,13 @@ mod tests {
         let cut_before = make_indexer();
         let cut_after = make_indexer();
         for event in evict {
-            cut_before
-                .apply_event_with_buffer(event.clone())
-                .await
-                .unwrap();
-            cut_after.apply_event_with_buffer(event).await.unwrap();
+            cut_before.apply_event_with_buffer(event.clone());
+            cut_after.apply_event_with_buffer(event);
         }
         assert_eq!(dumped_blocks(&cut_before).await, device(&[1]));
 
         for indexer in [&cut_before, &cut_after] {
-            indexer
-                .apply_event_with_buffer(store_again.clone())
-                .await
-                .unwrap();
+            indexer.apply_event_with_buffer(store_again.clone());
         }
         assert_eq!(dumped_blocks(&cut_before).await, device(&[1, 2]));
         assert_eq!(dumped_blocks(&cut_after).await, device(&[1, 2, 3]));
@@ -883,7 +822,7 @@ mod tests {
                 .apply_event_and_wait(event.clone())
                 .await
                 .unwrap();
-            indexer.apply_event_with_buffer(event).await.unwrap();
+            indexer.apply_event_with_buffer(event);
         }
 
         let restored = LowerTierIndexers::new(1, 4);

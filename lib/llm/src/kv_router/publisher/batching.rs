@@ -222,7 +222,7 @@ impl BatchingState {
             }
         };
         event.event_id = self.next_publish_id;
-        let _ = emit(
+        emit(
             local_indexer,
             worker_id,
             tier,
@@ -230,8 +230,7 @@ impl BatchingState {
             event,
             session_id,
             output,
-        )
-        .await;
+        );
         self.next_publish_id = self
             .next_publish_id
             .checked_add(1)
