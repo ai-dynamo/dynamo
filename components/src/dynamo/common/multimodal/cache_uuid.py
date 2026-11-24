@@ -5,12 +5,14 @@
 
 from collections.abc import Mapping, Sequence
 
-from dynamo._internal import (
-    UUID_ONLY_IMAGE_REJECTED_MESSAGE as UUID_ONLY_IMAGE_REJECTED_MESSAGE,
-)
 from dynamo.common.utils.env import env_bool
 
 ALLOW_CLIENT_CACHE_UUIDS_ENV = "DYN_MM_ALLOW_CLIENT_CACHE_UUIDS"
+UUID_ONLY_IMAGE_REJECTED_MESSAGE = (
+    "Image parts that carry only a `uuid` are not accepted. Send the image URL "
+    "or inline image data. To let clients reuse cached images by `uuid`, set "
+    "DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1 on the vLLM workers."
+)
 
 
 def client_cache_uuids_allowed() -> bool:
@@ -18,7 +20,7 @@ def client_cache_uuids_allowed() -> bool:
 
     Off by default: the engine cache identity is then derived from the media
     content, and image parts that carry only a `uuid` are rejected. Read per
-    call so both processes follow the current environment.
+    call so workers follow the current environment.
     """
     return env_bool(ALLOW_CLIENT_CACHE_UUIDS_ENV)
 

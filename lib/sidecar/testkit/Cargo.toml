@@ -41,7 +41,6 @@ serde_json = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
 tempfile = { workspace = true }
-temp-env = { version = "0.3.6", features = ["async_closure"] }
 tokio-util = { workspace = true }
 libc = { workspace = true }
 prost-types-v14 = { workspace = true }

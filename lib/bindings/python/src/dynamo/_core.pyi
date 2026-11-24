@@ -27,8 +27,6 @@ from typing_extensions import NotRequired
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
 
-UUID_ONLY_IMAGE_REJECTED_MESSAGE: str
-
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
     Log a message from Python with file and line info

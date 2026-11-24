@@ -76,10 +76,7 @@ use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::{
-    MediaDecoder, MediaLoader, UUID_ONLY_IMAGE_REJECTED_MESSAGE, client_cache_uuids_allowed,
-    max_data_url_bytes,
-};
+use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
     PreprocessedRequestBuilder, RoutingHints,
@@ -4443,7 +4440,6 @@ impl OpenAIPreprocessor {
             return Ok((Vec::new(), None));
         };
         let has_media_loader = self.media_loader.is_some();
-        let allow_client_uuids = client_cache_uuids_allowed();
 
         let message_order = self.formatter.media_message_order(request);
         for index in 0..messages.len() {
@@ -4492,19 +4488,6 @@ impl OpenAIPreprocessor {
                         "{type_str} uuid must be a non-empty string"
                     )));
                 }
-
-                if type_str == "image_url" && url.is_none() && uuid.is_some() && !allow_client_uuids
-                {
-                    return Err(crate::protocols::common::invalid_argument_error(
-                        UUID_ONLY_IMAGE_REJECTED_MESSAGE,
-                    ));
-                }
-                // Ignore client keys before deciding whether exact routing is available.
-                let uuid = if url.is_some() && !allow_client_uuids {
-                    None
-                } else {
-                    uuid
-                };
 
                 let slots = media_map.entry(type_str.to_string()).or_default();
                 let slot_idx = slots.len();
@@ -8904,7 +8887,7 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = match self
+        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
             .preprocess_request_with_options(
                 &request,
                 tracker.as_deref(),
@@ -8916,16 +8899,7 @@ impl
                     .map(|name| name.as_ref().clone()),
             )
             .instrument(preprocessing.clone())
-            .await
-        {
-            Ok(preprocessed) => preprocessed,
-            Err(error) => {
-                if let Some(payload) = payload_handle {
-                    payload.emit(None, Some(error.to_string()));
-                }
-                return Err(error);
-            }
-        };
+            .await?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }

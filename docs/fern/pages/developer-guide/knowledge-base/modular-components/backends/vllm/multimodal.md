@@ -250,22 +250,22 @@ curl http://localhost:8000/v1/chat/completions \
 ### Reuse vLLM multimodal processor cache entries
 
 vLLM can cache processed multimodal inputs under a client-provided opaque UUID.
-This is off by default. Without it, the frontend drops client UUIDs before routing and rendering,
-so vLLM derives the cache identity from the media content or URL, and the
-frontend rejects image parts that carry only a `uuid` with HTTP 400. Repeated
+This is off by default. The vLLM workers ignore client UUIDs and derive cache
+identity from the media content or URL. The Python vLLM worker rejects image
+parts that carry only a `uuid` with HTTP 400. Repeated
 requests that send the same image still reuse the cached entry.
 
 To let clients choose cache identities, set `DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1`
-on the frontend and on every vLLM worker, including the gRPC sidecar. Enable it
+on every vLLM worker, including the gRPC sidecar. Enable it
 only when every client that can reach the endpoint is trusted to manage these
 keys: the first image cached under a UUID is the one every later request with
 that UUID receives. On the gRPC sidecar the setting forwards UUIDs of
 URL-backed images only: the sidecar rejects image parts that carry only a
 `uuid` with either setting, so reuse by UUID alone needs the Python vLLM worker.
 
-The worker and sidecar also ignore client UUIDs by default when receiving
-requests from an older frontend during a rolling upgrade. Set the opt-in on
-both sides for client-managed reuse during that upgrade.
+The worker and sidecar apply this default with older frontends during rolling
+upgrades. The frontend needs no opt-in setting. Requests with client UUIDs
+still skip exact multimodal routing, even when the workers ignore those UUIDs.
 
 `DYN_MM_IMAGE_CACHE_SESSION_SCOPED` partitions Dynamo's image download cache.
 It does not partition client-selected vLLM UUIDs. With the opt-in enabled, the

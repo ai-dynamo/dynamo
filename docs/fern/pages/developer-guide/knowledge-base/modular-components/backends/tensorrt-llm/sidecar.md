@@ -40,12 +40,10 @@ the full URL, including its query string. TensorRT-LLM combines that UUID with
 the image content for native cache identity. The same image at different signed
 URLs therefore gets separate native KV chains, unlike content-only identity.
 
-The frontend ignores client UUIDs by default. For rotating URLs, set
-`DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1` on the frontend and supply a stable `uuid` on
-each `image_url` content part to reuse native KV for unchanged image content.
-With this opt-in, caller UUIDs disable automatic image routing hints, so the
-router does not credit those image blocks for cache affinity.
-`--frontend-decoding` is not an alternative on this sidecar: it accepts
+For rotating URLs, supply a stable `uuid` on each `image_url` content part to
+reuse native KV for unchanged image content. Caller UUIDs disable automatic image
+routing hints, so the router does not credit those image blocks for cache
+affinity. `--frontend-decoding` is not an alternative on this sidecar: it accepts
 media URLs and data URIs, and rejects decoded media.
 
 ## Launch Locally

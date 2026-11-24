@@ -1020,7 +1020,7 @@ class VllmMultimodalRequestProcessor:
         if mm_uuids is None and self.embedding_loader is None:
             mm_uuids = compute_mm_uuids(multi_modal_data)
             if mm_uuids is not None:
-                logger.warning(
+                logger.debug(
                     "No frontend multimodal hashes were provided; recomputed "
                     "image UUIDs may not match routing decisions"
                 )

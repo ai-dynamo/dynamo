@@ -9,7 +9,6 @@ use dynamo_backend_common::{
     MultimodalData, PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason,
     TopLogprob, usage,
 };
-use dynamo_llm::preprocessor::media::client_cache_uuids_allowed;
 use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
 use serde::Deserialize;
 
@@ -140,7 +139,8 @@ pub(crate) fn build_generate_request(
         .is_some_and(|items| !items.is_empty());
     // A client uuid says nothing about the media it labels, so without the
     // opt-in vLLM keys images by content or URL hashes.
-    let allow_client_uuids = client_cache_uuids_allowed();
+    let allow_client_uuids =
+        dynamo_runtime::config::env_is_truthy("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS");
     let forwarded_image_uuids = if has_images {
         forwarded_image_uuids(&request, allow_client_uuids)?
     } else {

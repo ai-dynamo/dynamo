@@ -154,7 +154,6 @@ async fn glm_gather_installs_routing_and_hashes_atomically() {
         "video",
         "override",
         "uuid",
-        "uuid_opt_in",
         "unsupported_config",
     ] {
         let dir = mm_routing::glm5_next::tests::model_dir();
@@ -192,7 +191,7 @@ async fn glm_gather_installs_routing_and_hashes_atomically() {
         if case == "override" {
             body["mm_processor_kwargs"] = serde_json::json!({"max_image_tokens": 64});
         }
-        if matches!(case, "uuid" | "uuid_opt_in") {
+        if case == "uuid" {
             body["messages"][0]["content"][0]["uuid"] = "external-cache-key".into();
         }
         if case == "video" {
@@ -212,18 +211,10 @@ async fn glm_gather_installs_routing_and_hashes_atomically() {
             .stop_conditions(Default::default())
             .sampling_options(Default::default())
             .output_options(Default::default());
-        let allow_client_uuids = (case == "uuid_opt_in").then_some("1");
-        let (_, image_tokens) = temp_env::async_with_vars(
-            [("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", allow_client_uuids)],
-            preprocessor.gather_multi_modal_data_with_image_tokens(
-                &request,
-                &mut builder,
-                None,
-                &ids,
-            ),
-        )
-        .await
-        .unwrap();
+        let (_, image_tokens) = preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &ids)
+            .await
+            .unwrap();
         let result = builder.build().unwrap();
         assert_eq!(
             result.token_ids.as_ref(),
@@ -235,24 +226,10 @@ async fn glm_gather_installs_routing_and_hashes_atomically() {
             2
         );
         let extra = result.extra_args.as_ref().unwrap();
-        let expects_exact_routing = matches!(case, "valid" | "uuid");
-        assert_eq!(
-            result.mm_routing_info.is_some(),
-            expects_exact_routing,
-            "{case}"
-        );
-        assert_eq!(
-            extra.get("mm_hashes").is_some(),
-            expects_exact_routing,
-            "{case}"
-        );
-        assert_eq!(
-            result.multi_modal_uuids.is_some(),
-            case == "uuid_opt_in",
-            "{case}"
-        );
+        assert_eq!(result.mm_routing_info.is_some(), case == "valid", "{case}");
+        assert_eq!(extra.get("mm_hashes").is_some(), case == "valid", "{case}");
         assert!(extra.get("mm_hashes_by_modality").is_none(), "{case}");
-        if expects_exact_routing {
+        if case == "valid" {
             let hash = format!("{:016x}", OpenAIPreprocessor::hash_image_url(image_url));
             assert_eq!(extra["mm_hashes"], serde_json::json!([hash, hash]));
             assert_eq!(image_tokens, Some(32));

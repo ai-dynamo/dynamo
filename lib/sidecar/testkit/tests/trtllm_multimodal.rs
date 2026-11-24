@@ -186,59 +186,52 @@ async fn formatter_regrouped_tool_media_reaches_openengine_in_rendered_order() {
         ]
     }))
     .unwrap();
-    for allow_client_uuids in [None, Some("1")] {
-        let (mut prepared, _, _) = temp_env::async_with_vars(
-            [("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", allow_client_uuids)],
-            preprocessor.preprocess_request(&request, None),
-        )
+    let (mut prepared, _, _) = preprocessor
+        .preprocess_request(&request, None)
         .await
         .unwrap();
-        let prompt = prepared.extra_args.as_ref().unwrap()["formatted_prompt"]
-            .as_str()
-            .unwrap();
-        assert!(prompt.find("Result A").unwrap() < prompt.find("Result B").unwrap());
-        assert_eq!(prompt.matches("<｜deepseek_image｜>").count(), 2);
-        let expected_tokens = prepared.token_ids.clone();
-        assert!(!expected_tokens.is_empty());
-        prepared.model = "mocker-model".into();
+    let prompt = prepared.extra_args.as_ref().unwrap()["formatted_prompt"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.find("Result A").unwrap() < prompt.find("Result B").unwrap());
+    assert_eq!(prompt.matches("<｜deepseek_image｜>").count(), 2);
+    let expected_tokens = prepared.token_ids.clone();
+    assert!(!expected_tokens.is_empty());
+    prepared.model = "mocker-model".into();
 
-        let control = Controller::<Adapter>::default();
-        let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-        advertise_media(&fixture, &["image"]);
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
-        let ctx = mock_context();
-        let handle = control.request(ctx.id(), RequestPlan::default());
-        fixture.respond(ctx.id(), vec![finished()]);
-        let outputs = collect(&engine, prepared, GenerateContext::new(ctx, None)).await;
+    let control = Controller::<Adapter>::default();
+    let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+    advertise_media(&fixture, &["image"]);
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    fixture.respond(ctx.id(), vec![finished()]);
+    let outputs = collect(&engine, prepared, GenerateContext::new(ctx, None)).await;
+    assert_eq!(
+        outputs.last().unwrap().as_ref().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    let native = handle.native_request().unwrap();
+    assert_eq!(
+        native.input,
+        Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+            ids: expected_tokens.to_vec()
+        }))
+    );
+    assert_eq!(native.media.len(), 2);
+    for (item, id) in native.media.iter().zip(["a", "b"]) {
+        assert_eq!(item.modality, pb::Modality::Image as i32);
+        assert_eq!(item.uuid, id);
         assert_eq!(
-            outputs.last().unwrap().as_ref().unwrap().finish_reason,
-            Some(FinishReason::Stop)
+            item.source,
+            Some(pb::media_item::Source::Url(format!(
+                "https://example.com/{id}.png"
+            )))
         );
-        let native = handle.native_request().unwrap();
-        assert_eq!(
-            native.input,
-            Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-                ids: expected_tokens.to_vec()
-            }))
-        );
-        assert_eq!(native.media.len(), 2);
-        for (item, id) in native.media.iter().zip(["a", "b"]) {
-            assert_eq!(item.modality, pb::Modality::Image as i32);
-            assert_eq!(
-                item.uuid,
-                if allow_client_uuids.is_some() { id } else { "" }
-            );
-            assert_eq!(
-                item.source,
-                Some(pb::media_item::Source::Url(format!(
-                    "https://example.com/{id}.png"
-                )))
-            );
-        }
-        engine.cleanup().await.unwrap();
-        fixture.shutdown().await;
     }
+    engine.cleanup().await.unwrap();
+    fixture.shutdown().await;
 }
 
 #[tokio::test]

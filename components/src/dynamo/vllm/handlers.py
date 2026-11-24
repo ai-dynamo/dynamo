@@ -4918,8 +4918,8 @@ def _drop_client_cache_uuids(messages: Any) -> Any:
 
     Used when client cache uuids are off, so vLLM derives each cache identity
     from the media content, as on the generate path. A media part that has a
-    ``uuid`` and no media is rejected, as the frontend rejects UUID-only
-    images. Accepts one conversation or a batch of them, and leaves anything
+    ``uuid`` and no media is rejected, as on the worker generate path. Accepts
+    one conversation or a batch of them, and leaves anything
     that is not a content part for vLLM's request model to validate.
     """
 
