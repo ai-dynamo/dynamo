@@ -91,6 +91,7 @@ class Encoder(StagedEncoderFixture):
         self.encodes = []
         self.sends = []
         self.releases = []
+        self.release_rpcs = []
         self.fail = False
         self.stage_failure = None
         self.stage_calls = 0
@@ -125,6 +126,11 @@ class Encoder(StagedEncoderFixture):
         if self.stage_failure is not None:
             await context.abort(self.stage_failure, "private injected Stage error")
         return await super().Stage(request, context)
+
+    async def Release(self, request, context):
+        response = await super().Release(request, context)
+        self.release_rpcs.append(request.transfer_id)
+        return response
 
     async def _stage_media(self, part, images, videos, audios):
         assert images == IMAGES[: len(images)]
@@ -234,6 +240,8 @@ async def run(args, tmp, stack):
     sockets = zmq.asyncio.Context()
     stack.callback(sockets.destroy, 0)
     requests = []
+    refuse_handoff = False
+    refused = []
     handoff_key = secrets.token_bytes(32)
 
     class Language(service_pb2_grpc.SglangServiceServicer):
@@ -318,6 +326,18 @@ async def run(args, tmp, stack):
                 not req.HasField(k) for k in ("image_data", "video_data", "audio_data")
             )
             ids = list(req.input_ids.one.ids)
+            if refuse_handoff and self.role != "decode":
+                receipt = EncoderHandoff.parse(
+                    req.encoder_handoff,
+                    ids.count(image_token),
+                    ids.count(video_token),
+                    ids.count(audio_token),
+                )
+                verify_handoff(receipt, handoff_key)
+                refused.append(receipt)
+                await ctx.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, "language admission refused"
+                )
             await self.consume(
                 ids,
                 req.encoder_handoff if req.HasField("encoder_handoff") else None,
@@ -554,6 +574,32 @@ async def run(args, tmp, stack):
 
     await chat([])
     assert sum(len(e.encodes) for e in encoders) == 8
+    # Both producers are live. If P/PD refuses an already-staged request, the
+    # frontend must revoke the original producer before its 30-second TTL.
+    refuse_handoff = True
+    try:
+        await exchange("/v1/chat/completions", payload(IMAGES))
+    except urllib.error.HTTPError:
+        pass
+    else:
+        raise AssertionError("language admission refusal should fail the request")
+    refuse_handoff = False
+    assert refused and all(r == refused[0] for r in refused)
+    receipt = refused[0]
+    (issuer,) = [e for e in encoders if receipt.part_id in e.encodes]
+
+    async def wait_for_release():
+        while receipt.transfer_id not in issuer.release_rpcs:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait_for_release(), 5)
+    assert [e for e in encoders if receipt.transfer_id in e.release_rpcs] == [issuer]
+    assert receipt.part_id not in issuer.parts and receipt.part_id in issuer.releases
+    assert all(part != receipt.part_id for e in encoders for part, _ in e.sends)
+    print(
+        "PASS language refusal after Stage released the issuing E before Deliver and TTL"
+    )
+
     await stop(encoder_workers[0])
     removed = len(encoders[0].encodes)
     for _ in range(4):
@@ -596,7 +642,7 @@ async def run(args, tmp, stack):
         else:
             raise AssertionError("public /generate accepted private encoder_handoff")
         assert len(requests) == before
-        assert sum(len(e.encodes) for e in encoders) == media_requests
+        assert sum(len(e.encodes) for e in encoders) == media_requests + 1
         assert all(language.http_requests == 0 for language in languages)
 
         result = await exchange("/generate", body)
@@ -658,13 +704,15 @@ async def run(args, tmp, stack):
             "PASS public /generate routed images, video and interleaved audio, and rejected private encoder_handoff"
         )
 
-    assert sum(len(e.encodes) for e in encoders) == media_requests
+    assert sum(len(e.encodes) for e in encoders) == media_requests + 1
     assert sum(len(language.receives) for language in languages) == media_requests
     if args.split:
         assert not languages[1].receives
     for e in encoders:
         assert sorted(e.encodes) == sorted(e.releases)
-        assert sorted(e.encodes) == sorted(part for part, _ in e.sends)
+        assert sorted(part for part in e.encodes if part != receipt.part_id) == sorted(
+            part for part, _ in e.sends
+        )
         assert not e.parts
     encoder = encoders[1]
     failure_routes = [("/v1/chat/completions", payload(IMAGES))]
@@ -713,14 +761,14 @@ async def run(args, tmp, stack):
     else:
         raise AssertionError("injected Stage failure should fail the image request")
     assert len(requests) == before, "native Generate ran after Stage failed"
-    assert sum(len(e.encodes) for e in encoders) == media_requests + 1
+    assert sum(len(e.encodes) for e in encoders) == media_requests + 2
     assert len(encoders[1].encodes) == len(encoders[1].releases)
     print(
         f"PASS ({roles}): {media_requests} media requests, {media_requests} transfers, "
         "text bypass, replica withdrawal and failed Stage."
     )
     print(
-        "encodes per E (includes one injected failure)",
+        "encodes per E (includes rejected admission and injected encoder failure)",
         [len(e.encodes) for e in encoders],
     )
     print("deliveries per receiver", [len(language.receives) for language in languages])
