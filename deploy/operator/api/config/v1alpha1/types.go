@@ -95,13 +95,13 @@ type OperatorConfiguration struct {
 	LPX LPXConfiguration `json:"lpx"`
 }
 
-// DefaultDGDROutputCopierImage pins the kubectl image's amd64/arm64 manifest list.
-const DefaultDGDROutputCopierImage = "docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d"
+// DefaultDGDROutputCopierImage is used when no output-copier image is configured.
+const DefaultDGDROutputCopierImage = "bitnami/kubectl:latest"
 
 // DGDRConfiguration holds operator-wide profiling Job settings.
 type DGDRConfiguration struct {
 	// OutputCopierImage is a complete image reference for the output-copier sidecar.
-	// Empty uses the bundled digest-pinned kubectl image. The image must provide
+	// Empty uses the bundled kubectl image. The image must provide
 	// /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.
 	// Per-request profiling Job container image overrides take precedence.
 	// Existing Jobs keep their image.
@@ -109,7 +109,7 @@ type DGDRConfiguration struct {
 	OutputCopierImage string `json:"outputCopierImage,omitempty"`
 }
 
-// EffectiveOutputCopierImage resolves an omitted image to the pinned default.
+// EffectiveOutputCopierImage resolves an omitted image to the bundled default.
 func (c DGDRConfiguration) EffectiveOutputCopierImage() string {
 	if c.OutputCopierImage != "" {
 		return c.OutputCopierImage

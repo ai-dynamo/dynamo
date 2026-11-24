@@ -935,7 +935,7 @@ Kubernetes: `>=1.30.0-0`
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | global.snapshot.install | bool | `false` | Whether this chart should install the bundled Snapshot subchart (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs. NOTE: For production environments, it is recommended to install Snapshot separately. |
-| dynamo-operator.dgdr.outputCopierImage | string | `""` | Complete output-copier image reference for v1beta1 DGDR profiling Jobs. Empty uses the operator's digest-pinned default; per-DGDR image overrides take precedence. The image must contain /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities. |
+| dynamo-operator.dgdr.outputCopierImage | string | `""` | Complete output-copier image reference for v1beta1 DGDR profiling Jobs. Empty uses the operator's kubectl default; per-DGDR image overrides take precedence. The image must contain /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities. |
 | dynamo-operator.grovePreflight.enabled | bool | `true` | Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate. |
 | dynamo-operator.grovePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
 | dynamo-operator.grovePreflight.imagePullSecrets | list | `[]` | Existing pull secrets for the Grove preflight image. |
@@ -1032,15 +1032,16 @@ Kubernetes: `>=1.30.0-0`
 
 The v1beta1 DGDR profiling Job's `output-copier` sidecar relays profiler status and writes
 results to a ConfigMap. Configure it with `dynamo-operator.dgdr.outputCopierImage`.
-Omitting the value or setting it to `""` uses this bundled default:
+Omitting the value or setting it to `""` keeps the default `bitnami/kubectl:latest`.
+To use a private registry or another kubectl image, set a complete image reference:
 
 ```yaml
 dynamo-operator:
   dgdr:
-    outputCopierImage: docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d
+    outputCopierImage: registry.example.com/tools/kubectl:approved
 ```
 
-For private registries, mirror the image and use your repository and digest. With the standalone
+Replace the example reference with your image's repository and tag or digest. With the standalone
 operator chart, use `dgdr.outputCopierImage`. Both set `OperatorConfiguration.dgdr.outputCopierImage`.
 
 Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash),

@@ -5921,7 +5921,7 @@ DGDRConfiguration holds operator-wide profiling Job settings.
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
 <ParamField path="outputCopierImage" type="string">
-OutputCopierImage is a complete image reference for the output-copier sidecar. Empty uses the bundled digest-pinned kubectl image. The image must provide /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities. Per-request profiling Job container image overrides take precedence. Existing Jobs keep their image.
+OutputCopierImage is a complete image reference for the output-copier sidecar. Empty uses the bundled kubectl image. The image must provide /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities. Per-request profiling Job container image overrides take precedence. Existing Jobs keep their image.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

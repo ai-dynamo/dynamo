@@ -4178,7 +4178,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `outputCopierImage` _string_ | OutputCopierImage is a complete image reference for the output-copier sidecar.<br />Empty uses the bundled digest-pinned kubectl image. The image must provide<br />/bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.<br />Per-request profiling Job container image overrides take precedence.<br />Existing Jobs keep their image. |  | Optional: \{\} <br /> |
+| `outputCopierImage` _string_ | OutputCopierImage is a complete image reference for the output-copier sidecar.<br />Empty uses the bundled kubectl image. The image must provide<br />/bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.<br />Per-request profiling Job container image overrides take precedence.<br />Existing Jobs keep their image. |  | Optional: \{\} <br /> |
 
 
 #### DRAConfiguration

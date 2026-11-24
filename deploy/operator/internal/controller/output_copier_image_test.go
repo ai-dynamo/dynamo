@@ -41,7 +41,7 @@ func TestCreateProfilingJobOutputCopierImage(t *testing.T) {
 		requestImage  string
 		want          string
 	}{
-		{name: "pinned default", want: configv1alpha1.DefaultDGDROutputCopierImage},
+		{name: "default", want: "bitnami/kubectl:latest"},
 		{name: "operator digest", operatorImage: "registry.example/kubectl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", want: "registry.example/kubectl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		{name: "request overrides operator", operatorImage: "registry.example/kubectl:operator", requestImage: "registry.example/kubectl:request", want: "registry.example/kubectl:request"},
 	}
