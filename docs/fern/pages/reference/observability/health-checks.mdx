@@ -189,6 +189,8 @@ The first response sets the canary's health result immediately. Dynamo then cons
 stream within the same timeout, keeping that canary in flight until cleanup finishes. If the stream
 stalls past the timeout, Dynamo marks the endpoint not ready, asks the engine to stop the request,
 and releases the stream. Completing cleanup does not overwrite a newer health result.
+Runtime shutdown also cancels pending checks and stream cleanup, signalling the producer to stop
+without waiting for the request timeout.
 
 The timeout stays fixed in these cases:
 
