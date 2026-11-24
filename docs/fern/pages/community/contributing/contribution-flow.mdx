@@ -88,11 +88,6 @@ or multiple major components require a
     `copy-pr-bot` creates it after automatic CI approval or `/ok to test <sha>`.
     Retries for these workflows require approval for the current commit.
 
-    On its own fork PRs, `glamr-agent` can request retries with
-    `@dynamo-ops please rerun failed CI for <full-head-sha>`, optionally prefixed by `factory:` or `nursery:`.
-    The commenter, PR author, and fork owner must all match the trusted account.
-    The SHA must match the current PR head. `GLAMR_CI_REQUESTS_DISABLED=true` disables these requests.
-
     For fork PRs, GitHub can omit PR links for checks such as Pre Merge.
     When those links are missing, the command cannot retry the checks.
     Ask a maintainer to retry them through GitHub Actions.
