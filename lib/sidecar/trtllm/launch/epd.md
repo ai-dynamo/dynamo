@@ -130,22 +130,31 @@ intended peers using a firewall, network policy, or authenticated tunnel.
 A shared model-cache filesystem is optional; every engine must have the
 matching checkpoint locally.
 
-## Upstream-nightly CI
+## E2E validation
 
-The upstream TRT-LLM nightly workflow selects the standard serve cases
-`trtllm_image_e_pd` and `trtllm_image_e_p_d`. Each runs an aggregated baseline,
-then the configured EPD topology on one GPU. Two distinct images must produce
-correct colors and match the baseline's expanded token usage. Per-worker request
-counters require exactly one dispatch through each stage; split P/D responses
-must identify different workers. Tests use pinned model snapshots and disable
-encoder and KV reuse for this comparison.
+The standard serve cases `trtllm_image_e_pd` and `trtllm_image_e_p_d` each run an
+aggregated baseline followed by the configured EPD topology on one GPU. Two
+distinct images must produce correct colors and match the baseline's expanded
+prompt usage. Per-worker counters require exactly one dispatch through each
+stage; split P/D responses must identify different workers. Tests use pinned
+model snapshots and disable encoder and KV reuse for this comparison.
 
-These cases exercise the HTTP frontend, routing, sidecars and native engines.
-A missing or mismatched contract fails the job rather than skipping it. The EPD
-prerequisites must be published in the upstream nightly before these jobs can
-pass. Source overlays used for pre-publication and cross-host validation are
-separate evidence, not a stock-nightly pass. Native protocol ownership and
-cancellation tests remain CPU integration coverage.
+The normal sidecar CI job uses Dynamo's TRT-LLM test container. These two cases
+skip when that runtime has no native OpenEngine Encoder service. They become
+eligible when the central runtime pin is upgraded to include the upstream encoder
+changes; a present implementation with an incompatible contract still fails.
+Custom upstream image selection is deferred to shared infrastructure for all
+frameworks. Until the normal runtime includes EPD, validate with a compatible
+build using the same serve cases:
+
+```bash
+python3 -m pytest tests/serve/test_sidecar.py -k 'trtllm_image_e_pd or trtllm_image_e_p_d' -ra -s
+```
+
+A skipped case is not EPD validation. Check that both cases passed without skips.
+Source overlays and cross-host runs are separate evidence from the normal CI
+container. Native protocol ownership and cancellation checks remain CPU
+integration coverage.
 
 The launchers use the shared process manager for teardown. No EPD-specific
 process-tracking implementation is required.

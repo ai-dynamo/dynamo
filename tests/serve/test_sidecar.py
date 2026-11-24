@@ -80,8 +80,8 @@ def _sglang_reports_node_listeners() -> bool:
     return False
 
 
-def _trtllm_serves_openengine() -> bool:
-    """Is the installed TensorRT-LLM new enough to serve `openengine.v1`?
+def _trtllm_serves_openengine(module: str = "servicer") -> bool:
+    """Does the installed TensorRT-LLM provide the requested OpenEngine handler?
 
     `lib/sidecar/trtllm` speaks OpenEngine, which the servicer provides from
     release 1.3.0rc27 onward. `container/context.yaml` pins that release, so
@@ -100,7 +100,7 @@ def _trtllm_serves_openengine() -> bool:
     if not locations:
         return False
     return any(
-        (pathlib.Path(root) / "grpc" / "openengine" / "servicer.py").is_file()
+        (pathlib.Path(root) / "grpc" / "openengine" / f"{module}.py").is_file()
         for root in locations
     )
 
@@ -458,7 +458,11 @@ sidecar_configs = {
                 pytest.mark.gpu_1,
                 pytest.mark.nightly,
                 pytest.mark.multimodal,
-                pytest.mark.upstream_trtllm,
+                pytest.mark.skipif(
+                    not _trtllm_serves_openengine("encoding"),
+                    reason="the selected TRT-LLM runtime has no native OpenEngine "
+                    "Encoder service; EPD needs the upstream encoder changes",
+                ),
                 pytest.mark.model(
                     _MEDIA_MODELS["vision"][0], revision=_MEDIA_MODELS["vision"][1]
                 ),
