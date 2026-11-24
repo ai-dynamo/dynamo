@@ -80,6 +80,20 @@ pub struct CacheStats {
     pub over_capacity: u64,
 }
 
+impl CacheStats {
+    /// What the totals gained since `earlier`, an earlier reading of the same caches.
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            prompt_blocks: self.prompt_blocks - earlier.prompt_blocks,
+            prompt_hits: self.prompt_hits - earlier.prompt_hits,
+            stored_blocks: self.stored_blocks - earlier.stored_blocks,
+            decode_blocks: self.decode_blocks - earlier.decode_blocks,
+            evicted_blocks: self.evicted_blocks - earlier.evicted_blocks,
+            over_capacity: self.over_capacity - earlier.over_capacity,
+        }
+    }
+}
+
 pub struct KvCaches {
     capacity: usize,
     dp_size: u32,

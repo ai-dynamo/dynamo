@@ -281,7 +281,7 @@ async fn run_causal(
             .acquire_many_owned(3)
             .await
             .unwrap(),
-        Arc::new(super::super::super::metrics::Metrics::new()),
+        Arc::new(dynamo_http_server::metrics::Metrics::new()),
         Arc::new(request),
     )
     .await;

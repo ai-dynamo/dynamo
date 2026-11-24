@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,13 @@ func prepareUpgradeHistory(ctx context.Context, c client.Client) (func(context.C
 		}
 		snapshots[ns] = objects
 	}
+
+	// Seed authored origin examples too: CREATE admission would stamp today's version.
+	examples, err := environmentExamples()
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(snapshots, examples)
 	return clusterenv.PrepareHistory(ctx, c, snapshots)
 }
 
@@ -401,6 +409,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 
 	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
 	t.Run("disaggregatedset-replay", testUpgradeDisaggregatedSetReplay)
+	t.Run("environment", testClusterEnvironment)
 	runUpgradeCompatibilityScenarios(t)
 }
 
