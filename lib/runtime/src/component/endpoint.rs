@@ -133,8 +133,28 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
+        let config = self.build_internal()?;
+        let runtime = config.endpoint.drt().runtime();
+        let token = runtime.child_token();
+        // The caller can disappear while discovery is committing the write.
+        // Keep registration and rollback together, and stop the endpoint if
+        // nobody receives the handle.
+        let cancel_on_drop = token.clone().drop_guard();
+        let started = runtime.primary().spawn(config.register(token)).await??;
+        cancel_on_drop.disarm();
+        Ok(started)
+    }
+}
+
+impl EndpointConfig {
+    async fn register(self, endpoint_shutdown_token: CancellationToken) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+            self.dissolve();
+        let runtime = endpoint.drt().runtime().clone();
+        // Enroll before checking the shutdown fence, so teardown also waits
+        // for an endpoint that is still installing its transport.
+        let graceful_task = graceful_shutdown.then(|| endpoint.drt().register_graceful_task());
+        let _registration = runtime.endpoint_registration_guard().await?;
         if endpoint.track_response_completion
             && endpoint.drt().response_plane() != ResponsePlaneMode::Tcp
         {
@@ -151,10 +171,6 @@ impl EndpointConfigBuilder {
         handler.bind_endpoint(&endpoint);
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
-
-        // This creates a child token of the runtime's endpoint_shutdown_token. That token is
-        // cancelled first as part of graceful shutdown. See Runtime::shutdown.
-        let endpoint_shutdown_token = endpoint.drt().child_token();
 
         let system_health = endpoint.drt().system_health();
 
@@ -223,19 +239,6 @@ impl EndpointConfigBuilder {
             )
             .await?;
 
-        let tracker_clone = if graceful_shutdown {
-            tracing::debug!(
-                "Registering endpoint '{}' with graceful shutdown tracker",
-                endpoint.name
-            );
-            let tracker = endpoint.drt().graceful_shutdown_tracker();
-            tracker.register_endpoint();
-            Some(tracker)
-        } else {
-            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
-            None
-        };
-
         // Register this endpoint instance in the discovery plane
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
         // consistent registration/discovery across the system.
@@ -258,12 +261,10 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Unable to register service for discovery"
                 );
+                let drain_timeout = endpoint.drt().endpoint_drain_timeout();
                 let _ = server
-                    .unregister_endpoint_instance(&endpoint_id, connection_id)
+                    .unregister_endpoint_instance(&endpoint_id, connection_id, drain_timeout)
                     .await;
-                if let Some(tracker) = tracker_clone {
-                    tracker.unregister_endpoint();
-                }
                 anyhow::bail!(
                     "Unable to register service for discovery. Check discovery service status"
                 );
@@ -280,8 +281,16 @@ impl EndpointConfigBuilder {
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
         let discovery_for_cleanup = discovery;
 
+        let drt_for_cleanup = endpoint.drt().clone();
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let _graceful_task = graceful_task;
             cancel_token_for_cleanup.cancelled().await;
+
+            // Read *after* cancellation: the bound is published when the
+            // shutdown sequence starts, so reading it at registration time
+            // would always see the default and put this drain on a different
+            // clock than the Phase 2 wait for it.
+            let drain_timeout = drt_for_cleanup.endpoint_drain_timeout();
 
             if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
                 tracing::warn!(%error, "Failed to unregister endpoint from discovery");
@@ -293,7 +302,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint_instance(&endpoint_id, connection_id)
+                .unregister_endpoint_instance(&endpoint_id, connection_id, drain_timeout)
                 .await
             {
                 tracing::warn!(
@@ -301,11 +310,6 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Failed to unregister endpoint"
                 );
-            }
-
-            if let Some(tracker) = tracker_clone {
-                tracing::debug!("Unregister endpoint from graceful shutdown tracker");
-                tracker.unregister_endpoint();
             }
 
             anyhow::Ok(())
@@ -439,6 +443,7 @@ impl Endpoint {
     /// and should start receiving requests.
     pub async fn register_endpoint_instance(&self) -> anyhow::Result<()> {
         let drt = self.drt();
+        let _registration = drt.runtime().endpoint_registration_guard().await?;
         let instance_id = drt.connection_id();
         let endpoint_id = self.id();
 

@@ -1613,7 +1613,10 @@ mod tests {
                 "unexpected error after {state}"
             );
         }
-        runtime.velo_response_service().shutdown().await;
+        runtime
+            .velo_response_service()
+            .shutdown(Duration::ZERO, Duration::ZERO)
+            .await;
     }
 
     #[test]
@@ -1851,7 +1854,10 @@ mod tests {
                         assert!(response.next().await.is_none());
                         guard_dropped_rx.await.unwrap();
                     }
-                    runtime.velo_response_service().shutdown().await;
+                    runtime
+                        .velo_response_service()
+                        .shutdown(Duration::ZERO, Duration::ZERO)
+                        .await;
                 })
                 .await
                 .expect("guarded dispatch did not complete after the error prologue");

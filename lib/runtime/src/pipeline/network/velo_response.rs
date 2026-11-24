@@ -46,10 +46,19 @@ pub const TRANSPORT_NAME: &str = "velo_response";
 /// versions must keep `ResponseAddress`'s `version`, `peer_id`,
 /// `peer_address`, `anchor` and `ticket` decodable.
 const VERSION: u32 = 4;
-/// Process-wide services, keyed by [`service_key`].
-static PROCESS_SERVICES: LazyLock<
-    tokio::sync::Mutex<HashMap<Option<tokio::runtime::Id>, Weak<SharedService>>>,
-> = LazyLock::new(Default::default);
+/// Serializes acquisition and final-owner shutdown for one listener.
+type ServiceSlot = tokio::sync::Mutex<ServiceGeneration>;
+
+#[derive(Default)]
+struct ServiceGeneration {
+    lease: Weak<SharedService>,
+    // An HTTP request admitted by an earlier owner may still register a response.
+    admit_until: Option<tokio::time::Instant>,
+}
+
+/// Unrelated Tokio runtimes can acquire or close their listeners independently.
+static PROCESS_SERVICES: LazyLock<Mutex<HashMap<Option<tokio::runtime::Id>, Weak<ServiceSlot>>>> =
+    LazyLock::new(Default::default);
 static PROCESS_METRICS: LazyLock<(crate::MetricsRegistry, Arc<velo::VeloMetrics>)> =
     LazyLock::new(|| {
         let registry = crate::MetricsRegistry::new();
@@ -303,44 +312,31 @@ impl RuntimeService {
         self.closed.store(true, Ordering::Release);
     }
 
-    /// Keeps the service open for `window`, while a frontend may still admit
-    /// requests that have yet to register, then waits up to `headroom` more
-    /// for its response streams to finish.
-    pub(crate) async fn drain(&self, window: Duration, headroom: Duration) {
-        let Some(service) = self
-            .owner
-            .lock()
-            .await
-            .as_ref()
-            .map(|lease| lease.service.clone())
-        else {
-            return;
-        };
-        tokio::time::sleep(window).await;
-        let _ = tokio::time::timeout(headroom, async {
-            while !service.registrations.lock().requests.is_empty() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await;
-    }
-
     pub(crate) async fn service(&self) -> Result<Arc<VeloResponseService>> {
         let mut owner = self.owner.lock().await;
         ensure!(!self.is_closed(), "Velo response runtime is shut down");
         if let Some(owner) = owner.as_ref() {
             return Ok(owner.service.clone());
         }
-        // Acquisition and final-owner shutdown use the same lock. A new
-        // runtime cannot acquire a service while that service is closing.
-        let key = service_key(&self.runtime);
-        let mut shared = PROCESS_SERVICES.lock().await;
-        let lease = match shared.get(&key).and_then(Weak::upgrade) {
+        let slot = {
+            let key = service_key(&self.runtime);
+            let mut slots = PROCESS_SERVICES.lock();
+            slots.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+                slots.retain(|_, slot| slot.strong_count() > 0);
+                let slot = Arc::new(ServiceSlot::default());
+                slots.insert(key, Arc::downgrade(&slot));
+                slot
+            })
+        };
+        let mut shared = slot.lock().await;
+        ensure!(!self.is_closed(), "Velo response runtime is shut down");
+        let lease = match shared.lease.upgrade() {
             Some(lease) => lease,
             None => {
                 let runtime = self.runtime.clone();
                 // The spawned result owns cleanup even if its caller stops
                 // waiting before construction finishes.
+                let service_slot = slot.clone();
                 let lease = Arc::new(
                     runtime
                         .handle()
@@ -348,12 +344,15 @@ impl RuntimeService {
                             Ok::<_, anyhow::Error>(SharedService {
                                 service: VeloResponseService::from_env().await?,
                                 runtime,
+                                slot: service_slot,
                             })
                         })
                         .await??,
                 );
-                shared.retain(|_, service| service.strong_count() > 0);
-                shared.insert(key, Arc::downgrade(&lease));
+                *shared = ServiceGeneration {
+                    lease: Arc::downgrade(&lease),
+                    admit_until: None,
+                };
                 lease
             }
         };
@@ -362,15 +361,20 @@ impl RuntimeService {
         Ok(service)
     }
 
-    pub(crate) async fn shutdown(&self) {
-        let mut owner = self.owner.lock().await;
-        self.closed.store(true, Ordering::Release);
-        let Some(lease) = owner.take() else {
+    pub(crate) async fn shutdown(&self, window: Duration, headroom: Duration) {
+        self.close();
+        let Some(lease) = self.owner.lock().await.take() else {
             return;
         };
-        let mut shared = PROCESS_SERVICES.lock().await;
+        let slot = lease.slot.clone();
+        let mut shared = slot.lock().await;
+        let deadline = tokio::time::sleep(window).deadline();
+        let admit_until = shared.admit_until.unwrap_or(deadline).max(deadline);
+        shared.admit_until = Some(admit_until);
         if let Some(lease) = Arc::into_inner(lease) {
-            shared.remove(&service_key(&lease.runtime));
+            // Only the final owner waits for streams. Keep this listener's slot
+            // locked until its port is released so a replacement can bind it.
+            lease.service.drain(admit_until, headroom).await;
             lease.service.shutdown().await;
         }
     }
@@ -378,6 +382,7 @@ impl RuntimeService {
 
 /// Stream handles retain the service, but do not count as runtime owners.
 struct SharedService {
+    slot: Arc<ServiceSlot>,
     service: Arc<VeloResponseService>,
     // Keeps an owned Tokio runtime alive without retaining the Dynamo Runtime.
     runtime: crate::runtime::RuntimeType,
@@ -547,6 +552,18 @@ impl VeloResponseService {
             !idle
         });
         evicted
+    }
+
+    /// Allow late response admission through the outstanding HTTP deadline, then
+    /// wait for registered streams.
+    async fn drain(&self, admit_until: tokio::time::Instant, headroom: Duration) {
+        tokio::time::sleep_until(admit_until).await;
+        let _ = tokio::time::timeout(headroom, async {
+            while !self.registrations.lock().requests.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
     }
 
     async fn shutdown(&self) {
@@ -1075,6 +1092,74 @@ mod tests {
         }
     }
 
+    // Idle workers have no HTTP admission left to protect. The frontend's
+    // configured grace must not consume their entire cleanup allowance.
+    #[tokio::test]
+    async fn drained_runtime_skips_velo_http_admission_window() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("60")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let service = runtime.velo_response_service().service().await.unwrap();
+                runtime
+                    .shutdown_with_budget(Duration::from_secs(2))
+                    .await
+                    .expect("an idle worker must not wait for frontend HTTP admission");
+                assert!(service.closed.initialized());
+            },
+        )
+        .await;
+    }
+
+    // A timed-out HTTP owner can still be tokenizing its first request. With
+    // an empty response map, retain the window for its late registration.
+    #[tokio::test]
+    async fn pending_http_owner_retains_velo_response_admission_window() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("1")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let service = runtime.velo_response_service().service().await.unwrap();
+                let last = crate::Runtime::from_current().unwrap();
+                assert!(Arc::ptr_eq(
+                    &service,
+                    &last.velo_response_service().service().await.unwrap()
+                ));
+                let http_owner = runtime.graceful_shutdown_tracker().register_task();
+                runtime
+                    .shutdown_and_wait(Some(Duration::ZERO))
+                    .await
+                    .unwrap();
+                // The final owner has no HTTP guard of its own, but the earlier
+                // owner's admitted request is still eligible to register.
+                let shutdown = tokio::spawn({
+                    let last = last.clone();
+                    async move { last.shutdown_and_wait(Some(Duration::ZERO)).await }
+                });
+                last.primary_token().cancelled().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let response = service
+                    .register_response(EngineContext::new(()).context(), false)
+                    .expect("an admitted HTTP request may register during its grace period");
+                drop(response);
+                drop(http_owner);
+                tokio::time::timeout(Duration::from_secs(5), shutdown)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(service.closed.initialized());
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn runtime_shutdown_closes_only_the_last_owner_after_its_streams_drain() {
         temp_env::async_with_vars(
@@ -1099,20 +1184,20 @@ mod tests {
                 ));
                 let address = tcp_address(&service);
 
-                first.shutdown();
-                tokio::time::timeout(Duration::from_secs(10), first.primary_token().cancelled())
-                    .await
+                let registration = service
+                    .register_response(EngineContext::new(()).context(), false)
                     .unwrap();
+                first
+                    .shutdown_with_budget(Duration::from_secs(2))
+                    .await
+                    .expect("a nonfinal owner must not wait for the surviving owner's streams");
                 assert!(first_clone.velo_response_service().service().await.is_err());
                 drop(first_clone);
                 drop(first);
                 assert!(!service.closed.initialized());
                 tokio::net::TcpStream::connect(address).await.unwrap();
 
-                // Retain both the service and an in-flight registration across shutdown.
-                let registration = service
-                    .register_response(EngineContext::new(()).context(), false)
-                    .unwrap();
+                // Retain the same in-flight response through final-owner shutdown.
                 let endpoint = second.graceful_shutdown_tracker().register_task();
                 let main = second.primary_token();
                 second.shutdown();
@@ -1136,6 +1221,12 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(1_500)).await;
                 assert!(!service.closed.initialized());
                 tokio::net::TcpStream::connect(address).await.unwrap();
+                // A replacement with the same service key must wait for the old listener.
+                let replacement = crate::Runtime::single_threaded().unwrap();
+                let replacement_owner = replacement.velo_response_service();
+                let fresh = replacement_owner.service();
+                tokio::pin!(fresh);
+                assert!(futures::poll!(&mut fresh).is_pending());
                 drop(registration);
                 tokio::time::timeout(Duration::from_secs(10), async {
                     while !service.closed.initialized() {
@@ -1154,8 +1245,7 @@ mod tests {
 
                 // A later runtime receives a new service, even while callers
                 // still hold handles to the service that was shut down.
-                let replacement = crate::Runtime::from_current().unwrap();
-                let fresh = replacement.velo_response_service().service().await.unwrap();
+                let fresh = fresh.await.unwrap();
                 assert!(!Arc::ptr_eq(&service, &fresh));
                 replacement.shutdown();
                 tokio::time::timeout(
