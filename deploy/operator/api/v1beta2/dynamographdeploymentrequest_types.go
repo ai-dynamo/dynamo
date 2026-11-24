@@ -83,6 +83,34 @@ type HardwareSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+
+	// Interconnect describes the links between candidate workers. Like gpu, it makes the
+	// hardware object nonempty, so admission still discovers omitted GPU fields.
+	// +optional
+	Interconnect *InterconnectSpec `json:"interconnect,omitempty"`
+}
+
+// InterconnectSpec describes the links that move data between candidate workers.
+type InterconnectSpec struct {
+	// KVTransferBandwidthGBps is the bandwidth, in decimal gigabytes per second, that moves a
+	// request's KV cache from a prefill worker to a decode worker. It lowers to AISimulate's
+	// engine.kv_transfer.bandwidth_gb_per_second, which adds the transfer time to the TTFT of
+	// disaggregated candidates and keeps the KV cache reserved on the prefill worker until the
+	// transfer finishes. Aggregated candidates do not transfer KV and are unaffected.
+	// AISimulate applies the value to each prefill rank's sending link and each decode rank's
+	// receiving link, where a rank is one attention-data-parallel rank with all of its tensor-
+	// and pipeline-parallel GPUs, and concurrent transfers share those links. The same value
+	// applies to every candidate whatever its tensor-parallel size, so a per-GPU measurement,
+	// for example from a NIXL benchmark, is conservative for candidates whose GPUs send their
+	// KV shards over separate NICs.
+	// When omitted, AISimulate models the transfer as instantaneous, so disaggregated candidates
+	// report optimistic TTFT and goodput; admission warns when such candidates are searched
+	// without a bandwidth. Admission rejects the field when the effective search is
+	// aggregated-only.
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	KVTransferBandwidthGBps *float64 `json:"kvTransferBandwidthGBps,omitempty"`
 }
 
 // KVCapacityFractionRange defines the searched fraction of a candidate's KV capacity.

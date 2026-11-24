@@ -107,6 +107,42 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 KV-transfer bandwidth
+
+In a disaggregated candidate, the prefill worker sends each request's KV cache to
+a decode worker before decode starts. `spec.hardware.interconnect.kvTransferBandwidthGBps`
+sets the bandwidth of that link in decimal GB/s. It lowers to AISimulate's
+`engine.kv_transfer.bandwidth_gb_per_second`. AISimulate then adds the transfer time to
+each request's TTFT and keeps the KV cache reserved on the prefill worker until the
+transfer finishes. Aggregated candidates do not transfer KV and are unaffected.
+
+When the field is omitted, AISimulate models the transfer as instantaneous. Disaggregated
+candidates then report optimistic TTFT and goodput, and can win the search for that reason
+alone. Admission accepts such a Request but returns a warning whenever the effective search
+includes disaggregated candidates, which is the default.
+
+AISimulate applies the bandwidth to each prefill rank's sending link and each decode
+rank's receiving link, where a rank is one attention-data-parallel rank with all of its
+tensor- and pipeline-parallel GPUs. Concurrent transfers share those links. The same value
+applies to every candidate whatever its tensor-parallel size, so a measured per-GPU
+bandwidth, for example from a NIXL transfer benchmark, is conservative for candidates whose
+GPUs send their KV shards over separate NICs. Prefer a measured value to the nominal NIC
+rate. Setting `interconnect` does not opt out of hardware discovery.
+
+```yaml
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  hardware:
+    interconnect:
+      kvTransferBandwidthGBps: 27.7 # Measured NIXL GPU-to-GPU bandwidth across nodes.
+```
+
+`inputOverrides.engine.kv_transfer` remains the final overlay: it can replace the typed
+bandwidth, set `bytes_per_token` or `timing_mode`, or delete the transfer model with
+`null`. Admission rejects a transfer model when the effective `engine.mode` searches
+no disaggregated candidates, because AISimulate would reject it when the Run starts.
+
 ### v1beta2 DGD Overrides
 
 DGDR v1beta2 is available without a feature gate and is not feature complete.

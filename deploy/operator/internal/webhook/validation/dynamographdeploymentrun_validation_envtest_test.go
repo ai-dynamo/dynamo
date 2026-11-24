@@ -34,7 +34,7 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 		{
 			name: "empty hardware is an accepted resolved opt-out when input overrides supply hardware",
 			test: admissionTestCase{object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-				run := schemaRunForAdmission(`{"engine":{"hardware":"h200_sxm"}}`, nil)
+				run := schemaRunForAdmission(`{"engine":{"hardware":"h200_sxm","kv_transfer":{"bandwidth_gb_per_second":25}}}`, nil)
 				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
 				return run
 			}()},
@@ -290,6 +290,7 @@ func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1
 			Hardware: &nvidiacomv1beta2.HardwareSpec{
 				GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(8))},
 				NumGPUsPerNode: new(int32(8)),
+				Interconnect:   &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(25.0)},
 			},
 			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{
 				InputTokens: new(int32(2)), OutputTokens: new(int32(1)),

@@ -3692,6 +3692,23 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers<br />to AISimulate's num_gpus_per_node input.<br />An explicit value is authoritative. In a nonempty hardware object, admission discovers<br />an omitted value from the selected cluster node shape. The Run controller never discovers<br />this value. An exactly empty hardware object opts out of all operator hardware discovery<br />and typed hardware defaults, leaving AISimulate input and defaults authoritative. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `interconnect` _[InterconnectSpec](#interconnectspec)_ | Interconnect describes the links between candidate workers. Like gpu, it makes the<br />hardware object nonempty, so admission still discovers omitted GPU fields. |  | Optional: \{\} <br /> |
+
+
+#### InterconnectSpec
+
+
+
+InterconnectSpec describes the links that move data between candidate workers.
+
+
+
+_Appears in:_
+- [HardwareSpec](#v1beta2-hardwarespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kvTransferBandwidthGBps` _float_ | KVTransferBandwidthGBps is the bandwidth, in decimal gigabytes per second, that moves a<br />request's KV cache from a prefill worker to a decode worker. It lowers to AISimulate's<br />engine.kv_transfer.bandwidth_gb_per_second, which adds the transfer time to the TTFT of<br />disaggregated candidates and keeps the KV cache reserved on the prefill worker until the<br />transfer finishes. Aggregated candidates do not transfer KV and are unaffected.<br />AISimulate applies the value to each prefill rank's sending link and each decode rank's<br />receiving link, where a rank is one attention-data-parallel rank with all of its tensor-<br />and pipeline-parallel GPUs, and concurrent transfers share those links. The same value<br />applies to every candidate whatever its tensor-parallel size, so a per-GPU measurement,<br />for example from a NIXL benchmark, is conservative for candidates whose GPUs send their<br />KV shards over separate NICs.<br />When omitted, AISimulate models the transfer as instantaneous, so disaggregated candidates<br />report optimistic TTFT and goodput; admission warns when such candidates are searched<br />without a bandwidth. Admission rejects the field when the effective search is<br />aggregated-only. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### KVCapacityFractionRange

@@ -733,6 +733,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{
 					"gpu":            map[string]any{"sku": "future_accelerator", "budget": int64(4)},
 					"numGpusPerNode": int64(2),
+					"interconnect":   v1beta2InterconnectForAdmission(),
 				}
 			}),
 			gpuDiscovery: true,
@@ -752,6 +753,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{
 					"gpu":            map[string]any{"sku": "h200_sxm", "budget": int64(4)},
 					"numGpusPerNode": int64(8),
+					"interconnect":   v1beta2InterconnectForAdmission(),
 				}
 			}),
 			gpuDiscovery: true,
@@ -1490,8 +1492,12 @@ const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
 // defaults. It is unstructured on purpose: an omitted field,
 // an explicit empty object and a null are different requests, and typed Go cannot tell them
 // apart.
+// The base Request models the KV transfer so only cases about it see the bandwidth warning.
 func v1beta2DGDRForAdmission(mutate func(spec map[string]any)) *unstructured.Unstructured {
-	spec := map[string]any{"model": map[string]any{"name": v1beta2AdmissionModel}}
+	spec := map[string]any{
+		"model":    map[string]any{"name": v1beta2AdmissionModel},
+		"hardware": map[string]any{"interconnect": v1beta2InterconnectForAdmission()},
+	}
 	if mutate != nil {
 		mutate(spec)
 	}
@@ -1502,6 +1508,11 @@ func v1beta2DGDRForAdmission(mutate func(spec map[string]any)) *unstructured.Uns
 		"metadata":   metadata,
 		"spec":       spec,
 	}}
+}
+
+// v1beta2InterconnectForAdmission is a measured prefill-to-decode KV-transfer bandwidth.
+func v1beta2InterconnectForAdmission() map[string]any {
+	return map[string]any{"kvTransferBandwidthGBps": 25.0}
 }
 
 // v1beta1CarrierForAdmission is a v1beta1 Request carrying a v1beta2 spec with workload under the
@@ -1519,6 +1530,7 @@ func v1beta2TraceRequestForAdmission(workload map[string]any) *unstructured.Unst
 		spec["workload"] = workload
 		spec["hardware"] = map[string]any{
 			"gpu": map[string]any{"sku": "h200_sxm", "budget": int64(8)}, "numGpusPerNode": int64(8),
+			"interconnect": v1beta2InterconnectForAdmission(),
 		}
 	})
 }
@@ -1568,5 +1580,6 @@ func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRe
 	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
 		GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
 		NumGPUsPerNode: &numGPUsPerNode,
+		Interconnect:   &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(25.0)},
 	}
 }

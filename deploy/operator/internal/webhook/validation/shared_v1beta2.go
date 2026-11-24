@@ -61,9 +61,50 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 		if !errors.As(err, &schemaErr) {
 			return append(allErrs, field.InternalError(fldPath, err))
 		}
-		allErrs = append(allErrs, inputSchemaErrors(schemaErr, fldPath)...)
+		return append(allErrs, inputSchemaErrors(schemaErr, fldPath)...)
 	}
-	return allErrs
+	return append(allErrs, v.validateKVTransferV1beta2(spec, input, fldPath)...)
+}
+
+// validateKVTransferV1beta2 checks the KV-transfer model of the effective input against the modes
+// it searches. spec, input, and fldPath must not be nil; input must already satisfy the schema.
+// AISimulate rejects engine.kv_transfer when no disaggregated mode is searched, so admission
+// reports that against the field that introduced it. Disaggregated candidates without a bandwidth
+// are scored with an instantaneous transfer, which admission allows but warns about.
+func (v *sharedValidation) validateKVTransferV1beta2(
+	spec *nvidiacomv1beta2.NativeSearchInput,
+	input map[string]any,
+	fldPath *field.Path,
+) field.ErrorList {
+	transfer, err := aisimulate.InspectKVTransfer(input)
+	if err != nil {
+		return field.ErrorList{field.Invalid(fldPath.Child("aisim", "inputOverrides", "engine", "mode"), "<redacted>", err.Error())}
+	}
+
+	// A transfer model needs a disaggregated mode to apply to.
+	if transfer.Configured && !transfer.SearchesDisaggregated {
+		typed := spec.Hardware != nil && spec.Hardware.Interconnect != nil &&
+			spec.Hardware.Interconnect.KVTransferBandwidthGBps != nil
+		if typed {
+			return field.ErrorList{field.Forbidden(
+				fldPath.Child("hardware", "interconnect", "kvTransferBandwidthGBps"),
+				"applies only to disaggregated candidates, but spec.aisim.inputOverrides restricts engine.mode to modes without them; remove the field or allow mode disaggregated",
+			)}
+		}
+		return field.ErrorList{field.Forbidden(
+			fldPath.Child("aisim", "inputOverrides", "engine", "kv_transfer"),
+			"applies only to disaggregated candidates, but engine.mode does not search them",
+		)}
+	}
+
+	// Without a bandwidth the simulated handoff is free, so disaggregated scores are optimistic.
+	if transfer.SearchesDisaggregated && !transfer.HasBandwidth {
+		v.warnf(
+			"%s: disaggregated candidates will be scored with an instantaneous prefill-to-decode KV transfer, which understates their TTFT and overstates goodput; set the measured bandwidth between prefill and decode GPUs",
+			fldPath.Child("hardware", "interconnect", "kvTransferBandwidthGBps"),
+		)
+	}
+	return nil
 }
 
 // validateNativeSearchInputUpdate preserves metadata/status updates across upstream schema changes.
