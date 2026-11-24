@@ -90,6 +90,10 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** A `DYN_LOG` filter scoped to `dynamo_llm`, `dynamo_llm::http`, `dynamo_llm::http::service`, or one of the modules in the table must also name `dynamo_http_server` or the new target, for example `dynamo_http_server=<level>`. There is no runtime alias, so the old directive no longer selects these lines.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Control-token spellings in chat request text tokenize as text by default** ([#18159](https://github.com/ai-dynamo/dynamo/pull/18159)). With `--dyn-chat-processor dynamo`, Jinja chat templates treat recognized control-token spellings in messages, tool definitions, and `response_format` values as ordinary text. Templates can still interpret markers they read from assistant history. Dynamo rejects rendered chat prompts containing NUL bytes before tokenization.
+
+  > **Migrate:** For non-Harmony Jinja templates that rely on clients sending control tokens in message text, set `DYN_REQUEST_CONTROL_TOKENS_AS_TEXT=0`.
+
 <a id="v170"></a>
 
 ## v1.7.0 - Nov 23, 2026
@@ -121,10 +125,6 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend admin API is off by default and moves to a separate loopback port** ([#17165](https://github.com/ai-dynamo/dynamo/pull/17165)). `/router_policy`, `/router_policy/busy_threshold`, and `/busy_threshold` are no longer served on the inference port, and `DYN_DISABLE_FRONTEND_ADMIN_API` is removed.
 
   > **Migrate:** Set `DYN_ENABLE_FRONTEND_ADMIN_API=1` on frontends that need these routes and call port `8002` (`DYN_FRONTEND_ADMIN_PORT`). The listener binds to `127.0.0.1` (`DYN_FRONTEND_ADMIN_HOST`), so on Kubernetes use `kubectl port-forward pod/<frontend-pod> 8002:8002`. Remove `DYN_DISABLE_FRONTEND_ADMIN_API`; it is ignored.
-
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Control-token spellings in chat request text tokenize as text by default** ([#18159](https://github.com/ai-dynamo/dynamo/pull/18159)). With `--dyn-chat-processor dynamo`, Jinja chat templates treat recognized control-token spellings in messages, tool definitions, and `response_format` values as ordinary text. Templates can still interpret markers they read from assistant history. Dynamo rejects rendered chat prompts containing NUL bytes before tokenization.
-
-  > **Migrate:** For non-Harmony Jinja templates that rely on clients sending control tokens in message text, set `DYN_REQUEST_CONTROL_TOKENS_AS_TEXT=0`.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Worker-selection plugin callbacks take `&self` and require `Send + Sync`** ([#17712](https://github.com/ai-dynamo/dynamo/pull/17712)). `WorkerFilter::keep`, `WorkerScorer::score` and `WorkerPicker::pick` no longer take `&mut self`, and one plugin instance may be called from several threads at once.
 
