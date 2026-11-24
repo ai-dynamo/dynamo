@@ -19,54 +19,55 @@ func podDiscoveryComponentStatus(namespace string) v1beta1.ComponentReplicaStatu
 	return v1beta1.ComponentReplicaStatus{
 		ComponentKind:    v1beta1.ComponentKindDeployment,
 		RuntimeNamespace: namespace,
-		Roles: []v1beta1.ComponentRoleStatus{{Name: "main", Containers: []v1beta1.ComponentContainerStatus{{
+		Roles: []v1beta1.ComponentRoleStatus{{Name: "main", PodSpec: corev1.PodSpec{Containers: []corev1.Container{{
 			Name: "main", Image: "engine:test",
-			Env: map[string]v1beta1.EnvironmentValueStatus{
-				commonconsts.DynamoDiscoveryBackendEnvVar: {Value: new("kubernetes")},
-			},
-		}}}},
+			Env: []corev1.EnvVar{{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"}},
+		}}}}},
 	}
 }
 
 func TestPodDiscoveryUsesPublishedEnvironment(t *testing.T) {
 	for _, test := range []struct {
 		name string
-		env  map[string]v1beta1.EnvironmentValueStatus
+		env  []corev1.EnvVar
 		want metav1.ConditionStatus
 	}{
-		{name: "missing mode uses runtime pod default", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")},
+		{name: "missing mode uses runtime pod default", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"},
 		}, want: metav1.ConditionTrue},
-		{name: "explicit pod mode", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")}, "DYN_KUBE_DISCOVERY_MODE": {Value: new("pod")},
+		{name: "explicit pod mode", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
 		}, want: metav1.ConditionTrue},
 		{name: "missing backend uses runtime etcd default", want: metav1.ConditionFalse},
-		{name: "explicit etcd backend", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("etcd")},
+		{name: "explicit etcd backend", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "etcd"},
 		}, want: metav1.ConditionFalse},
-		{name: "container mode", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")}, "DYN_KUBE_DISCOVERY_MODE": {Value: new("container")},
+		{name: "container mode", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
 		}, want: metav1.ConditionFalse},
-		{name: "known empty is not absent", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")}, "DYN_KUBE_DISCOVERY_MODE": {Value: new("")},
+		{name: "known empty is not absent", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE"},
 		}, want: metav1.ConditionFalse},
-		{name: "unknown backend is pending", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Unresolved: true},
+		{name: "unknown backend is pending", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "$(PROVIDER_BACKEND)"},
 		}, want: metav1.ConditionUnknown},
-		{name: "unknown mode is pending", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")}, "DYN_KUBE_DISCOVERY_MODE": {Unresolved: true},
+		{name: "unknown mode is pending", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "$(PROVIDER_MODE)"},
 		}, want: metav1.ConditionUnknown},
-		{name: "published literals are not expanded again", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")}, "DYN_KUBE_DISCOVERY_MODE": {Value: new("$(MODE)")}, "MODE": {Value: new("pod")},
-		}, want: metav1.ConditionFalse},
-		{name: "known incompatibility wins over unknown setting", env: map[string]v1beta1.EnvironmentValueStatus{
-			"DYN_DISCOVERY_BACKEND": {Value: new("etcd")}, "DYN_KUBE_DISCOVERY_MODE": {Unresolved: true},
+		{name: "published references are not expanded again", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "$(MODE)"}, {Name: "MODE", Value: "pod"},
+		}, want: metav1.ConditionUnknown},
+		{name: "valueFrom is pending", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "discovery", Key: "mode"}}},
+		}, want: metav1.ConditionUnknown},
+		{name: "known incompatibility wins over unknown setting", env: []corev1.EnvVar{
+			{Name: "DYN_DISCOVERY_BACKEND", Value: "etcd"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "$(PROVIDER_MODE)"},
 		}, want: metav1.ConditionFalse},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Use independent published facts even when authored discovery settings disagree")
 			component := podDiscoveryComponentStatus("")
-			component.Roles[0].Containers[0].Env = test.env
+			component.Roles[0].PodSpec.Containers[0].Env = test.env
 			dgd := &v1beta1.DynamoGraphDeployment{
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Env:         []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"}},
@@ -98,7 +99,7 @@ func TestPodDiscoveryRequiresCurrentRoles(t *testing.T) {
 		{name: "missing component publication", want: metav1.ConditionUnknown},
 		{name: "stale publication", generation: 1, roles: podDiscoveryComponentStatus("").Roles, want: metav1.ConditionUnknown},
 		{name: "missing runtime container", roles: []v1beta1.ComponentRoleStatus{{Name: "main"}}, want: metav1.ConditionUnknown},
-		{name: "unrelated container is not a runtime", roles: []v1beta1.ComponentRoleStatus{{Name: "main", Containers: []v1beta1.ComponentContainerStatus{{Name: "metrics"}}}}, want: metav1.ConditionUnknown},
+		{name: "unrelated container is not a runtime", roles: []v1beta1.ComponentRoleStatus{{Name: "main", PodSpec: corev1.PodSpec{Containers: []corev1.Container{{Name: "metrics"}}}}}, want: metav1.ConditionUnknown},
 		{name: "complete target", roles: podDiscoveryComponentStatus("").Roles, want: metav1.ConditionTrue},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -123,12 +124,12 @@ func TestPodDiscoveryChecksRoleRuntimes(t *testing.T) {
 	t.Log("Native runtimes own discovery, not engine-only main containers or helper containers")
 	leader := podDiscoveryComponentStatus("").Roles[0]
 	leader.Name = "leader"
-	leader.Containers[0].Name = "runtime"
-	leader.InitContainers = leader.Containers
-	leader.Containers = []v1beta1.ComponentContainerStatus{{Name: "main", Env: map[string]v1beta1.EnvironmentValueStatus{
-		"DYN_DISCOVERY_BACKEND": {Value: new("etcd")},
+	leader.PodSpec.Containers[0].Name = "runtime"
+	leader.PodSpec.InitContainers = leader.PodSpec.Containers
+	leader.PodSpec.Containers = []corev1.Container{{Name: "main", Env: []corev1.EnvVar{
+		{Name: "DYN_DISCOVERY_BACKEND", Value: "etcd"},
 	}}}
-	worker := v1beta1.ComponentRoleStatus{Name: "worker", Containers: []v1beta1.ComponentContainerStatus{{Name: "main"}, {Name: "metrics"}}}
+	worker := v1beta1.ComponentRoleStatus{Name: "worker", PodSpec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}, {Name: "metrics"}}}}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
@@ -143,8 +144,8 @@ func TestPodDiscoveryChecksRoleRuntimes(t *testing.T) {
 	}
 
 	t.Log("Every role with a runtime must support pod discovery")
-	worker.InitContainers = []v1beta1.ComponentContainerStatus{{Name: "runtime", Env: map[string]v1beta1.EnvironmentValueStatus{
-		"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")}, "DYN_KUBE_DISCOVERY_MODE": {Value: new("container")},
+	worker.PodSpec.InitContainers = []corev1.Container{{Name: "runtime", Env: []corev1.EnvVar{
+		{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
 	}}}
 	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{Roles: []v1beta1.ComponentRoleStatus{leader, worker}}
 	if got := podDiscoveryStatus(dgd, configv1alpha1.DiscoveryBackendKubernetes); got != metav1.ConditionFalse {
@@ -159,9 +160,9 @@ func TestPodDiscoveryChecksRoleRuntimes(t *testing.T) {
 
 	t.Log("A regular helper named runtime must not hide incompatible main discovery")
 	dgd.Annotations = nil
-	leader.InitContainers = nil
-	leader.Containers = append(leader.Containers, v1beta1.ComponentContainerStatus{Name: "runtime", Env: map[string]v1beta1.EnvironmentValueStatus{
-		"DYN_DISCOVERY_BACKEND": {Value: new("kubernetes")},
+	leader.PodSpec.InitContainers = nil
+	leader.PodSpec.Containers = append(leader.PodSpec.Containers, corev1.Container{Name: "runtime", Env: []corev1.EnvVar{
+		{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"},
 	}})
 	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{Roles: []v1beta1.ComponentRoleStatus{leader}}
 	if got := podDiscoveryStatus(dgd, configv1alpha1.DiscoveryBackendKubernetes); got != metav1.ConditionFalse {

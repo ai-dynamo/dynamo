@@ -27,9 +27,11 @@ func TestRelayKeepsKnownDiscoveryAliasWithUnrelatedPendingBindings(t *testing.T)
 	component.ComponentKind = v1beta1.ComponentKindLeaderWorkerSet
 	leader := &component.Roles[0]
 	leader.Name = "leader"
-	leader.Containers[0].Env["DYN_KUBE_DISCOVERY_MODE"] = v1beta1.EnvironmentValueStatus{Value: new("pod")}
-	leader.Containers[0].Env["PENDING"] = v1beta1.EnvironmentValueStatus{Unresolved: true}
-	leader.Containers[0].Env[consts.DynamoRankEnvVar] = v1beta1.EnvironmentValueStatus{Unresolved: true}
+	leader.PodSpec.Containers[0].Env = append(leader.PodSpec.Containers[0].Env,
+		corev1.EnvVar{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
+		corev1.EnvVar{Name: "PENDING", Value: "$(DYNAMO_RANK)"},
+		corev1.EnvVar{Name: consts.DynamoRankEnvVar, Value: "$(PENDING)"},
+	)
 	worker := leader.DeepCopy()
 	worker.Name = "worker"
 	component.Roles = append(component.Roles, *worker)

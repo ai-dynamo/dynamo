@@ -262,7 +262,9 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 
 	t.Log("Withdraw only after the current target confirms incompatible discovery")
 	dgd.Status.ObservedGeneration = dgd.Generation
-	dgd.Status.Components["decode"].Roles[0].Containers[0].Env["DYN_KUBE_DISCOVERY_MODE"] = v1beta1.EnvironmentValueStatus{Value: new("container")}
+	dgd.Status.Components["decode"].Roles[0].PodSpec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
+	}
 	if err := client.Status().Update(ctx, dgd); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +285,9 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 	}
 
 	t.Log("A status-only compatible target republishes the relay despite conflicting authored env")
-	dgd.Status.Components["decode"].Roles[0].Containers[0].Env["DYN_KUBE_DISCOVERY_MODE"] = v1beta1.EnvironmentValueStatus{Value: new("pod")}
+	dgd.Status.Components["decode"].Roles[0].PodSpec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
+	}
 	if err := client.Status().Update(ctx, dgd); err != nil {
 		t.Fatal(err)
 	}

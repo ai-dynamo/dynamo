@@ -208,22 +208,22 @@ func podDiscoveryStatus(dgd *v1beta1.DynamoGraphDeployment, defaultBackend confi
 		}
 		runtimeName := commonconsts.MainContainerName
 		for _, role := range roles {
-			if slices.ContainsFunc(role.InitContainers, func(container v1beta1.ComponentContainerStatus) bool {
+			if slices.ContainsFunc(role.PodSpec.InitContainers, func(container corev1.Container) bool {
 				return container.Name == commonconsts.RuntimeContainerName
 			}) {
 				runtimeName = commonconsts.RuntimeContainerName
 			}
 		}
 		for _, role := range roles {
-			containers := role.Containers
+			containers := role.PodSpec.Containers
 			if runtimeName == commonconsts.RuntimeContainerName {
-				containers = role.InitContainers
+				containers = role.PodSpec.InitContainers
 			}
-			index := slices.IndexFunc(containers, func(container v1beta1.ComponentContainerStatus) bool {
+			index := slices.IndexFunc(containers, func(container corev1.Container) bool {
 				return container.Name == runtimeName
 			})
 			if index < 0 {
-				if runtimeName == commonconsts.MainContainerName || len(role.Containers) == 0 {
+				if runtimeName == commonconsts.MainContainerName || len(role.PodSpec.Containers) == 0 {
 					result = metav1.ConditionUnknown
 				}
 				continue
@@ -235,12 +235,17 @@ func podDiscoveryStatus(dgd *v1beta1.DynamoGraphDeployment, defaultBackend confi
 				{"DYN_KUBE_DISCOVERY_MODE", "pod", "pod"},
 			} {
 				value := setting.fallback
-				if binding, exists := containers[index].Env[setting.name]; exists {
-					if binding.Value == nil || binding.Unresolved {
+				env := containers[index].Env
+				bindingIndex := slices.IndexFunc(env, func(binding corev1.EnvVar) bool {
+					return binding.Name == setting.name
+				})
+				if bindingIndex >= 0 {
+					binding := env[bindingIndex]
+					if binding.ValueFrom != nil || strings.Contains(binding.Value, "$(") {
 						result = metav1.ConditionUnknown
 						continue
 					}
-					value = *binding.Value
+					value = binding.Value
 				}
 				if value != setting.required {
 					return metav1.ConditionFalse

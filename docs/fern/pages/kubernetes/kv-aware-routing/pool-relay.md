@@ -82,13 +82,15 @@ reconciliation. If `Ready` is False, inspect the condition reason with
 `kubectl -n inference describe dynamopoolrelay green` and check the Relay Pod logs. To publish
 serving load, set `DYN_SERVING_LOAD_PUBLISH=1` on the DGD's frontend Pods.
 
-The operator checks discovery settings in the DGD's current lowered role status, not its authored
-PodTemplates. An omitted `DYN_KUBE_DISCOVERY_MODE` uses the runtime default `pod`; an omitted
+The operator checks discovery settings in the DGD's current sparse role `podSpec`, not its authored
+PodTemplates. Native runtime sidecars are read from `initContainers`, otherwise from container `main`.
+An omitted `DYN_KUBE_DISCOVERY_MODE` uses the runtime default `pod`; an omitted
 `DYN_DISCOVERY_BACKEND` uses the runtime default `etcd`, which this Relay does not support.
 If target status is missing or stale, or a discovery value is unresolved, `Ready` is Unknown with
 reason `DiscoveryPending`. Existing Relay resources and their endpoint remain unchanged while
 publication is pending. A current target with known incompatible discovery withdraws the listener.
-These checks do not read ConfigMaps, Secrets, image environments, or provider environments.
+These checks do not replay published env values or read ConfigMaps, Secrets, image environments,
+or provider environments. A `valueFrom` or remaining `$(...)` reference is unavailable.
 
 The `podTemplate` follows DGD's Pod configuration shape. Put the image and transport environment
 on its `main` container. You can also set image pull secrets, resources, and sidecars there. The
