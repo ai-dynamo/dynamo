@@ -12,6 +12,7 @@ from typing import Optional
 
 import pytest
 
+from dynamo.thunderagent_router.policy import ResumePlan
 from dynamo.thunderagent_router.program_state import (
     ProgramLifecycle,
     ProgramStatus,
@@ -61,6 +62,61 @@ def place(router: ThunderAgentScheduler, program_id: str, replica: ReplicaKey) -
 def usage(router: ThunderAgentScheduler):
     """The per-replica usage map the scheduler phases consume."""
     return router._replica_usage_locked(router._capacity.snapshot())
+
+
+@pytest.mark.asyncio
+async def test_resume_preserves_native_shortlist_and_packing():
+    router, _ = make_router(
+        capacity_workers={(7, 1): 600, (7, 0): 600},
+        config=ThunderAgentConfig(
+            buffer_per_program=0, pause_threshold=1.0, resume_hysteresis=0.0
+        ),
+    )
+    for pid, tokens in [("small", 100), ("large", 500), ("medium", 400), ("next", 300)]:
+        program = router._table.begin_request(pid, tokens)
+        program.lifecycle = ProgramLifecycle.PAUSED
+        program.waiting = asyncio.Event()
+        router._table.paused[pid] = None
+
+    await router._scheduler_tick()
+
+    # The native shortlist takes 100 + 300 + 400; 500 exceeds the remaining
+    # aggregate budget. It then places 400, 300, 100, preserving replica ties.
+    assert {
+        pid: program.assigned_replica for pid, program in router._table.programs.items()
+    } == {"small": (7, 0), "large": None, "medium": (7, 1), "next": (7, 0)}
+    assert list(router._table.paused) == ["large"]
+    assert router._table.programs["large"].waiting is not None
+    snapshot = await router.status_snapshot()
+    assert snapshot["workers"]["7:0"]["used"] == 400
+    assert snapshot["workers"]["7:1"]["used"] == 400
+
+
+@pytest.mark.asyncio
+async def test_policy_queue_cannot_bypass_host_capacity_check(monkeypatch):
+    router, _ = make_router(
+        capacity_workers={(1, 0): 1000},
+        config=ThunderAgentConfig(buffer_per_program=0),
+    )
+    programs = []
+    for pid, tokens in [("first", 700), ("nonfit", 500), ("backfill", 100)]:
+        program = router._table.begin_request(pid, tokens)
+        program.lifecycle = ProgramLifecycle.PAUSED
+        router._table.paused[pid] = None
+        programs.append(program)
+    monkeypatch.setattr(
+        router._policy,
+        "prepare_resume",
+        lambda programs_in, config: ResumePlan(
+            programs=programs, resume_ceiling=0.8, native_packing=False
+        ),
+    )
+
+    await router._greedy_resume(router._capacity.snapshot())
+
+    assert list(router._table.paused) == ["nonfit"]
+    assert usage(router)[(1, 0)].used == 800
+    assert router._stat_forced_resumes == 0
 
 
 @pytest.mark.asyncio

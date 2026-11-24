@@ -13,10 +13,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional
 
-from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+if TYPE_CHECKING:
+    from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+from dynamo.thunderagent_router.policy import ReplicaUsage as _ReplicaUsage
+from dynamo.thunderagent_router.policy import ResumeChoice, ThunderAgentPolicy
 from dynamo.thunderagent_router.program_state import (
     Program,
     ProgramLifecycle,
@@ -45,19 +48,6 @@ class PauseDecision:
 
 
 @dataclass
-class _ReplicaUsage:
-    """One replica's occupancy, from a single pass over the program table.
-
-    Kept live for a whole tick: pause and resume adjust it as they mutate the table. No
-    ``used_decayed`` field -- it moves with the clock, so it is derived on demand.
-    """
-
-    capacity: int
-    used: int = 0
-    programs: list[Program] = field(default_factory=list)
-
-
-@dataclass
 class ThunderAgentConfig:
     pause_threshold: float = 0.95
     soft_demote_threshold: float = 0.80
@@ -81,6 +71,9 @@ class _AdmissionGate:
 
 
 class ThunderAgentScheduler:
+    program_table_cls = ProgramTable
+    policy_cls = ThunderAgentPolicy
+
     def __init__(
         self,
         capacity: WorkerCapacityProvider,
@@ -88,7 +81,8 @@ class ThunderAgentScheduler:
     ) -> None:
         self._capacity = capacity
         self._cfg = config
-        self._table = ProgramTable()
+        self._policy = self.policy_cls()
+        self._table = self.program_table_cls()
         self._lock = asyncio.Lock()
         self._admission_gates: dict[str, _AdmissionGate] = {}
         self._scheduler_task: Optional[asyncio.Task] = None
@@ -148,44 +142,30 @@ class ThunderAgentScheduler:
         estimated_prompt_tokens: int,
     ) -> PauseDecision:
         wait_started = time.monotonic()
-        async with self._lock:
-            snapshot = self._table.snapshot_request(program_id)
-            wait_event, was_paused = self._admit_locked(
-                program_id, estimated_prompt_tokens
-            )
-            # No await can replace this program before its identity is captured.
-            admitted = self._table.programs.get(program_id)
-            admitted_epoch = admitted.admission_epoch if admitted is not None else None
+        while True:
+            async with self._lock:
+                if self._admission_ready(program_id):
+                    snapshot = self._table.snapshot_request(program_id)
+                    wait_event, was_paused = self._admit_locked(
+                        program_id, estimated_prompt_tokens
+                    )
+                    # No await can replace this program before its identity is captured.
+                    admitted = self._table.programs.get(program_id)
+                    admitted_epoch = (
+                        admitted.admission_epoch if admitted is not None else None
+                    )
+                    break
+            await asyncio.sleep(0.02)
 
         try:
             if wait_event is not None:
-                try:
-                    await asyncio.wait_for(
-                        wait_event.wait(), timeout=self._cfg.resume_timeout_seconds
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Forced resume for %s after %.1fs",
-                        program_id,
-                        self._cfg.resume_timeout_seconds,
-                    )
-                    async with self._lock:
-                        program = self._table.programs.get(program_id)
-                        if (
-                            program is not None
-                            and program.lifecycle == ProgramLifecycle.PAUSED
-                        ):
-                            usage = self._replica_usage_locked(
-                                self._capacity.snapshot()
-                            )
-                            replica = self._least_loaded_replica_locked(usage)
-                            self._resume_program(program, replica)
-                            self._stat_forced_resumes += 1
+                await self._wait_for_resume(program_id, wait_event)
 
             waited = time.monotonic() - wait_started
 
             async with self._lock:
                 program = self._table.programs.get(program_id)
+                self._check_admission_owner(program, admitted, admitted_epoch)
                 if program is None:
                     return PauseDecision(program_id=program_id, waited_seconds=waited)
 
@@ -213,6 +193,38 @@ class ThunderAgentScheduler:
                 program_id, snapshot, admitted, admitted_epoch
             )
             raise
+
+    def _admission_ready(self, program_id: str) -> bool:
+        return self._policy.admission_ready(program_id)
+
+    async def _wait_for_resume(
+        self, program_id: str, wait_event: asyncio.Event
+    ) -> None:
+        if self._policy.retry_on_request_change:
+            await self._greedy_resume(self._capacity.snapshot())
+        if not self._policy.force_resume_on_timeout:
+            await wait_event.wait()
+            return
+        try:
+            await asyncio.wait_for(
+                wait_event.wait(), timeout=self._cfg.resume_timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Forced resume for %s after %.1fs",
+                program_id,
+                self._cfg.resume_timeout_seconds,
+            )
+            async with self._lock:
+                program = self._table.programs.get(program_id)
+                if program is not None and program.lifecycle == ProgramLifecycle.PAUSED:
+                    usage = self._replica_usage_locked(self._capacity.snapshot())
+                    replica = self._least_loaded_replica_locked(usage)
+                    self._resume_program(program, replica)
+                    self._stat_forced_resumes += 1
+
+    def _check_admission_owner(self, program, admitted, admitted_epoch) -> None:
+        self._policy.check_admission_owner(program, admitted, admitted_epoch)
 
     async def _rollback_admission_shielded(
         self,
@@ -313,28 +325,25 @@ class ThunderAgentScheduler:
                 if key[0] in live_worker_ids
             }
 
-        if not capacities:
-            # Cold start: no MDC yet, so no replica to reason about. Let the request
-            # through unassigned; the first response chunk back-fills the pair.
-            return None, False
-        replica = self._select_replica_for_admission_locked(
-            self._replica_usage_locked(capacities),
-            program.token_total,
-            queue_behind_paused=was_new and not stale_replacement,
-        )
-        if replica is not None:
-            # Placing here is pre-existing (worker-keyed did the same argmin), and not
-            # binding: _greedy_resume_locked re-picks the replica on every resume.
-            program.assigned_replica = replica
-            self._stat_worker_assignments += 1
-            return None, False
+        if not self._policy.rank_initial_admission():
+            if not capacities:
+                # Cold start: let the first response back-fill the replica.
+                return None, False
+            replica = self._select_replica_for_admission_locked(
+                self._replica_usage_locked(capacities),
+                program.token_total,
+                queue_behind_paused=was_new and not stale_replacement,
+            )
+            if replica is not None:
+                program.assigned_replica = replica
+                self._stat_worker_assignments += 1
+                return None, False
+            if not was_new:
+                # Native TA lets an unplaceable live session retry next turn.
+                return None, False
 
-        if not was_new:
-            # Already running and unplaceable: let the turn through unpinned rather than
-            # parking a live session. The next turn retries.
-            return None, False
-
-        # Every replica is full: queue until the scheduler tick resumes us.
+        self._policy.admission_queued(program)
+        # Capacity or policy requires waiting; only a resume can assign us now.
         program.waiting = program.waiting or asyncio.Event()
         program.lifecycle = ProgramLifecycle.PAUSED
         self._table.paused[program_id] = None
@@ -371,10 +380,12 @@ class ThunderAgentScheduler:
                 return
             if program.marked_for_pause:
                 program.marked_for_pause = False
-                do_pause = True
+                do_pause = self._policy.mark_reasoning_for_pause
 
         if do_pause:
             await self._pause_acting(program_id)
+        if self._policy.retry_on_request_change:
+            await self._greedy_resume(self._capacity.snapshot())
 
     async def assign_worker(
         self,
@@ -530,8 +541,8 @@ class ThunderAgentScheduler:
     def _pause_until_safe_locked(self, usage: dict[ReplicaKey, _ReplicaUsage]) -> None:
         """Shed load from every over-threshold replica. Caller holds ``self._lock``.
 
-        Smallest-ACTING-first then mark REASONING, as upstream. Candidate order is taken
-        once per replica instead of rescanning the table on every pause.
+        Smallest-ACTING-first, then mark REASONING if the policy allows deferred
+        pausing. Candidate order is taken once per replica, without table rescans.
         """
         threshold = self._cfg.pause_threshold
         pause_target = min(self._cfg.pause_target, threshold)
@@ -562,7 +573,7 @@ class ThunderAgentScheduler:
                 entry.used -= freed
                 paused_this_tick += 1
 
-            if entry.used > target_limit:
+            if entry.used > target_limit and self._policy.mark_reasoning_for_pause:
                 # Marking does not free anything now; it defers the pause to
                 # after_request. Upstream keeps marking until the candidates run out.
                 reasoning = sorted(
@@ -644,12 +655,15 @@ class ThunderAgentScheduler:
             )
             return True
 
-    def _greedy_resume_locked(self, usage: dict[ReplicaKey, _ReplicaUsage]) -> None:
-        """Best-fit-decreasing restore of paused programs. Caller holds ``self._lock``.
+    async def _greedy_resume(self, capacities: dict[ReplicaKey, int]) -> None:
+        """Run the same resume pass between ticks when a policy requests it."""
+        if not self._table.paused:
+            return
+        async with self._lock:
+            self._greedy_resume_locked(self._replica_usage_locked(capacities))
 
-        Keeps ``usage`` in step as it resumes -- invariant maintenance, since a replica only
-        accepts a resume while it stays under the resume ceiling.
-        """
+    def _greedy_resume_locked(self, usage: dict[ReplicaKey, _ReplicaUsage]) -> None:
+        """Apply policy choices and maintain occupancy. Caller holds ``self._lock``."""
         if not self._table.paused:
             return
 
@@ -670,56 +684,47 @@ class ThunderAgentScheduler:
 
         paused_programs.sort(key=lambda p: (group_key(p), p.token_total))
 
-        resume_ceiling = max(
-            0.0, self._cfg.pause_threshold - self._cfg.resume_hysteresis
-        )
-        buffer = self._cfg.buffer_per_program
-        backend_caps = [
-            (key, int(entry.capacity * resume_ceiling) - entry.used)
-            for key, entry in usage.items()
-        ]
-        backend_caps = [(key, r) for key, r in backend_caps if r > buffer]
-        if not backend_caps:
+        plan = self._policy.prepare_resume(paused_programs, self._cfg)
+        programs = plan.programs
+        if not programs:
             return
-
-        backend_caps.sort(key=lambda x: -x[1])
-
-        total_capacity = sum(r for _, r in backend_caps)
-        resumable_programs: list[Program] = []
-        cumulative = 0
-        for program in paused_programs:
-            required = program.token_total + buffer
-            if cumulative + required <= total_capacity:
-                resumable_programs.append(program)
-                cumulative += required
-
-        if not resumable_programs:
-            return
-
-        resumable_programs.sort(key=lambda p: -p.token_total)
-        min_required = min(p.token_total for p in resumable_programs) + buffer
+        packing = None
+        if plan.native_packing:
+            programs, packing = self._native_resume_queue_locked(
+                programs, usage, plan.resume_ceiling
+            )
 
         resumed_this_tick = 0
-        for program in resumable_programs:
-            if not backend_caps:
+        for program in programs:
+            if packing is not None and not packing:
                 break
-            replica, remaining = backend_caps[0]
-            if min_required > remaining:
-                break
-            required = program.token_total + buffer
-            if required > remaining:
+            plan.before_attempt(program)
+            required = program.token_total + self._cfg.buffer_per_program
+            ceiling = plan.ceiling(program)
+            # Finish this candidate's fit/exception decision before considering
+            # a lower-ranked backfill candidate. The policy cannot bypass fit.
+            choice = self._select_resume_locked(usage, required, ceiling, packing)
+            if choice is None and plan.may_force_admit(program):
+                choice = self._select_resume_override_locked(usage, ceiling)
+            if choice is None:
                 continue
-            self._resume_program(program, replica)
-            entry = usage[replica]
+            self._resume_program(program, choice.replica)
+            plan.record_admission(program, choice, resumed_this_tick)
+            entry = usage[choice.replica]
             entry.programs.append(program)
-            entry.used += self._program_tokens(program) + buffer
+            entry.used += self._program_tokens(program) + self._cfg.buffer_per_program
+            if packing is not None:
+                # Native packing charges full footprint, even for weighted
+                # ACTING reservations. Preserve that independent packing budget.
+                remaining = choice.remaining - required
+                if remaining > self._cfg.buffer_per_program:
+                    packing[0] = (choice.replica, remaining)
+                    packing.sort(key=lambda item: -item[1])
+                else:
+                    packing.pop(0)
+            if choice.forced:
+                self._stat_forced_resumes += 1
             resumed_this_tick += 1
-            updated_remaining = remaining - required
-            if updated_remaining > buffer:
-                backend_caps[0] = (replica, updated_remaining)
-                backend_caps.sort(key=lambda x: -x[1])
-            else:
-                backend_caps.pop(0)
 
         if resumed_this_tick:
             logger.info(
@@ -727,6 +732,74 @@ class ThunderAgentScheduler:
                 resumed_this_tick,
                 len(self._table.paused),
             )
+
+    def _native_resume_queue_locked(
+        self,
+        programs: list[Program],
+        usage: dict[ReplicaKey, _ReplicaUsage],
+        ceiling: float,
+    ) -> tuple[list[Program], list[tuple[ReplicaKey, int]]]:
+        """Native aggregate-capacity shortlist followed by decreasing footprint."""
+        buffer = self._cfg.buffer_per_program
+        packing = [
+            (key, int(entry.capacity * ceiling) - entry.used)
+            for key, entry in usage.items()
+            if int(entry.capacity * ceiling) - entry.used > buffer
+        ]
+        packing.sort(key=lambda item: -item[1])
+        total_capacity = sum(remaining for _, remaining in packing)
+        selected = []
+        cumulative = 0
+        for program in programs:
+            required = program.token_total + buffer
+            if cumulative + required <= total_capacity:
+                selected.append(program)
+                cumulative += required
+        selected.sort(key=lambda program: -program.token_total)
+        return selected, packing
+
+    def _select_resume_locked(
+        self,
+        usage: dict[ReplicaKey, _ReplicaUsage],
+        required: int,
+        ceiling: float,
+        packing: Optional[list[tuple[ReplicaKey, int]]] = None,
+    ) -> Optional[ResumeChoice]:
+        """Normal capacity admission, owned by ThunderAgent for every policy."""
+        if packing is not None:
+            if not packing or packing[0][1] < required:
+                return None
+            replica, remaining = packing[0]
+            return ResumeChoice(replica, remaining, ceiling)
+
+        best = None
+        for replica, entry in usage.items():
+            remaining = int(entry.capacity * ceiling) - entry.used
+            if entry.capacity <= 0 or remaining < required:
+                continue
+            if (
+                best is None
+                or remaining > best.remaining
+                or (remaining == best.remaining and replica < best.replica)
+            ):
+                best = ResumeChoice(replica, remaining, ceiling)
+        return best
+
+    def _select_resume_override_locked(
+        self, usage: dict[ReplicaKey, _ReplicaUsage], ceiling: float
+    ) -> Optional[ResumeChoice]:
+        """Place a policy-authorized exception only after normal admission fails."""
+        replica = max(
+            (key for key, entry in usage.items() if entry.capacity > 0),
+            key=lambda key: usage[key].capacity - self._decayed_used(usage[key]),
+            default=None,
+        )
+        if replica is None:
+            return None
+        entry = usage[replica]
+        return ResumeChoice(
+            replica, int(entry.capacity * ceiling) - entry.used, ceiling, forced=True
+        )
 
     def _resume_program(
         self, program: Program, target_replica: Optional[ReplicaKey]

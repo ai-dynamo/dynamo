@@ -76,6 +76,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
 
 class ThunderAgentArgGroup(ArgGroup):
     name = "thunderagent-router"
+    include_resume_timeout = True
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         # Inherit standard router options (--endpoint, --router-block-size, KV
@@ -120,15 +121,16 @@ class ThunderAgentArgGroup(ArgGroup):
             "from hard pause (default: 1.0)",
             arg_type=float,
         )
-        add_argument(
-            g,
-            flag_name="--resume-timeout-seconds",
-            env_var="DYN_THUNDERAGENT_RESUME_TIMEOUT_SECONDS",
-            default=1800.0,
-            help="Maximum wait on a paused program before a forced resume "
-            "(default: 1800)",
-            arg_type=float,
-        )
+        if self.include_resume_timeout:
+            add_argument(
+                g,
+                flag_name="--resume-timeout-seconds",
+                env_var="DYN_THUNDERAGENT_RESUME_TIMEOUT_SECONDS",
+                default=1800.0,
+                help="Maximum wait on a paused program before a forced resume "
+                "(default: 1800)",
+                arg_type=float,
+            )
         add_argument(
             g,
             flag_name="--resume-hysteresis",
