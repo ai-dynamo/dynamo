@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -717,6 +719,96 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
 				}
 			}
+		})
+	}
+}
+
+func TestSGLangEnvironmentLookups(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		origin       string
+		general      []corev1.EnvVar
+		env          []corev1.EnvVar
+		nativeWorker bool
+		gpus         int64
+		gpuError     bool
+		wantBase     int32
+		wantCount    int
+		wantError    string
+	}{
+		{name: "legacy literals retain ports", origin: "1.7.0", gpus: 4, wantBase: 19090, wantCount: 4},
+		{name: "semantic literals retain ports", gpus: 4, wantBase: 19090, wantCount: 4},
+		{name: "general lookup reads the final topological order", general: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"}}, env: []corev1.EnvVar{{Name: "BASE", Value: "30500"}}, gpus: 4, wantBase: 30500, wantCount: 4},
+		{name: "lookup uses expansion time", env: []corev1.EnvVar{{Name: "BASE", Value: "30500"}, {Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"}, {Name: "BASE", Value: "30600"}}, gpus: 4, wantBase: 30500, wantCount: 4},
+		{name: "local forward reference stays optimistic", env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"}, {Name: "BASE", Value: "30500"}}, gpuError: true, wantBase: 19090, wantCount: 1},
+		{name: "unknown Grove input stays optimistic", env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(GROVE_PCSG_POD_INDEX)"}}, gpuError: true, wantBase: 19090, wantCount: 1},
+		{name: "unknown ConfigMap base stays optimistic", env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "settings", Key: "port"}}}}, gpuError: true, wantBase: 19090, wantCount: 1},
+		{name: "unknown Secret alias shadows an earlier literal", env: []corev1.EnvVar{{Name: "BASE", Value: "30500"}, {Name: "BASE", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "settings", Key: "port"}}}, {Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"}}, gpuError: true, wantBase: 19090, wantCount: 1},
+		{name: "unknown enable does not reject possible excess ranks", env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_ENABLE", Value: "$(GROVE_ENABLE)"}}, gpus: 16, wantBase: 19090, wantCount: 8},
+		{name: "unknown exporter does not reject possible range overflow", env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_EXPORTER", Value: "$(PROVIDER_EXPORTER)"}, {Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "65535"}}, gpus: 4, wantBase: 65535, wantCount: 1},
+		{name: "escaped reference is a known invalid number", env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$$(BASE)"}}, wantError: "not a number"},
+		{name: "known invalid base still fails", env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "70000"}}, wantError: "outside the port range"},
+		{name: "compute-only native worker retains authored ports", nativeWorker: true, env: []corev1.EnvVar{{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "30500"}}, gpuError: true, wantBase: 30500, wantCount: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Author telemetry inputs without expanding or flattening their source lists")
+			origin := test.origin
+			if origin == "" {
+				origin = "1.8.0"
+			}
+			env := append([]corev1.EnvVar{{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"}, {Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"}}, test.env...)
+			template := &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "engine:1.8.0", Command: []string{"python3", "-m", "dynamo.sglang"}, Env: env}}}}
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, PodTemplate: template}
+			role, nodes := RoleMain, int32(1)
+			if test.nativeWorker {
+				template.Spec.Containers[0].Command = []string{"python3", "-m", "sglang.launch_server"}
+				template.Spec.Containers[0].Ports = []corev1.ContainerPort{{Name: commonconsts.DynamoNixlPortName, ContainerPort: 30500}}
+				leader := template.DeepCopy()
+				leader.Spec.InitContainers = []corev1.Container{{Name: "runtime", Image: "runtime:1.8.0", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}}
+				component.PodTemplate = nil
+				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+				component.Roles = []v1beta1.ComponentRoleSpec{{Name: "leader", PodTemplate: leader}, {Name: "worker", PodTemplate: template}}
+				role, nodes = RoleWorker, 2
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+				Spec:        v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "sglang", Env: test.general, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}}}
+			original := dgd.DeepCopy()
+			gpuCount := func() (int64, error) {
+				if test.gpuError {
+					return 0, errors.New("GPU resolution must not run for an unreadable base or native engine")
+				}
+				return test.gpus, nil
+			}
+
+			for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
+				t.Log("Read telemetry after the production provider entrypoint finalizes the environment", provider)
+				var pod *corev1.PodSpec
+				var err error
+				if provider == commonconsts.MultinodeDeploymentTypeGrove {
+					pod, err = GeneratePodSpecForComponent(&component, BackendFrameworkSGLang, nil, dgd, role, nodes, &configv1alpha1.OperatorConfiguration{}, provider, "worker", nil, gpuCount)
+				} else {
+					pod, err = GenerateBasePodSpec(&component, BackendFrameworkSGLang, nil, dgd.Name, dgd.Namespace, role, nodes, &configv1alpha1.OperatorConfiguration{}, provider, "worker", nil, gpuCount, GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env})
+				}
+				if test.wantError != "" {
+					require.ErrorContains(t, err, test.wantError)
+					continue
+				}
+				require.NoError(t, err)
+				ports := map[string]int32{}
+				for _, port := range pod.Containers[0].Ports {
+					if port.Name == "nixl" || strings.HasPrefix(port.Name, "nixl-") {
+						ports[port.Name] = port.ContainerPort
+					}
+				}
+				require.Len(t, ports, test.wantCount)
+				require.Equal(t, test.wantBase, ports["nixl"])
+				for rank := 1; rank < test.wantCount; rank++ {
+					require.Equal(t, test.wantBase+int32(rank), ports["nixl-"+strconv.Itoa(rank)])
+				}
+			}
+			require.Equal(t, original, dgd)
 		})
 	}
 }

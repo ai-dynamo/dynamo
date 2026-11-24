@@ -43,6 +43,7 @@ from .sglang_prepost import (
     SglangStreamingPostProcessor,
     ToolCallParserType,
     _client_wants_separate_reasoning,
+    _effective_reasoning_parser_name,
     _get_history_tool_calls_count,
     _guided_output_requires_reasoning,
     convert_tools,
@@ -63,8 +64,8 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    random_uuid,
     read_jinja_chat_template,
+    request_id_from_context,
     resolve_chat_template,
     worker_warmup,
 )
@@ -488,10 +489,8 @@ class SglangPreprocessWorkerResult:
     request: dict[str, Any]
     force_reasoning: bool = False
     named_zero_arg_tool: str | None = None
-    # ``effective_reasoning_parser_name`` is None when the request opted out
-    # via ``separate_reasoning=False``; the main process must skip creating
-    # a reasoning parser in that case so the pool path matches the inline
-    # path byte-for-byte.
+    # Keep the same boundary parser in the pool and inline paths, including
+    # tool requests that display reasoning as content.
     effective_reasoning_parser_name: str | None = None
 
 
@@ -577,8 +576,8 @@ def _preprocess_worker(
         force_reasoning=pre.force_reasoning,
     )
 
-    effective_reasoning_parser_name = (
-        _w_reasoning_parser_name if _client_wants_separate_reasoning(request) else None
+    effective_reasoning_parser_name = _effective_reasoning_parser_name(
+        request, _w_reasoning_parser_name, pre.force_reasoning
     )
 
     return SglangPreprocessWorkerResult(
@@ -838,10 +837,13 @@ class SglangProcessor:
             history_tool_calls_count=_get_history_tool_calls_count(
                 request.get("messages", [])
             ),
-            sglang_tools=convert_tools(request.get("tools")),
+            sglang_tools=convert_tools(
+                request.get("chat_template_tools") or request.get("tools")
+            ),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=named_zero_arg_tool,
             guided_json_is_content=_guided_json_is_content(dynamo_preproc),
+            separate_reasoning=_client_wants_separate_reasoning(request),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=prompt_token_ids,
             stop_strings=_request_stop_strings(request),
@@ -853,7 +855,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Single-process path: preprocess, dispatch, stream post-process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         try:
             if self.debug_perf:
@@ -930,7 +932,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Pool path: preprocess in worker, stream in main process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         # --- Phase 1: Preprocess (semaphore held) ---
         assert self._worker_semaphore is not None
@@ -1101,7 +1103,7 @@ class SglangProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choice:
                     dynamo_out: dict[str, Any] = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": [choice],
                         "created": created_ts,
                         "model": request["model"],

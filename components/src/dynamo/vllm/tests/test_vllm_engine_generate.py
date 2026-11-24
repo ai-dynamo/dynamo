@@ -88,6 +88,35 @@ def test_tito_adapter_uses_outer_tokens_and_rl_sampling_defaults():
     assert adapted.sampling_params.output_kind is RequestOutputKind.DELTA
 
 
+@pytest.mark.parametrize(
+    ("routing", "expected"),
+    [
+        (None, 7),
+        ({}, 7),
+        ({"priority": None}, 7),
+        ({"priority": -50}, 50),
+        ({"priority": 0}, 0),
+    ],
+)
+def test_tito_adapter_takes_the_priority_the_router_forwarded(routing, expected):
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    request = _request(sampling_params={"max_tokens": 5}, priority=7)
+    if routing is not None:
+        request["routing"] = routing
+
+    adapted = adapt_engine_generate_request(
+        request,
+        enable_multimodal=False,
+        decode_capable=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+
+    assert adapted is not None
+    assert adapted.priority == expected
+
+
 def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 

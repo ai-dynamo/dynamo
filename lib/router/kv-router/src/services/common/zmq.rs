@@ -312,6 +312,11 @@ pub fn connect_dealer_socket(endpoint: &str) -> Result<ZmqSocket> {
 
 #[cfg(any(feature = "replica-sync-zmq", test))]
 pub fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
+    ZmqSocket::new(create_bound_pub_socket_sync(endpoint)?)
+}
+
+#[cfg(any(feature = "replica-sync-zmq", test))]
+pub(crate) fn create_bound_pub_socket_sync(endpoint: &str) -> Result<zmq::Socket> {
     // Not pooled: the socket holds the only reference to its context, so dropping it
     // terminates the context, which waits until libzmq has closed the listener. The port is
     // free again as soon as the publisher's owner has shut down.
@@ -319,7 +324,7 @@ pub fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     configure_send_socket(&socket)?;
     set_ipv6_for(&socket, endpoint)?;
     socket.bind(endpoint)?;
-    ZmqSocket::new(socket)
+    Ok(socket)
 }
 
 pub fn validate_endpoint(endpoint: &str) -> Result<()> {

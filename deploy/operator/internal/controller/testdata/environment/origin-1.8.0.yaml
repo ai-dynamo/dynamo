@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Authored inputs, not captured output from an earlier operator.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: environment
+  annotations:
+    nvidia.com/dynamo-operator-origin-version: 1.8.0
+spec:
+  backendFramework: vllm
+  env:
+    - name: Z_BASE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: GRAPH_REF
+      value: $(Z_BASE)
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/frontend:1.7.0
+              command: [python3, -m, dynamo.frontend]
+              env:
+                - name: B
+                  value: $(A)
+                - name: A
+                  value: x
+                - name: Z_BASE
+                  value: specific
+    - name: prefill
+      type: prefill
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/worker:1.7.0
+              command: [python3, -m, dynamo.vllm]
+              args: [--model, test/model, --disaggregation-mode, prefill]
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+    - name: decode
+      type: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/worker:1.7.0
+              command: [python3, -m, dynamo.vllm]
+              args: [--model, test/model, --disaggregation-mode, decode]
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  name: environment
+  annotations:
+    nvidia.com/dynamo-operator-origin-version: 1.8.0
+spec:
+  backendFramework: vllm
+  name: decode
+  type: decode
+  replicas: 1
+  env:
+    - name: Z_BASE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: GRAPH_REF
+      value: $(Z_BASE)
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          image: registry.example/worker:1.7.0
+          command: [python3, -m, dynamo.vllm]
+          args: [--model, test/model]
+          env:
+            - name: B
+              value: $(A)
+            - name: A
+              value: x
+            - name: Z_BASE
+              value: specific

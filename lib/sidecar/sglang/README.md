@@ -28,8 +28,15 @@ server. See the [sidecar overview](../README.md) for installation.
 | Disaggregated | Yes |
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) | Yes |
-| Data parallelism (DP>1) | Not yet |
+| Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
+| Replica DP (`--dp-size N`) | Aggregated and decode; SGLang's Rust server rejects it for prefill |
 | Image, video, and audio input | Yes, as URLs |
+
+SGLang's Rust server runs one listener per DP rank: listener `k` on a node
+binds `--port + k` and `--grpc-port + k`, so keep the two ports at least the
+node's listener count apart. One sidecar per node serves all of the node's
+listeners as one worker, with `--grpc-connections` connections
+to each.
 
 See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 
@@ -76,7 +83,7 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
 Multinode deployments use complete `leader` and `worker` role PodTemplates. See
-[`multinode_tp.yaml`](deploy/multinode_tp.yaml)
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
 and the [SGLang sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
 
 ### Kubernetes manifest notes
@@ -122,6 +129,8 @@ node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-sglang-multinode-tp.svg)
 
-### Data parallelism
+### Multi-Node DP
 
-Not supported yet; see the [support matrix](#support-matrix).
+Attention DP across two nodes, with one sidecar per node (shown with DP=4, two ranks per node).
+
+![With attention DP across two nodes, each node runs one Dynamo Sidecar that registers that node's DP ranks and calls its own SGLang listeners.](../../../docs/fern/assets/img/sidecar-sglang-multinode-dp.svg)

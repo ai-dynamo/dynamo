@@ -20,6 +20,8 @@ USER root
 # The NIM base removes some packages but keeps their conffiles (dpkg state rc).
 # Purge them so compliance does not attribute packages that no longer ship.
 RUN dpkg -l | awk '/^rc/ {print $2}' | xargs -r dpkg --purge
+# Dynamo resets the NIM entrypoint and never starts the NIM nginx proxy.
+RUN rm -rf /opt/nim/.local/nginx
 {% endif %}
 
 {% set has_transformers_pin = context.vllm[device_key].transformers_version is defined -%}
@@ -90,9 +92,8 @@ COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 

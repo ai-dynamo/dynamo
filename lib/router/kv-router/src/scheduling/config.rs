@@ -28,11 +28,6 @@ use dynamo_worker_selection::{
 };
 
 pub use dynamo_scheduler::{RouterConfigOverride, RouterPrefillLoadModel};
-// Pre-split paths kept through 1.9 and removed in 1.10; the named list is the inventory in compat.rs.
-#[allow(deprecated)]
-pub use crate::compat::scheduling::config::{
-    RouterConfigOverrideBuilder, RouterConfigOverrideBuilderError,
-};
 
 const fn default_track_prefill_tokens() -> bool {
     true
@@ -868,6 +863,17 @@ impl KvRouterConfig {
             .cloned();
         if let Some(settings) = settings {
             settings.apply(self)?;
+        }
+        Ok(())
+    }
+
+    /// Apply the policy file's `router` settings for the last time: later
+    /// [`Self::apply_policy_config`] calls leave this config alone. For a caller that
+    /// overrides one of those settings and hands the config to code that applies again.
+    pub fn finalize_policy_config(&mut self) -> Result<(), String> {
+        self.apply_policy_config()?;
+        if let Some(policy) = self.policy_config_cache.get_mut() {
+            policy.drop_router_settings();
         }
         Ok(())
     }

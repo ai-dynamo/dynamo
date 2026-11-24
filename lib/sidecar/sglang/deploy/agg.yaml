@@ -92,6 +92,8 @@ spec:
           - Qwen/Qwen3-0.6B
           - --host
           - 127.0.0.1
+          # Listener k binds --port + k and --grpc-port + k. With --dp-size or
+          # --attn-dp-size N, keep the two ports at least N apart.
           - --port
           - "30000"
           - --grpc-port

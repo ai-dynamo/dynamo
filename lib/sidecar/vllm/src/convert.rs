@@ -1702,34 +1702,23 @@ fn map_output_logprobs(
         .copied()
         .map(normalize_logprob)
         .collect();
+    // vLLM sends the true top N, including the sampled token when it ranks there.
     let top_logprobs = include_top_logprobs.then(|| {
         output
-            .token_ids
+            .candidate_tokens
             .iter()
-            .enumerate()
-            .map(|(index, token_id)| {
-                let mut entries =
-                    Vec::with_capacity(output.candidate_tokens[index].tokens.len() + 1);
-                entries.push(TopLogprob {
-                    rank: output.ranks[index],
-                    token_id: *token_id,
-                    token: None,
-                    logprob: normalize_logprob(output.logprobs[index]),
-                    bytes: None,
-                });
-                entries.extend(
-                    output.candidate_tokens[index]
-                        .tokens
-                        .iter()
-                        .map(|candidate| TopLogprob {
-                            rank: candidate.rank,
-                            token_id: candidate.id,
-                            token: None,
-                            logprob: normalize_logprob(candidate.logprob),
-                            bytes: None,
-                        }),
-                );
-                entries
+            .map(|candidates| {
+                candidates
+                    .tokens
+                    .iter()
+                    .map(|candidate| TopLogprob {
+                        rank: candidate.rank,
+                        token_id: candidate.id,
+                        token: None,
+                        logprob: normalize_logprob(candidate.logprob),
+                        bytes: None,
+                    })
+                    .collect()
             })
             .collect()
     });

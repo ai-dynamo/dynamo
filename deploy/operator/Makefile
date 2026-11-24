@@ -97,9 +97,9 @@ REGISTRY ?=
 TAG ?= latest
 
 # CUDA versions used by render.py. Override for non-default builds.
-# Valid values are constrained by container/render.py (currently 13.0 / 13.1).
+# Valid values are constrained by container/render.py (currently 13.0 / 13.4).
 CUDA_VERSION ?= 13.0
-CUDA_VERSION_TRTLLM ?= 13.1
+CUDA_VERSION_TRTLLM ?= 13.4
 # CUDA version for the dynamo-framework images (planner, frontend).
 CUDA_VERSION_DYNAMO ?= 13.0
 
