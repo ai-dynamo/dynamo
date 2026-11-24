@@ -13,7 +13,7 @@ This page does not list:
 - Kubernetes operator metrics. See [Operator Metrics](operator-metrics.mdx).
 - NIXL transfer metrics, which NIXL serves on its own port. See the [NIXL telemetry documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
 - Velo metrics (`velo_*`), which the Velo library defines. Dynamo processes expose them when `DYN_RESPONSE_PLANE=velo`. See the [Velo metrics reference](https://github.com/ai-dynamo/velo/blob/main/docs/src/appendix/metrics.md).
-- KVBM metrics, including the block-pool metrics in the `kvbm-logical` crate. KVBM was removed in v1.7.0; see the documentation for v1.6 and earlier.
+- KVBM metrics, including the block-pool metrics in the `kvbm-logical` crate. KVBM was removed in v1.8.0; see the documentation for v1.7 and earlier.
 
 ## Metric Types
 
@@ -530,7 +530,7 @@ Recorded only with `--shared-cache-type hicache`. These carry a `router_id` labe
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_router_shared_cache_hit_rate` | histogram | — | Fraction of request blocks found in the shared KV cache. | |
-| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | — | Shared-cache blocks beyond the selected worker's device overlap. | |
+| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | — | Shared-cache blocks the selected worker can load past its local (device, host, and disk) prefix: the unbroken run, or zero below the engine's minimum load. | |
 | `dynamo_router_shared_cache_errors_total` | counter | — | Failed shared-cache queries and subscriber errors. Frontend only; carries only `router_id`, like the [routing overhead](#per-request-routing-overhead) metrics. | |
 
 ### Active Sequence Synchronization
@@ -598,6 +598,7 @@ Emitted by every process that runs a Dynamo DistributedRuntime: on the HTTP port
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_uptime_seconds` | gauge | `worker_id` | DistributedRuntime uptime. Updated before each Prometheus scrape on both the frontend and the system-status server. | |
+| `dynamo_metrics_merge_conflicts_total` | counter | — | Metric families dropped from `/metrics` and OTLP because their help or type conflicted with an earlier family of the same name. A nonzero value means some metric is missing; a one-time warning, `skipping metric family`, names the family and both declarations. Counts every skip, so a conflict that persists adds one per scrape and per export. | Experimental |
 
 With the QUIC response plane (`--response-plane quic` or `DYN_RESPONSE_PLANE=quic`), every process also records:
 

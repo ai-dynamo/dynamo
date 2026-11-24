@@ -158,6 +158,11 @@ func (r *reconciler) watchExports(
 		return controllerBuilder, nil
 	}
 	r.exports.clusterPropertyWatched = true
+	if config.MultiCluster.ClusterID != "" {
+		mgr.GetLogger().Info("multiCluster.clusterId wins over the cluster's ID in its ClusterSet for DynamoPoolRelays "+
+			"without a clusterId; the Global Discovery Service lists their pools only if the two are equal",
+			"clusterId", config.MultiCluster.ClusterID)
+	}
 	return controllerBuilder.Watches(
 		multicluster.NewClusterProperty(),
 		handler.EnqueueRequestsFromMapFunc(r.mapClusterPropertyToRelays),
@@ -541,24 +546,27 @@ func (r *reconciler) exportProblems(
 
 	// A standard implementation labels the pool's imports with the cluster's ID in
 	// its ClusterSet, and the Global Discovery Service joins the pool's
-	// registration to them only under the same cluster ID. A Relay that takes the
-	// cluster's ID cannot differ from it, so only a set cluster ID is checked.
-	setID, setBy := relay.Spec.ClusterID, "clusterId"
-	if setID == "" {
-		setID, setBy = r.clusterID, "the operator's multiCluster.clusterId"
-	}
-	if !r.exports.clusterPropertyWatched || setID == "" {
+	// registration to them only under the same cluster ID. A Relay that runs under
+	// that ID cannot differ from it.
+	if !r.exports.clusterPropertyWatched {
 		return problems, nil
+	}
+	clusterID, source, err := r.resolveClusterID(ctx, relay)
+	if errors.Is(err, errNoClusterID) || err == nil && source == clusterIDFromClusterSet {
+		return problems, nil
+	}
+	if err != nil {
+		return problems, err
 	}
 	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
 	if err != nil || property == nil {
 		return problems, err
 	}
-	if clusterID := multicluster.ClusterPropertyValue(property); clusterID != "" && clusterID != setID {
+	if value := multicluster.ClusterPropertyValue(property); value != "" && value != clusterID {
 		problems = append(problems, exportProblem{reason: reasonClusterIDMismatch, related: property, message: fmt.Sprintf(
 			"%s %q differs from the ID %q that ClusterProperty %s gives this cluster in its ClusterSet; "+
 				"the Global Discovery Service lists the pool only when they match",
-			setBy, setID, clusterID, multicluster.ClusterIDProperty)})
+			source, clusterID, value, multicluster.ClusterIDProperty)})
 	}
 	return problems, nil
 }

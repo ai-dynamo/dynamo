@@ -43,7 +43,7 @@ impl AsyncEngine<Input, Output, Error> for FailingEngine {
     }
 }
 
-use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 fn sglang() -> SharedFormat {

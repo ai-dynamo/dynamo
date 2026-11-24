@@ -180,6 +180,10 @@ pub struct WorkerCatalogRecord {
     /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_owned_mm_identity: Option<bool>,
+    /// The KV event source sends one remove per block however many times it stored
+    /// the block (SGLang). Unset means a remove per store (vLLM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_stores: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -212,6 +216,7 @@ impl WorkerCatalogRecord {
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             kv_event_source_mode: req.kv_event_source_mode,
             engine_owned_mm_identity: req.engine_owned_mm_identity,
+            idempotent_stores: req.idempotent_stores,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -316,6 +321,7 @@ impl Default for WorkerRequest {
             router_hint_source_control_endpoints: HashMap::new(),
             kv_event_source_mode: None,
             engine_owned_mm_identity: None,
+            idempotent_stores: None,
         }
     }
 }
@@ -362,6 +368,10 @@ pub struct WorkerRequest {
     /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
     #[serde(default, deserialize_with = "strict_bool")]
     pub engine_owned_mm_identity: Option<bool>,
+    /// The KV event source sends one remove per block however many times it stored
+    /// the block (SGLang). Unset means a remove per store (vLLM).
+    #[serde(default, deserialize_with = "strict_bool")]
+    pub idempotent_stores: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -391,6 +401,8 @@ pub struct WorkerPatchRequest {
     pub kv_event_source_mode: Option<String>,
     #[serde(default, deserialize_with = "strict_bool")]
     pub engine_owned_mm_identity: Option<bool>,
+    #[serde(default, deserialize_with = "strict_bool")]
+    pub idempotent_stores: Option<bool>,
 }
 
 impl WorkerCatalogRecord {
@@ -457,6 +469,9 @@ impl WorkerCatalogRecord {
         }
         if patch.engine_owned_mm_identity.is_some() {
             self.engine_owned_mm_identity = patch.engine_owned_mm_identity;
+        }
+        if patch.idempotent_stores.is_some() {
+            self.idempotent_stores = patch.idempotent_stores;
         }
     }
 }

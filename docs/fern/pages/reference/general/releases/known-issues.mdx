@@ -12,9 +12,27 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 Known issues summarize each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
+<a id="v170"></a>
+
+## v1.7.0 — current release
+
+The v1.7.0 known issues are listed in the **Known Issues** section of the [v1.7.0 GitHub release notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.7.0) and land on this page with the v1.7.0 release notes page.
+
+<a id="v162"></a>
+
+## v1.6.2
+
+No new known issues. The [v1.6.0 known issues](#v160) still apply, except the TensorRT-LLM HTTP 500 on oversized non-streaming `/v1/messages` requests, which v1.6.2 fixes.
+
+<a id="v161"></a>
+
+## v1.6.1
+
+No new known issues. The [v1.6.0 known issues](#v160) still apply.
+
 <a id="v160"></a>
 
-## v1.6.0 — current release
+## v1.6.0
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **Out-of-Vocab Stop Token Crash:** A request whose `stop_token_ids` includes an ID at or above the model's vocabulary size can crash the SGLang scheduler when any request in the batch sets `min_tokens`, failing every request on that worker until it restarts. The issue also affects v1.5.0. No workaround is available yet.
 

@@ -434,19 +434,6 @@ pub struct ExportConfig {
     pub resource_attributes: Vec<(String, String)>,
 }
 
-/// Parse the `key=value,key=value` form used for headers and resource
-/// attributes.
-///
-/// Splits on the *first* `=` so base64 padding in a bearer token survives.
-/// Percent-decoding, which the spec allows, is deliberately not applied.
-pub(crate) fn parse_key_value_list(raw: &str) -> Vec<(String, String)> {
-    raw.split(',')
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .filter(|(k, _)| !k.is_empty())
-        .collect()
-}
-
 impl ExportConfig {
     /// `None` unless `OTEL_METRICS_EXPORTER=otlp`. Prometheus scraping is
     /// unaffected either way.
@@ -491,30 +478,30 @@ impl ExportConfig {
                 env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
             );
         }
-        let protocol = crate::logging::OtlpProtocol::Grpc;
+        let protocol = crate::otlp::OtlpProtocol::Grpc;
 
         // Signal-specific headers replace the generic set rather than merging,
         // per the OTLP exporter spec.
         let headers = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_HEADERS)
             .or_else(|_| std::env::var(env_otlp::OTEL_EXPORTER_OTLP_HEADERS))
-            .map(|raw| parse_key_value_list(&raw))
+            .map(|raw| crate::otlp::parse_key_value_list(&raw))
             .unwrap_or_default();
 
         let resource_attributes = std::env::var(env_otlp::OTEL_RESOURCE_ATTRIBUTES)
-            .map(|raw| parse_key_value_list(&raw))
+            .map(|raw| crate::otlp::parse_key_value_list(&raw))
             .unwrap_or_default();
 
         Ok(Some(Self {
             headers,
             resource_attributes,
-            endpoint: crate::logging::resolve_otlp_endpoint(
+            endpoint: crate::otlp::resolve_otlp_endpoint(
                 protocol,
                 std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_ENDPOINT).ok(),
                 std::env::var(env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT).ok(),
                 "/v1/metrics",
             ),
             interval: export_interval(),
-            service_name: crate::logging::get_service_name(),
+            service_name: crate::otlp::get_service_name(),
         }))
     }
 }
@@ -618,11 +605,7 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
         let collected =
             tokio::task::spawn_blocking(move || collector.metric_families_combined()).await;
         let families = match collected {
-            Ok(Ok(families)) => families,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "OTLP metrics collection failed");
-                continue;
-            }
+            Ok(families) => families,
             Err(error) => {
                 tracing::warn!(%error, "OTLP metrics collection task failed");
                 continue;
@@ -864,7 +847,7 @@ mod tests {
             .register(Box::new(histogram))
             .expect("register histogram");
 
-        let collected = registry.metric_families_combined().expect("combined");
+        let collected = registry.metric_families_combined();
         let metrics = to_resource_metrics(&collected, &[], UNIX_EPOCH)
             .scope_metrics
             .into_iter()

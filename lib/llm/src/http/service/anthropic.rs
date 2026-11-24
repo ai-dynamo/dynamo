@@ -31,14 +31,8 @@ use tracing::Instrument;
 
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
-    disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
-        monitor_for_disconnects_with_activity_and_error_signal,
-    },
-    metrics::{
-        CancellationLabels, Endpoint, ErrorType, InflightGuard,
-        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
-    },
+    disconnect::{StreamErrorSignal, monitor_for_disconnects_with_activity_and_error_signal},
+    metrics::process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
@@ -62,14 +56,21 @@ use crate::protocols::openai::chat_completions::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_http_server::{
+    disconnect::{ConnectionHandle, create_connection_monitor},
+    metrics::{CancellationLabels, Endpoint, ErrorType, InflightGuard},
+};
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
-    invalid_argument,
+    Protocol, anthropic_context_length_message, invalid_argument, public_message_for,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
-use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
+use super::openai::{get_or_create_request_id, warn_nvext_disabled};
+use dynamo_error::http::{
+    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
+};
+use dynamo_http_server::request::get_body_limit;
 
 mod validation;
 use validation::ValidatedRequest;
@@ -613,14 +614,14 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    let (orig_request, context) = request.into_parts();
+    let (mut orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
     // Looked up after the media refusal so a refused request gets the
     // configured status, not this lookup's 404/503.
-    let (engine, parsing_options) = state
+    let (engine, parsing_options, input_policy) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_input_policy(&model)
         .map_err(|e| match e {
             // Registered but not ready to serve yet → retryable 503 (mapped to
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
@@ -643,6 +644,8 @@ async fn anthropic_messages(
             )
             .into_marked_response(&mut inflight_guard),
         })?;
+
+    input_policy.prepare_anthropic(&mut orig_request);
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -767,19 +770,20 @@ async fn anthropic_messages(
         // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
         // (`rate_limit_error`) with a `Cancelled` metric label and no
         // rejection accounting.
-        if let Some(error) = super::metrics::queue_deadline_error(e.as_ref()) {
-            super::metrics::record_failure(error);
-            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+        if let Some(error) = dynamo_http_server::metrics::queue_deadline_error(e.as_ref()) {
+            dynamo_http_server::metrics::record_failure(error);
+            inflight_guard.mark_error(dynamo_http_server::metrics::ErrorType::Cancelled);
             return anthropic_error_unrecorded(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limit_error",
-                super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model,
+                dynamo_http_server::metrics::Endpoint::AnthropicMessages,
+            );
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Overloaded,
                 format!("{e:#}"),
@@ -787,7 +791,7 @@ async fn anthropic_messages(
             )
             .into_marked_response(&mut inflight_guard);
         }
-        if super::metrics::request_was_cancelled(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_cancelled(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Cancelled,
                 format!("{e:#}"),
@@ -801,7 +805,7 @@ async fn anthropic_messages(
             inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
             return response;
         }
-        if super::metrics::request_was_unavailable(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_unavailable(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Unavailable,
                 format!("{e:#}"),
@@ -1031,8 +1035,8 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, aggregation_options)
                 .await
                 .map_err(|error| {
-                    let error_type = if super::metrics::request_was_cancelled(&error) {
-                        super::metrics::ErrorType::Cancelled
+                    let error_type = if dynamo_http_server::metrics::request_was_cancelled(&error) {
+                        dynamo_http_server::metrics::ErrorType::Cancelled
                     } else {
                         super::openai::metric_error_type_for_class(error.class())
                     };
@@ -1412,7 +1416,11 @@ fn anthropic_backend_error_response(error_response: super::openai::ErrorResponse
     } else {
         anthropic_error_type_for_status(status, "api_error")
     };
-    anthropic_error_unrecorded(status, error_type, error.message())
+    let rendered_message = error
+        .context_length_details()
+        .and_then(anthropic_context_length_message)
+        .unwrap_or_else(|| error.message().to_string());
+    anthropic_error_unrecorded(status, error_type, &rendered_message)
 }
 
 /// Build an Anthropic-formatted error response from a canonical
@@ -1483,12 +1491,13 @@ fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> An
     };
     AnthropicErrorBody {
         error_type: anthropic_error_type_for_class(error.class()).to_string(),
-        message: error.public_message().unwrap_or(message).to_string(),
+        message: public_message_for(error, Protocol::Anthropic)
+            .unwrap_or_else(|| message.to_string()),
     }
 }
 
 fn anthropic_non_streaming_aggregation_error(error: DynamoError) -> Response {
-    if super::metrics::request_was_cancelled(&error) {
+    if dynamo_http_server::metrics::request_was_cancelled(&error) {
         return anthropic_sanitized_error_with_details(SanitizedError::Cancelled, error);
     }
     anthropic_semantic_error(&error)
@@ -1504,7 +1513,7 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
         return None;
     };
 
-    super::metrics::record_failure(error);
+    dynamo_http_server::metrics::record_failure(error);
     if matches!(
         error.class(),
         dynamo_runtime::error::ErrorClass::Internal
@@ -1514,10 +1523,12 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
     } else {
         tracing::debug!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
     }
+    let rendered_message = public_message_for(error, Protocol::Anthropic)
+        .unwrap_or_else(|| public_message.to_string());
     Some(anthropic_error_unrecorded(
         status,
         anthropic_error_type_for_class(error.class()),
-        error.public_message().unwrap_or(public_message),
+        &rendered_message,
     ))
 }
 
@@ -1646,7 +1657,7 @@ mod tests {
             .class(ErrorClass::BackendProtocol)
             .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
             .build();
-        let counter = super::super::metrics::DYNAM_FAILURES_TOTAL
+        let counter = dynamo_http_server::metrics::DYNAM_FAILURES_TOTAL
             .with_label_values(&[error.class().as_str(), error.reason().as_str()]);
         let before = counter.get();
         let event = Annotated::<NvCreateChatCompletionStreamResponse> {
@@ -1712,6 +1723,111 @@ mod tests {
         let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.error.error_type, "invalid_request_error");
         assert_eq!(body.error.message, "CLIENT_SAFE_MESSAGE");
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_renders_context_length_wording() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(9000),
+            })
+            .build();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match super::super::openai::check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => anthropic_backend_error_response(response),
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "prompt is too long: this model's maximum context length is 8192 tokens, but the \
+             prompt contains 9000 tokens. Please reduce the length of the messages."
+        );
+        assert!(
+            body.error
+                .message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.error.message.contains("prompt is too long"));
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_reports_prompt_tokens_for_combined_budget() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match super::super::openai::check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => anthropic_backend_error_response(response),
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "this model's maximum context length is 8192 tokens. However, the request would use \
+             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
+             reduce the length of the messages or the requested output."
+        );
+        assert!(
+            body.error
+                .message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.error.message.contains("4000 prompt tokens"));
+        assert!(body.error.message.contains("5000 requested output tokens"));
+        assert!(!body.error.message.contains("prompt is too long"));
         assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
     }
 
@@ -1889,6 +2005,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_semantic_error_renders_context_length_details() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+        let response = anthropic_semantic_error(&error).expect("invalid request response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "this model's maximum context length is 8192 tokens. However, the request would use \
+             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
+             reduce the length of the messages or the requested output."
+        );
+        assert!(
+            body.error
+                .message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.error.message.contains("4000 prompt tokens"));
+        assert!(body.error.message.contains("5000 requested output tokens"));
+        assert!(!body.error.message.contains("prompt is too long"));
+        assert!(!body.error.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+    }
+
+    #[tokio::test]
     async fn anthropic_semantic_conflict_uses_invalid_request_type() {
         let error = dynamo_runtime::error::DynamoError::builder()
             .class(dynamo_runtime::error::ErrorClass::Conflict)
@@ -1949,6 +2103,64 @@ mod tests {
         assert_eq!(body.error_type, "invalid_request_error");
         assert_eq!(body.message, "Invalid request");
         assert!(!body.message.contains("PRIVATE_STREAM_DIAGNOSTIC"));
+    }
+
+    #[test]
+    fn anthropic_stream_error_renders_context_length_details() {
+        use dynamo_runtime::error::{ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(body.error_type, "invalid_request_error");
+        assert_eq!(
+            body.message,
+            "this model's maximum context length is 8192 tokens. However, the request would use \
+             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
+             reduce the length of the messages or the requested output."
+        );
+        assert!(
+            body.message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(!body.message.contains("prompt is too long"));
+    }
+
+    #[test]
+    fn anthropic_stream_error_prompt_at_limit_reports_missing_output_room() {
+        use dynamo_runtime::error::{ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8192),
+                prompt_tokens: Some(8192),
+            })
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(
+            body.message,
+            "prompt is too long: this model's maximum context length is 8192 tokens and the \
+             prompt contains 8192 tokens, which leaves no room for output. Please reduce the \
+             length of the messages."
+        );
+        assert!(
+            body.message
+                .contains("maximum context length is 8192 tokens")
+        );
+        assert!(body.message.contains("prompt is too long"));
+        assert!(body.message.contains("leaves no room for output"));
     }
 
     #[test]

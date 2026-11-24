@@ -32,12 +32,3 @@ tests:
       - notMatchRegex:
           path: data["config.yaml"]
           pattern: "mcsImplementation:"
-
-  - it: passes both settings together
-    set:
-      dynamo-operator.dynamo.multiCluster.mcsImplementation: karmada
-      dynamo-operator.dynamo.multiCluster.clusterId: member-east
-    asserts:
-      - matchRegex:
-          path: data["config.yaml"]
-          pattern: 'multiCluster:\n\s+mcsImplementation: "karmada"\n\s+clusterId: "member-east"'

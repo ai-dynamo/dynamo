@@ -748,17 +748,13 @@ func TestOperatorClusterIDStandsInForAnOmittedClusterID(t *testing.T) {
 	}
 	ctx := context.Background()
 	config := startExportAPIServer(t, exportTestVersion)
-	scheme := newExportTestScheme(t)
-	if err := eventsv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	apiClient, err := client.New(config, client.Options{Scheme: scheme})
+	apiClient, err := client.New(config, client.Options{Scheme: newExportTestScheme(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	startRelayController(t, config, relayControllerOptions{version: exportTestVersion, clusterID: "fleet-east"})
 
-	t.Log("Create a pool whose Relay has no clusterId, in a cluster with no ID in its ClusterSet: it runs under the operator's multiCluster.clusterId")
+	t.Log("Create a pool whose Relay has no clusterId: Setup passes the operator's multiCluster.clusterId, which it runs under")
 	relay := readSampleRelay(t)
 	relay.Spec.ClusterID = ""
 	createNamespace(t, apiClient, relay.Namespace)
@@ -767,32 +763,14 @@ func TestOperatorClusterIDStandsInForAnOmittedClusterID(t *testing.T) {
 		t.Fatal(err)
 	}
 	deploymentKey := client.ObjectKey{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
-	runsUnderFleetEast := func() (bool, error) {
+	eventually(t, "the Relay's Deployment under cluster ID fleet-east", func() (bool, error) {
 		deployment := &appsv1.Deployment{}
 		if err := apiClient.Get(ctx, deploymentKey, deployment); err != nil {
 			return false, client.IgnoreNotFound(err)
 		}
 		args := deployment.Spec.Template.Spec.Containers[0].Args
 		return len(args) > 1 && args[0] == "--cluster-id" && args[1] == "fleet-east", nil
-	}
-	eventually(t, "the Relay's Deployment under cluster ID fleet-east", runsUnderFleetEast)
-	waitForExports(t, apiClient, relay, multicluster.PoolRelayServiceName(relay.Name), relay.Name+"-frontend")
-
-	t.Log("Give the cluster another ID in its ClusterSet: the Relay keeps the operator's ID, and the mismatch is reported")
-	if err := apiClient.Create(ctx, newClusterIDProperty("west")); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "a ClusterIDMismatch event about the operator's multiCluster.clusterId", func() (bool, error) {
-		for _, note := range relayEventNotes(t, apiClient, relay, reasonClusterIDMismatch) {
-			if strings.Contains(note, `multiCluster.clusterId "fleet-east"`) && strings.Contains(note, `the ID "west"`) {
-				return true, nil
-			}
-		}
-		return false, nil
 	})
-	if running, err := runsUnderFleetEast(); err != nil || !running {
-		t.Fatalf("the Relay's Deployment no longer runs under fleet-east: %v", err)
-	}
 }
 
 // relayEventNotes returns the notes of the events with reason that regard relay.

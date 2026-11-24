@@ -29,6 +29,7 @@ dynamo-router-protocol = { workspace = true }
 dynamo-scheduler = { workspace = true }
 dynamo-session-affinity = { workspace = true }
 dynamo-protocols = { workspace = true }
+dynamo-http-server = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }

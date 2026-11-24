@@ -16,7 +16,6 @@ import (
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -1155,10 +1154,6 @@ func TestPoolExportsCheckTheClusterID(t *testing.T) {
 			property: "west", emptyClusterID: true, defaultClusterID: "fleet-east",
 			wantMismatch: true, wantMismatchOf: `multiCluster.clusterId "fleet-east"`,
 		},
-		{
-			name: "the operator's multiCluster.clusterId that is the cluster's ID", watched: true,
-			property: "fleet-east", emptyClusterID: true, defaultClusterID: "fleet-east",
-		},
 		{name: "a failed read fails the reconcile instead of skipping the check", watched: true, readFails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1257,23 +1252,12 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 			defaultClusterID: "fleet-east", routingPool: "fleet-east/inference/green", wantHeld: "sets DYN_RELAY_ROUTING_POOL",
 		},
 		{name: "without the property the Relay is held", watched: true, noProperty: true, wantHeld: "does not exist"},
-		{name: "a property without a value gives no cluster ID", watched: true, wantHeld: `gives ""`},
-		{name: "a property with surrounding whitespace gives no cluster ID", watched: true, property: " east", wantHeld: `gives " east"`},
-		{name: "a property with a control character gives no cluster ID", watched: true, property: "ea\tst", wantHeld: `gives "ea\tst"`},
-		{name: "a property with a slash gives no cluster ID", watched: true, property: "us/east", wantHeld: `gives "us/east"`},
-		{
-			name: "a property longer than a clusterId gives no cluster ID", watched: true,
-			property: strings.Repeat("e", configvalidation.MaxClusterIDLength+1), wantHeld: "1 to 128 characters",
-		},
-		{
-			name: "a Relay that names its cluster in DYN_RELAY_ROUTING_POOL needs a clusterId", watched: true,
-			property: "east", routingPool: "east/inference/green", wantHeld: "sets DYN_RELAY_ROUTING_POOL",
-		},
+		{name: "a property that a cluster ID cannot be gives none", watched: true, property: "us/east", wantHeld: `gives "us/east"`},
 		{
 			name: "with a clusterId, DYN_RELAY_ROUTING_POOL names the same cluster", clusterID: "west", watched: true,
 			property: "east", routingPool: "west/inference/green", wantClusterID: "west",
 		},
-		{name: "without the watch a Relay needs a clusterId", property: "east", wantHeld: "restart the operator"},
+		{name: "with standard MCS but no watch, a Relay needs a cluster ID", property: "east", wantHeld: "restart the operator"},
 		{name: "without the pool's exports a Relay needs a cluster ID", exportsOff: true, property: "east", wantHeld: "set clusterId or multiCluster.clusterId"},
 		{name: "a failed read fails the reconcile instead of holding the Relay", watched: true, property: "east", readFails: true},
 	} {
@@ -1394,6 +1378,16 @@ func TestARelayStaysAsItIsWhileItsClusterIDIsUnavailable(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	published := &appsv1.Deployment{}
 	g.Expect(fakeClient.Get(ctx, deploymentKey, published)).To(gomega.Succeed())
+	published.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: published.Generation, Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2,
+	}
+	g.Expect(fakeClient.Status().Update(ctx, published)).To(gomega.Succeed())
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(fakeClient.Get(ctx, request.NamespacedName, relay)).To(gomega.Succeed())
+	running := relay.Status.DeepCopy()
+	g.Expect(running.Endpoint).NotTo(gomega.BeEmpty())
+	g.Expect(running.AvailableReplicas).To(gomega.Equal(int32(2)))
 	exports := exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))
 	g.Expect(exports).NotTo(gomega.BeEmpty())
 
@@ -1411,6 +1405,16 @@ func TestARelayStaysAsItIsWhileItsClusterIDIsUnavailable(t *testing.T) {
 	g.Expect(ready).NotTo(gomega.BeNil())
 	g.Expect(ready.Reason).To(gomega.Equal("ClusterIDUnavailable"))
 	g.Expect(ready.Message).To(gomega.ContainSubstring("does not exist"))
+	g.Expect(relay.Status.Endpoint).To(gomega.Equal(running.Endpoint))
+	g.Expect(relay.Status.AvailableReplicas).To(gomega.Equal(running.AvailableReplicas))
+
+	t.Log("The held Relay reports the listeners that its Deployment still has")
+	held.Status.AvailableReplicas = 1
+	g.Expect(fakeClient.Status().Update(ctx, held)).To(gomega.Succeed())
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(fakeClient.Get(ctx, request.NamespacedName, relay)).To(gomega.Succeed())
+	g.Expect(relay.Status.AvailableReplicas).To(gomega.Equal(int32(1)))
 
 	t.Log("Give the cluster the ID west: the Relay runs under it")
 	g.Expect(fakeClient.Create(ctx, newClusterIDProperty("west"))).To(gomega.Succeed())

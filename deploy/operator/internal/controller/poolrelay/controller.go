@@ -24,6 +24,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/multicluster"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -155,9 +156,9 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	}
 
 	// The Relay runs under its clusterId or the cluster's ID; without either, it stays as it is.
-	clusterID, err := r.resolveClusterID(ctx, &relay)
+	clusterID, _, err := r.resolveClusterID(ctx, &relay)
 	if errors.Is(err, errNoClusterID) {
-		return ctrl.Result{}, r.reportUnsettled(ctx, &relay, "ClusterIDUnavailable", err)
+		return ctrl.Result{}, r.reportHeld(ctx, &relay, "ClusterIDUnavailable", err)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -196,7 +197,7 @@ func (r *reconciler) publish(
 				_, withdrawErr := r.withdraw(ctx, relay, "ResourceOwnershipConflict", err.Error())
 				return ctrl.Result{}, errors.Join(err, withdrawErr)
 			}
-			return ctrl.Result{}, errors.Join(err, r.reportUnsettled(ctx, relay, "ReconcileFailed", err))
+			return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, relay, err))
 		}
 	}
 	deployment, err := r.applyDeployment(ctx, relay, desiredDeployment)
@@ -205,7 +206,7 @@ func (r *reconciler) publish(
 			_, withdrawErr := r.withdraw(ctx, relay, "ResourceOwnershipConflict", err.Error())
 			return ctrl.Result{}, errors.Join(err, withdrawErr)
 		}
-		return ctrl.Result{}, errors.Join(err, r.reportUnsettled(ctx, relay, "ReconcileFailed", err))
+		return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, relay, err))
 	}
 
 	// Deployment status is listener availability, never model or KV readiness.
@@ -257,20 +258,42 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 			}
 			if runtime != nil {
 				hasBackend, hasMode := false, false
-				for _, item := range runtime.Env {
-					switch item.Name {
-					case commonconsts.DynamoDiscoveryBackendEnvVar:
-						hasBackend = true
-						if item.ValueFrom != nil {
+
+				// Resolve known semantic aliases; runtime inputs remain unsupported.
+				if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
+					backend, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, commonconsts.DynamoDiscoveryBackendEnvVar)
+					hasBackend = exists
+					if exists {
+						if !backend.Known {
 							return false, nil
 						}
-						discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
-					case "DYN_KUBE_DISCOVERY_MODE":
-						hasMode = true
-						if item.ValueFrom != nil {
+						discovery.Backend = configv1alpha1.DiscoveryBackend(backend.Value)
+					}
+					mode, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, "DYN_KUBE_DISCOVERY_MODE")
+					hasMode = exists
+					if exists {
+						if !mode.Known {
 							return false, nil
 						}
-						discovery.Mode = configv1alpha1.KubeDiscoveryMode(item.Value)
+						discovery.Mode = configv1alpha1.KubeDiscoveryMode(mode.Value)
+					}
+				} else {
+					// Preserve the legacy raw reader and its duplicate handling.
+					for _, item := range runtime.Env {
+						switch item.Name {
+						case commonconsts.DynamoDiscoveryBackendEnvVar:
+							hasBackend = true
+							if item.ValueFrom != nil {
+								return false, nil
+							}
+							discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
+						case "DYN_KUBE_DISCOVERY_MODE":
+							hasMode = true
+							if item.ValueFrom != nil {
+								return false, nil
+							}
+							discovery.Mode = configv1alpha1.KubeDiscoveryMode(item.Value)
+						}
 					}
 				}
 				// Explicit env values override envFrom; missing keys could still come from it.
@@ -428,16 +451,37 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 	return observed, nil
 }
 
-// reportUnsettled makes the current Relay condition unready, with reason, without
-// claiming that this generation's required resources were reconciled: after an
-// apply error, or while the Relay's resources stay as they are.
-func (r *reconciler) reportUnsettled(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
+// reportHeld reports a Relay that the controller leaves as it is while a setting
+// that it needs is missing. Its resources keep running, so the status shows what
+// the cache holds of its Service and Deployment.
+func (r *reconciler) reportHeld(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
+	// The Service gives the endpoint, and the Deployment the available replicas.
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
+	endpoint, available := "", int32(0)
+	var service corev1.Service
+	if err := r.Get(ctx, key, &service); err == nil && metav1.IsControlledBy(&service, relay) {
+		endpoint = key.Name
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	var deployment appsv1.Deployment
+	if err := r.Get(ctx, key, &deployment); err == nil && metav1.IsControlledBy(&deployment, relay) {
+		available = deployment.Status.AvailableReplicas
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return r.setStatus(ctx, relay, false, reason, truncate(problem.Error(), maxConditionMessage), endpoint, available, false)
+}
+
+// An apply error makes the current Relay condition unready without claiming
+// that this generation's required resources were reconciled.
+func (r *reconciler) reportApplyFailure(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, operationErr error) error {
 	before := relay.DeepCopy()
 	relay.Status.Endpoint = ""
 	relay.Status.AvailableReplicas = 0
 	meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
-		Type: "Ready", Status: metav1.ConditionFalse, Reason: reason,
-		Message: problem.Error(), ObservedGeneration: relay.Generation,
+		Type: "Ready", Status: metav1.ConditionFalse, Reason: "ReconcileFailed",
+		Message: operationErr.Error(), ObservedGeneration: relay.Generation,
 	})
 	if equality.Semantic.DeepEqual(before.Status, relay.Status) {
 		return nil
@@ -510,14 +554,23 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 // its clusterId is omitted, and neither the operator nor the About API stands in.
 var errNoClusterID = errors.New("the Relay has no cluster ID")
 
-// resolveClusterID returns the cluster ID that relay runs under, in the same
-// order in every Global Discovery mode: its clusterId, the operator's
-// multiCluster.clusterId, or the cluster's ID in its ClusterSet, from the About
-// API's ClusterProperty that the controller watches with standard MCS. The error
-// wraps errNoClusterID when none gives an ID that the Relay can use.
-func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.DynamoPoolRelay) (string, error) {
+// clusterIDSource names where a Relay's cluster ID comes from, in messages.
+type clusterIDSource string
+
+const (
+	clusterIDFromSpec       clusterIDSource = "clusterId"
+	clusterIDFromOperator   clusterIDSource = "the operator's multiCluster.clusterId"
+	clusterIDFromClusterSet clusterIDSource = "the cluster's ID in its ClusterSet"
+)
+
+// resolveClusterID returns the cluster ID that relay runs under and its source,
+// in the same order in every Global Discovery mode: its clusterId, the
+// operator's multiCluster.clusterId, or the cluster's ID in its ClusterSet, from
+// the About API's ClusterProperty that the controller watches with standard MCS.
+// The error wraps errNoClusterID when none gives an ID that the Relay can use.
+func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.DynamoPoolRelay) (string, clusterIDSource, error) {
 	if relay.Spec.ClusterID != "" {
-		return relay.Spec.ClusterID, nil
+		return relay.Spec.ClusterID, clusterIDFromSpec, nil
 	}
 
 	// A registration that names its cluster itself cannot follow an ID that can change.
@@ -526,36 +579,38 @@ func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.Dynam
 			if container.Name == mainContainer && slices.ContainsFunc(container.Env, func(item corev1.EnvVar) bool {
 				return item.Name == "DYN_RELAY_ROUTING_POOL"
 			}) {
-				return "", fmt.Errorf("%w: clusterId is omitted, but the main container sets DYN_RELAY_ROUTING_POOL, "+
+				return "", "", fmt.Errorf("%w: clusterId is omitted, but the main container sets DYN_RELAY_ROUTING_POOL, "+
 					"whose cluster must equal the Relay's cluster ID; set clusterId", errNoClusterID)
 			}
 		}
 	}
 	if r.clusterID != "" {
-		return r.clusterID, nil
+		return r.clusterID, clusterIDFromOperator, nil
 	}
 	if r.exports == nil || !r.exports.clusterPropertyWatched {
-		return "", fmt.Errorf("%w: clusterId is omitted, the operator's multiCluster.clusterId is empty, and the operator "+
-			"uses the cluster's ID in its ClusterSet only with multiCluster.mcsImplementation %s in a cluster that served "+
-			"the About API when the operator started; set clusterId or multiCluster.clusterId, or install the About API "+
-			"and restart the operator", errNoClusterID, configv1alpha1.MCSImplementationStandard)
+		remedy := "set clusterId or multiCluster.clusterId"
+		if r.exports != nil && multicluster.UsesClusterSetID(r.exports.config.MultiCluster.MCSImplementation) {
+			remedy += ", or install the About API and restart the operator"
+		}
+		return "", "", fmt.Errorf("%w: clusterId is omitted, and the operator has neither multiCluster.clusterId nor "+
+			"the cluster's ID in its ClusterSet; %s", errNoClusterID, remedy)
 	}
 
 	// The watch of the property requeues the Relay when the property changes.
 	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if property == nil {
-		return "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s does not exist; create it, or set clusterId",
+		return "", "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s does not exist; create it, or set clusterId",
 			errNoClusterID, multicluster.ClusterIDProperty)
 	}
 	clusterID := multicluster.ClusterPropertyValue(property)
 	if err := configvalidation.CheckClusterID(clusterID); err != nil {
-		return "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s gives %q, which a cluster ID cannot be: it %w",
+		return "", "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s gives %q, which a cluster ID cannot be: it %w",
 			errNoClusterID, multicluster.ClusterIDProperty, clusterID, err)
 	}
-	return clusterID, nil
+	return clusterID, clusterIDFromClusterSet, nil
 }
 
 // render returns the Relay's resources and its Deployment, which runs under
