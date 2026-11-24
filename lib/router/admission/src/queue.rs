@@ -934,7 +934,9 @@ impl<T> PolicyClassQueue<T> {
     /// for the shared reason, which is every lane while the fleet is full, keeps its place in
     /// both indexes. With a slot free every lane the gate lets go may go, and they stay too:
     /// the best of them is promoted, as under a capacity recheck. A lane that may go while
-    /// others are still refused for the shared reason answered for itself, and leaves.
+    /// others are still refused for the shared reason answered for itself, and leaves. When
+    /// every lane may go, a lane that answered for itself cannot be told apart: it stays and
+    /// waits its turn as the stand-in, as it does after a capacity recheck.
     fn recheck_shared<V: Into<LaneCheck>>(
         &mut self,
         plan: &RecheckPlan,
