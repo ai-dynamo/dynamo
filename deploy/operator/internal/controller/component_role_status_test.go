@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -78,7 +79,7 @@ func TestDisaggregatedSetTargetRoleStatus(t *testing.T) {
 	}}}
 	original := ds.DeepCopy()
 	statuses := map[string]v1beta1.ComponentReplicaStatus{"Prefill": {}}
-	err = applyDisaggregatedSetRoleStatuses(ds, disaggregatedSetSelection{componentToRole: map[string]string{"Prefill": "prefill"}}, statuses)
+	err = applyDisaggregatedSetRoleStatuses(ds, disaggregatedset.Selection{ComponentToRole: map[string]string{"Prefill": "prefill"}}, statuses)
 	require.NoError(t, err)
 	require.Len(t, statuses["Prefill"].Roles, 2)
 	require.Equal(t, "leader:new", statuses["Prefill"].Roles[0].Containers[0].Image)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -15,7 +16,7 @@ import (
 
 // applyDisaggregatedSetRoleStatuses projects target templates from the persisted
 // DisaggregatedSet, not from its possibly older child LeaderWorkerSets.
-func applyDisaggregatedSetRoleStatuses(ds *unstructured.Unstructured, selection disaggregatedSetSelection, statuses map[string]v1beta1.ComponentReplicaStatus) error {
+func applyDisaggregatedSetRoleStatuses(ds *unstructured.Unstructured, selection disaggregatedset.Selection, statuses map[string]v1beta1.ComponentReplicaStatus) error {
 	var spec struct {
 		Roles []struct {
 			Name string                                `json:"name"`
@@ -31,7 +32,7 @@ func applyDisaggregatedSetRoleStatuses(ds *unstructured.Unstructured, selection 
 	}
 
 	// Bind each selected component to its lowered LWS role without re-rendering.
-	for component, roleName := range selection.componentToRole {
+	for component, roleName := range selection.ComponentToRole {
 		status := statuses[component]
 		for _, role := range spec.Roles {
 			if role.Name != roleName {
