@@ -21,11 +21,13 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import supports_fpm_idle_heartbeat
 from dynamo.sglang.args import Config
 from dynamo.sglang.drain_controls import (
     configure_worker_drain,
     unregister_worker_drain_controls,
 )
+from dynamo.sglang.drain_scheduler import configure_prefill_shutdown
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
     gateway_child_index,
@@ -555,6 +557,13 @@ async def init_prefill(
             engine, config, publisher, generate_endpoint, shutdown_event
         )
 
+        track_response_completion = configure_prefill_shutdown(
+            shutdown,
+            handler,
+            integrated=attached_engine is None,
+            supports_idle_heartbeat=supports_fpm_idle_heartbeat,
+        )
+
         health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
         ready_event = asyncio.Event()
@@ -583,6 +592,7 @@ async def init_prefill(
                     drain.wrap(handler.generate),
                     shutdown=shutdown,
                     graceful_shutdown=True,
+                    track_response_completion=track_response_completion,
                     metrics_labels=metrics_labels,
                     health_check_payload=health_check_payload,
                 ),

@@ -287,6 +287,118 @@ def test_prefill_reserves_cleanup_inside_total(shutdown_env, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("inflight_timeout", ["1", "0"])
+def test_prefill_waits_for_request_and_kv_drain(
+    shutdown_env, monkeypatch, inflight_timeout, caplog
+):
+    # The KV check follows request completion and also waits for requests when
+    # the earlier in-flight stage reaches its own cap.
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS", inflight_timeout)
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK", "skip")
+
+    async def run():
+        started, request_done, kv_done, kv_started, kv_confirmed = (
+            asyncio.Event() for _ in range(5)
+        )
+        stop = asyncio.Event()
+        runtime = IdleRuntime()
+        runtime.shutdown_and_wait = AsyncMock()
+        endpoint = Mock()
+        endpoint.unregister_endpoint_instance = AsyncMock()
+        shutdown = ws.WorkerShutdown(runtime, [endpoint], stop, prefill=True)
+
+        async def wait_for_kv_transfers():
+            assert shutdown.idle.is_set()
+            kv_started.set()
+            await kv_done.wait()
+            kv_confirmed.set()
+
+        shutdown.wait_for_kv_transfers = wait_for_kv_transfers
+
+        async def generate(request, context):
+            yield "first"
+            await request_done.wait()
+            yield "last"
+
+        async def worker():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                assert kv_confirmed.is_set()
+
+        owner = asyncio.create_task(shutdown.run(worker(), install_signals=False))
+        await started.wait()
+        stream = shutdown.wrap(generate)({}, None)
+        assert await anext(stream) == "first"
+        shutdown.request_shutdown()
+        while shutdown.accepting:
+            await asyncio.sleep(0)
+        if inflight_timeout == "0":
+            # Let the request stage expire while the stream is still admitted.
+            async with asyncio.timeout(2):
+                while not any(
+                    "stage=inflight reason=timed_out" in msg for msg in caplog.messages
+                ):
+                    await asyncio.sleep(0)
+            assert not kv_started.is_set()
+        request_done.set()
+        assert [item async for item in stream] == ["last"]
+        await asyncio.wait_for(kv_started.wait(), timeout=1)
+        assert not stop.is_set()
+        kv_done.set()
+        await asyncio.wait_for(owner, timeout=1)
+        runtime.shutdown_and_wait.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("probe", ["raises", "rpc_cancelled", "hangs"])
+def test_prefill_kv_probe_failure_is_bounded_and_reserves_cleanup(
+    shutdown_env, monkeypatch, probe, caplog
+):
+    monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "2")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "0.5")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS", "0.12")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK", "skip")
+
+    async def run():
+        started, probe_started = asyncio.Event(), asyncio.Event()
+        runtime_budget = []
+        runtime = IdleRuntime()
+        runtime.shutdown_and_wait = AsyncMock(
+            side_effect=lambda timeout_secs=None: runtime_budget.append(timeout_secs)
+        )
+        shutdown = ws.WorkerShutdown(runtime, [], asyncio.Event(), prefill=True)
+
+        async def wait_for_kv_transfers():
+            probe_started.set()
+            if probe == "raises":
+                raise RuntimeError("scheduler idle state unavailable")
+            if probe == "rpc_cancelled":
+                raise asyncio.CancelledError
+            await asyncio.Event().wait()
+
+        shutdown.wait_for_kv_transfers = wait_for_kv_transfers
+
+        async def worker():
+            started.set()
+            await asyncio.Event().wait()
+
+        owner = asyncio.create_task(shutdown.run(worker(), install_signals=False))
+        await started.wait()
+        shutdown.request_shutdown()
+        await asyncio.wait_for(probe_started.wait(), timeout=1)
+        await asyncio.wait_for(owner, timeout=2)
+        assert any(
+            "stage=kv_transfer reason=timed_out" in msg for msg in caplog.messages
+        )
+        assert 0 < runtime_budget[0] <= 0.5
+        runtime.shutdown_and_wait.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def test_cleanup_timeout_is_failure_and_does_not_extend_stage(
     shutdown_env, monkeypatch
 ):

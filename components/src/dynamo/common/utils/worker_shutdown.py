@@ -128,6 +128,7 @@ class WorkerShutdown:
         self.pre_shutdown = pre_shutdown
         self.finalize_worker: Callable[[], Awaitable[None]] | None = None
         self.post_shutdown: Callable[[], Awaitable[None]] | None = None
+        self.wait_for_kv_transfers: Callable[[], Awaitable[None]] | None = None
         self.wait_for_control_tasks: Callable[[], Awaitable[None]] | None = None
         # Gateway parents delegate discovery and request draining to children.
         self.notify_children: Callable[[], None] | None = None
@@ -318,6 +319,27 @@ class WorkerShutdown:
             if not self._worker.cancelled():
                 raise
 
+    async def _drain_kv(
+        self, wait_for_transfers: Callable[[], Awaitable[None]]
+    ) -> None:
+        # An earlier in-flight stage cap may have expired. An active handler
+        # can still submit work after an otherwise idle scheduler observation.
+        await self.idle.wait()
+        try:
+            await wait_for_transfers()
+            return
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is None or task.cancelling():
+                raise
+            # A scheduler RPC cancelled independently of this shutdown stage.
+            logger.warning("KV transfer completion check was cancelled")
+        except Exception:
+            logger.exception(
+                "KV transfer completion check failed; waiting until the drain deadline"
+            )
+        await asyncio.Event().wait()
+
     async def _shutdown(self) -> None:
         assert self._worker is not None
 
@@ -361,7 +383,6 @@ class WorkerShutdown:
             )
 
         # Request completion is not evidence of remote KV-read completion.
-        # These engines declare the same conservative fallback as the sidecars.
         fallback = (
             os.environ.get("DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK", "wait")
             .strip()
@@ -370,7 +391,13 @@ class WorkerShutdown:
         if fallback not in ("wait", "skip", ""):
             logger.warning("Invalid KV-transfer fallback %r; using wait", fallback)
             fallback = "wait"
-        if self.prefill and fallback != "skip":
+        if self.prefill and self.wait_for_kv_transfers is not None:
+            await self._stage(
+                "kv_transfer",
+                self._drain_kv(self.wait_for_kv_transfers),
+                min(self._caps["kv_transfer"], self._drain_remaining()),
+            )
+        elif self.prefill and fallback != "skip":
             allowance = min(self._caps["kv_transfer"], self._drain_remaining())
             started = time.monotonic()
             self._observe_stage("kv_transfer", "started", 0.0)
