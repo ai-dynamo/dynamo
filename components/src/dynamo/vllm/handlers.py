@@ -2534,13 +2534,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "lora_name": str,
             "source": {
                 "uri": str  # e.g., "s3://bucket/path" or "file:///path"
-            }
+            },
+            "load_inplace": bool  # optional
         }
 
         Concurrent calls for the same LoRA are serialized. Re-loading an already
         loaded LoRA is idempotent by default. Set
         ``DYN_LORA_HOTSWAP_ENABLED=true`` to replace an already loaded LoRA with
-        a new URI.
+        a new URI. With ``load_inplace``, the swap reloads the weights under
+        in-flight requests instead of waiting for them to drain, and keeps the
+        prefix cache (callers isolate it, e.g. with ``cache_salt``).
         """
         try:
             try:
@@ -2563,6 +2566,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
                     is_hot_swap = old_info is not None and hot_swap_enabled
                     old_engine_loaded = lora_name in self._engine_loaded_loras
+                    in_place = (
+                        is_hot_swap
+                        and old_engine_loaded
+                        and request.get("load_inplace") is True
+                    )
 
                     if old_info is not None and not hot_swap_enabled:
                         logger.info(
@@ -2621,7 +2629,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Generate deterministic ID from lora_name before using it
                     lora_id = lora_name_to_id(lora_name)
 
-                    if is_hot_swap and old_info is not None and old_engine_loaded:
+                    if (
+                        is_hot_swap
+                        and old_info is not None
+                        and old_engine_loaded
+                        and not in_place
+                    ):
                         try:
                             async with self._pause_lock:
                                 if getattr(
@@ -2669,6 +2682,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                         lora_name=lora_name,
                                         lora_int_id=lora_id,
                                         lora_path=lora_path,
+                                        load_inplace=in_place,
                                     )
                                 )
                             self._engine_loaded_loras.add(lora_name)
@@ -2677,6 +2691,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 is_hot_swap
                                 and old_info is not None
                                 and old_engine_loaded
+                                and not in_place
                             ):
                                 try:
                                     async with self._pause_lock:
@@ -2715,7 +2730,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         f"LoRA adapter: {lora_name} with ID {lora_id}"
                     )
 
-                    if is_hot_swap:
+                    if is_hot_swap and not in_place:
                         try:
                             async with self._pause_lock:
                                 await self.engine_client.reset_prefix_cache()

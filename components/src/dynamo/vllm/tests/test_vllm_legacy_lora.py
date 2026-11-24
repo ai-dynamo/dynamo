@@ -222,6 +222,48 @@ async def test_hot_swap_rejects_paused_adapter_with_active_request(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_load_inplace_hot_swap_reloads_under_active_requests(monkeypatch):
+    handler = _make_prefill_handler()
+    handler.config.disaggregation_mode = DisaggregationMode.AGGREGATED
+    handler._lora_state.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/old")}
+    handler._engine_loaded_loras = {"adapterA"}
+    handler._lora_state.begin_request("adapterA")
+    manager = SimpleNamespace(
+        download_lora=AsyncMock(
+            return_value={"status": "success", "local_path": "/cache/new"}
+        )
+    )
+    monkeypatch.setenv("DYN_LORA_HOTSWAP_ENABLED", "true")
+    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+
+    async def load():
+        return [
+            result
+            async for result in handler.load_lora(
+                {
+                    "lora_name": "adapterA",
+                    "source": {"uri": "file:///adapter"},
+                    "load_inplace": True,
+                }
+            )
+        ]
+
+    results = await asyncio.wait_for(load(), timeout=5)
+
+    assert results[-1]["status"] == "success"
+    assert results[-1]["hot_swap"] is True
+    (lora_request,), _ = handler.engine_client.add_lora.await_args
+    assert lora_request.load_inplace is True
+    assert lora_request.lora_int_id == 123
+    assert lora_request.lora_path == "/cache/new"
+    assert handler._lora_state.loaded_loras["adapterA"].path == "/cache/new"
+    handler.engine_client.remove_lora.assert_not_awaited()
+    handler.engine_client.reset_prefix_cache.assert_not_awaited()
+    handler._lora_state.end_request("adapterA")
+
+
+@pytest.mark.asyncio
 async def test_unload_rejects_paused_adapter_with_active_request(monkeypatch):
     handler = _make_prefill_handler()
     handler._paused = True
