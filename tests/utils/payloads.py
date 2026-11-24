@@ -1070,6 +1070,9 @@ class StreamingChatPayload(BasePayload):
     expected_finish_reason: str | None = None
     expected_completion_tokens: int | None = None
     min_token_chunks: int = 0
+    # Set by response_handler for subclasses that check reasoning deltas.
+    streamed_reasoning: str = field(default="", init=False)
+    reasoning_after_answer: bool = field(default=False, init=False)
 
     def process_response(self, response: Any) -> str:
         try:
@@ -1080,6 +1083,9 @@ class StreamingChatPayload(BasePayload):
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
         content_parts = []
+        reasoning_parts = []
+        answer_started = False
+        self.reasoning_after_answer = False
         output_logprobs = []
         completion_ids = []
         terminal_nvext = {}
@@ -1113,7 +1119,13 @@ class StreamingChatPayload(BasePayload):
                 assert finish_reason is None, "Received choices after terminal chunk"
                 assert len(choices) == 1 and choices[0]["index"] == 0, chunk
                 choice = choices[0]
-                content_parts.append(choice["delta"].get("content") or "")
+                delta_content = choice["delta"].get("content") or ""
+                delta_reasoning = choice["delta"].get("reasoning_content") or ""
+                if delta_reasoning:
+                    reasoning_parts.append(delta_reasoning)
+                    self.reasoning_after_answer |= answer_started
+                answer_started |= bool(delta_content.strip())
+                content_parts.append(delta_content)
                 logprobs = choice.get("logprobs") or {}
                 chunk_logprobs = logprobs.get("content") or []
                 output_logprobs.extend(chunk_logprobs)
@@ -1135,6 +1147,7 @@ class StreamingChatPayload(BasePayload):
                 assert usage is None, "Duplicate terminal usage"
                 usage = chunk["usage"]
 
+        self.streamed_reasoning = "".join(reasoning_parts)
         assert is_done, "Stream ended without [DONE]"
         assert (
             token_chunks >= self.min_token_chunks
@@ -1144,7 +1157,9 @@ class StreamingChatPayload(BasePayload):
             "length",
         }, f"Missing or unexpected finish reason: {finish_reason!r}"
         if self.expected_finish_reason is not None:
-            assert finish_reason == self.expected_finish_reason
+            assert (
+                finish_reason == self.expected_finish_reason
+            ), f"finish_reason {finish_reason!r}, expected {self.expected_finish_reason!r}"
         content = "".join(content_parts)
         assert content.strip(), "Stream returned no content"
         if self.body.get("stream_options", {}).get("include_usage"):
@@ -1426,43 +1441,22 @@ class ReasoningChatPayload(ChatPayload):
 
 
 @dataclass
-class StreamingReasoningChatPayload(BasePayload):
+class StreamingReasoningChatPayload(StreamingChatPayload):
     """Streaming ReasoningChatPayload: reasoning deltas must all precede the answer."""
 
-    endpoint: str = "/v1/chat/completions"
-    http_stream: bool = True
+    expected_finish_reason: str | None = "stop"
 
     def response_handler(self, response: Any) -> str:
-        response.raise_for_status()
-        text = response.content.decode("utf-8")
-        events = [
-            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
-        ]
-        assert events[-1:] == ["[DONE]"], "Stream did not end with [DONE]"
-        chunks = parse_sse_json_chunks(text)
-        assert not any("error" in chunk for chunk in chunks), chunks
-        choices = [choice for chunk in chunks for choice in chunk["choices"]]
-        assert all(choice["index"] == 0 for choice in choices), choices
-        reasoning_parts: List[str] = []
-        content_parts: List[str] = []
-        for choice in choices:
-            delta = choice.get("delta") or {}
-            if delta.get("reasoning_content"):
-                assert not "".join(content_parts).strip(), (
-                    "reasoning_content arrived after the answer started: "
-                    f"{''.join(content_parts)!r}"
-                )
-                reasoning_parts.append(delta["reasoning_content"])
-            content_parts.append(delta.get("content") or "")
-        finish_reasons = [choice.get("finish_reason") for choice in choices]
-        content = "".join(content_parts)
-        reasoning = "".join(reasoning_parts)
-        assert finish_reasons[-1:] == ["stop"], (
-            f"Incomplete answer: finish_reason {finish_reasons[-1:]}; "
-            f"reasoning ends {reasoning[-500:]!r}; content {content[-200:]!r}"
-        )
-        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
-        _validate_reasoning_split(reasoning, content)
+        try:
+            content = super().response_handler(response)
+        except AssertionError as e:
+            raise AssertionError(
+                f"{e}; reasoning ends {self.streamed_reasoning[-500:]!r}"
+            ) from e
+        assert (
+            not self.reasoning_after_answer
+        ), f"reasoning_content arrived after the answer started: {content!r}"
+        _validate_reasoning_split(self.streamed_reasoning, content)
         return content
 
 
@@ -1484,6 +1478,12 @@ class GuidedDecodingChatPayload(ChatPayload):
         self.expected_json = expected_json
         self.expected_finish_reason = expected_finish_reason
         self.needs_token_ids = needs_token_ids
+
+    def response_handler(self, response: Any) -> str:
+        # The grammar governs the final answer only: never fall back to
+        # reasoning_content the way ChatPayload does.
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"].get("content") or ""
 
     def validate(self, response, content: str) -> None:
         parsed = _validate_structured_content(self.body, content)

@@ -1028,12 +1028,14 @@ def structured_output_payloads() -> list[BasePayload]:
         expected_response=[],
         expected_log=[],
         expected_finish_reason="stop",
+        max_attempts=3,
     )
     streamed = StreamingStructuredOutputPayload(
         body={**body, "stream": True},
         expected_response=[],
         expected_log=[],
         expected_finish_reason="stop",
+        max_attempts=3,
     )
     invalid = HttpErrorPayload(
         body={
@@ -1069,18 +1071,28 @@ def reasoning_payloads() -> list[BasePayload]:
         "top_p": 0.95,
         "chat_template_kwargs": {"enable_thinking": True},
     }
+    # "source" is required but not in the prompt, so only an enforced grammar
+    # produces it: a model that merely follows the prompt fails the schema.
     answer_schema = {
         "type": "object",
-        "properties": {"capital": {"type": "string"}},
-        "required": ["capital"],
+        "properties": {
+            "capital": {"type": "string"},
+            "source": {"type": "string", "enum": ["dynamo-sidecar-e2e"]},
+        },
+        "required": ["capital", "source"],
         "additionalProperties": False,
     }
     # No expected answer: these check how Dynamo splits the reply, not the model's
-    # knowledge.
+    # knowledge. Sampling varies, so retry as tests/README.md asks for model output.
     return [
-        ReasoningChatPayload(body=body, expected_response=[], expected_log=[]),
+        ReasoningChatPayload(
+            body=body, expected_response=[], expected_log=[], max_attempts=3
+        ),
         StreamingReasoningChatPayload(
-            body={**body, "stream": True}, expected_response=[], expected_log=[]
+            body={**body, "stream": True},
+            expected_response=[],
+            expected_log=[],
+            max_attempts=3,
         ),
         ReasoningChatPayload(
             body={
@@ -1097,6 +1109,7 @@ def reasoning_payloads() -> list[BasePayload]:
             },
             expected_response=[],
             expected_log=[],
+            max_attempts=3,
         ),
     ]
 
