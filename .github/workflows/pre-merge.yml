@@ -514,9 +514,16 @@ jobs:
       run: |
         cargo test --locked --features ais-forward-pass -- -Z unstable-options --format json --report-time --show-output | tee "$GITHUB_WORKSPACE/rust-test-results/ais-forward-pass.jsonl"
 
+    - name: Install cargo2junit
+      id: cargo2junit
+      if: ${{ !cancelled() && hashFiles('rust-test-results/*.jsonl') != '' }}
+      uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389  # v3.0.8
+      with:
+        tool: cargo2junit@0.1.15
+        locked: true
     - name: Convert completed Rust JSON reports
       id: rust_report
-      if: always()
+      if: ${{ !cancelled() && steps.cargo2junit.outcome == 'success' }}
       shell: bash
       env:
         REPORT_WORKSPACE: ${{ matrix.dir }}
@@ -524,15 +531,12 @@ jobs:
       run: |
         shopt -s nullglob
         reports=(rust-test-results/*.jsonl)
-        if (( ${#reports[@]} )); then
-          cargo install cargo2junit --version '=0.1.15' --locked --root "$RUNNER_TEMP/cargo2junit"
-        fi
         for report in "${reports[@]}"; do
           xml="${report%.jsonl}.xml"
           rm -f "$xml"
           # cargo2junit returns nonzero for failed tests, even with valid XML.
           TEST_SUITE_NAME_PREFIX="$REPORT_WORKSPACE/$(basename "$report" .jsonl)" \
-            "$RUNNER_TEMP/cargo2junit/bin/cargo2junit" < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
+            cargo2junit < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
           if python3 -c 'import sys, xml.etree.ElementTree as ET; sys.exit(not ET.parse(sys.argv[1]).findall("testsuite/testcase"))' "$xml.tmp"; then
             mv "$xml.tmp" "$xml"
           else
@@ -645,9 +649,16 @@ jobs:
       run: |
         cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx:: -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-unit.jsonl"
         cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-payload.jsonl"
+    - name: Install cargo2junit
+      id: cargo2junit
+      if: ${{ !cancelled() && hashFiles('rust-test-results/*.jsonl') != '' }}
+      uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389  # v3.0.8
+      with:
+        tool: cargo2junit@0.1.15
+        locked: true
     - name: Convert completed Rust JSON reports
       id: rust_report
-      if: always()
+      if: ${{ !cancelled() && steps.cargo2junit.outcome == 'success' }}
       shell: bash
       env:
         REPORT_WORKSPACE: root
@@ -655,15 +666,12 @@ jobs:
       run: |
         shopt -s nullglob
         reports=(rust-test-results/*.jsonl)
-        if (( ${#reports[@]} )); then
-          cargo install cargo2junit --version '=0.1.15' --locked --root "$RUNNER_TEMP/cargo2junit"
-        fi
         for report in "${reports[@]}"; do
           xml="${report%.jsonl}.xml"
           rm -f "$xml"
           # cargo2junit returns nonzero for failed tests, even with valid XML.
           TEST_SUITE_NAME_PREFIX="$REPORT_WORKSPACE/$(basename "$report" .jsonl)" \
-            "$RUNNER_TEMP/cargo2junit/bin/cargo2junit" < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
+            cargo2junit < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
           if python3 -c 'import sys, xml.etree.ElementTree as ET; sys.exit(not ET.parse(sys.argv[1]).findall("testsuite/testcase"))' "$xml.tmp"; then
             mv "$xml.tmp" "$xml"
           else
