@@ -81,10 +81,25 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const unrelatedInitContainerName = "setup"
 	const customSidecarImage = "runtime:custom"
 	const trtllmBackendFramework = "trtllm"
+	const roleTemplateSecret = "role-template-secret-canary"
 
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
+
+	t.Log("Prepare role mutations with a private value in complete Pod templates")
+	roleMutationOld := betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		worker := betaWorkerComponent(dgd)
+		setBetaExplicitMultinodeRoleTemplates(worker, 2)
+		for i := range worker.Roles {
+			main := &worker.Roles[i].PodTemplate.Spec.Containers[0]
+			main.Env = append(main.Env, corev1.EnvVar{Name: "API_TOKEN", Value: roleTemplateSecret})
+		}
+	})
+	roleRename := roleMutationOld.DeepCopy()
+	betaWorkerComponent(roleRename).Roles[1].Name = "other"
+	roleRemoval := roleMutationOld.DeepCopy()
+	betaWorkerComponent(roleRemoval).Roles = betaWorkerComponent(roleRemoval).Roles[:1]
 
 	tests := []dgdAdmissionTestCase{
 		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -1995,6 +2010,27 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				`spec.components[1].roles: Required value: must contain the "leader" role`,
 				`spec.components[1].roles: Required value: must contain the "worker" role`,
 			},
+		},
+		{
+			name:          "role rename errors omit private Pod template values",
+			oldDeployment: roleMutationOld,
+			deployment:    roleRename,
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[1].name: Unsupported value: "other": supported values: "leader", "worker"`,
+				`spec.components[1].roles: Required value: must contain the "worker" role`,
+				`spec.components[1].roles: Forbidden: role names are immutable after creation`,
+			},
+			notWantErr: roleTemplateSecret,
+		},
+		{
+			name:          "role removal errors omit private Pod template values",
+			oldDeployment: roleMutationOld,
+			deployment:    roleRemoval,
+			wantWebhookErrs: []string{
+				`spec.components[1].roles: Required value: must contain the "worker" role`,
+				`spec.components[1].roles: Forbidden: role names are immutable after creation`,
+			},
+			notWantErr: roleTemplateSecret,
 		},
 		{
 			name: "v1beta1 explicit multinode roles default omitted replicas",
