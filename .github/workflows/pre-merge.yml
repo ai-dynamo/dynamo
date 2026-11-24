@@ -461,13 +461,7 @@ jobs:
       run: cargo test --locked --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
-      shell: bash
-      env:
-        # Enable libtest JSON output on the pinned stable compiler.
-        RUSTC_BOOTSTRAP: '1'
-      run: |
-        cargo doc --no-deps
-        cargo test --locked --doc -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/doctests.jsonl"
+      run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # Benchmarks use custom harnesses that reject libtest JSON flags.
