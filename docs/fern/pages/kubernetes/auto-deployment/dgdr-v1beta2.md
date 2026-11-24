@@ -21,7 +21,7 @@ independent DGD.
 > Candidate-to-DGD creation.
 
 To run a recommendation outside the operator and export deployment files directly, see
-[Generate a DGD with AISimulate](aisimulate-dgd.mdx).
+[Generate a DGD with AISim](aisimulate-dgd.mdx).
 
 ## Prerequisites
 

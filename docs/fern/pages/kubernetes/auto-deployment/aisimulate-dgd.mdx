@@ -1,16 +1,16 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Generate a DGD with AISimulate
+title: Generate a DGD with AISim
 subtitle: Run an offline recommendation and export the selected configuration as a manifest or Kustomize bundle
 ---
 
-Use AISimulate's `recommend` command with NVIDIA Dynamo's `dgd` output adapter to generate a
+Use AISim's `recommend` command with NVIDIA Dynamo's `dgd` output adapter to generate a
 `DynamoGraphDeployment` (DGD) before deploying it to Kubernetes. The search runs offline; it does
 not create cluster resources. You inspect the generated manifest and apply it yourself.
 
 <Warning>
-**Experimental.** The AISimulate CLI and output-adapter contracts may change without a standard
+**Experimental.** The AISim CLI and output-adapter contracts may change without a standard
 deprecation period. Simulation results are estimates; validate the selected deployment on your
 hardware before relying on its performance.
 </Warning>
@@ -23,8 +23,8 @@ For an operator-managed search with persistent Requests, Runs, and Candidates, u
 - A Linux environment with Python 3.11 through 3.13, Dynamo, and the matching `aisim` package.
   Follow [Dynamo Sweeper Integration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/dynamo-integration.md#install)
   for a planner image or source installation. Install `ai-dynamo` in the same Python environment
-  as the CLI: AISimulate alone does not register the `dgd` adapter.
-- Access to the model's Hugging Face configuration and AISimulate performance data for your model,
+  as the CLI: AISim alone does not register the `dgd` adapter.
+- Access to the model's Hugging Face configuration and AISim performance data for your model,
   hardware, and backend. The search does not require serving GPUs.
 - For deployment, a cluster with the [Dynamo operator](../installation/install-dynamo.md), matching
   DGD CRDs, and GPUs that match the configuration. The example targets H200 GPUs and vLLM.
@@ -246,7 +246,7 @@ applying every candidate creates multiple deployments and consumes their combine
 | Missing `dgd` configuration or an invalid destination | Supply a top-level `dgd` mapping and exactly the destination field required by its format. |
 | A nightly or digest image fails version validation | Set `dgd.runtime_version_override` to the image's Dynamo version in `MAJOR.MINOR.PATCH` form. |
 | No feasible candidate | Inspect `recommendation.json`; revise the workload, constraints, or search space. No DGD is rendered without a selected candidate. |
-| Model or performance-data lookup fails | Verify model access and AISimulate data coverage for the selected model, backend, and hardware. Do not substitute fixed timings for a capacity-planning result. |
+| Model or performance-data lookup fails | Verify model access and AISim data coverage for the selected model, backend, and hardware. Do not substitute fixed timings for a capacity-planning result. |
 
 See [DGD Output Adapter Configuration](../../reference/components/aisimulate-dgd-output.md) for the
 full output contract, validation rules, and current limitations.

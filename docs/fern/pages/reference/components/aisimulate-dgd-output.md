@@ -1,14 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: AISimulate DGD Output Adapter Configuration
+title: AISim DGD Output Adapter Configuration
 subtitle: Fields, selection rules, and artifacts for recommend --output dgd
 ---
 
 NVIDIA Dynamo registers `dgd` in the `aisim.output_adapters` entry-point group. Use it with
 `aisimulate recommend --output dgd` to render selected recommendations as
 `DynamoGraphDeployment` (DGD) resources. For a complete workflow, see
-[Generate a DGD with AISimulate](../../kubernetes/auto-deployment/aisimulate-dgd.mdx).
+[Generate a DGD with AISim](../../kubernetes/auto-deployment/aisimulate-dgd.mdx).
 
 > [!WARNING]
 > **Experimental.** The CLI and output-adapter contracts may change without a standard deprecation
@@ -16,14 +16,14 @@ NVIDIA Dynamo registers `dgd` in the `aisim.output_adapters` entry-point group. 
 
 ## Configuration Fields
 
-The adapter consumes the top-level `dgd` mapping after AISimulate applies `--set` overrides.
+The adapter consumes the top-level `dgd` mapping after AISim applies `--set` overrides.
 Requesting `--output dgd` requires that mapping. Unknown keys are rejected.
 
 | Field | Type and default | Contract |
 |---|---|---|
 | `name` | Required nonempty string | Resource name. No path separators. Only `{index}` may be templated; required for Pareto output and rejected for scalar output. |
 | `namespace` | Optional string, default `null` | Sets `metadata.namespace`. Omitted, `null`, or empty removes the namespace from the generated manifest. |
-| `generator` | `aic` (default) or `direct` | `aic` uses AISimulate's generator bridge. `direct` uses Dynamo's direct renderer. Both apply Dynamo runtime finalization. |
+| `generator` | `aic` (default) or `direct` | `aic` uses AISim's generator bridge. `direct` uses Dynamo's direct renderer. Both apply Dynamo runtime finalization. |
 | `format` | `manifest` (default) or `kustomize` | Selects a YAML file or an independent Kustomize bundle per selected candidate. |
 | `output_file` | Optional nonempty string | Required for `manifest`, forbidden for `kustomize`. A filename ending in `.yaml` or `.yml`, without path separators; only `{index}` may be templated. |
 | `output_dir` | Optional nonempty string | Required for `kustomize`, forbidden for `manifest`. A directory name without path separators; `.` and `..` are rejected. Only `{index}` may be templated. |
@@ -86,7 +86,7 @@ select a different backend version for simulation.
 
 ## Selection and Artifacts
 
-AISimulate owns simulation, search, ranking, and final candidate selection. Dynamo owns the
+AISim owns simulation, search, ranking, and final candidate selection. Dynamo owns the
 conversion of those selected candidates into DGDs. `--stack engine|dynamo` selects simulation;
 `--output dgd` independently enables generation. Neither option substitutes for the other.
 
@@ -108,7 +108,7 @@ The adapter also writes `index.json` in the CLI output directory:
 ```
 
 The index uses `output: dgd` for manifest output and `output: kustomize` for bundles. Artifact paths
-are relative to the CLI output directory. AISimulate's `recommendation.json`,
+are relative to the CLI output directory. AISim's `recommendation.json`,
 `recommendation.csv`, and selected prediction configurations under `recommendations/` remain
 separate from this index.
 
