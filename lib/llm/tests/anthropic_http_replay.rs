@@ -475,6 +475,7 @@ async fn completed_tool_block_precedes_gated_tail(#[case] per_tool_completion: b
         let split_at = if per_tool_completion {
             script[1].data.as_mut().unwrap().tool_call_completion.push(
                 dynamo_llm::protocols::openai::chat_completions::ToolCallCompletion {
+                    native_completion_authoritative: Some(false),
                     choice_index: 0,
                     tool_index: 0,
                     complete: true,

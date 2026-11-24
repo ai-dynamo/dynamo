@@ -27,6 +27,7 @@ from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGrou
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.parser_plugins import load_plugins_from_args
 from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
     is_snapshot_enabled,
@@ -596,6 +597,7 @@ async def parse_args(args: list[str]) -> Config:
     Raises:
         SystemExit: If arguments are invalid or incompatible.
     """
+    load_plugins_from_args(args)
     runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_sglang_argspec = DynamoSGLangArgGroup()
 

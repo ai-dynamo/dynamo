@@ -197,8 +197,9 @@ struct DeltaChoice {
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     parser_call_completion: HashMap<u32, bool>,
-    // Mistral keeps parser-confirmed calls as streamed, including malformed JSON.
+    // Native grammar authority preserves parser-confirmed argument text.
     parser_confirmed_call_ids: HashSet<String>,
+    parser_authoritative_completion: HashSet<u32>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
     // `try_tool_call_parse_aggregate_finalize` running against `text` for producers
@@ -486,6 +487,13 @@ impl DeltaAggregator {
         parsing_options: ParsingOptions,
         require_explicit_tool_terminal: bool,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
+        // Older workers omitted per-call authority; retain their configured native policy.
+        let legacy_native_authority = super::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        )
+        .and_then(super::unified_parser::registration)
+        .is_some_and(|entry| entry.descriptor.native_completion_authoritative);
         let mut aggregator = stream
             .map(Annotated::into_data)
             .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -591,6 +599,7 @@ impl DeltaAggregator {
                                     tool_call_chunks: BTreeMap::new(),
                                     parser_call_completion: HashMap::new(),
                                     parser_confirmed_call_ids: HashSet::new(),
+                                    parser_authoritative_completion: HashSet::new(),
                                     tool_calls: None,
                                     reasoning_content: None,
                                     refusal: None,
@@ -680,6 +689,9 @@ impl DeltaAggregator {
                     // Apply it independently so the final call is not discarded.
                     for evidence in delta.tool_call_completion {
                         if let Some(choice) = aggregator.choices.get_mut(&evidence.choice_index) {
+                            if evidence.native_completion_authoritative.unwrap_or(legacy_native_authority) {
+                                choice.parser_authoritative_completion.insert(evidence.tool_index);
+                            }
                             choice.parser_call_completion.entry(evidence.tool_index)
                                 .and_modify(|complete| *complete |= evidence.complete)
                                 .or_insert(evidence.complete);
@@ -695,10 +707,6 @@ impl DeltaAggregator {
         // whole stream are dropped here (they're not a valid tool call in the
         // final schema), but chunks missing only `arguments` get defaulted to
         // "" — the old code dropped those entirely.
-        let is_mistral = super::unified_parser::selected_batch_family(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-        ) == Some(super::unified_parser::MISTRAL_UNIFIED_FAMILY);
         for choice in aggregator.choices.values_mut() {
             if choice.tool_call_chunks.is_empty() {
                 continue;
@@ -714,7 +722,9 @@ impl DeltaAggregator {
                         return None;
                     }
                     let call = finalize_merged_tool_chunk(chunk)?;
-                    if is_mistral && complete == Some(true) {
+                    if choice.parser_authoritative_completion.contains(&index)
+                        && complete == Some(true)
+                    {
                         choice.parser_confirmed_call_ids.insert(call.id.clone());
                     }
                     Some(call)
@@ -833,10 +843,13 @@ impl DeltaAggregator {
                             }
                         }
                     }
-                    Err(error) if family == super::unified_parser::BEAM_UNIFIED_FAMILY => {
+                    Err(error)
+                        if super::unified_parser::registration(family)
+                            .is_some_and(|entry| entry.descriptor.errors_are_fatal) =>
+                    {
                         return Err(DynamoError::builder()
                             .class(dynamo_runtime::error::ErrorClass::Internal)
-                            .diagnostic(format!("Invalid Beam tool output: {error}"))
+                            .diagnostic(format!("Invalid {family} tool output: {error}"))
                             .build());
                     }
                     Err(error) => {
@@ -2806,6 +2819,7 @@ mod tests {
             );
             input.data.as_mut().unwrap().tool_call_completion.push(
                 super::super::ToolCallCompletion {
+                    native_completion_authoritative: Some(false),
                     choice_index: index,
                     tool_index: 0,
                     complete: false,
@@ -3024,41 +3038,66 @@ mod tests {
             super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
         );
 
-        let response = DeltaAggregator::apply_with_tool_terminal_policy(
-            adapted,
-            ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
-            true,
-        )
-        .await
-        .expect("aggregation should succeed");
-
-        let choice = &response.inner.choices[0];
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
-        );
-        let calls = choice
-            .message
-            .tool_calls
-            .as_ref()
-            .expect("the streamed calls must not be dropped");
-        let calls: Vec<_> = calls
-            .iter()
-            .map(|call| {
-                (
-                    call.function.name.as_str(),
-                    call.function.arguments.as_str(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            calls,
-            [
-                ("cd", r#"{"workspace"}"#),
-                ("mkdir", r#"{"dir_name": "Projects"}"#)
-            ]
-        );
-        assert!(choice.message.content.is_none());
+        let adapted: Vec<_> = adapted.collect().await;
+        for authority in [Some(true), None, Some(false)] {
+            let mut wire = Vec::new();
+            for row in &adapted {
+                let mut data = row.data.clone().unwrap();
+                let mut serialized = serde_json::to_value(&data).unwrap();
+                if let Some(evidence) = serialized
+                    .get_mut("tool_call_completion")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for entry in evidence {
+                        if let Some(authority) = authority {
+                            entry["native_completion_authoritative"] = authority.into();
+                        } else {
+                            entry
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("native_completion_authoritative");
+                        }
+                    }
+                }
+                data = serde_json::from_value(serialized).unwrap();
+                wire.push(Annotated::from_data(data));
+            }
+            let response = DeltaAggregator::apply_with_tool_terminal_policy(
+                stream::iter(wire),
+                ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
+                true,
+            )
+            .await
+            .expect("aggregation should succeed");
+            let choice = &response.inner.choices[0];
+            assert_eq!(
+                choice.finish_reason,
+                Some(dynamo_protocols::types::FinishReason::ToolCalls)
+            );
+            let calls: Vec<_> = choice
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|call| {
+                    (
+                        call.function.name.as_str(),
+                        call.function.arguments.as_str(),
+                    )
+                })
+                .collect();
+            let expected = if authority == Some(false) {
+                vec![("mkdir", r#"{"dir_name": "Projects"}"#)]
+            } else {
+                vec![
+                    ("cd", r#"{"workspace"}"#),
+                    ("mkdir", r#"{"dir_name": "Projects"}"#),
+                ]
+            };
+            assert_eq!(calls, expected, "authority={authority:?}");
+            assert!(choice.message.content.is_none());
+        }
     }
 
     #[tokio::test]
@@ -3418,11 +3457,13 @@ mod tests {
         );
         second.data.as_mut().unwrap().tool_call_completion = vec![
             super::super::ToolCallCompletion {
+                native_completion_authoritative: Some(false),
                 choice_index: 0,
                 tool_index: 0,
                 complete: true,
             },
             super::super::ToolCallCompletion {
+                native_completion_authoritative: Some(false),
                 choice_index: 0,
                 tool_index: 1,
                 complete: true,
@@ -4140,6 +4181,7 @@ mod tests {
             parser_call_completion: HashMap::new(),
             model_eos: false,
             parser_confirmed_call_ids: HashSet::new(),
+            parser_authoritative_completion: HashSet::new(),
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
             refusal: None,
@@ -4385,6 +4427,7 @@ mod tests {
                 if let Some(complete) = complete {
                     input.data.as_mut().unwrap().tool_call_completion.push(
                         super::super::ToolCallCompletion {
+                            native_completion_authoritative: Some(false),
                             choice_index: 0,
                             tool_index: 0,
                             complete,

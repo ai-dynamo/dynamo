@@ -130,16 +130,16 @@ fn validate_parser_version_for_mode(
     };
 
     if version == ParserVersion::Auto {
-        // Beam needs both selectors for its rendering, stop-token and reasoning handling.
-        let beam = crate::preprocessor::structural_tag::is_beam_parser;
-        if beam(tool_call_parser) != beam(reasoning_parser) {
-            anyhow::bail!(
-                "{}=auto routes Beam only when both --dyn-tool-call-parser and --dyn-reasoning-parser are \"beam\" (got {tool_call_parser} / {reasoning_parser})",
-                env_llm::DYN_PARSER_VERSION,
-                tool_call_parser = selector_value(tool_call_parser),
-                reasoning_parser = selector_value(reasoning_parser),
-            );
-        }
+        super::unified_parser::validate_auto_pair(tool_call_parser, reasoning_parser).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "{}=auto: {error} (got {} / {})",
+                    env_llm::DYN_PARSER_VERSION,
+                    selector_value(tool_call_parser),
+                    selector_value(reasoning_parser)
+                )
+            },
+        )?;
     }
     match version {
         ParserVersion::Auto
@@ -209,6 +209,44 @@ pub(crate) fn supports_family(family: &str) -> bool {
 
 pub fn unified_family_names() -> &'static [&'static str] {
     &super::unified_parser::FAMILY_NAMES
+}
+
+/// Load explicitly configured native parser libraries before the first catalog lookup.
+pub fn load_parser_plugins(paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    super::unified_parser::load_plugins(paths)
+}
+
+/// Capabilities of the linked parser crates; no tokenizer, backend, or parser state is needed.
+pub fn parser_capabilities() -> serde_json::Value {
+    let unified: Vec<_> = unified_family_names()
+        .iter()
+        .filter_map(|name| {
+            let entry = super::unified_parser::registration(name)?;
+            (entry.descriptor.family == *name).then(|| {
+                let mut descriptor = serde_json::json!(&entry.descriptor);
+                if let Some(identity) = entry.plugin_identity() {
+                    descriptor["plugin"] = serde_json::json!({
+                        "identity": identity,
+                        "inspect_prompt": entry.has_plugin_prompt(),
+                    });
+                }
+                descriptor
+            })
+        })
+        .collect();
+    let mut tool_selectors = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+    let mut reasoning_selectors = dynamo_parsers::reasoning::get_available_reasoning_parsers();
+    tool_selectors.sort_unstable();
+    reasoning_selectors.sort_unstable();
+    serde_json::json!({
+        "schema_version": 1,
+        "quote_aware_parsing": dynamo_parsers_v2::quote_aware_parsing(),
+        "unified": unified,
+        "legacy": {"tool_selectors": tool_selectors, "reasoning_selectors": reasoning_selectors,
+            "tools": dynamo_parsers::tool_calling::parsers::tool_parser_descriptors(),
+            "reasoning": dynamo_parsers::reasoning::reasoning_parser_descriptors(),
+        },
+    })
 }
 
 /// Resolve the configured family through the shared generation and pair policy.

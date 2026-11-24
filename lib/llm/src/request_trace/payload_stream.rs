@@ -866,6 +866,7 @@ mod tests {
             let mut chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
             chunks[0].data.as_mut().unwrap().tool_call_completion.push(
                 crate::protocols::openai::chat_completions::ToolCallCompletion {
+                    native_completion_authoritative: Some(false),
                     choice_index: 0,
                     tool_index: 0,
                     complete: false,

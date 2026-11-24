@@ -4939,6 +4939,7 @@ mod tests {
 
         annotated.data.as_mut().unwrap().tool_call_completion = vec![
             crate::protocols::openai::chat_completions::ToolCallCompletion {
+                native_completion_authoritative: Some(false),
                 choice_index: 0,
                 tool_index: 0,
                 complete: true,

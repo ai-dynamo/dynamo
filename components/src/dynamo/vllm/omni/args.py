@@ -29,6 +29,7 @@ from dynamo.common.configuration.utils import (
     parse_bool,
 )
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.parser_plugins import load_plugins_from_args
 
 logger = logging.getLogger(__name__)
 
@@ -644,6 +645,7 @@ def _add_stage_router_engine_args(parser: argparse.ArgumentParser) -> None:
 
 def parse_omni_args() -> OmniConfig:
     """Parse command-line arguments for the vLLM-Omni backend."""
+    load_plugins_from_args()
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     omni_argspec = OmniArgGroup()
 

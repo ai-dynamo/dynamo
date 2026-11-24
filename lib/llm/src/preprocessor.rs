@@ -28,6 +28,9 @@ pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
+use dynamo_parsers_v2::unified::prefill::{
+    beam_prompt_open_channel, gpt_oss_assistant_prefill, gpt_oss_prefill_has_reasoning,
+};
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
@@ -259,42 +262,6 @@ pub struct PromptReasoningPrefill {
     beam_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
 }
 
-// Harmony suppresses generated body text if initialization restores a non-assistant role.
-fn gpt_oss_assistant_prefill(prompt: &str, header_search_end: Option<usize>) -> Option<&str> {
-    const START: &str = "<|start|>";
-    let start = prompt[..header_search_end.unwrap_or(prompt.len())].rfind(START)?;
-    let prefix = &prompt[start..];
-    let role = prefix[START.len()..]
-        .split(|c: char| c.is_whitespace() || c == '<')
-        .next()?;
-    (role == "assistant").then_some(prefix)
-}
-
-fn gpt_oss_prefill_has_reasoning(message: &str) -> bool {
-    message
-        .split_once("<|message|>")
-        .is_some_and(|(header, _)| {
-            header
-                .split_once("<|channel|>")
-                .is_some_and(|(_, channel)| channel.split_whitespace().next() == Some("analysis"))
-        })
-}
-
-/// Plain response/reasoning text does not affect parser continuation state.
-fn compact_gpt_oss_prefill(prefix: &str) -> &str {
-    const MESSAGE: &str = "<|message|>";
-    let Some((header, body)) = prefix.split_once(MESSAGE) else {
-        return prefix;
-    };
-    if header.contains("to=") || body.contains("<|") {
-        // Recipient-owned bodies may contain a partially consumed JSON argument.
-        // TODO: Validate argument prefixes incrementally so released bytes no longer
-        // need to remain in the shared per-request continuation body.
-        return prefix;
-    }
-    &prefix[..header.len() + MESSAGE.len()]
-}
-
 impl std::fmt::Debug for PromptReasoningPrefill {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -328,27 +295,6 @@ impl From<bool> for PromptReasoningPrefill {
             response: false,
             beam_channel: None,
         }
-    }
-}
-
-/// Which Beam channel the rendered prompt leaves open after its last `<|start|>assistant`
-/// header: `None` for the bare header slot (the model opens its own channel), `Reasoning`
-/// for an open analysis message, `Response` for an open final message (assistant prefill).
-fn beam_prompt_open_channel(prompt: &str) -> Option<dynamo_parsers_v2::UnifiedParserStartingState> {
-    use dynamo_parsers_v2::UnifiedParserStartingState as State;
-    let tail = &prompt[prompt.rfind("<|start|>assistant")? + "<|start|>assistant".len()..];
-    let open = |opener: &str, closers: &[&str]| {
-        tail.rfind(opener).is_some_and(|at| {
-            let rest = &tail[at + opener.len()..];
-            !closers.iter().any(|closer| rest.contains(closer))
-        })
-    };
-    if open("<|channel|>final<|message|>", &["<|return|>", "<|end|>"]) {
-        Some(State::Response)
-    } else if open("<|channel|>analysis<|message|>", &["<|end|>"]) {
-        Some(State::Reasoning)
-    } else {
-        Some(State::None)
     }
 }
 
@@ -2111,6 +2057,7 @@ pub struct OpenAIPreprocessor {
     tool_call_parser: Option<String>,
     // Resolved at model setup so requests do not construct parsers to inspect their grammar.
     parser_requires_special_tokens: bool,
+    unified_registration: Option<dynamo_parsers_v2::UnifiedParserRegistration>,
     /// The model is served by the Beam unified family (`beam` tool-call and reasoning
     /// parsers). Gates Beam-only request semantics: `preserve_thinking`, the
     /// `builtin_tools` rendering view and stop-token visibility for the parser.
@@ -2626,15 +2573,14 @@ impl OpenAIPreprocessor {
 
     /// Families verified to have no supported non-thinking generation mode.
     fn reasoning_is_mandatory(family: Option<&str>) -> bool {
-        matches!(family, Some("beam"))
+        family
+            .and_then(crate::protocols::openai::chat_completions::unified_parser::registration)
+            .is_some_and(|entry| entry.descriptor.reasoning_mandatory)
     }
 
     /// Validate the client's effective reasoning toggle against the model's policy.
     fn validate_reasoning_request(&self, request: &NvCreateChatCompletionRequest) -> Result<()> {
-        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
+        let family = self.unified_family();
         if Self::reasoning_is_mandatory(family)
             && Self::normalize_thinking_aliases(request.chat_template_args.as_ref(), family)
                 == Some(false)
@@ -2771,7 +2717,7 @@ impl OpenAIPreprocessor {
             Self::normalize_thinking_aliases(chat_template_args.as_ref(), reasoning_parser);
 
         if Self::is_minimax_m3_family(reasoning_parser, tool_call_parser) {
-            Self::normalize_minimax_m3_thinking_mode(
+            dynamo_renderer::thinking::normalize_adaptive_thinking(
                 chat_template_args,
                 normalized,
                 thinking_control_from_client,
@@ -2780,7 +2726,10 @@ impl OpenAIPreprocessor {
             return;
         }
 
-        Self::apply_normalized_thinking_aliases(chat_template_args, normalized);
+        dynamo_renderer::thinking::apply_normalized_thinking_aliases(
+            chat_template_args,
+            normalized,
+        );
     }
 
     fn normalize_thinking_aliases(
@@ -2831,94 +2780,45 @@ impl OpenAIPreprocessor {
                 }
                 None
             })
-            .or_else(|| {
-                matches!(reasoning_parser, Some("kimi_k25" | "kimi_k3" | "kimi-k3")).then_some(true)
-            })
+            .or_else(|| Self::thinking_policy(None, reasoning_parser).default_enabled)
     }
 
-    fn normalize_minimax_m3_thinking_mode(
-        chat_template_args: &mut Option<HashMap<String, serde_json::Value>>,
-        normalized: Option<bool>,
-        thinking_control_from_client: bool,
-        constrained_generation: bool,
-    ) {
-        // MiniMax M3 defaults `thinking_mode` to "adaptive", which breaks
-        // constrained JSON/schema and forced-tool generation. If the client
-        // did not set thinking controls, force "disabled" for those requests.
-        let explicit_thinking_mode_is_adaptive = chat_template_args
-            .as_ref()
-            .and_then(|args| args.get("thinking_mode"))
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s.eq_ignore_ascii_case("adaptive"));
-        if !thinking_control_from_client && constrained_generation {
-            let args = chat_template_args.get_or_insert_default();
-            args.insert(
-                "thinking_mode".to_string(),
-                serde_json::Value::String("disabled".to_string()),
-            );
-            args.insert("thinking".to_string(), serde_json::Value::Bool(false));
-            args.insert(
-                "enable_thinking".to_string(),
-                serde_json::Value::Bool(false),
-            );
-            return;
-        }
-
-        Self::apply_normalized_thinking_aliases(chat_template_args, normalized);
-
-        let Some(normalized) = normalized else {
-            return;
-        };
-
-        // Canonicalize for M3 because its template only treats exact
-        // "disabled" as off. Preserve explicit "adaptive" as client intent.
-        if !explicit_thinking_mode_is_adaptive {
-            let args = chat_template_args.get_or_insert_default();
-            args.insert(
-                "thinking_mode".to_string(),
-                serde_json::Value::String(
-                    if normalized { "enabled" } else { "disabled" }.to_string(),
-                ),
-            );
-        }
-    }
-
-    fn apply_normalized_thinking_aliases(
-        chat_template_args: &mut Option<HashMap<String, serde_json::Value>>,
-        normalized: Option<bool>,
-    ) {
-        let Some(normalized) = normalized else {
-            return;
-        };
-        let args = chat_template_args.get_or_insert_default();
-        args.insert("thinking".to_string(), serde_json::Value::Bool(normalized));
-        args.insert(
-            "enable_thinking".to_string(),
-            serde_json::Value::Bool(normalized),
+    fn thinking_policy(
+        tool: Option<&str>,
+        reasoning: Option<&str>,
+    ) -> dynamo_renderer::thinking::ThinkingPolicy {
+        use crate::protocols::openai::chat_completions::unified_parser::registration;
+        use dynamo_renderer::thinking::ThinkingPolicy;
+        let tool_entry = tool.and_then(registration);
+        let reasoning_entry = reasoning.and_then(registration);
+        let effective = ThinkingPolicy::for_selectors(
+            tool_entry
+                .as_ref()
+                .map(|entry| entry.descriptor.family.as_str())
+                .or(tool),
+            reasoning_entry
+                .as_ref()
+                .map(|entry| entry.descriptor.family.as_str())
+                .or(reasoning),
         );
+        let legacy = ThinkingPolicy::for_selectors(tool, reasoning);
+        ThinkingPolicy {
+            adaptive: effective.adaptive || legacy.adaptive,
+            named_tool_disables: effective.named_tool_disables || legacy.named_tool_disables,
+            default_enabled: legacy.default_enabled.or(effective.default_enabled),
+        }
     }
 
-    /// True when the deployment renders MiniMax M3's `thinking_mode` template.
-    /// Either parser is sufficient, and tool-call aliases include `_nom`.
-    fn is_minimax_m3_family(
-        reasoning_parser: Option<&str>,
-        tool_call_parser: Option<&str>,
-    ) -> bool {
-        matches!(reasoning_parser, Some("minimax_m3") | Some("minimax-m3"))
-            || matches!(
-                tool_call_parser,
-                Some("minimax_m3")
-                    | Some("minimax-m3")
-                    | Some("minimax_m3_nom")
-                    | Some("minimax-m3-nom")
-            )
+    /// Whether either selector renders an adaptive thinking template.
+    fn is_minimax_m3_family(reasoning: Option<&str>, tool: Option<&str>) -> bool {
+        Self::thinking_policy(tool, reasoning).adaptive
     }
 
     /// A structured `response_format`, top-level `guided_*`, and a forced tool
     /// choice each constrain output from the first token.
     ///
     /// With no client thinking control, a request this returns true for
-    /// renders thinking disabled (see `normalize_minimax_m3_thinking_mode`),
+    /// renders thinking disabled (see `dynamo_renderer::thinking::normalize_adaptive_thinking`),
     /// even when the grammar itself contains `<mm:think>...</mm:think>`. The
     /// reasoning parser is then skipped, and a generated think block stays
     /// verbatim in `content`. A client that wants that block split into
@@ -2959,8 +2859,7 @@ impl OpenAIPreprocessor {
         request: &mut NvCreateChatCompletionRequest,
         tool_call_parser: Option<&str>,
     ) {
-        let uses_kimi_k3_parser =
-            tool_call_parser.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        let uses_kimi_k3_parser = Self::thinking_policy(tool_call_parser, None).named_tool_disables;
         let is_named = matches!(
             request.inner.tool_choice.as_ref(),
             Some(ChatCompletionToolChoiceOption::Named(_))
@@ -3076,6 +2975,15 @@ impl OpenAIPreprocessor {
         let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer_id_bound);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         if validate_chat_parsers {
+            let local_plugins = unified_parser::plugin_identities(
+                tool_call_parser.as_deref(),
+                mdc.runtime_config.reasoning_parser.as_deref(),
+            );
+            anyhow::ensure!(
+                local_plugins == mdc.runtime_config.parser_plugin_identities,
+                "worker and frontend parser plugin registrations differ for model {}",
+                mdc.display_name
+            );
             crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -3122,7 +3030,9 @@ impl OpenAIPreprocessor {
                 mdc.runtime_config.reasoning_parser.as_deref(),
             )?;
         let mistral_tool_call_grammar = if mdc.model_type.supports_chat()
-            && unified_family == Some(unified_parser::MISTRAL_UNIFIED_FAMILY)
+            && unified_family
+                .and_then(unified_parser::registration)
+                .is_some_and(|entry| entry.descriptor.guidance.mistral_lark)
         {
             match mistral_grammar::MistralToolCallGrammar::for_model(
                 &mdc.runtime_config,
@@ -3145,12 +3055,9 @@ impl OpenAIPreprocessor {
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
         let beam_route = mdc.model_type.supports_chat()
-            && crate::protocols::openai::chat_completions::unified_parser::selected_family(
-                tool_call_parser.as_deref(),
-                mdc.runtime_config.reasoning_parser.as_deref(),
-            ) == Some(
-                crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
-            );
+            && unified_family
+                .and_then(unified_parser::registration)
+                .is_some_and(|entry| entry.descriptor.guidance.whole_turn);
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -3476,6 +3383,7 @@ impl OpenAIPreprocessor {
             kv_cache_block_size,
             tool_call_parser,
             parser_requires_special_tokens,
+            unified_registration: unified_family.and_then(unified_parser::registration),
             beam_route,
             mistral_tool_call_grammar,
             normalize_tool_call_args,
@@ -3548,14 +3456,21 @@ impl OpenAIPreprocessor {
         let prompt = self
             .apply_template(&request)?
             .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
-        if Self::prompt_injected_reasoning_start_for_parsers(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config
-                .reasoning_parser
-                .as_deref()
-                .or(self.tool_call_parser.as_deref()),
-            Some(prompt.as_str()),
-        ) {
+        let prompt_opened_reasoning = if let Some(entry) = self.unified_registration.as_ref()
+            && entry.has_plugin_prompt()
+        {
+            entry.inspect_prompt(Some(prompt.as_str()), None)?.reasoning
+        } else {
+            Self::prompt_injected_reasoning_start_for_parsers(
+                self.tool_call_parser.as_deref(),
+                self.runtime_config
+                    .reasoning_parser
+                    .as_deref()
+                    .or(self.tool_call_parser.as_deref()),
+                Some(prompt.as_str()),
+            )
+        };
+        if prompt_opened_reasoning {
             return Err(SystemOneModelIncompatible(
                 "/v1/systemone requires a chat template that closes or disables reasoning before the answer position"
             ).into());
@@ -3811,10 +3726,7 @@ impl OpenAIPreprocessor {
     }
 
     fn validate_model_request<R: OAIChatLikeRequest>(&self, request: &R) -> Result<()> {
-        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ) == Some("gpt_oss")
+        if self.unified_family() == Some("gpt_oss")
             && request
                 .chat_template_args()
                 .and_then(|args| args.get("reasoning_effort"))
@@ -4238,7 +4150,7 @@ impl OpenAIPreprocessor {
             self.runtime_config.reasoning_parser.as_deref(),
             formatted_prompt.as_ref().map(RenderedPrompt::as_str),
             header_search_end,
-        );
+        )?;
         // Without a generation prompt (`add_generation_prompt: false`, or a
         // continued final message, which ends inside the assistant's text) the
         // tail cannot establish the template's reasoning state: keep the
@@ -5980,25 +5892,21 @@ impl OpenAIPreprocessor {
 
     /// The Unified family that parses this model's output.
     fn unified_family(&self) -> Option<&'static str> {
-        crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        )
+        self.unified_registration.as_ref().and_then(|entry| {
+            crate::protocols::openai::chat_completions::unified_parser::canonical_family(
+                &entry.descriptor.family,
+            )
+        })
     }
 
     fn tool_processing_route(
         &self,
         request: &NvCreateChatCompletionRequest,
-        guided_tool_constraint: &crate::protocols::openai::GuidedToolConstraint,
+        _guided_tool_constraint: &crate::protocols::openai::GuidedToolConstraint,
     ) -> anyhow::Result<ToolProcessingRoute> {
-        use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
+        use crate::protocols::openai::chat_completions::tool_parser_v2;
 
-        let family = unified_parser::selected_request_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-            request.inner.tool_choice.as_ref(),
-            guided_tool_constraint,
-        );
+        let family = self.unified_family();
         // Options, capture, and aggregation reuse selection; only request routing
         // owns the operator-facing decision line.
         tracing::debug!(
@@ -6166,7 +6074,11 @@ impl OpenAIPreprocessor {
                         dynamo_parsers_v2::UnifiedParserStartingState::Response
                     } else {
                         prompt_prefill.unified_starting_state.unwrap_or_else(|| {
-                            unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                            self.unified_registration
+                                .as_ref()
+                                .expect("resolved unified route")
+                                .descriptor
+                                .stream_starting_state(prompt_injected_reasoning)
                         })
                     },
                     prefix: prompt_prefill.prefix.clone(),
@@ -6192,7 +6104,7 @@ impl OpenAIPreprocessor {
                 },
             );
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
-                Box::pin(unified_parser::apply_stream_with_policy(
+                Box::pin(unified_parser::apply_stream_with_registration(
                     stream,
                     tool_definitions,
                     guided_tool_constraint,
@@ -6200,6 +6112,7 @@ impl OpenAIPreprocessor {
                     family,
                     guided_tool_streaming,
                     policy,
+                    self.unified_registration.clone(),
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
@@ -7391,67 +7304,23 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
     ) -> Result<bool> {
         if let Some(family) = unified_family {
-            // The unified grammar owns token preservation, including native tool markers.
-            return dynamo_parsers_v2::create_unified_parser_for_family(family, &[])
-                .with_context(|| {
-                    format!("Failed to resolve special-token requirements for {family}")
-                })
-                .map(|parser| parser.preserve_special_tokens());
+            return crate::protocols::openai::chat_completions::unified_parser::registration(
+                family,
+            )
+            .map(|entry| entry.descriptor.preserve_special_tokens)
+            .ok_or_else(|| anyhow::anyhow!("unknown parser family '{family}'"));
         }
-        // Parsers in this allow-list match against special tokens that the
-        // tokenizer would otherwise strip when `skip_special_tokens=true`
-        // (the OpenAI-API default). Without the tokens preserved through
-        // decode the parsers silently produce empty reasoning_content /
-        // tool_calls.
-        //
-        // - gemma4: `<|think|>` prompt trigger plus parser-visible
-        //   `<|channel>` / `<channel|>` reasoning markers and tool-call markers.
-        // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
-        // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
-        // - kimi_k25: `</think>` (special token id 163607).
-        // - kimi_k3: `<|open|>` / `<|close|>` / `<|sep|>` XTML markers.
-        // - mistral: `[THINK]` / `[/THINK]` reasoning markers.
-        // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
-        //   `<mm:think>` reasoning markers.
-        // - inkling: `<|message_model|>` / `<|content_thinking|>` /
-        //   `<|content_text|>` / `<|content_invoke_tool_json|>` / `<|end_message|>`
-        //   channel markers, consumed by both the tool-call and reasoning parsers.
-        // - muse_glimmer / muse_spark: `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>`
-        //   channel markers, consumed by the unified parser (reasoning + content +
-        //   tool calls); matched on either parser name since the card may set only
-        //   the reasoning name.
-        Ok(matches!(
-            tool_call_parser,
-            Some("gemma4")
-                | Some("gemma-4")
-                | Some("harmony")
-                | Some("kimi_k2")
-                | Some("kimi_k3")
-                | Some("kimi-k3")
-                | Some("minimax_m3")
-                | Some("minimax-m3")
-                | Some("minimax_m3_nom")
-                | Some("minimax-m3-nom")
-                | Some("inkling")
-                | Some("muse_glimmer")
-                | Some("muse")
-                | Some("deepseek_v41")
-        ) || matches!(
-            reasoning_parser,
-            Some("gemma4")
-                | Some("gemma-4")
-                | Some("gpt_oss")
-                | Some("kimi_k25")
-                | Some("kimi_k3")
-                | Some("kimi-k3")
-                | Some("mistral")
-                | Some("minimax_m3")
-                | Some("minimax-m3")
-                | Some("inkling")
-                | Some("muse_glimmer")
-                | Some("muse")
-                | Some("deepseek_v41")
-        ))
+        let tool = tool_call_parser.is_some_and(|selector| {
+            dynamo_parsers::tool_calling::parsers::tool_parser_descriptors()
+                .iter()
+                .any(|entry| entry.selector == selector && entry.preserve_special_tokens)
+        });
+        let reasoning = reasoning_parser.is_some_and(|selector| {
+            dynamo_parsers::reasoning::reasoning_parser_descriptors()
+                .iter()
+                .any(|entry| entry.selector == selector && entry.preserve_special_tokens)
+        });
+        Ok(tool || reasoning)
     }
 
     /// Whether the resolved `skip_special_tokens` will strip the special-token
@@ -7711,6 +7580,7 @@ impl OpenAIPreprocessor {
             formatted_prompt,
             None,
         )
+        .unwrap()
     }
 
     fn prompt_reasoning_prefill_at_boundary(
@@ -7718,53 +7588,37 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         formatted_prompt: Option<&str>,
         header_search_end: Option<usize>,
-    ) -> PromptReasoningPrefill {
-        let family = crate::protocols::openai::chat_completions::unified_parser::configured_family(
-            tool_call_parser,
-            reasoning_parser,
-        );
-        let assistant_prefill = (family == Some("gpt_oss"))
-            .then(|| {
-                formatted_prompt
-                    .and_then(|prompt| gpt_oss_assistant_prefill(prompt, header_search_end))
-            })
-            .flatten();
-        let unified = if family == Some("gpt_oss") {
-            assistant_prefill.is_some_and(gpt_oss_prefill_has_reasoning)
-        } else {
-            Self::prompt_injected_reasoning_start_for_parsers(
+    ) -> anyhow::Result<PromptReasoningPrefill> {
+        let registration =
+            crate::protocols::openai::chat_completions::unified_parser::configured_family(
                 tool_call_parser,
                 reasoning_parser,
-                formatted_prompt,
             )
-        };
+            .and_then(crate::protocols::openai::chat_completions::unified_parser::registration);
+        if let Some(registration) = registration {
+            let resolved = registration.inspect_prompt(formatted_prompt, header_search_end)?;
+            let legacy = if matches!(reasoning_parser, Some("muse" | "muse_glimmer")) {
+                Self::prompt_injected_reasoning_start(None, formatted_prompt)
+            } else {
+                resolved.explicit_reasoning
+            };
+            return Ok(PromptReasoningPrefill {
+                legacy,
+                unified: resolved.reasoning,
+                unified_starting_state: resolved.starting_state,
+                prefix: resolved.prefix.map(Arc::from),
+                reasoning_closed_by_prompt: reasoning_parser.and(resolved.reasoning_closed),
+                response: resolved.channel
+                    == Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+                beam_channel: resolved.channel,
+            });
+        }
+        let unified = Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt);
         let legacy = if matches!(reasoning_parser, Some("muse" | "muse_glimmer")) {
-            // The legacy crate falls back to Basic for Muse, so only its generic
-            // opener may seed reasoning. Native Muse prefill would swallow tool JSON.
             Self::prompt_injected_reasoning_start(None, formatted_prompt)
         } else {
             unified
         };
-        let prefix = match family {
-            Some("gemma4") => {
-                const HEADER: &str = "<|channel>thought\n";
-                formatted_prompt.and_then(|raw| {
-                    ("<|channel>".len()..HEADER.len())
-                        .rev()
-                        .map(|end| &HEADER[..end])
-                        .find(|prefix| raw.ends_with(prefix))
-                        .map(Arc::from)
-                })
-            }
-            Some("gpt_oss") => {
-                assistant_prefill.map(|prefix| Arc::from(compact_gpt_oss_prefill(prefix)))
-            }
-            _ => None,
-        };
-        // MiniMax M3: the request's `thinking_mode` is what the client asked for;
-        // the rendered prompt is what the model was told. A chat template that
-        // does not render `thinking_mode` leaves a "disabled" prompt open, so
-        // the model may still open with `<mm:think>` or `</mm:think>`.
         let reasoning_closed_by_prompt = if matches!(reasoning_parser, Some("glm45" | "glm47")) {
             formatted_prompt.and_then(|prompt| {
                 if unified {
@@ -7778,31 +7632,15 @@ impl OpenAIPreprocessor {
                 .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
                 .flatten()
         };
-        let beam_channel = (family
-            == Some(
-                crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
-            ))
-        .then(|| {
-            formatted_prompt
-                .map(str::trim_end)
-                .and_then(beam_prompt_open_channel)
-        })
-        .flatten();
-        let response =
-            beam_channel == Some(dynamo_parsers_v2::UnifiedParserStartingState::Response);
-        PromptReasoningPrefill {
+        Ok(PromptReasoningPrefill {
             legacy,
-            unified: unified || family == Some("gemma4") && prefix.is_some(),
-            // A bare None state synthesizes an unfinished assistant header in ChoiceState.
-            unified_starting_state: (family == Some("gpt_oss")
-                && prefix.is_none()
-                && formatted_prompt.is_some_and(|prompt| prompt.contains("<|start|>")))
-            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
-            prefix,
+            unified,
+            unified_starting_state: None,
+            prefix: None,
             reasoning_closed_by_prompt,
-            response,
-            beam_channel,
-        }
+            response: false,
+            beam_channel: None,
+        })
     }
 
     fn prompt_injected_reasoning_ended_arg(
@@ -7872,25 +7710,21 @@ impl OpenAIPreprocessor {
         // The legacy split path retains its existing request-control behavior.
         if let Some(family) = unified_family {
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
-            return match family {
-                // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
-                "gpt_oss" => false,
-                // Thinking controls govern generation; keep emitted GLM reasoning separate.
-                "glm47" => false,
-                "gemma4" => thinking != Some(true) && !Self::is_gemma4_tool_parser(tool_parser),
-                // Spark's template cannot disable reasoning, so keep generated
-                // reasoning separate instead of folding it into visible content.
-                // `muse_spark_open` resolves to the canonical `muse_spark` family here.
-                "muse_spark" => false,
-                "deepseek_v4" | "deepseek_v41" => {
+            let descriptor =
+                crate::protocols::openai::chat_completions::unified_parser::registration(family)
+                    .expect("selected registration")
+                    .descriptor;
+            use dynamo_parsers_v2::unified::ReasoningControl;
+            return match descriptor.reasoning_control {
+                ReasoningControl::AlwaysParse => false,
+                ReasoningControl::OptInUnlessToolSelected => {
+                    thinking != Some(true)
+                        && !tool_parser.is_some_and(|selector| descriptor.accepts(selector))
+                }
+                ReasoningControl::DeepSeek => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
                 }
-                // Mistral output starts in content and only `[THINK]` opens
-                // reasoning; disabling would fold an emitted thought into `content`.
-                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY => {
-                    false
-                }
-                _ => thinking == Some(false),
+                ReasoningControl::Request => thinking == Some(false),
             };
         }
         Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args.as_ref())
@@ -10112,6 +9946,30 @@ mod extra_args_media_copy_tests {
 
 #[cfg(test)]
 mod tests {
+    pub(super) fn configure_test_parsers(
+        preprocessor: &mut OpenAIPreprocessor,
+        tool: Option<String>,
+        reasoning: Option<String>,
+    ) {
+        use crate::protocols::openai::chat_completions::unified_parser;
+        preprocessor.tool_call_parser = tool.clone();
+        preprocessor.runtime_config.tool_call_parser = tool;
+        preprocessor.runtime_config.reasoning_parser = reasoning;
+        let family = unified_parser::selected_family(
+            preprocessor.tool_call_parser.as_deref(),
+            preprocessor.runtime_config.reasoning_parser.as_deref(),
+        );
+        preprocessor.unified_registration = family.and_then(unified_parser::registration);
+        preprocessor.beam_route = family == Some("beam");
+        preprocessor.parser_requires_special_tokens =
+            OpenAIPreprocessor::parser_requires_special_tokens(
+                family,
+                preprocessor.tool_call_parser.as_deref(),
+                preprocessor.runtime_config.reasoning_parser.as_deref(),
+            )
+            .unwrap();
+    }
+
     use super::*;
     use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
     use crate::protocols::common::preprocessor::MultimodalData;
@@ -10165,8 +10023,11 @@ mod tests {
             return;
         }
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.tool_call_parser = Some("harmony".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".into()),
+            Some("gpt_oss".into()),
+        );
         let input = "<|channel|>analysis<|message|>private thought<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>";
         for (alias_index, args) in [
             serde_json::json!({}),
@@ -10380,8 +10241,11 @@ mod tests {
             return;
         }
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.tool_call_parser = Some("harmony".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".into()),
+            Some("gpt_oss".into()),
+        );
         preprocessor.runtime_config.structural_tag = Some(Default::default());
         let input = "<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]<|return|>";
         for channel in ["commentary", "analysis"] {
@@ -10466,8 +10330,11 @@ mod tests {
     #[test]
     fn gpt_oss_prefill_keeps_headers_quoted_in_tool_arguments() {
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.tool_call_parser = Some("harmony".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".into()),
+            Some("gpt_oss".into()),
+        );
         for body in [
             "{\"q\":\"<|start|>assistant<|channel|>analysis<|message|>literal\"}",
             "{\"q\":\"<|start|>user literal\"}",
@@ -10532,8 +10399,11 @@ mod tests {
     #[test]
     fn gpt_oss_rendered_boundary_preserves_trim_and_repeated_content() {
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.tool_call_parser = Some("harmony".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".into()),
+            Some("gpt_oss".into()),
+        );
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test", "messages": [{"role":"assistant", "content":"  Hello"}],
             "continue_final_message":true, "add_generation_prompt":false,
@@ -10562,8 +10432,11 @@ mod tests {
     #[test]
     fn gpt_oss_rendered_boundary_excludes_repeated_body_markers() {
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.tool_call_parser = Some("harmony".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".into()),
+            Some("gpt_oss".into()),
+        );
         let body = "keep CONTINUE_FINAL_MESSAGE_TAG <|start|>user";
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model":"test", "messages":[{"role":"assistant","content":body}],
@@ -10653,8 +10526,11 @@ mod tests {
             return;
         }
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.tool_call_parser = Some("harmony".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".into()),
+            Some("gpt_oss".into()),
+        );
         preprocessor.formatter = test_prompt_formatter(
             "{% for message in messages %}<|start|>{{ message.role }}<|channel|>final<|message|>{{ message.content }}<|return|>{% endfor %}",
         );
@@ -10728,8 +10604,11 @@ mod tests {
             return;
         }
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.tool_call_parser = Some("harmony".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".into()),
+            Some("gpt_oss".into()),
+        );
         for (role, channel, input, content, reasoning, structured, forced) in [
             (
                 "assistant",
@@ -11034,8 +10913,11 @@ mod tests {
             (Some("muse"), None, "muse_glimmer"),
             (None, Some("muse_glimmer"), "muse_glimmer"),
         ] {
-            preprocessor.tool_call_parser = tool.map(str::to_string);
-            preprocessor.runtime_config.reasoning_parser = reason.map(str::to_string);
+            crate::preprocessor::tests::configure_test_parsers(
+                &mut preprocessor,
+                tool.map(str::to_string),
+                reason.map(str::to_string),
+            );
             if matches!(family, "gemma4" | "muse_glimmer") {
                 let prompt = if family == "gemma4" {
                     "<|channel>"
@@ -11126,8 +11008,11 @@ mod tests {
                 Ok(value) => value,
                 Err(_) => panic!("unexpected shared preprocessor"),
             };
-            preprocessor.tool_call_parser = Some(tool.into());
-            preprocessor.runtime_config.reasoning_parser = Some(reason.into());
+            crate::preprocessor::tests::configure_test_parsers(
+                &mut preprocessor,
+                Some(tool.into()),
+                Some(reason.into()),
+            );
             let (open, close) = unified_parser::tests::reasoning_markers(family);
             for thinking in [false, true] {
                 for prefilled in [false, true] {
@@ -11238,6 +11123,7 @@ mod tests {
             None,
         )
         .unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
         card.runtime_config.tool_call_parser = Some("kimi_k2".into());
         card.runtime_config.reasoning_parser = Some("kimi_k25".into());
         let preprocessor = OpenAIPreprocessor::new(card).unwrap();
@@ -11465,8 +11351,11 @@ mod tests {
             Ok(value) => value,
             Err(_) => panic!("unexpected shared preprocessor"),
         };
-        preprocessor.tool_call_parser = Some("gemma4".into());
-        preprocessor.runtime_config.reasoning_parser = Some("gemma4".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("gemma4".into()),
+            Some("gemma4".into()),
+        );
         let request: NvCreateChatCompletionRequest = serde_json::from_value(
             serde_json::json!({"model":"test","messages":[{"role":"user","content":"answer"}], "chat_template_args": {"enable_thinking": true}}),
         )
@@ -11640,6 +11529,7 @@ mod tests {
             None,
         )
         .unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
         card.runtime_config.tool_call_parser = Some(tool.into());
         card.runtime_config.reasoning_parser = Some(reason.into());
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
@@ -12014,7 +11904,12 @@ mod tests {
                 Ok(preprocessor) => preprocessor,
                 Err(_) => panic!("test preprocessor unexpectedly shared"),
             };
-            preprocessor.runtime_config.reasoning_parser = Some(parser.to_string());
+            let retained_tool_parser = preprocessor.tool_call_parser.clone();
+            crate::preprocessor::tests::configure_test_parsers(
+                &mut preprocessor,
+                retained_tool_parser,
+                Some(parser.to_string()),
+            );
             let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
             let kwargs = serde_json::Map::from_iter([
@@ -12123,7 +12018,12 @@ mod tests {
             .unwrap();
             let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
             let preprocessor = Arc::get_mut(&mut preprocessor).unwrap();
-            preprocessor.tool_call_parser = Some(family.into());
+            let retained_reasoning_parser = preprocessor.runtime_config.reasoning_parser.clone();
+            crate::preprocessor::tests::configure_test_parsers(
+                preprocessor,
+                Some(family.into()),
+                retained_reasoning_parser,
+            );
             preprocessor.formatter = test_prompt_formatter(prefix);
             let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
@@ -12344,6 +12244,7 @@ mod tests {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
         card.runtime_config.reasoning_parser = Some("muse_glimmer".to_string());
         let preprocessor = OpenAIPreprocessor::new(card).unwrap();
         let request = parser_route_test_request(ChatCompletionToolChoiceOption::Required);
@@ -12427,6 +12328,7 @@ mod tests {
                     for structural_tag in [false, true] {
                         let mut card =
                             ModelDeploymentCard::load_from_disk(model_path.clone(), None).unwrap();
+                        card.model_type = crate::model_type::ModelType::Chat;
                         card.runtime_config.tool_call_parser = tool.map(str::to_string);
                         card.runtime_config.reasoning_parser = reasoning.map(str::to_string);
                         let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
@@ -12641,6 +12543,7 @@ mod tests {
             ("qwen3_coder", "qwen3", "qwen3"),
         ] {
             let mut card = ModelDeploymentCard::load_from_disk(model_path.clone(), None).unwrap();
+            card.model_type = crate::model_type::ModelType::Chat;
             card.runtime_config.tool_call_parser = Some(tool.to_string());
             card.runtime_config.reasoning_parser = Some(reasoning.to_string());
             let preprocessor = OpenAIPreprocessor::new(card).unwrap();
@@ -12739,6 +12642,7 @@ mod tests {
             ("qwen3_coder", true),
         ] {
             let mut card = ModelDeploymentCard::load_from_disk(model_path.clone(), None).unwrap();
+            card.model_type = crate::model_type::ModelType::Chat;
             card.runtime_config.tool_call_parser = Some(parser.to_string());
             let preprocessor = OpenAIPreprocessor::new(card).unwrap();
             let request = parser_route_test_request(ChatCompletionToolChoiceOption::Required);
@@ -13726,7 +13630,12 @@ mod tests {
             Ok(preprocessor) => preprocessor,
             Err(_) => panic!("test preprocessor unexpectedly shared"),
         };
-        preprocessor.tool_call_parser = Some("harmony".to_string());
+        let retained_reasoning_parser = preprocessor.runtime_config.reasoning_parser.clone();
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("harmony".to_string()),
+            retained_reasoning_parser,
+        );
         preprocessor.tokenizer = Arc::new(HiddenStopTokenizer);
         preprocessor
     }
@@ -14998,6 +14907,349 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn registered_family_round_trips_through_model_card_stream_and_batch() {
+        let selector =
+            std::env::var("DYNAMO_REGISTRY_FIXTURE_SELECTOR").unwrap_or_else(|_| "hermes".into());
+        let plugin_path = std::env::var("DYNAMO_REGISTRY_FIXTURE_PLUGIN").unwrap_or_default();
+        let vendor_mode = std::env::var("DYNAMO_REGISTRY_FIXTURE_VENDOR").unwrap_or_default();
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::registered_family_round_trips_through_model_card_stream_and_batch"
+            ),
+            &[
+                (env_llm::DYN_PARSER_VERSION, "2"),
+                ("DYNAMO_REGISTRY_FIXTURE_SELECTOR", &selector),
+                ("DYNAMO_REGISTRY_FIXTURE_VENDOR", &vendor_mode),
+                ("DYNAMO_REGISTRY_FIXTURE_PLUGIN", &plugin_path),
+            ],
+        ) {
+            return;
+        }
+        static VENDOR_BASE: std::sync::OnceLock<dynamo_parsers_v2::UnifiedParserRegistration> =
+            std::sync::OnceLock::new();
+        static VENDOR_CREATED: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        if !vendor_mode.is_empty() {
+            let baseline = dynamo_parsers_v2::resolve_unified_parser("hermes").unwrap();
+            let mut descriptor = baseline.descriptor.clone();
+            assert!(VENDOR_BASE.set(baseline).is_ok());
+            match vendor_mode.as_str() {
+                "new" => {
+                    descriptor.family = selector.clone();
+                    descriptor.aliases.clear();
+                }
+                "alias" => descriptor.aliases.push(selector.clone()),
+                _ => panic!("unknown vendor fixture mode"),
+            }
+            dynamo_parsers_v2::register_unified_parser_with_descriptor(descriptor, |tools| {
+                VENDOR_CREATED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                VENDOR_BASE
+                    .get()
+                    .expect("baseline registration seeded before override")
+                    .create(tools)
+            })
+            .unwrap();
+        }
+        let plugins = [std::path::PathBuf::from(&plugin_path)];
+        if !plugin_path.is_empty() {
+            use crate::protocols::openai::chat_completions::tool_parser_v2::load_parser_plugins;
+            let duplicates = [plugins[0].clone(), plugins[0].clone()];
+            assert!(
+                load_parser_plugins(&duplicates)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("conflicting parser selector")
+            );
+            load_parser_plugins(&plugins).unwrap();
+        }
+        let expected_family =
+            crate::protocols::openai::chat_completions::unified_parser::canonical_family(&selector)
+                .unwrap();
+        assert!(
+            crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names()
+                .contains(&selector.as_str())
+        );
+        let catalog =
+            crate::protocols::openai::chat_completions::tool_parser_v2::parser_capabilities();
+        assert!(
+            catalog["unified"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["family"] == expected_family)
+        );
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
+        card.runtime_config.tool_call_parser = Some(selector.clone());
+        card.runtime_config.reasoning_parser = Some(selector.clone());
+        if !plugin_path.is_empty() {
+            use crate::protocols::openai::chat_completions::unified_parser;
+            use dynamo_parsers_v2::unified::plugin::{GuidanceChoice, GuidanceRequest};
+            let selected = unified_parser::registration(expected_family).unwrap();
+            let tools = [dynamo_parsers_v2::Tool {
+                name: "get_weather".into(),
+                description: None,
+                parameters: serde_json::json!({"type":"object"}),
+                strict: None,
+            }];
+            let answer = "look\nT:before\n";
+            for split in 0..=answer.len() {
+                let mut parser = selected.create(&tools).unwrap();
+                parser
+                    .initialize_request(dynamo_parsers_v2::UnifiedParserInit {
+                        starting_state: dynamo_parsers_v2::UnifiedParserStartingState::Reasoning,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let mut output = dynamo_parsers_v2::UnifiedParserOutput::default();
+                parser.parse_into(&answer[..split], &mut output).unwrap();
+                parser.parse_into(&answer[split..], &mut output).unwrap();
+                assert_eq!(
+                    output.events,
+                    [
+                        dynamo_parsers_v2::UnifiedParserEvent::Reasoning("look".into()),
+                        dynamo_parsers_v2::UnifiedParserEvent::Text("before".into()),
+                    ]
+                );
+            }
+            assert!(
+                OpenAIPreprocessor::prompt_reasoning_prefill_at_boundary(
+                    Some(&selector),
+                    Some(&selector),
+                    Some("model prompt\nR:"),
+                    None,
+                )
+                .unwrap()
+                .unified
+            );
+            let build = selected.plugin_guidance().unwrap();
+            let guidance = build(GuidanceRequest {
+                tools: Vec::new(),
+                choice: GuidanceChoice::Named("get_weather".into()),
+                parallel_tool_calls: None,
+                schema_mode: Default::default(),
+                structured_output_schema: None,
+                starts_in_reasoning: false,
+                options: Default::default(),
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                guidance["format"]["value"],
+                "R:look\nT:before\nC:weather\nT:after\n"
+            );
+            assert!(
+                OpenAIPreprocessor::new(card.clone())
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("registrations differ")
+            );
+            card.runtime_config.parser_plugin_identities =
+                unified_parser::plugin_identities(Some(&selector), Some(&selector));
+        }
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        assert_eq!(VENDOR_CREATED.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(preprocessor.unified_family(), Some(expected_family));
+        let request = parser_route_test_request(ChatCompletionToolChoiceOption::Auto);
+        let raw = "<think>look</think>before<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}</tool_call>after";
+        let raw = if plugin_path.is_empty() {
+            raw
+        } else {
+            "R:look\nT:before\nC:weather\nT:after\n"
+        };
+        let chunks: Vec<_> = [Some(raw), None].into_iter().map(|content| {
+            Annotated::from_data(serde_json::from_value::<NvCreateChatCompletionStreamResponse>(serde_json::json!({
+                "id":"registry", "object":"chat.completion.chunk", "created":0, "model":"fixture", "choices":[{
+                    "index":0, "delta": content.map(|text| serde_json::json!({"content":text})).unwrap_or_else(|| serde_json::json!({})),
+                    "finish_reason": content.is_none().then_some("stop")
+                }]
+            })).unwrap())
+        }).collect();
+        let tools = crate::preprocessor::tool_choice::effective_tool_definitions(&request).unwrap();
+        let stream = preprocessor
+            .postprocessor_parsing_stream(stream::iter(chunks.clone()), &request, false, false)
+            .unwrap();
+        let ordered: Vec<_> = stream.collect().await;
+        let mut events = Vec::new();
+        for choice in ordered
+            .iter()
+            .flat_map(|row| row.data.iter())
+            .flat_map(|row| &row.inner.choices)
+        {
+            if let Some(text) = &choice.delta.reasoning_content {
+                if !text.is_empty() {
+                    events.push(("reasoning", text.clone()));
+                }
+            }
+            if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                if !text.is_empty() {
+                    events.push(("text", text.clone()));
+                }
+            }
+            if let Some(calls) = &choice.delta.tool_calls {
+                for call in calls {
+                    if let Some(function) = &call.function {
+                        if let Some(name) = &function.name {
+                            events.push(("tool", name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            events,
+            vec![
+                ("reasoning", "look".into()),
+                ("text", "before".into()),
+                ("tool", "get_weather".into()),
+                ("text", "after".into())
+            ]
+        );
+        let streamed =
+            crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                stream::iter(ordered),
+                crate::protocols::openai::ParsingOptions::default(),
+            )
+            .await
+            .unwrap();
+        let batch = crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+            stream::iter(chunks.clone()),
+            crate::protocols::openai::ParsingOptions::new(
+                Some(selector.clone()),
+                Some(selector.clone()),
+            )
+            .with_tools(tools),
+        )
+        .await
+        .unwrap();
+        for result in [&streamed, &batch] {
+            let choice = &result.inner.choices[0];
+            assert_eq!(choice.message.reasoning_content.as_deref(), Some("look"));
+            assert_eq!(
+                choice.message.content,
+                Some(ChatCompletionMessageContent::Text("beforeafter".into()))
+            );
+            let calls = choice.message.tool_calls.as_ref().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+                serde_json::json!({"city":"Paris"})
+            );
+        }
+        if !vendor_mode.is_empty() {
+            assert_eq!(VENDOR_CREATED.load(std::sync::atomic::Ordering::SeqCst), 2);
+        }
+        if !plugin_path.is_empty() {
+            let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_at_boundary(
+                Some(&selector),
+                Some(&selector),
+                Some("model prompt\nT:"),
+                None,
+            )
+            .unwrap();
+            let mut continuation = chunks.clone();
+            continuation[0].data.as_mut().unwrap().inner.choices[0]
+                .delta
+                .content = Some(ChatCompletionMessageContent::Text("after\n".into()));
+            let parsed = preprocessor
+                .postprocessor_parsing_stream(stream::iter(continuation), &request, prefill, false)
+                .unwrap();
+            let response =
+                crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                    parsed,
+                    crate::protocols::openai::ParsingOptions::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.inner.choices[0].message.content,
+                Some(ChatCompletionMessageContent::Text("after".into()))
+            );
+            assert!(
+                crate::protocols::openai::chat_completions::tool_parser_v2::load_parser_plugins(
+                    &plugins
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("before parser discovery")
+            );
+            return;
+        }
+        dynamo_parsers_v2::register_unified_parser_with_descriptor(
+            dynamo_parsers_v2::UnifiedParserDescriptor::new(expected_family),
+            |_| anyhow::bail!("replacement factory must not run for the resolved model"),
+        )
+        .unwrap();
+        let pinned_stream = preprocessor
+            .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+            .unwrap();
+        let pinned =
+            crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                pinned_stream,
+                crate::protocols::openai::ParsingOptions::default(),
+            )
+            .await;
+        dynamo_parsers_v2::unregister_unified_parser(expected_family);
+        let pinned = pinned.unwrap();
+        assert_eq!(
+            pinned.inner.choices[0].message.tool_calls.as_ref().unwrap()[0]
+                .function
+                .name,
+            "get_weather"
+        );
+    }
+
+    #[test]
+    fn vendor_aliases_inherit_template_policy_and_preserve_legacy_defaults() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::vendor_aliases_inherit_template_policy_and_preserve_legacy_defaults"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        for (family, alias) in [("kimi_k3", "vendor_kimi"), ("minimax_m3", "vendor_m3")] {
+            let mut descriptor = dynamo_parsers_v2::resolve_unified_parser(family)
+                .unwrap()
+                .descriptor;
+            descriptor.aliases.push(alias.into());
+            dynamo_parsers_v2::register_unified_parser_with_descriptor(descriptor, |tools| {
+                dynamo_parsers_v2::create_unified_parser_for_family("hermes", tools)
+            })
+            .unwrap();
+        }
+        let kimi = OpenAIPreprocessor::thinking_policy(Some("vendor_kimi"), Some("vendor_kimi"));
+        assert!(kimi.named_tool_disables);
+        assert_eq!(kimi.default_enabled, Some(true));
+        assert!(OpenAIPreprocessor::thinking_policy(Some("vendor_m3"), None).adaptive);
+        assert_eq!(
+            OpenAIPreprocessor::thinking_policy(None, Some("kimi_k25")).default_enabled,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn partial_gemma_prompt_enables_only_the_unified_parser() {
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("gemma4"),
+            Some("gemma4"),
+            Some("<|channel>thou"),
+        );
+        assert!(prefill.unified);
+        assert!(!prefill.legacy);
+        assert_eq!(prefill.prefix.as_deref(), Some("<|channel>thou"));
+    }
+
     #[test]
     fn special_token_requirements_are_resolved_once_per_model() {
         if crate::test_utils::run_isolated(
@@ -15023,7 +15275,7 @@ mod tests {
         card.model_type = crate::model_type::ModelType::Chat;
         card.runtime_config.tool_call_parser = Some("kimi_k3".into());
         let preprocessor = OpenAIPreprocessor::new(card).unwrap();
-        assert_eq!(CREATED.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(CREATED.load(std::sync::atomic::Ordering::SeqCst), 0);
         for skip in [None, Some(false), Some(true)] {
             let mut request = parser_route_test_request(ChatCompletionToolChoiceOption::Auto);
             request.common.skip_special_tokens = skip;
@@ -15038,42 +15290,9 @@ mod tests {
                     output.output_options.skip_special_tokens,
                     skip.or(Some(false))
                 );
-                assert_eq!(CREATED.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(CREATED.load(std::sync::atomic::Ordering::SeqCst), 0);
             }
         }
-        dynamo_parsers_v2::unregister_unified_parser("kimi_k3");
-    }
-
-    #[test]
-    fn special_token_factory_failure_rejects_model_setup() {
-        if crate::test_utils::run_isolated(
-            concat!(
-                module_path!(),
-                "::special_token_factory_failure_rejects_model_setup"
-            ),
-            &[(env_llm::DYN_PARSER_VERSION, "2")],
-        ) {
-            return;
-        }
-        dynamo_parsers_v2::register_unified_parser("kimi_k3", |_| {
-            anyhow::bail!("factory unavailable")
-        });
-        let mut card = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
-            None,
-        )
-        .unwrap();
-        card.model_type = crate::model_type::ModelType::Chat;
-        card.runtime_config.tool_call_parser = Some("kimi_k3".into());
-        let error = OpenAIPreprocessor::new(card)
-            .err()
-            .expect("factory failure must reject model setup");
-        assert!(
-            error
-                .to_string()
-                .contains("special-token requirements for kimi_k3")
-        );
-        assert!(format!("{error:#}").contains("factory unavailable"));
         dynamo_parsers_v2::unregister_unified_parser("kimi_k3");
     }
 
@@ -15889,6 +16108,7 @@ mod tests {
             None,
         )
         .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
         mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
         mdc.runtime_config
             .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
@@ -15946,6 +16166,7 @@ mod tests {
                 None,
             )
             .unwrap();
+            mdc.model_type = crate::model_type::ModelType::Chat;
             mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
             mdc.runtime_config
                 .set_engine_specific(capability, true)
@@ -16050,8 +16271,18 @@ mod tests {
     async fn glm_generation_reasoning_follows_rendered_prompt() {
         for parser in ["glm45", "glm47"] {
             let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-            preprocessor.runtime_config.reasoning_parser = Some(parser.into());
-            preprocessor.tool_call_parser = Some("glm47".into());
+            let retained_tool_parser = preprocessor.tool_call_parser.clone();
+            crate::preprocessor::tests::configure_test_parsers(
+                &mut preprocessor,
+                retained_tool_parser,
+                Some(parser.into()),
+            );
+            let retained_reasoning_parser = preprocessor.runtime_config.reasoning_parser.clone();
+            crate::preprocessor::tests::configure_test_parsers(
+                &mut preprocessor,
+                Some("glm47".into()),
+                retained_reasoning_parser,
+            );
             for (tail, reasoning_open) in [
                 ("<|assistant|><think>\n", true),
                 ("<|assistant|><think></think>\n", false),
@@ -16121,8 +16352,18 @@ mod tests {
     #[tokio::test]
     async fn glm_unknown_prompt_reasoning_preserves_request_controls() {
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
-        preprocessor.runtime_config.reasoning_parser = Some("glm45".into());
-        preprocessor.tool_call_parser = Some("glm47".into());
+        let retained_tool_parser = preprocessor.tool_call_parser.clone();
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            retained_tool_parser,
+            Some("glm45".into()),
+        );
+        let retained_reasoning_parser = preprocessor.runtime_config.reasoning_parser.clone();
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut preprocessor,
+            Some("glm47".into()),
+            retained_reasoning_parser,
+        );
         for (tail, add_generation_prompt) in [
             ("<|assistant|>", true),
             ("<think>", false),
@@ -16899,6 +17140,7 @@ mod tests {
         )
         .unwrap();
         // llama3_json has no unified family, so it still takes the legacy jail.
+        mdc.model_type = crate::model_type::ModelType::Chat;
         mdc.runtime_config.tool_call_parser = Some("llama3_json".to_string());
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
@@ -17147,6 +17389,7 @@ mod tests {
             None,
         )
         .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
         mdc.runtime_config.reasoning_parser = Some("minimax_m2".to_string());
         mdc.runtime_config.tool_call_parser = Some("minimax_m2".to_string());
         let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
@@ -18556,6 +18799,7 @@ mod tests {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
         card.runtime_config.reasoning_parser = Some("minimax_m3".to_string());
         card.runtime_config.tool_call_parser = Some("minimax_m3".to_string());
         let preprocessor = OpenAIPreprocessor::new(card).unwrap();
@@ -19884,6 +20128,7 @@ mod tests {
             None,
         )
         .unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
         card.runtime_config.reasoning_parser = Some(parser.to_string());
         card.runtime_config.tool_call_parser = Some(parser.to_string());
         let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(card).unwrap())
@@ -19905,7 +20150,12 @@ mod tests {
                     template,
                     parser.unwrap_or("minimax_m3"),
                 );
-                preprocessor.runtime_config.reasoning_parser = parser.map(str::to_string);
+                let retained_tool_parser = preprocessor.tool_call_parser.clone();
+                crate::preprocessor::tests::configure_test_parsers(
+                    &mut preprocessor,
+                    retained_tool_parser,
+                    parser.map(str::to_string),
+                );
                 for mode in ["enabled", "disabled", "adaptive"] {
                     for (field, guidance, _) in minimax_m3_explicit_guided_cases() {
                         let mut request = minimax_m3_request(minimax_m3_merge_body(
@@ -21477,8 +21727,11 @@ mod beam_route_tests {
     #[test]
     fn beam_reasoning_validation_keeps_history_controls_and_other_families() {
         let mut beam = synthetic_preprocessor(true, HISTORY_TEMPLATE);
-        beam.tool_call_parser = Some("beam".into());
-        beam.runtime_config.reasoning_parser = Some("beam".into());
+        crate::preprocessor::tests::configure_test_parsers(
+            &mut beam,
+            Some("beam".into()),
+            Some("beam".into()),
+        );
         for extra in [
             serde_json::json!({}),
             serde_json::json!({"reasoning_effort": null}),

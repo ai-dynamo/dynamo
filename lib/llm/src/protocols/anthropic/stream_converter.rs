@@ -1344,6 +1344,7 @@ mod tests {
         );
         let mut second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
         second.tool_call_completion.push(ToolCallCompletion {
+            native_completion_authoritative: Some(false),
             choice_index: 0,
             tool_index: 1,
             complete: true,
@@ -1353,6 +1354,7 @@ mod tests {
         let mut completion = text_chunk("");
         completion.inner.choices.clear();
         completion.tool_call_completion.push(ToolCallCompletion {
+            native_completion_authoritative: Some(false),
             choice_index: 0,
             tool_index: 0,
             complete: true,
@@ -1556,6 +1558,7 @@ mod tests {
             let mut completion = text_chunk("");
             completion.inner.choices.clear();
             completion.tool_call_completion.push(ToolCallCompletion {
+                native_completion_authoritative: Some(false),
                 choice_index: 1,
                 tool_index: 0,
                 complete: true,

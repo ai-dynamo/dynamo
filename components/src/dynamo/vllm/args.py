@@ -29,6 +29,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 )
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.parser_plugins import load_plugins_from_args
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import (
@@ -191,6 +192,7 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
 
 def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]:
     """Split Dynamo and vLLM arguments while preserving the original model source."""
+    load_plugins_from_args(argv)
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 

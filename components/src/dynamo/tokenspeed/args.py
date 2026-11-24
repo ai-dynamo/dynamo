@@ -20,6 +20,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.parser_plugins import load_plugins_from_args
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.tokenspeed.disagg import (
     resolve_disaggregation_mode,
@@ -133,6 +134,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
         formatter_class=argparse.RawTextHelpFormatter,
         allow_abbrev=False,
     )
+    load_plugins_from_args(argv)
     DynamoRuntimeArgGroup().add_arguments(parser)
     DynamoTokenSpeedArgGroup().add_arguments(parser)
 

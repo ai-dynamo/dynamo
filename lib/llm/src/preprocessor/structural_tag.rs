@@ -70,7 +70,7 @@ fn resolve_reasoning_boundary(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum SelectedStructuralTagBuilder {
     V1(v1::StructuralTagBuilder),
     V2(v2::StructuralTagBuilder),
@@ -150,7 +150,9 @@ fn is_kimi_k2_parser(parser_name: Option<&str>) -> bool {
 // over the native wire instead (see `tool_choice.rs`), which keeps the analysis channel
 // and still forces the call header of an allowed tool.
 pub(crate) fn is_beam_parser(parser_name: Option<&str>) -> bool {
-    parser_name == Some("beam")
+    parser_name
+        .and_then(crate::protocols::openai::chat_completions::unified_parser::canonical_family)
+        == Some("beam")
 }
 
 fn is_muse_spark_parser(parser_name: Option<&str>) -> bool {
@@ -160,7 +162,13 @@ fn is_muse_spark_parser(parser_name: Option<&str>) -> bool {
 // Spark's unified parser can be selected through either parser slot. Its
 // forced-tool grammar must use that same family when only reasoning is set.
 fn structural_tag_parser<'a>(tool: Option<&'a str>, reasoning: Option<&'a str>) -> Option<&'a str> {
-    tool.or_else(|| reasoning.filter(|parser| is_muse_spark_parser(Some(parser))))
+    tool.or_else(|| {
+        reasoning.filter(|parser| {
+            is_muse_spark_parser(Some(parser))
+                || crate::protocols::openai::chat_completions::unified_parser::registration(parser)
+                    .is_some_and(|entry| entry.plugin_guidance().is_some())
+        })
+    })
 }
 
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {

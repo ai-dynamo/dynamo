@@ -12,7 +12,11 @@ from typing import List, Literal, Optional
 import msgspec
 from packaging.version import Version
 
-from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo._core import (
+    get_parser_capabilities,
+    get_reasoning_parser_names,
+    get_tool_parser_names,
+)
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import (
@@ -20,6 +24,7 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     env_or_default,
 )
+from dynamo.common.parser_plugins import add_parser_plugin_argument
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
@@ -29,10 +34,6 @@ logger = logging.getLogger(__name__)
 _ENGINE_REQUEST_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
 
-# Parser selectors that still work but are scheduled for removal, mapped to the
-# name to configure instead. `muse` predates Muse Spark Open and selects only
-# Muse Glimmer; the frontend emits the matching warning at model registration.
-_DEPRECATED_PARSER_ALIASES: dict[str, str] = {"muse": "muse_glimmer"}
 _fpm_trace_invalid_warning_emitted = False
 
 
@@ -120,20 +121,28 @@ class DynamoRuntimeConfig(ConfigBase):
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
         self.structural_tag = resolve_structural_tag_config(self)
-        for flag, value in (
+        selectors = (
             ("--dyn-tool-call-parser", self.dyn_tool_call_parser),
             ("--dyn-reasoning-parser", self.dyn_reasoning_parser),
-        ):
-            replacement = _DEPRECATED_PARSER_ALIASES.get(value or "")
-            if replacement is not None:
+        )
+        if any(value for _, value in selectors):
+            deprecated = {
+                alias: entry
+                for entry in get_parser_capabilities()["unified"]
+                for alias in entry["deprecated_aliases"]
+            }
+            for flag, value in selectors:
+                entry = deprecated.get(value)
+                if entry is None:
+                    continue
                 logger.warning(
                     "%s=%s is a deprecated alias of %s and will be removed in a "
-                    "future release; configure %s instead. Muse Spark Open is a "
-                    "different parser: muse_spark_open.",
+                    "future release; configure %s instead. %s",
                     flag,
                     value,
-                    replacement,
-                    replacement,
+                    entry["family"],
+                    entry["family"],
+                    entry["deprecation_note"] or "",
                 )
 
         # The Rust FPM sink reads this setting from the process environment.
@@ -247,6 +256,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo runtime arguments to parser."""
+        add_parser_plugin_argument(parser)
         g = parser.add_argument_group("Dynamo Runtime Options")
 
         add_argument(

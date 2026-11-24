@@ -505,7 +505,13 @@ pub async fn register_model_card(
     let model_suffix = derive_lora_suffix(lora_name);
 
     let discovery = endpoint.drt().discovery();
-    let wire_card = card.for_mdc_wire();
+    let mut wire_card = card.for_mdc_wire();
+    let config = &mut wire_card.runtime_config;
+    config.parser_plugin_identities =
+        crate::protocols::openai::chat_completions::unified_parser::plugin_identities(
+            config.tool_call_parser.as_deref(),
+            config.reasoning_parser.as_deref(),
+        );
     let spec = DiscoverySpec::from_model_with_suffix(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),

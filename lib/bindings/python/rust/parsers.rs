@@ -36,8 +36,27 @@ pub fn get_structural_tag_parser_names() -> Vec<&'static str> {
     structural_tag_parser_names()
 }
 
+/// Load trusted native parser libraries before querying or serving the parser catalog.
+#[pyfunction]
+pub fn load_parser_plugins(paths: Vec<std::path::PathBuf>) -> PyResult<()> {
+    dynamo_llm::protocols::openai::chat_completions::tool_parser_v2::load_parser_plugins(&paths)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(format!("{error:#}")))
+}
+
+/// Return the linked frontend-crates capability catalog without model or runtime setup.
+#[pyfunction]
+pub fn get_parser_capabilities(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    pythonize::pythonize(
+        py,
+        &dynamo_llm::protocols::openai::chat_completions::tool_parser_v2::parser_capabilities(),
+    )
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
 /// Add parsers module functions to the Python module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(get_parser_capabilities, m)?)?;
+    m.add_function(wrap_pyfunction!(load_parser_plugins, m)?)?;
     m.add_function(wrap_pyfunction!(get_tool_parser_names, m)?)?;
     m.add_function(wrap_pyfunction!(get_reasoning_parser_names, m)?)?;
     m.add_function(wrap_pyfunction!(get_structural_tag_parser_names, m)?)?;

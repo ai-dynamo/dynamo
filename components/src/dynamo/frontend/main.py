@@ -30,6 +30,10 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.parser_plugins import (
+    add_parser_plugin_argument,
+    load_plugins_from_args,
+)
 from dynamo.llm import (
     AisPerfConfig,
     EngineType,
@@ -43,6 +47,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import BUILTIN_CHAT_PROCESSORS, FrontendArgGroup, FrontendConfig
+from .parser_capabilities import print_parser_capabilities
 
 if TYPE_CHECKING:
     from .vllm_processor import EngineFactory
@@ -295,9 +300,22 @@ def parse_args() -> (
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
     )
 
+    parser.add_argument(
+        "--list-parser-capabilities",
+        action="store_true",
+        help="Print the linked frontend-crates parser capability and selector mapping as JSON, then exit.",
+    )
+    load_plugins_from_args()
+    add_parser_plugin_argument(parser)
     FrontendArgGroup().add_arguments(parser)
 
     args, unknown = parser.parse_known_args()
+
+    if args.list_parser_capabilities:
+        if unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        print_parser_capabilities()
+        parser.exit()
 
     config = FrontendConfig.from_cli_args(args)
     config.validate()

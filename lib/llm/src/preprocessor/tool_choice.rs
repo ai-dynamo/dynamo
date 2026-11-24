@@ -101,7 +101,7 @@ impl OpenAIPreprocessor {
             .tool_choice
             .as_ref()
             .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-        let requires_enforcement = self.is_beam()
+        let requires_enforcement = self.uses_turn_grammar()
             && (matches!(
                 choice,
                 ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
@@ -164,7 +164,7 @@ impl OpenAIPreprocessor {
         // `N.0`) or the answer — so forced choices are enforced and the response keeps
         // its reasoning. Dynamo only decides when it applies (`beam_turn_grammar_constraint`)
         // and from which channel the rendered prompt leaves open.
-        let beam_constraint = if self.is_beam() {
+        let beam_constraint = if self.uses_turn_grammar() {
             beam_turn_grammar_constraint(request)
         } else {
             GuidedToolConstraint::None
@@ -206,7 +206,7 @@ impl OpenAIPreprocessor {
         // the first token that loses the reasoning and the channel structure.
         if !is_forced_tool_choice && beam_constraint.frames_structured_answer() {
             if let Some(schema) = request.get_guided_json()
-                && let Some(structural_tag) = beam_turn_structural_tag(
+                && let Some(structural_tag) = self.turn_structural_tag(
                     tools,
                     &parser_tool_choice,
                     request.inner.parallel_tool_calls,
@@ -241,7 +241,7 @@ impl OpenAIPreprocessor {
             beam_constraint,
             GuidedToolConstraint::BeamTurnGrammar { .. }
         ) {
-            if let Some(structural_tag) = beam_turn_structural_tag(
+            if let Some(structural_tag) = self.turn_structural_tag(
                 tools,
                 &parser_tool_choice,
                 request.inner.parallel_tool_calls,
@@ -261,7 +261,7 @@ impl OpenAIPreprocessor {
         }
 
         let tool_definitions = convert_tools(tools);
-        if !self.is_beam()
+        if !self.uses_turn_grammar()
             && self.apply_tool_choice_structural_tag(
                 &parser_tool_choice,
                 &tool_definitions,
@@ -513,9 +513,33 @@ fn install_mistral_grammar(
 }
 
 impl OpenAIPreprocessor {
-    fn is_beam(&self) -> bool {
-        is_beam_parser(self.tool_call_parser.as_deref())
-            || is_beam_parser(self.runtime_config.reasoning_parser.as_deref())
+    fn uses_turn_grammar(&self) -> bool {
+        self.unified_registration
+            .as_ref()
+            .is_some_and(|entry| entry.descriptor.guidance.whole_turn)
+    }
+
+    fn turn_structural_tag(
+        &self,
+        tools: &[ChatCompletionTool],
+        tool_choice: &ToolChoice,
+        parallel_tool_calls: Option<bool>,
+        prompt_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
+        answer_schema: Option<&serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let builder = self
+            .unified_registration
+            .as_ref()?
+            .descriptor
+            .structural_tag_builder?;
+        build_turn_structural_tag(
+            builder,
+            tools,
+            tool_choice,
+            parallel_tool_calls,
+            prompt_channel,
+            answer_schema,
+        )
     }
 
     /// Whether the Beam turn grammar holds this request's `response_format` inside the
@@ -525,7 +549,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> bool {
-        self.is_beam() && beam_turn_grammar_constraint(request).frames_structured_answer()
+        self.uses_turn_grammar() && beam_turn_grammar_constraint(request).frames_structured_answer()
     }
 
     /// Whether Beam's output is a bare `response_format` document the engine's grammar
@@ -551,7 +575,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> bool {
-        self.is_beam()
+        self.uses_turn_grammar()
             && has_explicit_guided_decoding_ext(request)
             && !Self::has_guided_tool_choice(request)
             && !Self::has_structured_response_format(request)
@@ -675,7 +699,27 @@ fn beam_turn_grammar_enabled() -> bool {
 /// `answer_schema`, holding the answer in the final channel to that JSON schema. `None`
 /// where the grammar derives nothing (see
 /// `dynamo_parsers_v2::structural_tag::builders::beam`).
+#[cfg(test)]
 fn beam_turn_structural_tag(
+    tools: &[ChatCompletionTool],
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+    prompt_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
+    answer_schema: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let builder = dynamo_parsers_v2::structural_tag_builder_for_family("beam")?;
+    build_turn_structural_tag(
+        builder,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        prompt_channel,
+        answer_schema,
+    )
+}
+
+fn build_turn_structural_tag(
+    builder: &dynamo_parsers_v2::structural_tag::StructuralTagBuilder,
     tools: &[ChatCompletionTool],
     tool_choice: &ToolChoice,
     parallel_tool_calls: Option<bool>,
@@ -686,9 +730,6 @@ fn beam_turn_structural_tag(
     use dynamo_parsers_v2::structural_tag::{
         PromptChannel, StructuralTagContext, StructuralTagSchemaMode, StructuralTagToolChoice,
     };
-    let builder = dynamo_parsers_v2::structural_tag_builder_for_family(
-        crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
-    )?;
     let v2_tools: Vec<dynamo_parsers_v2::Tool> = tools
         .iter()
         .map(|tool| dynamo_parsers_v2::Tool {
@@ -884,7 +925,10 @@ fn effective_tools_constraint(
     // Beam holds every turn with its grammar (`apply_tool_choice_guided_decoding`); a
     // reconstructing frontend reports the same so parsing frames the arguments and a
     // `response_format` answer the way that grammar shaped them.
-    if is_beam_parser(tool_call_parser) || is_beam_parser(reasoning_parser) {
+    if unified_parser::configured_family(tool_call_parser, reasoning_parser)
+        .and_then(unified_parser::registration)
+        .is_some_and(|entry| entry.descriptor.guidance.whole_turn)
+    {
         return Ok(beam_turn_grammar_constraint(request));
     }
     let is_forced_tool_choice = matches!(
@@ -1022,7 +1066,11 @@ mod tests {
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
         mdc.runtime_config.structural_tag = (mode == StructuralTagMode::On)
             .then(crate::local_model::runtime_config::StructuralTagConfig::default);
+        mdc.model_type = crate::model_type::ModelType::Chat;
         mdc.runtime_config.tool_call_parser = Some(parser.to_string());
+        if parser == "beam" {
+            mdc.runtime_config.reasoning_parser = Some("beam".into());
+        }
         OpenAIPreprocessor::new(mdc).unwrap()
     }
 
@@ -1094,8 +1142,7 @@ mod tests {
         }
         let mut preprocessor = preprocessor("harmony", StructuralTagMode::Off);
         let inner = Arc::get_mut(&mut preprocessor).unwrap();
-        inner.tool_call_parser = None;
-        inner.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        crate::preprocessor::tests::configure_test_parsers(inner, None, Some("gpt_oss".into()));
         let mut common = preprocessed_request();
         assert_eq!(
             preprocessor
@@ -1426,6 +1473,7 @@ mod tests {
             None,
         )
         .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
         mdc.runtime_config.tool_call_parser = tool_parser.map(str::to_owned);
         mdc.runtime_config.reasoning_parser = reasoning_parser.map(str::to_owned);
         OpenAIPreprocessor::new(mdc).unwrap()
@@ -1638,6 +1686,7 @@ mod tests {
                 None,
             )
             .unwrap();
+            mdc.model_type = crate::model_type::ModelType::Chat;
             mdc.runtime_config.tool_call_parser = Some(parser.to_owned());
             let tokenizer = mdc.tokenizer().unwrap();
             let preprocessor =
@@ -1686,6 +1735,7 @@ mod tests {
             None,
         )
         .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
         mdc.runtime_config.tool_call_parser = Some("muse_spark".to_owned());
         let tokenizer = mdc.tokenizer().unwrap();
         let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
@@ -1712,6 +1762,7 @@ mod tests {
             None,
         )
         .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
         mdc.runtime_config.tool_call_parser = Some("muse_spark".to_owned());
         let tokenizer = mdc.tokenizer().unwrap();
         let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
@@ -1760,6 +1811,7 @@ mod tests {
                 None,
             )
             .unwrap();
+            mdc.model_type = crate::model_type::ModelType::Chat;
             mdc.runtime_config.tool_call_parser = Some(parser.to_owned());
             let tokenizer = mdc.tokenizer().unwrap();
             let preprocessor =

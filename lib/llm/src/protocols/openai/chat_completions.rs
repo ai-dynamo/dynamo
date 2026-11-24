@@ -24,6 +24,7 @@ pub mod aggregator;
 pub(crate) mod allowed_tools;
 pub(crate) mod custom_tools;
 mod delta;
+mod parser_plugin;
 pub(crate) mod tool_call_merge;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
@@ -375,6 +376,9 @@ pub struct ToolCallCompletion {
     pub choice_index: u32,
     pub tool_index: u32,
     pub complete: bool,
+    /// The parser's native grammar owns completed argument text even when it is not JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_completion_authoritative: Option<bool>,
 }
 
 /// A response structure for streamed chat completions, embedding OpenAI's

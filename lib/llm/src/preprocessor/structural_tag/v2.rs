@@ -15,15 +15,26 @@ use crate::protocols::openai::chat_completions::tool_parser_v2;
 
 use super::StructuralTagBuildRequest;
 
-#[derive(Clone, Copy)]
-pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
+#[derive(Clone)]
+pub(crate) enum StructuralTagBuilder {
+    Linked(&'static InnerBuilder),
+    Loaded(std::sync::Arc<dynamo_parsers_v2::unified::LoadedGuidance>),
+}
 
 impl StructuralTagBuilder {
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
         let family = crate::protocols::openai::chat_completions::unified_parser::canonical_family(
             parser_name,
         )?;
-        dynamo_parsers_v2::structural_tag_builder_for_family(family).map(Self)
+        let registration =
+            crate::protocols::openai::chat_completions::unified_parser::registration(family)?;
+        if let Some(builder) = registration.plugin_guidance() {
+            return Some(Self::Loaded(builder));
+        }
+        registration
+            .descriptor
+            .structural_tag_builder
+            .map(Self::Linked)
     }
 
     pub(super) fn build(
@@ -50,21 +61,43 @@ impl StructuralTagBuilder {
             super::ResolvedReasoningBoundary::Backend => ReasoningBoundaryV2::External,
         };
 
-        self.0.build_with_options(
-            &StructuralTagContext {
-                tool_choice,
-                tools: &tools,
-                parallel_tool_calls: request.parallel_tool_calls,
-                schema_mode,
-                structured_output_schema: request.structured_output_schema,
-                starts_in_reasoning: request.starts_in_reasoning,
-            },
-            &StructuralTagOptions {
-                exclude_special_tokens: request.exclude_special_tokens,
-                reasoning_boundary,
-                tool_arguments_any_order: request.tool_arguments_any_order,
-            },
-        )
+        let options = StructuralTagOptions {
+            exclude_special_tokens: request.exclude_special_tokens,
+            reasoning_boundary,
+            tool_arguments_any_order: request.tool_arguments_any_order,
+        };
+        match self {
+            Self::Linked(builder) => builder.build_with_options(
+                &StructuralTagContext {
+                    tool_choice,
+                    tools: &tools,
+                    parallel_tool_calls: request.parallel_tool_calls,
+                    schema_mode,
+                    structured_output_schema: request.structured_output_schema,
+                    starts_in_reasoning: request.starts_in_reasoning,
+                },
+                &options,
+            ),
+            Self::Loaded(build) => {
+                use dynamo_parsers_v2::unified::plugin::{GuidanceChoice, GuidanceRequest};
+                build(GuidanceRequest {
+                    tools,
+                    choice: match tool_choice {
+                        StructuralTagToolChoiceV2::None => GuidanceChoice::None,
+                        StructuralTagToolChoiceV2::Auto => GuidanceChoice::Auto,
+                        StructuralTagToolChoiceV2::Required => GuidanceChoice::Required,
+                        StructuralTagToolChoiceV2::Named(name) => {
+                            GuidanceChoice::Named(name.to_owned())
+                        }
+                    },
+                    parallel_tool_calls: request.parallel_tool_calls,
+                    schema_mode,
+                    structured_output_schema: request.structured_output_schema.cloned(),
+                    starts_in_reasoning: request.starts_in_reasoning,
+                    options,
+                })
+            }
+        }
     }
 }
 

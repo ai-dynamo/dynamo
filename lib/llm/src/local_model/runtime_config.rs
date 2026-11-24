@@ -311,6 +311,10 @@ pub struct ModelRuntimeConfig {
 
     pub reasoning_parser: Option<String>,
 
+    /// Canonical parser families and their native library identities, advertised by workers.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parser_plugin_identities: std::collections::BTreeMap<String, String>,
+
     /// Controls how historical `function.arguments` are presented to the MiniJinja
     /// chat template.  `JsonString` (default) preserves the raw JSON string, which
     /// is backward-compatible with all models.  `JsonObject` normalizes the string
@@ -472,6 +476,7 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            parser_plugin_identities: Default::default(),
             tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,

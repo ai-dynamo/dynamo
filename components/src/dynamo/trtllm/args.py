@@ -21,6 +21,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.parser_plugins import load_plugins_from_args
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
@@ -163,6 +164,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
+    load_plugins_from_args(argv)
     DynamoRuntimeArgGroup().add_arguments(parser)
     DynamoTrtllmArgGroup().add_arguments(parser)
 
