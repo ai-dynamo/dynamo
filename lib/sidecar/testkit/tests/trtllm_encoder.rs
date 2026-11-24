@@ -93,6 +93,8 @@ fn server_info(encoder: bool) -> pb::ServerInfo {
         capacity: Some(pb::DeploymentCapacity {
             kv_block_size: Some(32),
             total_kv_blocks: Some(1024),
+            max_running_requests: Some(2),
+            max_batched_tokens: Some(4096),
             ..Default::default()
         }),
         schema_release: include_str!("../../trtllm/proto/REVISION").trim().into(),
@@ -190,7 +192,11 @@ async fn encode_uses_unary_rpc_and_consumer_forwards_opaque_reference() {
         }],
     );
     let outputs = collect(&consumer, input, GenerateContext::new(context, None)).await;
-    assert!(outputs.iter().all(Result::is_ok), "{outputs:?}");
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert_eq!(
+        outputs[0].as_ref().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
     assert_eq!(
         handle.native_request().unwrap().encoded_media,
         Some(reference())
@@ -222,6 +228,18 @@ async fn encoder_rejects_wrong_schema_or_role_before_dispatch() {
         let error = fixture.engine().await.start(0).await.unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(fixture.encoder.encode.received_count(), 0);
+        fixture.shutdown().await;
+    }
+    for mode in [
+        DisaggregationMode::Aggregated,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        let (mut fixture, generate) = fixture(mode).await;
+        *fixture.discovery.server_info.lock().unwrap() = Some(server_info(true));
+        let error = fixture.engine().await.start(0).await.unwrap_err();
+        assert!(error.to_string().contains("encoder-only"), "{error}");
+        assert_eq!(generate.received_count(), 0);
         fixture.shutdown().await;
     }
 }
@@ -377,6 +395,27 @@ async fn reference_only_release_never_generates_or_aborts() {
 #[tokio::test]
 async fn pending_encode_emits_one_cancelled_terminal_on_stop_kill_and_shutdown() {
     bounded("pending Encode cancellation", async {
+        {
+            let (mut fixture, _) = fixture(DisaggregationMode::Encode).await;
+            let encoder = fixture.engine().await;
+            encoder.start(0).await.unwrap();
+            let context = mock_context();
+            context.stop_generating();
+            let outputs = collect(
+                &encoder,
+                image_request(),
+                GenerateContext::new(context, None),
+            )
+            .await;
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(
+                outputs[0].as_ref().unwrap().finish_reason,
+                Some(FinishReason::Cancelled)
+            );
+            assert_eq!(fixture.encoder.encode.received_count(), 0);
+            encoder.cleanup().await.unwrap();
+            fixture.shutdown().await;
+        }
         for cancellation in ["stop", "kill", "shutdown"] {
             let (mut fixture, generate) = fixture(DisaggregationMode::Encode).await;
             let encoder = fixture.engine().await;
@@ -494,36 +533,70 @@ async fn cancelled_terminal_releases_unobserved_reference() {
 }
 
 #[tokio::test]
-async fn invalid_encode_response_releases_its_reference() {
-    let (mut fixture, _) = fixture(DisaggregationMode::Encode).await;
-    *fixture.encoder.response.lock().unwrap() = Some(pb::EncodeResponse {
-        request_id: "wrong-request".into(),
-        encoded_media: Some(reference()),
-    });
-    let encoder = fixture.engine().await;
-    encoder.start(0).await.unwrap();
-    let release = fixture.encoder.release.next_request(RequestPlan::default());
-    let mut stream = encoder
-        .generate(image_request(), GenerateContext::new(mock_context(), None))
-        .await
-        .unwrap();
-    assert!(
-        bounded("invalid Encode", stream.next())
+async fn invalid_encode_response_releases_only_bounded_references() {
+    for (request_id, bytes, expected_release) in [
+        ("wrong-request", 3, true),
+        ("", 64 * 1024 + 1, false),
+        ("", 128 * 1024 + 1, false),
+    ] {
+        let (mut fixture, _) = fixture(DisaggregationMode::Encode).await;
+        let context = mock_context();
+        *fixture.encoder.response.lock().unwrap() = Some(pb::EncodeResponse {
+            request_id: if request_id.is_empty() {
+                context.id().into()
+            } else {
+                request_id.into()
+            },
+            encoded_media: Some(pb::EncodedMediaRef {
+                opaque_state: vec![1; bytes],
+            }),
+        });
+        let encoder = fixture.engine().await;
+        encoder.start(0).await.unwrap();
+        let release = fixture.encoder.release.next_request(RequestPlan::default());
+        let mut stream = encoder
+            .generate(image_request(), GenerateContext::new(context, None))
+            .await
+            .unwrap();
+        let error = bounded("invalid Encode reply", stream.next())
             .await
             .unwrap()
-            .unwrap_err()
-            .to_string()
-            .contains("different request_id")
-    );
-    drop(stream);
-    bounded("invalid reference cleanup", release.wait(Event::Dropped)).await;
-    assert_eq!(
-        release.native_request().unwrap().native.encoded_media,
-        Some(reference())
-    );
-    assert_eq!(fixture.encoder.release.received_count(), 1);
-    encoder.cleanup().await.unwrap();
-    fixture.shutdown().await;
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(if expected_release {
+                "request_id"
+            } else if bytes > 128 * 1024 {
+                "Encode"
+            } else {
+                "oversized"
+            }),
+            "{error}"
+        );
+        drop(stream);
+        if expected_release {
+            bounded(
+                "invalid Encode reference release",
+                release.wait(Event::Dropped),
+            )
+            .await;
+            assert_eq!(
+                release
+                    .native_request()
+                    .unwrap()
+                    .native
+                    .encoded_media
+                    .unwrap()
+                    .opaque_state,
+                vec![1; bytes]
+            );
+        }
+        assert_eq!(
+            fixture.encoder.release.received_count(),
+            usize::from(expected_release)
+        );
+        encoder.cleanup().await.unwrap();
+        fixture.shutdown().await;
+    }
 }
 
 #[tokio::test]
@@ -553,7 +626,35 @@ async fn probe_releases_reference_before_success_without_changing_normal_encode(
             );
         }
     }
-    assert_eq!(fixture.encoder.encode.received_count(), 2);
+    let held = fixture.encoder.release.next_request(RequestPlan {
+        open: OpenAction::Hold,
+        ..Default::default()
+    });
+    let mut input = image_request();
+    input.is_probe = true;
+    let context = mock_context();
+    let mut stream = encoder
+        .generate(input, GenerateContext::new(context.clone(), None))
+        .await
+        .unwrap();
+    let next = stream.next();
+    tokio::pin!(next);
+    bounded("probe release dispatch", async {
+        tokio::select! {
+            _ = held.wait(Event::Received) => {},
+            _ = &mut next => panic!("probe finished before release"),
+        }
+    })
+    .await;
+    context.stop_generating();
+    held.release();
+    let output = bounded("cancelled probe release", next)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Cancelled));
+    assert!(output.encoder_result.is_none());
+    assert_eq!(fixture.encoder.encode.received_count(), 3);
     assert_eq!(fixture.encoder.aborts.lock().unwrap().len(), 0);
     encoder.cleanup().await.unwrap();
     fixture.shutdown().await;
@@ -683,7 +784,10 @@ async fn encoder_leader_publishes_and_monitors_identity_without_kv_telemetry() {
         let encoder = fixture.engine().await;
         let config = encoder.start(0).await.unwrap();
         assert_eq!(config.runtime_data["trtllm_node"], node);
+        assert_eq!(config.runtime_data["grpc_service"], "openengine.v1.Encoder");
         let registration = config.llm.unwrap();
+        assert_eq!(registration.max_num_seqs, Some(2));
+        assert_eq!(registration.max_num_batched_tokens, Some(4096));
         assert_eq!(registration.data_parallel_size, Some(2));
         assert_eq!(registration.data_parallel_start_rank, Some(0));
         assert!(registration.kv_cache_block_size.is_none());

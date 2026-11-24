@@ -570,12 +570,18 @@ class EncoderImagePayload(ChatPayload):
             raise ValueError(f"Expected positive completion usage: {usage!r}")
         if usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]:
             raise ValueError(f"Inconsistent token usage: {usage!r}")
-        if (usage.get("prompt_tokens_details") or {}).get("cached_tokens") != 0:
+        if (usage.get("prompt_tokens_details") or {}).get("cached_tokens") not in (
+            None,
+            0,
+        ):
             raise ValueError(f"Expected uncached image request: {usage!r}")
         observation = {
             "request": {k: v for k, v in self.body.items() if k != "model"},
             "color": self.color,
-            "usage": usage,
+            "usage": {
+                name: usage[name]
+                for name in ("prompt_tokens", "completion_tokens", "total_tokens")
+            },
         }
         if not self.is_baseline:
             if observation != json.loads(baseline_path.read_text()):
@@ -605,9 +611,14 @@ class EncoderImagePayload(ChatPayload):
     def validate(self, response: Any, content: str) -> None:
         # Only generated-content failures may retry; stage and usage failures are final.
         super().validate(response, content)
-        colors = re.findall(r"\b(red|green)\b", content.lower())
-        if not colors or colors[0] != self.color:
-            raise AssertionError(content)
+        choice = response.json()["choices"][0]
+        answer = choice["message"].get("content")
+        if (
+            not isinstance(answer, str)
+            or set(re.findall(r"\b(red|green)\b", answer.lower())) != {self.color}
+            or choice.get("finish_reason") != "stop"
+        ):
+            raise AssertionError(choice)
 
 
 @dataclass

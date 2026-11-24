@@ -737,40 +737,33 @@ fn guided_decoding(
         ));
     }
 
+    use pb::guided_decoding::Guide;
+    let mut guides = Vec::new();
+    if let Some(json) = &guided.json {
+        guides.push(Guide::JsonSchema(json_guide(json)));
+    }
+    if let Some(regex) = &guided.regex {
+        guides.push(Guide::Regex(regex.clone()));
+    }
+    if let Some(grammar) = &guided.grammar {
+        guides.push(Guide::EbnfGrammar(grammar.clone()));
+    }
+    if let Some(tag) = &guided.structural_tag {
+        guides.push(Guide::StructuralTag(json_guide(tag)));
+    }
     if guided.choice.is_some() {
+        // `choice` is in the OpenEngine contract but the TensorRT-LLM server
+        // rejects it; fail fast with a clear message.
         return Err(client::invalid_argument(
             "guided decoding `choice` is not supported by the TensorRT-LLM OpenEngine server",
         ));
     }
-    if [
-        guided.json.is_some(),
-        guided.regex.is_some(),
-        guided.grammar.is_some(),
-        guided.structural_tag.is_some(),
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count()
-        > 1
-    {
+    if guides.len() > 1 {
         return Err(client::invalid_argument(
             "only one guided decoding constraint may be set",
         ));
     }
-    use pb::guided_decoding::Guide;
-    let guide = if let Some(json) = &guided.json {
-        Some(Guide::JsonSchema(json_guide(json)))
-    } else if let Some(regex) = &guided.regex {
-        Some(Guide::Regex(regex.clone()))
-    } else if let Some(grammar) = &guided.grammar {
-        Some(Guide::EbnfGrammar(grammar.clone()))
-    } else {
-        guided
-            .structural_tag
-            .as_ref()
-            .map(|tag| Guide::StructuralTag(json_guide(tag)))
-    };
-    Ok(guide.map(|guide| pb::GuidedDecoding {
+    Ok(guides.pop().map(|guide| pb::GuidedDecoding {
         guide: Some(guide),
         backend: String::new(),
     }))

@@ -9,7 +9,7 @@ use dynamo_backend_common::DynamoError;
 
 use crate::{client, proto as pb};
 
-const MAX_ENCODER_HANDOFF_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_ENCODER_HANDOFF_BYTES: usize = 64 * 1024;
 const MAX_ENCODED_HANDOFF_BYTES: usize = MAX_ENCODER_HANDOFF_BYTES.div_ceil(3) * 4;
 
 fn validate_encoder_handoff(handoff: &pb::EncodedMediaRef) -> Result<(), DynamoError> {
@@ -45,9 +45,9 @@ pub(crate) fn from_result(result: &serde_json::Value) -> Result<pb::EncodedMedia
 }
 
 pub(crate) fn to_result(
-    handoff: pb::EncodedMediaRef,
+    handoff: &pb::EncodedMediaRef,
 ) -> Result<serde_json::Map<String, serde_json::Value>, DynamoError> {
-    validate_encoder_handoff(&handoff)?;
+    validate_encoder_handoff(handoff)?;
     let mut result = serde_json::Map::new();
     result.insert(
         "opaque_state".into(),
@@ -65,7 +65,7 @@ mod tests {
         let native = pb::EncodedMediaRef {
             opaque_state: vec![0, 255, 19, 0],
         };
-        let wire = to_result(native.clone()).unwrap();
+        let wire = to_result(&native).unwrap();
         assert_eq!(
             from_result(&serde_json::Value::Object(wire)).unwrap(),
             native

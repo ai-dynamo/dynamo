@@ -137,7 +137,8 @@ impl TrtllmClient {
 
     fn encoder(&self) -> EncoderClient<Channel> {
         EncoderClient::new(self.pool.next_channel())
-            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            // Leave room for the request ID and protobuf envelope, not image payloads.
+            .max_decoding_message_size(crate::encoder_handoff::MAX_ENCODER_HANDOFF_BYTES * 2)
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 

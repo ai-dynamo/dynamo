@@ -16,7 +16,8 @@ if [[ "${1:-}" == "--help" ]]; then
     echo "Usage: MODEL=Qwen/Qwen3-VL-2B-Instruct $0"
     echo "Requires the TRT-LLM encoder-handoff build and matching native sidecar."
     echo "MODEL_REVISION: required full checkpoint commit SHA; NIXL/UCX must be available."
-    echo "EPD_MODE: e_pd (default) or e_p_d."
+    echo "EPD_MODE: e_pd (default) or e_p_d; current mode: ${EPD_MODE:-e_pd}."
+    echo "disagg_multimodal_e_p_d.sh is the fixed E/P/D entrypoint."
     echo "In E+P+D, image encoder handoffs stay on P; text can use conditional prefill bypass."
     echo "TRTLLM_PYTHON: engine Python."
     echo "EPD_ENCODER_ARGS/EPD_ENGINE_ARGS: optional native YAML/JSON options for E/consumers."
@@ -46,15 +47,22 @@ fi
 # Reuse the allocator's physical ID (including GPU/MIG UUIDs), rather than
 # replacing a managed allocation with physical defaults 0/1/2. Explicit role
 # overrides still allow operators to spread workers across several devices.
-DEFAULT_ENCODER_GPU=0
-DEFAULT_PREFILL_GPU=1
-DEFAULT_DECODE_GPU=2
-if [[ -v CUDA_VISIBLE_DEVICES ]]; then
-    DEFAULT_ENCODER_GPU=$(inherited_gpu_id)
-    DEFAULT_PREFILL_GPU="$DEFAULT_ENCODER_GPU"
-    DEFAULT_DECODE_GPU="$DEFAULT_ENCODER_GPU"
+role_gpu() {
+    if [[ -n "$1" ]]; then
+        printf '%s\n' "$1"
+    elif [[ -v CUDA_VISIBLE_DEVICES ]]; then
+        inherited_gpu_id
+    else
+        printf '%s\n' "$2"
+    fi
+}
+ENCODER_GPU=$(role_gpu "${ENCODER_GPU:-}" 0)
+if [[ "$EPD_MODE" == e_pd ]]; then
+    PD_GPU=$(role_gpu "${PD_GPU:-}" 0)
+else
+    PREFILL_GPU=$(role_gpu "${PREFILL_GPU:-}" 1)
+    DECODE_GPU=$(role_gpu "${DECODE_GPU:-}" 2)
 fi
-ENCODER_GPU="${ENCODER_GPU:-$DEFAULT_ENCODER_GPU}"
 ENCODER_BIND_HOST="${ENCODER_BIND_HOST:-127.0.0.1}"
 ENCODER_CONNECT_HOST="${ENCODER_CONNECT_HOST:-$ENCODER_BIND_HOST}"
 case "$ENCODER_CONNECT_HOST" in
@@ -86,9 +94,10 @@ from tensorrt_llm.grpc.openengine.bindings import (
     SCHEMA_RELEASE, encoding_pb2, openengine_pb2
 )
 expected = Path(os.environ["TRTLLM_EPD_SCHEMA_REVISION_FILE"]).read_text().strip()
-service = openengine_pb2.DESCRIPTOR.services_by_name["Encoder"]
+service = openengine_pb2.DESCRIPTOR.services_by_name.get("Encoder")
 if (
     SCHEMA_RELEASE != expected
+    or service is None
     or "Encode" not in service.methods_by_name
     or service.methods_by_name["Encode"].server_streaming
     or "ReleaseEncodedMedia" not in service.methods_by_name
@@ -121,21 +130,23 @@ export TRTLLM_OPENENGINE_ENCODER_MODEL_REVISION="$MODEL_REVISION"
 
 CONTEXT="${TRTLLM_CONTEXT_LENGTH:-4096}"
 trtllm_write_merged_config "${EPD_ENCODER_ARGS:-}" \
-    '{"mm_encoder_only":true,"max_batch_size":1,"dtype":"bfloat16"}' \
-    "$RUN_DIR/encode.yaml" "$TRTLLM_PYTHON"
-CONSUMER_OPTIONS='{"disable_mm_encoder":true,"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16"}'
+    '{"mm_encoder_only":true}' \
+    "$RUN_DIR/encode.yaml" "$TRTLLM_PYTHON" \
+    '{"max_batch_size":1,"dtype":"bfloat16"}'
+CONSUMER_OPTIONS='{"disable_mm_encoder":true}'
 CONSUMER_ARGS=()
-CONSUMER_GPU="${PD_GPU:-$DEFAULT_ENCODER_GPU}"
+CONSUMER_GPU="${PD_GPU:-}"
 TOPOLOGY="E+PD"
 if [[ "$EPD_MODE" == e_p_d ]]; then
-    CONSUMER_OPTIONS='{"disable_mm_encoder":true,"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16","cache_transceiver_config":{"backend":"NIXL"}}'
+    CONSUMER_OPTIONS='{"disable_mm_encoder":true,"cache_transceiver_config":{"backend":"NIXL"}}'
     CONSUMER_ARGS+=(--disaggregation-mode prefill)
-    CONSUMER_GPU="${PREFILL_GPU:-$DEFAULT_PREFILL_GPU}"
+    CONSUMER_GPU="$PREFILL_GPU"
     TOPOLOGY="E+P+D"
 fi
 CONSUMER_OVERRIDES=$(build_trtllm_override_args_with_mem --merge-with-json "$CONSUMER_OPTIONS")
 trtllm_write_merged_config "${EPD_ENGINE_ARGS:-}" "$CONSUMER_OVERRIDES" \
-    "$RUN_DIR/pd.yaml" "$TRTLLM_PYTHON"
+    "$RUN_DIR/pd.yaml" "$TRTLLM_PYTHON" \
+    '{"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16"}'
 print_launch_banner --multimodal "TensorRT-LLM sidecar image $TOPOLOGY" "$MODEL" "${DYN_HTTP_PORT:-8000}"
 python3 -m dynamo.frontend &
 TRTLLM_OPENENGINE_ENCODER_ENDPOINT="$(grpc_address "$ENCODER_ADVERTISE_HOST" "$ENCODER_GRPC_PORT")" \
@@ -152,7 +163,7 @@ DYN_SYSTEM_PORT="$CONSUMER_SYSTEM_PORT" "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:$PD_GRPC_PORT" --model-path "$MODEL_PATH" \
     --route-to-encoder --context-length "$CONTEXT" "${CONSUMER_ARGS[@]}" &
 if [[ "$EPD_MODE" == e_p_d ]]; then
-    CUDA_VISIBLE_DEVICES="${DECODE_GPU:-$DEFAULT_DECODE_GPU}" "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL_PATH" \
+    CUDA_VISIBLE_DEVICES="$DECODE_GPU" "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL_PATH" \
         --grpc --grpc-protocol openengine --host 127.0.0.1 --port "$DECODE_GRPC_PORT" \
         --served_model_name "$MODEL" --max_seq_len "$CONTEXT" --extra_llm_api_options "$RUN_DIR/pd.yaml" &
     DYN_SYSTEM_PORT="$DECODE_SYSTEM_PORT" "${SIDECAR_CMD[@]}" \

@@ -384,6 +384,11 @@ impl LLMEngine for TrtllmSidecarEngine {
             let routing_deadline = startup_deadline(self.transport.startup_deadline)?;
             let routing_discovery = async {
                 let server = client.server_info().await?.unwrap_or_default();
+                if !self.mode.is_encode() && server.engine_role == pb::EngineRole::Encoder as i32 {
+                    return Err(client::invalid_argument(
+                        "generation sidecars cannot use an encoder-only OpenEngine server",
+                    ));
+                }
                 if self.encoder_identity.get().is_some_and(|expected| {
                     expected.instance_id != server.instance_id
                         || expected.engine_role != server.engine_role
@@ -400,6 +405,13 @@ impl LLMEngine for TrtllmSidecarEngine {
                     ));
                 }
                 if self.mode.is_encode() {
+                    let capacity = server.capacity.as_ref();
+                    model.max_num_seqs = capacity
+                        .and_then(|capacity| capacity.max_running_requests)
+                        .filter(|value| *value > 0);
+                    model.max_num_batched_tokens = capacity
+                        .and_then(|capacity| capacity.max_batched_tokens)
+                        .filter(|value| *value > 0);
                     let parallelism = server.parallelism.as_ref();
                     let dp_size = parallelism
                         .and_then(|parallelism| parallelism.data_parallel_size)
@@ -509,6 +521,12 @@ impl LLMEngine for TrtllmSidecarEngine {
             "TensorRT-LLM gRPC is ready"
         );
         let mut config = model.engine_config();
+        if self.mode.is_encode() {
+            config.runtime_data.insert(
+                "grpc_service".into(),
+                serde_json::json!("openengine.v1.Encoder"),
+            );
+        }
         config.served_model_name = Some(info.served_model_name.clone());
         if self.route_to_encoder {
             config.runtime_data.insert(
@@ -607,9 +625,6 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
-        if self.mode.is_encode() && self.started.initialized() {
-            return Ok(Vec::new());
-        }
         let routing = self
             .routing
             .get()
@@ -622,9 +637,6 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
-        if self.mode.is_encode() && self.started.initialized() {
-            return Ok(MetricsBindings::default());
-        }
         let routing = self
             .routing
             .get()

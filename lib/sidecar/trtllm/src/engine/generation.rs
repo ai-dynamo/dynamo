@@ -9,7 +9,6 @@ use dynamo_backend_common::{
     AsyncEngineContext, DynamoError, GenerateContext, LLMEngineOutput, LLMEngineOutputExt,
     PreprocessedRequest, usage,
 };
-use dynamo_llm::protocols::common::preprocessor::RELEASE_ENCODER_RESULT;
 use futures::stream::BoxStream;
 use tracing::Instrument;
 
@@ -50,7 +49,7 @@ impl Drop for EncoderHandoffCleanup {
             runtime.spawn(
                 async move {
                     if let Err(error) = client.release_encoder_handoff(handoff).await {
-                        tracing::warn!(%error, "Unable to release encoder handoff");
+                        tracing::warn!(error = %error.to_string().escape_debug(), "Unable to release encoder handoff");
                     }
                 }
                 .in_current_span(),
@@ -79,19 +78,10 @@ impl TrtllmSidecarEngine {
             .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let release_requested = request
-            .extra_args
-            .as_ref()
-            .and_then(|extra| extra.get(RELEASE_ENCODER_RESULT))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
-        let is_release = release_requested && request.is_encoder_result_release();
-        if release_requested && (!self.mode.is_encode() || !is_release) {
-            return Err(client::invalid_argument(
-                "encoder handoff release requires an encode worker and a reference-only request",
-            ));
-        }
-        if is_release && let Some(result) = request.encoder_result.as_ref() {
+        if self.mode.is_encode()
+            && request.is_encoder_result_release()
+            && let Some(result) = request.encoder_result.as_ref()
+        {
             client
                 .release_encoder_handoff(crate::encoder_handoff::from_result(result)?)
                 .await?;
@@ -112,8 +102,14 @@ impl TrtllmSidecarEngine {
             validate_remote_media_urls(&request, self.allow_remote_media_urls)?;
             let request = build_encode_request(request, &request_id, &model, Some(limits))?;
             return Ok(Box::pin(async_stream::stream! {
+                if ctx.is_stopped() || shutdown.is_cancelled() {
+                    yield Ok(LLMEngineOutput::cancelled());
+                    return;
+                }
                 let encoded = tokio::select! {
                     biased;
+                    // Retain an already-ready reference even when cancellation is ready too.
+                    encoded = client.encode(request) => encoded,
                     _ = ctx.stopped() => {
                         yield Ok(LLMEngineOutput::cancelled());
                         return;
@@ -122,7 +118,6 @@ impl TrtllmSidecarEngine {
                         yield Ok(LLMEngineOutput::cancelled());
                         return;
                     },
-                    encoded = client.encode(request) => encoded,
                 };
                 let response = match encoded {
                     Ok(response) => response,
@@ -132,25 +127,33 @@ impl TrtllmSidecarEngine {
                     yield Err(client::protocol_error("Encode returned no encoded_media reference"));
                     return;
                 };
+                let result = match crate::encoder_handoff::to_result(&handoff) {
+                    Ok(result) => result,
+                    Err(error) => { yield Err(client::protocol_error(error.to_string())); return; }
+                };
                 let mut cleanup = EncoderHandoffCleanup {
                     client,
-                    handoff: Some(handoff.clone()),
+                    handoff: Some(handoff),
                     context: None,
                 };
                 if response.request_id != request_id {
                     yield Err(client::protocol_error("Encode returned a different request_id"));
                     return;
                 }
-                let result = match crate::encoder_handoff::to_result(handoff) {
-                    Ok(result) => result,
-                    Err(error) => { yield Err(client::protocol_error(error.to_string())); return; }
-                };
+                if ctx.is_stopped() || shutdown.is_cancelled() {
+                    yield Ok(LLMEngineOutput::cancelled());
+                    return;
+                }
                 let output = if probe {
                     if let Err(error) = cleanup.release().await {
                         yield Err(error);
                         return;
                     }
-                    LLMEngineOutput { finish_reason: Some(dynamo_backend_common::FinishReason::Stop), ..Default::default() }
+                    if ctx.is_stopped() || shutdown.is_cancelled() {
+                        LLMEngineOutput::cancelled()
+                    } else {
+                        LLMEngineOutput { finish_reason: Some(dynamo_backend_common::FinishReason::Stop), ..Default::default() }
+                    }
                 } else {
                     let mut output = LLMEngineOutput::encode_terminal(result);
                     output.extra_args = Some(Box::new(serde_json::json!({
@@ -165,11 +168,10 @@ impl TrtllmSidecarEngine {
         // A single-rank engine needs no hint, even when it advertises the
         // capability. Suppress it and the associated anonymous conversation ID
         // to avoid retaining one-shot per-conversation cache state.
-        let use_dp_targeting = !self.mode.is_encode()
-            && self
-                .routing
-                .get()
-                .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
+        let use_dp_targeting = self
+            .routing
+            .get()
+            .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
         let target_dp_rank = request.routing.as_ref().and_then(|routing| {
             if self.mode.is_prefill() {
                 routing.prefill_dp_rank.or(routing.dp_rank)

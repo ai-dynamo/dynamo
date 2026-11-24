@@ -33,6 +33,7 @@ from tests.utils.multimodal import (
     make_sidecar_image_identity_payload,
     make_sidecar_media_payload,
 )
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     disaggregated_kv_routing_payload,
@@ -469,6 +470,7 @@ sidecar_configs = {
             env={
                 **TRTLLM_MULTI_ENGINE_ENV,
                 "MODEL_REVISION": _MEDIA_MODELS["vision"][1],
+                "EPD_MODE": topology,
                 "TRTLLM_CONTEXT_LENGTH": "2048",
                 "DYN_REQUEST_PLANE": "tcp",
                 "DYN_EVENT_PLANE": "zmq",
@@ -943,6 +945,11 @@ def test_serve_deployment(
         )
         with monkeypatch.context() as baseline_env:
             baseline_env.setenv("MODEL", model_path)
+            baseline_env.setenv("DYN_NAMESPACE", f"baseline-{generate_random_suffix()}")
+            baseline_env.setenv(
+                "DYN_TEST_OUTPUT_PATH",
+                str(pathlib.Path(resolve_test_output_path(".")) / "baseline"),
+            )
             for name in (
                 "TRTLLM_OPENENGINE_ENCODER_TRANSFER",
                 "TRTLLM_OPENENGINE_ENCODER_MODEL_REVISION",

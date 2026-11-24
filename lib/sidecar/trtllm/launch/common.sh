@@ -41,7 +41,8 @@ TRTLLM_OPENENGINE_PROTOBUF_PYI_VERSION="36.2.0.1.20260730172104+768a93c7b44e"
 # site-packages is read-only, and install them yourself.
 trtllm_ensure_openengine_bindings() {
     local python="$1"
-    if "$python" -c "import openengine.v1.openengine_pb2" >/dev/null 2>&1; then
+    if "$python" -c "from tensorrt_llm.grpc.openengine.bindings import openengine_pb2" >/dev/null 2>&1 \
+        || "$python" -c "import openengine.v1.openengine_pb2" >/dev/null 2>&1; then
         return 0
     fi
     if [[ -n "${TRTLLM_SKIP_BINDINGS_INSTALL:-}" ]]; then

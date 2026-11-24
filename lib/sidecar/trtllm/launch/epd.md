@@ -122,7 +122,9 @@ allowing text requests to use conditional prefill bypass.
 Set `TRTLLM_OPENENGINE_ENCODER_TRANSFER=nixl` and
 `TRTLLM_OPENENGINE_ENCODER_MODEL_REVISION` to the immutable revision on E and its
 consumers. Encoder control and native transfer endpoints must be reachable across
-hosts. A shared model-cache filesystem is optional; every engine must have the
+hosts. The OpenEngine control listener is unauthenticated; restrict it to the
+intended peers using a firewall, network policy, or authenticated tunnel.
+A shared model-cache filesystem is optional; every engine must have the
 matching checkpoint locally.
 
 ## Upstream-nightly CI
