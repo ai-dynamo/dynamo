@@ -79,6 +79,7 @@ The original Prometheus type word travels with each metric in `metric.metadata` 
 
 - A histogram or summary with no `_count` sample is dropped: its buckets and total cannot be reconciled, and a quantile computed from it would be meaningless.
 - A `NaN` value is reported as no-recorded-value with the value left unset, rather than as a raw `NaN` that some backends reject.
+- If two metric families share a name but declare different help or type, the first one merged is kept and the later one is dropped, from both `/metrics` and OTLP. Dynamo's own families are merged from the runtime's root registry first, then from the registries attached to it, in the order they were attached. Engine families are merged last and only on the OTLP path, since `/metrics` appends engine text verbatim. `dynamo_metrics_merge_conflicts_total` counts each drop, and a one-time `skipping metric family` warning names the family and both declarations.
 - If a collector responds with `partial_success`, the count of rejected data points is logged. A successful response is not assumed to mean the data was kept.
 
 ### Known gaps
