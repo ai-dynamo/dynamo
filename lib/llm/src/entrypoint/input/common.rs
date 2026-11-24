@@ -494,6 +494,7 @@ impl PreprocessedRouting {
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         metrics: Arc<Metrics>,
+        requires_continuation: bool,
     ) -> anyhow::Result<
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     > {
@@ -501,8 +502,12 @@ impl PreprocessedRouting {
             SingleIn<PreprocessedRequest>,
             ManyOut<Annotated<LLMEngineOutput>>,
         >::new();
-        let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
-            .into_operator_for::<LLMEngineOutput>();
+        let migration = if requires_continuation {
+            Migration::requiring_continuation(card, migration_limit, migration_max_seq_len, metrics)
+        } else {
+            Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
+        }
+        .into_operator_for::<LLMEngineOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());

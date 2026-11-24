@@ -519,7 +519,6 @@ impl GenerateFormat for VllmFormat {
                 .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
                     request,
-                    migration: continuation.as_ref().map(|_| ()).map_err(Clone::clone),
                     exchange: Box::new(VllmExchange {
                         response,
                         continuation,
@@ -555,6 +554,10 @@ fn to_client(response: impl serde::Serialize) -> Result<Value, DynamoError> {
 }
 
 impl GenerateExchange for VllmExchange {
+    fn migration(&self) -> Result<(), String> {
+        self.continuation.as_ref().map(|_| ()).map_err(Clone::clone)
+    }
+
     fn chunk(
         &mut self,
         output: LLMEngineOutput,

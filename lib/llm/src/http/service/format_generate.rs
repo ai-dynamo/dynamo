@@ -36,6 +36,7 @@ use super::{RouteDoc, service_v2};
 use crate::generate_format::{
     Bound, ClientError, ClientRequest, ErrorPhase, GenerateExchange, Opened, SharedFormat, Worker,
 };
+use crate::migration::RequestContinuation;
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
@@ -49,7 +50,21 @@ use dynamo_http_server::request::get_body_limit;
 pub(super) const DEFAULT_PATH: &str = "/generate";
 
 /// Shared with migration, which asks the exchange how to continue a request.
+/// `RequestContinuation` is `Sync` and `GenerateExchange` is only `Send`, so
+/// the exchange needs a lock. The lock is never contended: `RetryManager`
+/// runs inside the same `stream.next()` that `feed` follows, and nothing holds
+/// it across an `.await`.
 type SharedExchange = Arc<Mutex<Box<dyn GenerateExchange>>>;
+
+impl RequestContinuation for Mutex<Box<dyn GenerateExchange>> {
+    fn next_attempt(
+        &self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<(), String> {
+        self.lock().migrate(delivered_tokens, request)
+    }
+}
 
 struct GenerateRoute {
     state: Arc<service_v2::State>,
@@ -368,15 +383,18 @@ async fn handler(
     };
     let Bound {
         mut request,
-        migration,
         exchange,
     } = match bind(&worker) {
         Ok(bound) => bound,
         Err(error) => return reject(client_error(format, error)),
     };
     request.tracker = Some(tracker.clone());
+    let migration = exchange.migration();
     let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
-    request.continuation = Some(migration.map(|()| exchange.clone() as _));
+    match migration {
+        Ok(()) => request.continuation = Some(exchange.clone() as _),
+        Err(reason) => tracing::debug!(%reason, "generate request does not migrate"),
+    }
 
     let context: Context<PreprocessedRequest> =
         match preprocessed_context_from_headers(request, request_id.clone(), &headers) {

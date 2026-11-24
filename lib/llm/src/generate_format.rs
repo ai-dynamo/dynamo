@@ -19,18 +19,13 @@ use axum::extract::rejection::{BytesRejection, JsonRejection, MissingJsonContent
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use dynamo_runtime::error::DynamoError;
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::migration::RequestContinuation;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 
 mod error;
 pub use error::{ErrorPhase, WorkerError};
 
-/// Runtime-config key under which a worker advertises engine facts its
-/// format needs, such as engine-side defaults. Absent on older workers.
-pub const ENGINE_INFO_KEY: &str = "generate_engine_info";
 /// Names the format the frontend serves.
 pub const FORMAT_ENV: &str = "DYN_GENERATE_FORMAT";
 
@@ -127,7 +122,9 @@ impl From<JsonRejection> for ClientError {
 /// The worker set chosen to serve a request.
 pub struct Worker<'a> {
     pub model: &'a str,
-    /// What it advertises under [`ENGINE_INFO_KEY`]; `Null` when nothing.
+    /// What it advertises under
+    /// [`crate::local_model::runtime_config::GENERATE_ENGINE_INFO_RUNTIME_KEY`];
+    /// `Null` when nothing.
     pub engine_info: &'a Value,
     pub kv_cache_block_size: u32,
     pub lora_name: Option<&'a str>,
@@ -149,10 +146,9 @@ pub struct Opened {
 /// Build the request and exchange once the worker set is known. Consumed once.
 pub type Bind = Box<dyn FnOnce(&Worker<'_>) -> Result<Bound, ClientError> + Send>;
 
-/// A request ready for dispatch and its migration admission decision.
+/// A request ready for dispatch and its response exchange.
 pub struct Bound {
     pub request: PreprocessedRequest,
-    pub migration: Result<(), String>,
     pub exchange: Box<dyn GenerateExchange>,
 }
 
@@ -170,28 +166,35 @@ pub trait GenerateExchange: Send {
         emit: &mut dyn FnMut(&Value),
     ) -> Result<(), DynamoError>;
 
+    /// `Ok` when a failed attempt may continue on another worker; `Err` says
+    /// why not. Asked once, before dispatch. The default refuses.
+    ///
+    /// The migration guards in Dynamo read only canonical fields. A format
+    /// that keeps structured output or other engine state in its native body
+    /// must refuse those requests here.
+    fn migration(&self) -> Result<(), String> {
+        Err("this format does not migrate".to_string())
+    }
+
     /// Continue after a failed attempt, atomically: update the engine-native
     /// body of `request`, whose canonical prompt and budgets Dynamo has already
     /// rebased onto the `delivered_tokens`, and rebase this exchange so later
-    /// outputs continue the earlier ones.
+    /// outputs continue the earlier ones. Called only when [`Self::migration`]
+    /// is `Ok`.
+    ///
+    /// After a failed dispatch, Dynamo calls this again with the same
+    /// `delivered_tokens` on a `request` the previous call already updated. So
+    /// derive the native body from the original request, not from `request`.
     fn migrate(
         &mut self,
-        delivered_tokens: usize,
-        request: &mut PreprocessedRequest,
-    ) -> Result<(), String>;
+        _delivered_tokens: usize,
+        _request: &mut PreprocessedRequest,
+    ) -> Result<(), String> {
+        Err("this format does not migrate".to_string())
+    }
 
     /// Unary: the client response. Streaming: an optional final chunk.
     fn finish(&mut self) -> Result<Option<Value>, DynamoError>;
-}
-
-impl RequestContinuation for Mutex<Box<dyn GenerateExchange>> {
-    fn next_attempt(
-        &self,
-        delivered_tokens: usize,
-        request: &mut PreprocessedRequest,
-    ) -> Result<(), String> {
-        self.lock().migrate(delivered_tokens, request)
-    }
 }
 
 /// One client-facing `/generate` wire format, linked into the frontend.
@@ -337,10 +340,6 @@ pub(crate) mod test_formats {
             Ok(())
         }
 
-        fn migrate(&mut self, _: usize, _: &mut PreprocessedRequest) -> Result<(), String> {
-            Ok(())
-        }
-
         fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
             Ok(None)
         }
@@ -400,7 +399,6 @@ pub(crate) mod test_formats {
                         .map_err(|error| ClientError::new(error.to_string()))?;
                     Ok(Bound {
                         request,
-                        migration: Err("the test format does not migrate".to_string()),
                         exchange: Box::new(PassthroughExchange),
                     })
                 }),
@@ -459,7 +457,6 @@ pub(crate) mod test_formats {
                         .map_err(|error| ClientError::new(error.to_string()))?;
                     Ok(Bound {
                         request,
-                        migration: Err("the test format does not migrate".to_string()),
                         exchange: Box::new(PassthroughExchange),
                     })
                 }),

@@ -187,7 +187,8 @@ async fn a_vllm_request_migrated_mid_generation_returns_what_an_unbroken_one_doe
         });
         let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
         let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
-        let migration = dynamo_llm::migration::Migration::from_mdc(&card, 3, None, metrics);
+        let migration =
+            dynamo_llm::migration::Migration::requiring_continuation(&card, 3, None, metrics);
         let response = respond(
             state(),
             Arc::new(dynamo_vllm_generate::VllmFormat),
@@ -240,7 +241,8 @@ async fn a_vllm_stream_migrated_mid_generation_streams_what_an_unbroken_one_does
         });
         let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
         let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
-        let migration = dynamo_llm::migration::Migration::from_mdc(&card, 3, None, metrics);
+        let migration =
+            dynamo_llm::migration::Migration::requiring_continuation(&card, 3, None, metrics);
         let response = respond(
             state(),
             Arc::new(dynamo_vllm_generate::VllmFormat),
@@ -399,8 +401,8 @@ async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
         headers.insert("x-data-parallel-rank", "3".parse().unwrap());
         let body = serde_json::json!({
             "token_ids": [1], "sampling_params": if missing_logprobs {
-                serde_json::json!({"logprobs": 1})
-            } else { serde_json::json!({}) },
+                serde_json::json!({"max_tokens": 4, "logprobs": 1})
+            } else { serde_json::json!({"max_tokens": 4}) },
             "request_id": "body-id", "priority": -7,
         })
         .to_string();
@@ -413,7 +415,7 @@ async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
             .unwrap();
         assert_eq!(opened.request_id, "header-id");
         let bound = (opened.bind)(&dynamo_sglang_generate::testkit::worker()).unwrap();
-        assert!(bound.migration.is_ok());
+        assert!(bound.exchange.migration().is_ok());
         let hints = bound.request.routing.as_ref().unwrap();
         assert_eq!(hints.dp_rank, Some(3));
         assert_eq!(hints.priority, Some(7));
