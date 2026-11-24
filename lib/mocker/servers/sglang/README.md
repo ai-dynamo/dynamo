@@ -11,8 +11,8 @@ service of SGLang's Rust server. It runs on CPU using the Dynamo Mocker
 scheduler, so sidecar discovery, streaming, cancellation, capacity, and
 disaggregated handoff behavior can be tested without SGLang, a model, or a GPU.
 
-The mock server temporarily imports the generated contract from
-`dynamo_sglang_sidecar::proto`. Only tokenized `Generate`, `Abort`, health, and
+The mock server takes the contract from the `sglang-api-types` crate. Only
+tokenized `Generate`, `Abort`, health, and
 discovery RPCs are implemented; unrelated SGLang RPCs, including `Detokenize`
 and the HiCache storage RPCs, return `Unimplemented`.
 

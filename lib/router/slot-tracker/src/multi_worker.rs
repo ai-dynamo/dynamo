@@ -24,6 +24,7 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::prompt_registry::{PromptRegistry, WorkerLoadReader, WorkerLoadSnapshot};
+use super::replica_sync::PendingWorkerEvents;
 use super::request_maps::{RequestBooking, RequestIndex};
 use super::sharded_lock::ShardedRwLock;
 use super::single::{
@@ -383,6 +384,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     pub(super) replica_sync: bool,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     replica_request_lease_observer: OnceLock<Arc<dyn ReplicaRequestLeaseObserver>>,
+    pub(super) pending_worker_events: Mutex<PendingWorkerEvents>,
     worker_type: &'static str,
 }
 
@@ -493,6 +495,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             replica_sync,
             replica_worker_policy: options.replica_worker_policy,
             replica_request_lease_observer: OnceLock::new(),
+            pending_worker_events: Mutex::default(),
             worker_type,
         }
     }
@@ -843,6 +846,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 prefill_load_hint: req.prefill_load_hint,
             },
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: req.lora_name.clone(),
         });
         let attempt_id = self.add_request_local(req, decay_now, lazily_register_worker)?;
@@ -897,6 +901,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker: booking.worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: self.request_index.lora_for(&booking.request_id),
         });
         true
@@ -950,6 +955,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: ActiveSequenceEventData::Free,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: removed.lora_name,
         });
         Ok(LifecycleMutationOutcome::Applied)
@@ -1060,6 +1066,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 worker,
                 data: ActiveSequenceEventData::Free,
                 router_id: self.router_id,
+                origin: Default::default(),
                 lora_name: removed.lora_name,
             });
         }
@@ -1167,6 +1174,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name,
         });
         Ok(completion)
@@ -1186,6 +1194,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: self.router_id,
+            origin: Default::default(),
             lora_name: self.request_index.lora_for(request_id),
         });
     }
@@ -2128,6 +2137,7 @@ mod tests {
                 prefill_load_hint: tracking_hint(12),
             },
             router_id: 99,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -2141,6 +2151,7 @@ mod tests {
             worker: payload_worker,
             data: ActiveSequenceEventData::Free,
             router_id: 99,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -2154,6 +2165,7 @@ mod tests {
             worker: payload_worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: 99,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -3482,6 +3494,68 @@ mod tests {
         assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
+    fn from_worker(mut event: ActiveSequenceEvent) -> ActiveSequenceEvent {
+        event.origin = crate::wire::ActiveSequenceEventOrigin::Worker;
+        event
+    }
+
+    fn load_of(
+        sequences: &ActiveSequencesMultiWorker<RecordingPublisher>,
+        worker: WorkerWithDpRank,
+    ) -> (usize, usize, usize) {
+        let now = Instant::now();
+        (
+            sequences.active_request_counts()[&worker],
+            sequences.active_blocks()[&worker],
+            sequences.active_tokens(now)[&worker],
+        )
+    }
+
+    #[test]
+    fn worker_events_before_admission_are_applied() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let other_worker = WorkerWithDpRank::new(2, 0);
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1)), (2, (0, 1))]));
+
+        sequences.apply_replica_batch(vec![
+            from_worker(replica_free("freed", worker)),
+            from_worker(replica_mark("prefilled-then-freed", worker)),
+            from_worker(replica_free("prefilled-then-freed", worker)),
+            from_worker(replica_mark("prefilled", worker)),
+            // Only a worker's own events, for its own requests, are held.
+            replica_free("router-freed", worker),
+            from_worker(replica_free("other-worker", other_worker)),
+        ]);
+        sequences.apply_replica_batch(vec![
+            replica_add("freed", worker, vec![1, 2, 3]),
+            replica_add("prefilled-then-freed", worker, vec![13, 14, 15]),
+            replica_add("prefilled", worker, vec![4, 5, 6]),
+            replica_add("router-freed", worker, vec![7, 8, 9]),
+            replica_add("other-worker", worker, vec![10, 11, 12]),
+        ]);
+
+        assert_eq!(sequences.request_index.worker_for("freed"), None);
+        assert_eq!(
+            sequences.request_index.worker_for("prefilled-then-freed"),
+            None
+        );
+        // "prefilled" books decoding; the other two book prefill load.
+        assert_eq!(load_of(&sequences, worker), (3, 9, 24));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_worker_events_expire() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        for event in [replica_free("stale", worker), replica_mark("stale", worker)] {
+            let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+            sequences.apply_replica_batch(vec![from_worker(event)]);
+            tokio::time::advance(Duration::from_secs(31)).await;
+            sequences.apply_replica_batch(vec![replica_add("stale", worker, vec![1, 2, 3])]);
+
+            assert_eq!(load_of(&sequences, worker), (1, 3, 12));
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn replica_sync_free_rejects_stale_worker() {
         let worker = WorkerWithDpRank::new(1, 0);
@@ -3642,6 +3716,7 @@ mod tests {
                         prefill_load_hint: tracking_hint(12),
                     },
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 }),
                 Ok(ActiveSequenceEvent {
@@ -3649,6 +3724,7 @@ mod tests {
                     worker,
                     data: ActiveSequenceEventData::Free,
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 }),
             ]),
@@ -3692,6 +3768,7 @@ mod tests {
                                 prefill_load_hint: modeled_hint(100, 10),
                             },
                             router_id: 99,
+                            origin: Default::default(),
                             lora_name: None,
                         }),
                         Ok(ActiveSequenceEvent {
@@ -3704,6 +3781,7 @@ mod tests {
                                 prefill_load_hint: modeled_hint(40, 4),
                             },
                             router_id: 99,
+                            origin: Default::default(),
                             lora_name: None,
                         }),
                     ]),
@@ -3731,6 +3809,7 @@ mod tests {
                         worker,
                         data: ActiveSequenceEventData::Free,
                         router_id: 99,
+                        origin: Default::default(),
                         lora_name: None,
                     })]),
                 },
@@ -3770,6 +3849,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                 },
                 router_id: 99,
+                origin: Default::default(),
                 lora_name: None,
             })]),
         };
