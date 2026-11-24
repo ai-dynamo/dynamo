@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dynamo_admission::host::RequestProgressUpdater;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -190,6 +191,12 @@ pub struct RequestTracker {
     /// `nvext.extra_fields=["prompt_token_ids"]` response request.
     /// First-write-wins because one response generator owns one prompt.
     prompt_token_ids: OnceLock<Vec<u32>>,
+
+    /// The request classifier's write handle for this request, left here by the router at
+    /// each dispatch so the frontend can record how the reply ended: tool-call parsing
+    /// decides that, sometimes after the router's response stream is finished. The latest
+    /// dispatch wins because a retry can begin a new classifier lifecycle.
+    classifier_progress: Mutex<Option<RequestProgressUpdater>>,
 }
 
 /// Data a standalone router (running the `PushRouter` bindings in its own process)
@@ -264,6 +271,7 @@ impl RequestTracker {
             external_timing: OnceLock::new(),
             external_query_token_ids: OnceLock::new(),
             prompt_token_ids: OnceLock::new(),
+            classifier_progress: Mutex::new(None),
         }
     }
 
@@ -566,6 +574,16 @@ impl RequestTracker {
     /// Get the router scheduler queue depth recorded at routing time.
     pub fn router_queue_depth(&self) -> Option<usize> {
         self.router_queue_depth.get().copied()
+    }
+
+    /// Leave the request classifier's write handle, replacing an earlier dispatch's.
+    pub(crate) fn set_classifier_progress(&self, progress: RequestProgressUpdater) {
+        *self.classifier_progress.lock() = Some(progress);
+    }
+
+    /// The request classifier's write handle from the latest dispatch, if any.
+    pub(crate) fn classifier_progress(&self) -> Option<RequestProgressUpdater> {
+        self.classifier_progress.lock().clone()
     }
 
     /// Record when the prefill result was received by the router.
