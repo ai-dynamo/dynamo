@@ -181,8 +181,8 @@ _SGLANG_DSA_SHARDED_DCP_MODULE = "sglang.srt.layers.attention.dsa.dsa_dcp_sharde
 
 @lru_cache(maxsize=2)
 def _sglang_has_dsa_dcp_module(module_name: str) -> bool:
-    # The SGLang 0.5.19 XPU pin predates DSA DCP. Remove this probe when
-    # every supported build includes the DSA DCP implementation.
+    # SGLang 0.5.23 lacks the sharded DSA DCP module. Remove this probe when
+    # min supported version is 1.0.0+.
     try:
         return importlib.util.find_spec(module_name) is not None
     except (ImportError, ValueError):
@@ -343,6 +343,42 @@ async def mm_encode(
     )
 
 
+def import_qwen_vl_media_module() -> ModuleType | None:
+    """Return SGLang's Qwen VL media-processing module, or None if absent."""
+    try:
+        from sglang.srt.multimodal import qwen_vl_media_processing
+
+        return qwen_vl_media_processing
+    except ImportError:
+        pass
+    try:
+        # Fallback for SGLang 0.5.23, before sglang#46413 moved the Qwen VL
+        # media constants. Remove when min supported version is 1.0.0+.
+        from sglang.srt.multimodal.processors import qwen_vl
+
+        return qwen_vl
+    except ImportError:
+        return None
+
+
+def get_tokenizer_worker_class(server_args: Any) -> type[Any]:
+    """Return the tokenizer class a gateway child registers with the router.
+
+    Deferred: the tokenizer manager imports SGLang's runtime stack.
+    """
+    try:
+        from sglang.srt.managers.tokenizer_manager import (
+            get_tokenizer_worker_class as _get_class,
+        )
+    except ImportError:
+        # Fallback for SGLang 0.5.23, before sglang#48119 folded TokenizerWorker
+        # into TokenizerManager. Remove when min supported version is 1.0.0+.
+        from sglang.srt.managers.multi_tokenizer_mixin import (
+            get_tokenizer_worker_class as _get_class,
+        )
+    return _get_class(server_args)
+
+
 @lru_cache(maxsize=1)
 def _warn_require_reasoning_unsupported() -> None:
     logger.warning(
@@ -446,8 +482,9 @@ def sglang_has_wide_mm_pad_values() -> bool:
 
     Both caller hashes and engine-owned identities produce wide values.
     """
-    # Compatibility with SGLang <= 0.5.22. Remove the probe once the minimum
-    # supported CUDA and XPU SGLang versions are both 0.5.23+.
+    # Every supported pin (CUDA 1.0.0/0.5.23, XPU 0.5.23) has wide pads. The
+    # probe stays while callers keep the scalar-pad hash-forwarding path;
+    # remove both together.
     try:
         # Deferred: schedule_batch imports torch and other SGLang runtime modules.
         from sglang.srt.managers.schedule_batch import MultimodalDataItem
@@ -493,10 +530,11 @@ def supports_external_mm_hashes(engine: Any) -> bool:
 
     # Deferred: these modules import torch and other SGLang runtime modules.
     # SGLang moved this class to req_types and dropped the schedule_batch
-    # re-export (sglang#48087); keep the old location for older releases.
+    # re-export (sglang#48087).
     try:
         from sglang.srt.managers.req_types import MultimodalProcessorOutput
     except ImportError:
+        # Fallback for SGLang 0.5.23. Remove when min supported version is 1.0.0+.
         from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
 
     async def tokenize_with_consistent_mm_padding(obj):
@@ -655,18 +693,13 @@ def diffusers_text_encoder_precision_kwargs(kwargs: dict[str, Any]) -> dict[str,
     longer reproduces the error in the unpatched auto-tuner.
     Dynamo's diffusion callers do not pass component precision overrides.
     """
-    try:
-        # Keep multimodal imports out of LLM workers, which also use this module.
-        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
-        from sglang.multimodal_gen.configs.pipeline_configs.diffusers_generic import (
-            DiffusersGenericPipelineConfig,
-        )
-        from sglang.multimodal_gen.runtime.loader.utils import (
-            checkpoint_component_sizes,
-        )
-    except ImportError:
-        # SGLang 0.5.22 has no sizing helper. Remove when minimum is 0.5.23+.
-        return kwargs
+    # Keep multimodal imports out of LLM workers, which also use this module.
+    from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+    from sglang.multimodal_gen.configs.pipeline_configs.diffusers_generic import (
+        DiffusersGenericPipelineConfig,
+    )
+    from sglang.multimodal_gen.runtime.loader.utils import checkpoint_component_sizes
+
     # Config resolution can fetch model_index.json for already cached weights.
     pipeline_config = PipelineConfig.from_kwargs(dict(kwargs))
     if not isinstance(pipeline_config, DiffusersGenericPipelineConfig):
@@ -704,6 +737,8 @@ __all__ = [
     "get_encoder_preprocessor_modules",
     "get_mm_encoder_class",
     "get_sglang_model_config",
+    "get_tokenizer_worker_class",
+    "import_qwen_vl_media_module",
     "mm_encode",
     "override_server_args",
     "publish_server_args",

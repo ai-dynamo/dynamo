@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Opt-in native parity qualification for SGLang 0.5.19, 0.5.22, and 0.5.23.
+"""Opt-in native parity qualification for SGLang 0.5.19, 0.5.22, 0.5.23, and 1.0.0.
 
 Set DYNAMO_DECISION_RUN_PINNED_SGLANG=1 in an explicitly provisioned target
 environment. Version acceptance enables the campaign; it is not qualification
@@ -50,8 +50,11 @@ def systemone_sglang_server(
     predownload_models,
 ):
     assert re.fullmatch(
-        r"0\.5\.(?:19|22|23)(?:\+cu[0-9]+)?", version("sglang")
-    ), "Parity targets SGLang 0.5.19, 0.5.22, or 0.5.23 with an optional CUDA suffix"
+        r"(?:0\.5\.(?:19|22|23)|1\.0\.0)(?:\+cu[0-9]+)?", version("sglang")
+    ), (
+        "Parity targets SGLang 0.5.19, 0.5.22, 0.5.23, or 1.0.0 "
+        "with an optional CUDA suffix"
+    )
     ports = dynamo_dynamic_ports
     base_url = f"http://localhost:{ports.frontend_port}"
     env = {**os.environ, "DYN_SYSTEM_PORT": str(ports.system_ports[0])}
@@ -109,7 +112,7 @@ def systemone_sglang_server(
 
 
 def _native_prefill_graph_args():
-    if version("sglang").split("+", 1)[0] in ("0.5.22", "0.5.23"):
+    if version("sglang").split("+", 1)[0] in ("0.5.22", "0.5.23", "1.0.0"):
         return ["--cuda-graph-backend-prefill", "disabled"]
     return ["--disable-piecewise-cuda-graph"]
 

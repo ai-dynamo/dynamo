@@ -277,6 +277,8 @@ def test_build_gateway_engine_falls_back_to_facade(monkeypatch):
     import sglang.srt.managers.multi_tokenizer_mixin as mixin
     import sglang.srt.runtime_context as runtime_context
 
+    from dynamo.sglang import _compat as sglang_compat
+
     _child_env(monkeypatch)
     monkeypatch.setattr(
         gateway.sgl.Engine, "attach_tokenizer_worker", None, raising=False
@@ -298,7 +300,9 @@ def test_build_gateway_engine_falls_back_to_facade(monkeypatch):
     monkeypatch.setattr(
         mixin, "read_from_shared_memory", lambda name: (port_args, server_args, info)
     )
-    monkeypatch.setattr(mixin, "get_tokenizer_worker_class", lambda sa: FakeWorker)
+    monkeypatch.setattr(
+        sglang_compat, "get_tokenizer_worker_class", lambda sa: FakeWorker
+    )
     monkeypatch.setattr(
         runtime_context, "publish", lambda sa, role: created.setdefault("role", role)
     )

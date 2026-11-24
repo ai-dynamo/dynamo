@@ -429,7 +429,13 @@ class DynamoWorkerProcess(ManagedProcess):
             str(max_model_len),
         ]
         if not cuda_graph:
-            command.extend(["--disable-cuda-graph", "--disable-piecewise-cuda-graph"])
+            command.extend(
+                [
+                    "--disable-decode-cuda-graph",
+                    "--disable-prefill-cuda-graph",
+                    "--disable-piecewise-cuda-graph",
+                ]
+            )
         if disagg_mode is None:
             # Aggregated
             command.append("--skip-tokenizer-init")

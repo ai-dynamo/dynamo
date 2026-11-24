@@ -83,7 +83,14 @@ class DynamoWorkerProcess(ManagedProcess):
             "--trust-remote-code",
         ]
         if serialize_requests:
-            command.extend(["--disable-cuda-graph", "--max-running-requests", "1"])
+            command.extend(
+                [
+                    "--disable-decode-cuda-graph",
+                    "--disable-prefill-cuda-graph",
+                    "--max-running-requests",
+                    "1",
+                ]
+            )
 
         # Add mode-specific arguments
         if mode == "agg":

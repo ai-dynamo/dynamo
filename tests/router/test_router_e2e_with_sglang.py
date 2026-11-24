@@ -202,7 +202,9 @@ class SGLangProcess(ManagedEngineProcessMixin):
             # consume ~7 GB during capture — must also be disabled for
             # multi-worker same-GPU tests to avoid OOM.
             if disable_cuda_graph:
-                command.append("--disable-cuda-graph")
+                command.extend(
+                    ["--disable-decode-cuda-graph", "--disable-prefill-cuda-graph"]
+                )
                 command.append("--disable-piecewise-cuda-graph")
 
             # Limit VRAM allocation (required for multi-worker on same GPU).
@@ -248,11 +250,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 # Add DP configuration
                 command.extend(
                     [
-                        "--dp-size",
+                        "--attn-dp-size",
                         str(data_parallel_size),
                         "--tp-size",
                         str(data_parallel_size),
-                        "--enable-dp-attention",
                     ]
                 )
 

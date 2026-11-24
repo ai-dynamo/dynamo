@@ -11,11 +11,9 @@ from typing import Any, Optional
 import transformers
 
 from dynamo.llm import ModelRuntimeConfig
+from dynamo.sglang._compat import import_qwen_vl_media_module
 
-try:
-    from sglang.srt.multimodal.processors import qwen_vl as sglang_qwen_vl
-except ImportError:
-    sglang_qwen_vl = None
+sglang_qwen_vl = import_qwen_vl_media_module()
 
 qwen3_smart_resize: Optional[Callable[..., Any]]
 try:

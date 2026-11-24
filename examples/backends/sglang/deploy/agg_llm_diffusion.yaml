@@ -56,7 +56,8 @@ spec:
           - --skip-tokenizer-init
           - --trust-remote-code
           - --enable-metrics
-          - --disable-cuda-graph
+          - --disable-decode-cuda-graph
+          - --disable-prefill-cuda-graph
           - --disable-overlap-schedule
           - --attention-backend
           - triton

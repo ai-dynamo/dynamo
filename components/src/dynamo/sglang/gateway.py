@@ -285,11 +285,10 @@ def build_gateway_engine():
         )
         return engine
 
-    from sglang.srt.managers.multi_tokenizer_mixin import (
-        get_tokenizer_worker_class,
-        read_from_shared_memory,
-    )
+    from sglang.srt.managers.multi_tokenizer_mixin import read_from_shared_memory
     from sglang.srt.runtime_context import publish
+
+    from dynamo.sglang._compat import get_tokenizer_worker_class
 
     port_args, server_args, scheduler_info = read_from_shared_memory(
         f"multi_tokenizer_args_{parent_pid}"

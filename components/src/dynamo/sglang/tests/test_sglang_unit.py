@@ -69,12 +69,6 @@ from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandle
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 try:
-    from sglang.multimodal_gen.runtime.loader.utils import checkpoint_component_sizes
-except ImportError:
-    # SGLang 0.5.22 has no sizing check. Remove when minimum is 0.5.23+.
-    checkpoint_component_sizes = None
-
-try:
     from dynamo.sglang import register as sglang_register
 except ImportError:
     sglang_register = None
@@ -285,10 +279,6 @@ def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
 )
 @pytest.mark.parametrize(
     "index_cached", [True, False], ids=["index-cached", "weights-only"]
-)
-@pytest.mark.skipif(
-    checkpoint_component_sizes is None,
-    reason="SGLang 0.5.22 has no memory sizing check",
 )
 def test_diffusers_text_encoder_precision_kwargs_sizes_every_encoder(
     tmp_path, encoders, index_cached, monkeypatch
@@ -1064,8 +1054,29 @@ async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
         assert config.server_args is resolved
 
 
+def _sglang_accepts_nsa_alias() -> bool:
+    try:
+        from sglang.srt.arg_groups.choices import removed_choice_message
+    except ImportError:
+        # SGLang 0.5.23 keeps nsa as a deprecated dsa alias.
+        return True
+    return removed_choice_message("attention_backend", "nsa") is None
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["dsa", "nsa"])
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "dsa",
+        pytest.param(
+            "nsa",
+            marks=pytest.mark.skipif(
+                not _sglang_accepts_nsa_alias(),
+                reason="SGLang 1.0 removed the nsa alias",
+            ),
+        ),
+    ],
+)
 async def test_parse_args_accepts_sparse_mla_dcp_when_engine_supports_it(
     monkeypatch, mock_sglang_cli, tmp_path, backend
 ):

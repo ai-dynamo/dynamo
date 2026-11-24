@@ -65,7 +65,8 @@ CMD="python -m dynamo.sglang \
     --trust-remote-code \
     --endpoint dyn://${NAMESPACE}.${COMPONENT}.${ENDPOINT} \
     --enable-metrics \
-    --disable-cuda-graph \
+    --disable-decode-cuda-graph \
+    --disable-prefill-cuda-graph \
     --disable-overlap-schedule \
     --attention-backend triton \
     --dllm-algorithm $DLLM_ALGORITHM"
