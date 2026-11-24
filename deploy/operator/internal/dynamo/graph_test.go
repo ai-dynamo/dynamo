@@ -5052,7 +5052,7 @@ func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
 				assert.Equal(t, want.Args, got.Container.Args, "role %s args", role.Role)
 				if tt.orderedEnv {
 					assert.Equal(t, want.Env, got.Container.Env, "role %s environment", role.Role)
-					assert.Contains(t, got.Container.Env, corev1.EnvVar{Name: "MODEL_PATH", Value: "/models/model"})
+					assert.Contains(t, got.Container.Env, corev1.EnvVar{Name: "MODEL_PATH", Value: "$(MODEL_ROOT)/model"})
 				}
 				shell := len(got.Container.Command) == 2 && slices.Contains([]string{"sh", "/bin/sh"}, got.Container.Command[0]) && got.Container.Command[1] == "-c"
 				assert.Equal(t, tt.wantShell[role.Role], shell, "role %s shell launch: %q", role.Role, got.Container.Command)
