@@ -19,3 +19,6 @@ matrix:
   variant:
   - name: b300
     components: []
+  - name: b300-multimodal
+    components:
+    - kustomize/components/multimodal

@@ -299,11 +299,31 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300.yaml -n
 
 </div>
 
+<div data-recipe-framework="vllm" data-sku="b300" data-variant="agg">
+
+For image and video input, apply the multimodal overlay instead:
+
+```bash
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300-multimodal.yaml -n ${NAMESPACE}
+```
+
+</div>
+
 <div data-recipe-framework="vllm" data-sku="b300" data-variant="disagg">
 
 ```bash
 export DGD=kimi-k3-1-pro-vllm-b300-disagg-agentic
 kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b300" data-variant="disagg">
+
+For image and video input, apply the multimodal overlay instead:
+
+```bash
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300-multimodal.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -443,6 +463,8 @@ All results below measure text-only traffic; the selected target is highlighted.
 | [B200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml) | 16 | TP8 × PP2 | Text-only benchmark |
 | [B300 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300.yaml) | 8 | TP8 per worker | Text-only benchmark; functional gate passed |
 | [B300 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300.yaml) | 16 | TP8 per worker | Functional only; prefill and transport bound at concurrency 48, not tuned |
+| [B300 vLLM aggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300-multimodal.yaml) | 8 | TP8 per worker | Validation pending |
+| [B300 vLLM disaggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300-multimodal.yaml) | 16 | TP8 per worker | Validation pending |
 | [VR200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml) | 16 | TP8 per worker | Text-only benchmark |
 | [VR200 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml) | 24 | TP8 per worker | Text-only benchmark |
 
