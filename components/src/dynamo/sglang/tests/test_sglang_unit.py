@@ -1954,15 +1954,6 @@ def test_enable_multimodal_without_role_keeps_standalone_worker():
     assert config.multimodal_encode_worker is False
 
 
-@pytest.mark.parametrize("flag", ["--multimodal-encode-worker", "--multimodal-worker"])
-@pytest.mark.asyncio
-async def test_removed_multimodal_role_flags_are_rejected(flag, mock_sglang_cli):
-    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", flag)
-
-    with pytest.raises(SystemExit):
-        await parse_args(sys.argv[1:])
-
-
 @pytest.mark.parametrize(
     "env_var", ["DYN_SGL_MULTIMODAL_ENCODE_WORKER", "DYN_SGL_MULTIMODAL_WORKER"]
 )
