@@ -78,8 +78,43 @@ pub(super) struct RouteObservation {
 
 struct KvHitTracking {
     prompt_tokens: u64,
+    /// Whether usage `cached_tokens` may stand in for a missing `kv_cache_hit`; see
+    /// [`usage_counts_as_engine_reuse`].
+    usage_fallback: bool,
     /// Taken by the first valid worker report, so an attempt counts at most once.
     reused_tokens: Option<IntCounter>,
+}
+
+impl KvHitTracking {
+    /// Count a worker report once, even if the stream subsequently fails or is cancelled,
+    /// and keep it on the request tracker for the request trace.
+    fn capture(&mut self, item: &Annotated<LLMEngineOutput>, tracker: Option<&RequestTracker>) {
+        if self.reused_tokens.is_none() {
+            return;
+        }
+        let Some(data) = item.data.as_ref() else {
+            return;
+        };
+        let Some(reused) = data
+            .engine_data
+            .as_ref()
+            .and_then(|data| data.get("kv_cache_hit"))
+            .and_then(|value| worker_cache_hit_tokens(self.prompt_tokens, value))
+            .or_else(|| {
+                self.usage_fallback
+                    .then(|| usage_cached_tokens(self.prompt_tokens, data))
+                    .flatten()
+            })
+        else {
+            return;
+        };
+        if let Some(tracker) = tracker {
+            tracker.record_engine_reused_tokens(reused);
+        }
+        if let Some(counter) = self.reused_tokens.take() {
+            counter.inc_by(reused);
+        }
+    }
 }
 
 /// Cache-hit report the worker attaches to its final chunk (`engine_data.kv_cache_hit`).
@@ -95,6 +130,34 @@ fn worker_cache_hit_tokens(prompt_tokens: u64, value: &serde_json::Value) -> Opt
         return None;
     }
     Some(report.reused_tokens)
+}
+
+/// Prefix-cache hit from the usage on the final chunk, for engines that report reuse only
+/// there (the native vLLM sidecar). Only the final chunk counts: an engine that sends usage
+/// earlier sends `kv_cache_hit` with its final usage, and that report must win.
+fn usage_cached_tokens(prompt_tokens: u64, data: &LLMEngineOutput) -> Option<u64> {
+    data.finish_reason.as_ref()?;
+    let usage = data.completion_usage.as_ref()?;
+    if u64::from(usage.prompt_tokens) != prompt_tokens {
+        return None;
+    }
+    usage
+        .prompt_tokens_details
+        .as_ref()?
+        .cached_tokens
+        .map(u64::from)
+}
+
+/// Whether usage `cached_tokens` measure reuse from before this attempt. Not on the decode
+/// leg of a remote prefill, whose usage repeats the prefill leg's count. Not where workers
+/// withhold `kv_cache_hit` on purpose but still send usage: `n > 1` (each sample's count
+/// includes the previous sample's hit) and multimodal input (the count includes expanded
+/// media tokens).
+fn usage_counts_as_engine_reuse(request: &PreprocessedRequest, phase: RequestPhase) -> bool {
+    request.prefill_result.is_none()
+        && !(phase == RequestPhase::Decode && request.bootstrap_info.is_some())
+        && request.sampling_options.n.is_none_or(|n| n <= 1)
+        && request.multi_modal_data.is_none()
 }
 
 pub(crate) fn prompt_private_blocks(
@@ -682,6 +745,7 @@ impl RequestGuard {
         }
         let kv_hit = kv_route.map(|route| KvHitTracking {
             prompt_tokens: route.prompt_tokens,
+            usage_fallback: usage_counts_as_engine_reuse(request, phase),
             reused_tokens: Some(request_metrics.observe_kv_route_estimate(
                 phase,
                 &request.model,
@@ -994,25 +1058,9 @@ impl RequestGuard {
         true
     }
 
-    /// Count a worker report once, even if the stream subsequently fails or is cancelled.
     fn capture_kv_worker_hit(&mut self, item: &Annotated<LLMEngineOutput>) {
-        let Some(kv) = self.kv_hit.as_mut() else {
-            return;
-        };
-        if kv.reused_tokens.is_none() {
-            return;
-        }
-        let Some(reused) = item
-            .data
-            .as_ref()
-            .and_then(|data| data.engine_data.as_ref())
-            .and_then(|data| data.get("kv_cache_hit"))
-            .and_then(|value| worker_cache_hit_tokens(kv.prompt_tokens, value))
-        else {
-            return;
-        };
-        if let Some(counter) = kv.reused_tokens.take() {
-            counter.inc_by(reused);
+        if let Some(kv) = self.kv_hit.as_mut() {
+            kv.capture(item, self.observability.tracker.as_deref());
         }
     }
 }

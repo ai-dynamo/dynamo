@@ -21,6 +21,8 @@ use crate::request_trace::{
 struct RequestTraceRequestEndState {
     request_tracker: Arc<RequestTracker>,
     replay_metrics: Arc<RequestReplayMetrics>,
+    model: String,
+    x_request_id: Option<String>,
 }
 
 pub(crate) struct RequestEndTraceState {
@@ -116,13 +118,25 @@ fn build_request_end_trace_state_for_policy(
         }
     };
 
+    let model = common_request.model.clone();
+    let x_request_id = super::x_request_id_from_context(context);
     let agent = has_agent_context
-        .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
+        .then(|| {
+            super::build_agent_context_trace_state(
+                common_request,
+                tracker,
+                context,
+                model.clone(),
+                x_request_id.clone(),
+            )
+        })
         .flatten();
 
     let request = RequestTraceRequestEndState {
         request_tracker,
         replay_metrics,
+        model,
+        x_request_id,
     };
 
     Some(RequestEndTraceState {
@@ -148,6 +162,8 @@ impl RequestEndTraceState {
         } else {
             super::record::emit_request_end(
                 self.request_id.clone(),
+                request_state.x_request_id,
+                request_state.model,
                 &request_state.request_tracker,
                 super::into_owned_replay_metrics(request_state.replay_metrics),
             );
@@ -288,6 +304,8 @@ mod tests {
                         input_length: 2,
                         input_sequence_hashes: vec![11],
                     }),
+                    model: "test-model".to_string(),
+                    x_request_id: None,
                 }),
                 request_id: request_id.to_string(),
                 request_context: context.clone(),
@@ -587,6 +605,38 @@ mod tests {
                 .input_length,
             3
         );
+    }
+
+    #[tokio::test]
+    async fn plain_request_end_carries_x_request_id_and_model() {
+        BUS.init(16);
+        let mut receiver = BUS.subscribe();
+        let tracker = Arc::new(RequestTracker::new());
+        let request = preprocessed_request(SamplingOptions::default());
+        let mut context = Context::new(());
+        context.insert(
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+            "client-req-1".to_string(),
+        );
+        let request_id = context.id().to_string();
+        let mut state = build_request_end_trace_state_for_policy(
+            &request,
+            &Some(tracker.clone()),
+            &context,
+            2,
+            true,
+        )
+        .unwrap();
+        tracker.record_finish();
+        state.emit();
+
+        let records = drain_request_records(&mut receiver, &request_id);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert!(record.agent_context.is_none());
+        let request = record.request.as_ref().expect("request payload");
+        assert_eq!(request.x_request_id.as_deref(), Some("client-req-1"));
+        assert_eq!(request.model.as_deref(), Some("test-model"));
     }
 
     #[test]
