@@ -294,6 +294,18 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
+        add_argument(
+            g,
+            flag_name="--mm-preprocess-processes",
+            env_var="DYN_TRTLLM_MM_PREPROCESS_PROCESSES",
+            default=0,
+            arg_type=int,
+            help=(
+                "Number of processes that run TensorRT-LLM multimodal input "
+                "preprocessing, each with its own copy of the input processor. 0 "
+                "runs it on threads of the worker process."
+            ),
+        )
         add_frontend_decoding_arg(g, env_prefix="TRTLLM")
 
         # --- Guided Decoding ---
@@ -537,6 +549,7 @@ class DynamoTrtllmConfig(ConfigBase):
     encode_endpoint: str
     allowed_local_media_path: str
     max_file_size_mb: int
+    mm_preprocess_processes: int
     frontend_decoding: bool
 
     default_height: int
@@ -589,6 +602,16 @@ class DynamoTrtllmConfig(ConfigBase):
             self.modality = Modality.MULTIMODAL
         elif self.modality == Modality.MULTIMODAL:
             self.enable_multimodal = True
+        if self.mm_preprocess_processes < 0:
+            raise ValueError("--mm-preprocess-processes must be >= 0")
+        if self.mm_preprocess_processes and (
+            not self.enable_multimodal
+            or self.disaggregation_mode == DisaggregationMode.ENCODE
+        ):
+            raise ValueError(
+                "--mm-preprocess-processes requires --enable-multimodal and is not "
+                "supported with --disaggregation-mode encode"
+            )
         if not self.served_model_name:
             self.served_model_name = None
         if self.publish_per_request_metrics and not self.publish_metrics:
