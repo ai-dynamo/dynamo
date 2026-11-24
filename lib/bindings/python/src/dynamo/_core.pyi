@@ -117,6 +117,14 @@ class DistributedRuntime:
         """
         ...
 
+    @property
+    def response_plane(self) -> str:
+        """
+        The response transport this runtime uses ("tcp", "quic" or "velo"),
+        after the default and the TLS fallback are applied.
+        """
+        ...
+
     def set_health_status(self, ready: bool) -> None:
         """
         Explicitly set the system-level health status (Ready / NotReady).
@@ -595,11 +603,11 @@ class Context:
 
         Call it before the engine's first yield, or before it raises. Returns
         ``False`` when this request's response cannot carry the header: the
-        response is already committed (a streaming request without
-        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
-        yield of one with it), or the request is not a ``/v1/chat/completions``
-        request. Otherwise raises ``ValueError`` for a name or value that is
-        not a valid header, or for a header the HTTP layer owns
+        response is already committed (streaming with the pre-commit wait
+        disabled, or after the first non-annotation event or the wait deadline),
+        or the request is not a ``/v1/chat/completions`` request. Otherwise raises
+        ``ValueError`` for a name or value that is not a valid header, or for a
+        header the HTTP layer owns
         (``content-type``, ``content-length``, ``content-encoding``,
         ``x-request-id``, hop-by-hop headers)."""
         ...
@@ -918,6 +926,55 @@ class SelectionService:
 
     async def potential_loads(self, request: JsonLike) -> JsonLike:
         """Per-worker potential loads for a prompt, without booking."""
+        ...
+
+    async def register_worker_publisher(self, endpoint: str) -> bool:
+        """Subscribe to a worker's prefill and request completion events.
+
+        Events update local and replicated reservations without being republished.
+        Requires replica sync. Returns True if the subscription was added, or
+        False if the endpoint was already registered.
+        """
+        ...
+
+    async def deregister_worker_publisher(self, endpoint: str) -> bool:
+        """Unsubscribe from a worker publisher.
+
+        Returns True if the subscription was removed, or False if the endpoint
+        was not registered.
+        """
+        ...
+
+    def list_worker_publishers(self) -> list[str]:
+        """Endpoints of the subscribed worker publishers, sorted."""
+        ...
+
+class WorkerSequenceEventPublisher:
+    """Nonblocking ZMQ publisher for worker-origin active-sequence events."""
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        routing_group: str,
+        worker_id: int,
+        dp_rank: int = 0,
+        bind_endpoint: str = "tcp://*:*",
+    ) -> None:
+        ...
+
+    @property
+    def endpoint(self) -> str:
+        """Bound endpoint, including the port selected by ZMQ."""
+        ...
+
+    def mark_prefill_completed(self, request_id: str) -> None:
+        ...
+
+    def free(self, request_id: str) -> None:
+        ...
+
+    def close(self) -> None:
         ...
 
 class ModelDeploymentCard:
@@ -1604,11 +1661,11 @@ class HttpService:
                 raised by an engine generator before its first ``yield`` maps to
                 the same HTTP error response as it does for a non-streaming
                 request. When False (the default), the service inherits
-                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0``, it commits
-                HTTP 200 without waiting and such an error arrives as an SSE
-                error frame; set to a positive number of milliseconds, it waits
-                that long and still maps an error that arrives inside the
-                window. True overrides the variable with an unbounded wait.
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0`` commits
+                HTTP 200 without waiting. A positive value bounds the wait in
+                milliseconds. Errors after the first non-annotation event or the
+                deadline arrive as SSE error frames. True overrides the
+                variable with an unbounded wait.
         """
         ...
 
