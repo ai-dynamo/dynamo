@@ -23,6 +23,7 @@ use dynamo_runtime::{
 
 use super::{HostedOccupancy, RoutingHost, RoutingPolicy};
 use crate::{
+    discovery::RuntimeConfigWatch,
     kv_router::{KvRouter, RoutingLoadContext, metrics::RouterRequestMetrics},
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
@@ -51,6 +52,7 @@ pub struct RoutingHostBuilder {
     affinity: Option<AffinityCoordinator>,
     lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
+    worker_configs: Option<RuntimeConfigWatch>,
     dispatch: Option<LlmDispatch>,
     multimodal_cache: Option<MultimodalCache>,
 }
@@ -66,6 +68,7 @@ impl RoutingHost {
             affinity: None,
             lora: None,
             candidate_policy: None,
+            worker_configs: None,
             dispatch: None,
             multimodal_cache: None,
         }
@@ -100,6 +103,14 @@ impl RoutingHostBuilder {
         self
     }
 
+    /// The per-worker runtime configs of the endpoint `client` discovers. Required for a
+    /// hosted policy that honors required taints, which reads each worker's taints from
+    /// them; no other policy reads them.
+    pub fn worker_configs(mut self, worker_configs: impl Into<Option<RuntimeConfigWatch>>) -> Self {
+        self.worker_configs = worker_configs.into();
+        self
+    }
+
     /// LoRA-aware selection for the round-robin and random policies.
     pub fn lora(mut self, lora: impl Into<Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>>) -> Self {
         self.lora = lora.into();
@@ -130,6 +141,7 @@ impl RoutingHostBuilder {
             affinity,
             lora,
             candidate_policy,
+            worker_configs,
             dispatch,
             multimodal_cache,
         } = self;
@@ -141,8 +153,13 @@ impl RoutingHostBuilder {
             (None, None) => None,
         };
         let transport_mode = policy.transport_mode();
-        let inputs =
-            PolicyInputs::check(policy, load_context, affinity.is_some(), candidate_policy)?;
+        let inputs = PolicyInputs::check(
+            policy,
+            load_context,
+            affinity.is_some(),
+            candidate_policy,
+            worker_configs,
+        )?;
         let (multimodal_cache_indexer, multimodal_cache_key_extractor) = multimodal_cache
             .map_or((None, None), |(indexer, extractor)| {
                 (Some(indexer), Some(extractor))
@@ -172,6 +189,7 @@ enum PolicyInputs {
         policy: RoutingPolicy,
         load_context: Arc<RoutingLoadContext>,
         candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
+        worker_configs: Option<RuntimeConfigWatch>,
     },
 }
 
@@ -181,6 +199,7 @@ impl PolicyInputs {
         load_context: Option<Arc<RoutingLoadContext>>,
         has_affinity: bool,
         candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
+        worker_configs: Option<RuntimeConfigWatch>,
     ) -> anyhow::Result<Self> {
         let policy = match policy {
             RoutingPolicy::Kv(kv_router) => {
@@ -204,10 +223,20 @@ impl PolicyInputs {
         if has_affinity && candidate_policy.is_some() {
             anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
         }
+        // Without the configs the host could not tell which workers have a required taint.
+        let worker_configs = if policy.honors_required_taints() {
+            let Some(worker_configs) = worker_configs else {
+                anyhow::bail!("{name} routing honors required taints and requires worker configs");
+            };
+            Some(worker_configs)
+        } else {
+            None
+        };
         Ok(Self::Builtin {
             policy,
             load_context,
             candidate_policy,
+            worker_configs,
         })
     }
 }
@@ -241,6 +270,7 @@ fn assemble(
                 affinity,
                 hosted_occupancy: None,
                 candidate_policy: None,
+                worker_configs: None,
                 routing_context: load_context,
             })
         }
@@ -248,6 +278,7 @@ fn assemble(
             policy,
             load_context,
             candidate_policy,
+            worker_configs,
         } => {
             let hosted_occupancy = matches!(
                 &policy,
@@ -266,6 +297,7 @@ fn assemble(
                 affinity,
                 hosted_occupancy,
                 candidate_policy,
+                worker_configs,
                 routing_context: Some(load_context),
             })
         }
@@ -297,7 +329,8 @@ mod policy_input_tests {
                 None,
             )
             .unwrap();
-            let Err(error) = PolicyInputs::check(non_kv_policy(mode), None, false, Some(policy))
+            let Err(error) =
+                PolicyInputs::check(non_kv_policy(mode), None, false, Some(policy), None)
             else {
                 panic!("{mode:?} should reject candidate policies");
             };
@@ -319,7 +352,8 @@ mod policy_input_tests {
                 None,
             )
             .unwrap();
-            let Err(error) = PolicyInputs::check(non_kv_policy(mode), None, false, Some(policy))
+            let Err(error) =
+                PolicyInputs::check(non_kv_policy(mode), None, false, Some(policy), None)
             else {
                 panic!("{mode:?} requires a load context");
             };

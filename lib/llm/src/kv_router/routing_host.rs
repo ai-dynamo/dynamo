@@ -30,6 +30,7 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
+    discovery::RuntimeConfigWatch,
     kv_router::{
         KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
         to_worker_selection_session_context,
@@ -307,6 +308,13 @@ impl RoutingPolicy {
             .map_or_else(|| format!("{:?}", self.transport_mode()), str::to_owned)
     }
 
+    /// Whether the policy sends a request that requires worker taints only to a worker that
+    /// advertises them. A hosted policy that a role's own policy resolved to does, and its
+    /// host is built with the workers' runtime configs.
+    pub(crate) fn honors_required_taints(&self) -> bool {
+        matches!(self, Self::Hosted(hosted) if hosted.honors_required_taints())
+    }
+
     /// The hosted policy, when its picker reads no occupancy. Only such a policy runs under a
     /// candidate policy (LoRA filtering), which picks among its candidates without occupancy.
     pub(crate) fn hosted_without_occupancy(&self) -> Option<&HostedPolicy> {
@@ -336,6 +344,10 @@ pub struct HostedPolicy {
     /// occupancy state, and it names the policy in the transport's logs. For a policy type
     /// it is a stand-in, least-loaded or round-robin.
     mode: RouterMode,
+    /// Send a request that requires worker taints only to a worker that advertises them, as
+    /// a KV router does. Set for a role that runs hosted because of its policy; the router
+    /// modes ignore taints.
+    honors_required_taints: bool,
 }
 
 impl HostedPolicy {
@@ -346,6 +358,7 @@ impl HostedPolicy {
             fresh_picker: Arc::new(move || crate::kv_router::hosted_picker(mode)),
             policy_type: None,
             mode,
+            honors_required_taints: false,
         })
     }
 
@@ -366,7 +379,17 @@ impl HostedPolicy {
             fresh_picker: Arc::new(fresh_picker),
             policy_type: Some(policy_type.into()),
             mode,
+            honors_required_taints: false,
         }
+    }
+
+    pub(crate) fn honoring_required_taints(mut self) -> Self {
+        self.honors_required_taints = true;
+        self
+    }
+
+    pub(crate) fn honors_required_taints(&self) -> bool {
+        self.honors_required_taints
     }
 
     pub(crate) fn picker(&self) -> &HostedWorkerPicker {
@@ -414,6 +437,9 @@ pub struct RoutingHost {
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
     candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
+    /// The endpoint's per-worker runtime configs, which carry each worker's taints. Held
+    /// only by a hosted policy that honors required taints.
+    worker_configs: Option<RuntimeConfigWatch>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Required for every mode except KV, where the [`KvRouter`] owns the client.

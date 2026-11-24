@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
+
 use dynamo_worker_selection::host::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
@@ -9,9 +11,61 @@ pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRe
     HostedSelectionRequest::new(request.token_ids.len())
 }
 
+/// `ids`, the workers free to take a request, without those that lack the taints it
+/// requires. `eligible` is `None` for a request that requires none. The caller has checked
+/// that a routable worker has the taints, so when none is left those workers are busy and
+/// the request is refused as overloaded, as on a KV router.
+pub(super) fn with_required_taints<'a>(
+    ids: &'a [u64],
+    eligible: Option<&HashSet<u64>>,
+) -> Result<Cow<'a, [u64]>, Error> {
+    let Some(eligible) = eligible else {
+        return Ok(Cow::Borrowed(ids));
+    };
+    let free: Vec<u64> = ids
+        .iter()
+        .copied()
+        .filter(|worker_id| eligible.contains(worker_id))
+        .collect();
+    if free.is_empty() {
+        return Err(crate::kv_router::map_scheduler_error(
+            KvSchedulerError::AllEligibleWorkersOverloaded,
+        ));
+    }
+    Ok(Cow::Owned(free))
+}
+
+/// The error a KV router returns when no worker has the taints a request requires.
+fn required_taints_error(unmet_by: std::fmt::Arguments<'_>) -> Error {
+    Error::new(KvSchedulerError::NoEndpoints).context(format!(
+        "the request requires worker taints that {unmet_by}"
+    ))
+}
+
 use super::*;
 
 impl RoutingHost {
+    /// The workers a request that requires taints may be sent to: those whose advertised
+    /// taints satisfy it, by the rule and from the per-worker configs the KV path uses.
+    /// `None` when the request requires none, or under a policy that ignores taints. The
+    /// caller intersects them with the workers the host's client may select.
+    fn workers_with_required_taints(&self, request: &PreprocessedRequest) -> Option<HashSet<u64>> {
+        let constraints = request
+            .routing
+            .as_ref()?
+            .routing_constraints
+            .as_ref()
+            .filter(|constraints| constraints.has_hard_constraints())?;
+        let configs = self.worker_configs.as_ref()?.borrow();
+        Some(
+            configs
+                .iter()
+                .filter(|(_, config)| constraints.is_compatible_with_worker_taints(&config.taints))
+                .map(|(worker_id, _)| *worker_id)
+                .collect(),
+        )
+    }
+
     /// The name this host's "Selected worker" lines give its policy.
     fn policy_label(&self) -> &str {
         match &self.policy {
@@ -25,6 +79,7 @@ impl RoutingHost {
         request: &SingleIn<PreprocessedRequest>,
         target_constraint: Option<AffinityTarget>,
         affinity_target: Option<AffinityTarget>,
+        taint_eligible: Option<&HashSet<u64>>,
     ) -> Result<HostedSelection, Error> {
         let preferred_worker = || match affinity_target {
             Some(target) => self.inner.with_selectable_worker_ids(|ids| {
@@ -51,7 +106,11 @@ impl RoutingHost {
             }
             RoutingPolicy::Hosted(hosted) => {
                 let picker = hosted.picker();
-                let preferred_worker = preferred_worker()?;
+                // As on the KV path, a soft affinity target without the required taints is
+                // passed over.
+                let preferred_worker = preferred_worker()?.filter(|worker_id| {
+                    taint_eligible.is_none_or(|eligible| eligible.contains(worker_id))
+                });
                 if picker.inputs().contains(WorkerInputs::ACTIVE_REQUESTS) {
                     let occupancy = self
                         .hosted_occupancy
@@ -64,6 +123,7 @@ impl RoutingHost {
                         target_constraint
                             .map(|target| target.worker_id)
                             .or(preferred_worker),
+                        taint_eligible,
                     )?;
                     Ok(HostedSelection {
                         initial_worker: selection.worker_id,
@@ -81,12 +141,12 @@ impl RoutingHost {
                         }
                         None => self.inner.with_selectable_worker_ids(|ids| {
                             if let Some(worker_id) = preferred_worker {
-                                Ok(worker_id)
-                            } else {
-                                picker
-                                    .select(ids, None, &hosted_request(request.content()))
-                                    .map_err(KvSchedulerError::from)
+                                return Ok(worker_id);
                             }
+                            let candidates = with_required_taints(ids, taint_eligible)?;
+                            picker
+                                .select(&candidates, None, &hosted_request(request.content()))
+                                .map_err(|failure| Error::new(KvSchedulerError::from(failure)))
                         })??,
                     };
                     Ok(HostedSelection {
@@ -144,6 +204,23 @@ impl RoutingHost {
         if is_direct && explicit.is_none() && !has_affinity_session {
             return Err(invalid_argument(format!(
                 "worker ID required for {phase} request in Direct routing mode"
+            )));
+        }
+        // Set for a request that requires taints under a policy that honors them. Such a
+        // request is selected among these workers only, and dispatched to no other.
+        let taint_eligible = self.workers_with_required_taints(request.content());
+        // Tested here, not where the free workers are filtered: with no worker free the
+        // client reports all workers busy before that filter runs.
+        if let Some(eligible) = &taint_eligible
+            && !self
+                .inner
+                .client
+                .instance_ids_avail()
+                .iter()
+                .any(|worker_id| eligible.contains(worker_id))
+        {
+            return Err(required_taints_error(format_args!(
+                "no routable {phase} worker advertises"
             )));
         }
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
@@ -205,7 +282,12 @@ impl RoutingHost {
                     (None, SessionAffinityMode::Soft) => target,
                     _ => None,
                 };
-                ready(self.select_hosted_worker(&request, pinned_target, affinity_target))
+                ready(self.select_hosted_worker(
+                    &request,
+                    pinned_target,
+                    affinity_target,
+                    taint_eligible.as_ref(),
+                ))
             })
             .await?
         };
@@ -217,6 +299,18 @@ impl RoutingHost {
             selected_occupancy,
             device_aware_telemetry,
         } = selection;
+        // The picker chose among the eligible workers. A worker the request names and one
+        // its hard session affinity is bound to were not filtered: the KV path fails the
+        // request when such a worker lacks the taints, and so does this one. A candidate
+        // policy's choice is held to the same, since it is made without reading taints.
+        if taint_eligible
+            .as_ref()
+            .is_some_and(|eligible| !eligible.contains(&initial_worker))
+        {
+            return Err(required_taints_error(format_args!(
+                "worker {initial_worker} does not advertise"
+            )));
+        }
         let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
             operation.as_ref().and_then(Hold::target).map(from_table)
         } else {
@@ -230,6 +324,14 @@ impl RoutingHost {
                     .and_then(|target| target.dp_rank),
             )
         };
+        // Transport fallback would retarget the request without reading the new worker's
+        // taints, so a request that requires taints goes exactly to the worker chosen for
+        // it, as a KV route does.
+        let target_constraint = target_constraint.or_else(|| {
+            taint_eligible
+                .is_some()
+                .then(|| target_for_worker(initial_worker))
+        });
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::ACTIVE_REQUESTS);

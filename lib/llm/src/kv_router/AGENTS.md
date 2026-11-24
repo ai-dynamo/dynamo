@@ -23,7 +23,7 @@ and the booking lifecycle these rules protect.
 - `role_routing.rs`: the routing settings each worker role runs with: how a serving set's or
   prefill pool's advertised `router_config` combines with the frontend's, and the one function
   (`role_policy`) that turns a role's router mode, a fixed mode or a policy type, into the
-  `RoutingPolicy` its host runs.
+  `RoutingPolicy` its host runs, and so decides whether the role gets a `KvRouter`.
 - `routing_load.rs`: the load context shared by a worker set's scheduler and its load metrics.
 - `routing_host.rs`: `RoutingHost`, the pipeline's terminal engine. Owns selection, dispatch,
   and response cleanup for one worker set.
@@ -59,6 +59,11 @@ and the booking lifecycle these rules protect.
   one.
 - Never drop a decode leg that carries staged KV before it reaches its worker, except when its
   cleanup budget runs out.
+- A role whose policy is only a picker runs without a `KvRouter`. When you add something that
+  works only on the KV path, add it to `KvPathReason` in `role_routing.rs`, or such a role
+  drops it silently. A reason is decided when the pipeline is built. For something a request
+  asks for, honor it in `routing_host/hosted.rs`, as required taints are, or fail the request
+  there. Never route such a request as if it had not asked.
 - Fail closed while the prefill target is `Pending`. Pass through only when `Untargeted`.
 - Do not let clients request a conditional bypass.
 - When you add a selection input, add it to the inputs table in `README.md` and decide whether
