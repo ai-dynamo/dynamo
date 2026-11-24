@@ -2691,10 +2691,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 is_hot_swap
                                 and old_info is not None
                                 and old_engine_loaded
-                                and not in_place
                             ):
                                 try:
                                     async with self._pause_lock:
+                                        # A failed swap can leave the replacement registered
+                                        # under the same ID, where add_lora is only a cache touch.
+                                        await self.engine_client.remove_lora(lora_id)
                                         await self.engine_client.add_lora(
                                             LoRARequest(
                                                 lora_name=lora_name,
