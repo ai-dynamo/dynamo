@@ -5,6 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # DGDR Output-Copier Image
 
+This image is not yet published and is not the operator's default. For the shipped default and
+operator-wide image configuration, see [DGDR Output-Copier Image](../../helm/charts/platform/README.md#dgdr-output-copier-image).
+
 This image adds the v1beta1 DGDR output-copier's shell utilities to the official
 `registry.k8s.io/kubectl` image. The kubectl v1.37.2 base and static BusyBox
 1.37.0-musl donor are pinned by multi-architecture manifest digest. BusyBox
@@ -25,7 +28,3 @@ platforms on native runners. The smoke test runs without network access, with a
 read-only root filesystem and writable `/tmp`; it checks the shell pipelines
 and uses the real kubectl client to generate a ConfigMap from profiler output.
 It does not contact a Kubernetes API server.
-
-For operator-wide image configuration, see
-[#18201](https://github.com/ai-dynamo/dynamo/pull/18201). Default image selection
-is discussed in [#19463](https://github.com/ai-dynamo/dynamo/pull/19463).
