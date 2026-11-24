@@ -1572,6 +1572,7 @@ jobs:
 
     - name: Publish Rust test reports
       if: always()
+      continue-on-error: true
       uses: ./.github/actions/rust-test-report
       with:
         api-key: ${{ secrets.DD_API_KEY }}
