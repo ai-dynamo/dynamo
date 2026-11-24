@@ -14,6 +14,7 @@ use dynamo_global_common::PoolKey;
 use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
     InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
+    SelectionCorePolicy, SelectionCoreSelector,
 };
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
@@ -167,15 +168,43 @@ async fn global_frontend_with(
     in_flight: Arc<InFlightTracker>,
 ) -> GlobalFrontend {
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
-    let (listener, url) = bind().await;
-    let cancel = CancellationToken::new();
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
     let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
+    serve_app(app, sender).await
+}
+
+/// A Global Frontend that routes round robin through the router core.
+async fn frontend_with_selection_core(pools: Vec<Pool>) -> GlobalFrontend {
+    let in_flight = Arc::new(InFlightTracker::new());
+    let selection_core =
+        SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, in_flight.clone())
+            .await
+            .unwrap();
+    let selection_core = Arc::new(selection_core);
+    let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
+    let (mut applied, reconcile) =
+        selection_core.reconcile_catalog(receiver, CancellationToken::new());
+    tokio::spawn(reconcile);
+    applied.changed().await.unwrap();
+    let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    let app = dynamo_global_frontend::app_with_selection_core(
+        applied,
+        selection_core,
+        in_flight,
+        client(),
+        metrics,
+    );
+    serve_app(app, sender).await
+}
+
+async fn serve_app(app: axum::Router, pools: watch::Sender<Arc<PoolSnapshot>>) -> GlobalFrontend {
+    let (listener, url) = bind().await;
+    let cancel = CancellationToken::new();
     tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
     wait_until_ok(&url.join("live").unwrap()).await;
     GlobalFrontend {
         server: Server { url, cancel },
-        pools: sender,
+        pools,
     }
 }
 
@@ -276,8 +305,20 @@ fn streamed_text(body: &str) -> String {
 #[tokio::test]
 async fn forwards_each_route_to_the_pool() {
     let pool_frontend = echo_pool_frontend().await;
-    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
+    let pools = vec![pool("blue", MODEL, &pool_frontend.url)];
+    forwards_each_route(&global_frontend(pools.clone()).await).await;
+}
 
+/// The same requests, through the router core: the same responses.
+#[tokio::test]
+async fn forwards_each_route_to_the_pool_through_the_core() {
+    let pool_frontend = echo_pool_frontend().await;
+    let pools = vec![pool("blue", MODEL, &pool_frontend.url)];
+    forwards_each_route(&frontend_with_selection_core(pools).await).await;
+}
+
+/// Each route through `global`: answered, timed once, nothing left in flight.
+async fn forwards_each_route(global: &GlobalFrontend) {
     // Each case's route and request, and how to read the echoed text from
     // the pool's response body.
     type EchoedText = fn(&str) -> String;
@@ -323,6 +364,13 @@ async fn forwards_each_route_to_the_pool() {
         assert_eq!(status, StatusCode::OK, "{route}: {body}");
         assert_eq!(text(&body), "hello", "{route}: {body}");
     }
+    let selections = "dynamo_global_frontend_overhead_selection_ms_count";
+    let in_flight = "dynamo_global_frontend_inflight_requests";
+    metrics_when(&global.server.url, |metrics| {
+        sample(metrics, selections, &[]) == Some(4.0)
+            && sample(metrics, in_flight, &[("pool", "ohio/dynamo/blue")]) == Some(0.0)
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -546,22 +594,25 @@ async fn forwards_the_request_as_sent() {
     assert!(!seen[0].contains_key("transfer-encoding"));
 }
 
-/// Records the session each request carried, and routes round robin.
+/// Records the session and tenant each request carried, and routes round robin.
 #[derive(Default)]
 struct SessionRecorder {
     sessions: Mutex<Vec<Option<String>>>,
+    tenants: Mutex<Vec<String>>,
     inner: RoundRobinSelector,
 }
 
+#[async_trait::async_trait]
 impl PoolSelector for SessionRecorder {
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
         let session = request.session.map(str::to_owned);
         self.sessions.lock().unwrap().push(session);
-        self.inner.select(request, candidates)
+        self.tenants.lock().unwrap().push(request.tenant.to_owned());
+        self.inner.select(request, candidates).await
     }
 }
 
@@ -584,6 +635,100 @@ async fn the_selector_sees_the_session() {
     }
     let sessions = recorder.sessions.lock().unwrap();
     assert_eq!(*sessions, [Some("session-123".to_owned()), None]);
+}
+
+#[tokio::test]
+async fn the_selector_sees_a_tenant_but_never_the_credential() {
+    use dynamo_global_router::affinity::{ANONYMOUS_TENANT, tenant_id};
+
+    let pool_frontend = echo_pool_frontend().await;
+    let recorder = Arc::new(SessionRecorder::default());
+    let blue = pool("blue", MODEL, &pool_frontend.url);
+    let in_flight = Arc::new(InFlightTracker::new());
+    let global = global_frontend_with(vec![blue], recorder.clone(), in_flight).await;
+
+    for credential in [Some("Bearer alice"), Some("Bearer bob"), None] {
+        let mut request = client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", "session-123")
+            .json(&chat(MODEL, "hi", false));
+        if let Some(credential) = credential {
+            request = request.header("authorization", credential);
+        }
+        ok_json(request.send().await.unwrap()).await;
+    }
+    let tenants = recorder.tenants.lock().unwrap();
+    // One session ID, three namespaces: each credential gets its own, and an
+    // unauthenticated request is anonymous rather than borrowing one.
+    assert_eq!(
+        *tenants,
+        [
+            tenant_id(Some("Bearer alice")),
+            tenant_id(Some("Bearer bob")),
+            ANONYMOUS_TENANT.to_owned(),
+        ]
+    );
+    // The credential itself never reaches the selector, so it never reaches
+    // a key or a stored row.
+    assert!(tenants.iter().all(|tenant| !tenant.contains("alice")));
+}
+
+#[tokio::test]
+async fn independent_frontends_share_session_affinity() {
+    use dynamo_global_router::affinity::{
+        AffinityConfig, InMemoryAffinityStore, StoreBackedSessionAffinity,
+    };
+    use dynamo_global_router::{AffinitySelector, PoolSignals};
+
+    let blue_server = pool_frontend(axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async { axum::Json(json!({"pool": "blue"})) }),
+    ))
+    .await;
+    let green_server = pool_frontend(axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async { axum::Json(json!({"pool": "green"})) }),
+    ))
+    .await;
+    let mut blue = pool("blue", MODEL, &blue_server.url);
+    blue.location.region = "east".into();
+    let mut green = pool("green", MODEL, &green_server.url);
+    green.location.region = "west".into();
+    let store = Arc::new(InMemoryAffinityStore::default());
+    let mut globals = Vec::new();
+    for region in ["east", "west"] {
+        let in_flight = Arc::new(InFlightTracker::new());
+        let selector = Arc::new(AffinitySelector::new(
+            Arc::new(PoolSignals::new(in_flight.clone())),
+            region.into(),
+            2.0,
+            Arc::new(
+                StoreBackedSessionAffinity::new(store.clone(), Duration::from_secs(1800)).unwrap(),
+            ),
+            AffinityConfig::default(),
+        ));
+        globals.push(
+            global_frontend_with(vec![blue.clone(), green.clone()], selector, in_flight).await,
+        );
+    }
+    for global in &globals {
+        let response = client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", "shared-session")
+            .json(&chat(MODEL, "hi", false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok_json(response).await["pool"], "blue");
+    }
+    let response = client()
+        .post(globals[1].server.url.join("v1/chat/completions").unwrap())
+        .json(&chat(MODEL, "hi", false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_json(response).await["pool"], "green");
+    assert_eq!(store.len(), 1);
 }
 
 #[tokio::test]

@@ -54,7 +54,9 @@ func IsDynamoComponentDeploymentConversionAnnotation(key string) bool {
 // context that shared-spec converters cannot derive from their local inputs.
 // +kubebuilder:object:generate=false
 type DynamoComponentDeploymentConversionContext struct {
-	ObjectName          string
+	// +required
+	ObjectName string
+	// +required
 	IncludeOriginSplits bool
 }
 
@@ -105,6 +107,7 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 func ConvertFromDynamoComponentDeploymentSpec(src *DynamoComponentDeploymentSpec, dst *v1beta1.DynamoComponentDeploymentSpec, restored *v1beta1.DynamoComponentDeploymentSpec, save *DynamoComponentDeploymentSpec, ctx DynamoComponentDeploymentConversionContext) error {
 	// Convert fields represented by both versions from the live source.
 	dst.BackendFramework = src.BackendFramework
+	dst.Env = src.Env
 
 	var preservedShared *v1beta1.DynamoComponentDeploymentSharedSpec
 	if restored != nil {
@@ -261,6 +264,7 @@ func dcdHubSpecNeedsSave(src *v1beta1.DynamoComponentDeployment, save *v1beta1.D
 func ConvertToDynamoComponentDeploymentSpec(src *v1beta1.DynamoComponentDeploymentSpec, dst *DynamoComponentDeploymentSpec, restored *DynamoComponentDeploymentSpec, save *v1beta1.DynamoComponentDeploymentSpec) error {
 	// Convert fields represented by both versions from the live source.
 	dst.BackendFramework = src.BackendFramework
+	dst.Env = src.Env
 
 	var preservedShared *DynamoComponentDeploymentSharedSpec
 	if restored != nil {

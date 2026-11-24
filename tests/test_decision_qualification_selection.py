@@ -15,7 +15,15 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
 
 @pytest.mark.parametrize(
-    "release", ["0.5.19", "0.5.19+cu128", "0.5.22", "0.5.22+cu130"]
+    "release",
+    [
+        "0.5.19",
+        "0.5.19+cu128",
+        "0.5.22",
+        "0.5.22+cu130",
+        "0.5.23",
+        "0.5.23+cu130",
+    ],
 )
 def test_native_parity_fixture_uses_version_specific_prefill_graph_flag(release):
     source = Path(__file__).parent / "serve" / "test_systemone_sglang.py"
@@ -51,7 +59,7 @@ def test_native_parity_fixture_uses_version_specific_prefill_graph_flag(release)
         namespace,
     )
     arguments = eval(compile(ast.Expression(command), str(source), "eval"), namespace)
-    if release.startswith("0.5.22"):
+    if release.startswith(("0.5.22", "0.5.23")):
         index = arguments.index("--cuda-graph-backend-prefill")
         assert arguments[index + 1] == "disabled"
         assert "--disable-piecewise-cuda-graph" not in arguments
@@ -73,7 +81,10 @@ def test_native_parity_fixture_uses_version_specific_prefill_graph_flag(release)
         ("0.5.22rc1", False),
         ("0.5.22.dev1", False),
         ("0.5.22.post1", False),
-        ("0.5.23", False),
+        ("0.5.23", True),
+        ("0.5.23+cu130", True),
+        ("0.5.23+debug", False),
+        ("0.5.24", False),
     ],
 )
 def test_native_parity_fixture_accepts_only_target_release_versions(release, is_target):

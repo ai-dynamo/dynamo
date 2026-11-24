@@ -24,9 +24,10 @@ on:
         required: true
         type: string
       amd_runner:
-        description: 'Runner to execute tests on (amd64 only)'
-        required: true
+        description: 'AMD64 runner name. Required when amd_runner_labels is empty.'
+        required: false
         type: string
+        default: ''
       target_tag_plain:
         description: 'Plain runtime image tag prefix from the build workflow'
         required: true
@@ -44,11 +45,6 @@ on:
         required: false
         type: string
         default: '/workspace'
-      kvbm_mla_backend:
-        description: 'KVBM MLA attention backend exported for KVBM tests'
-        required: false
-        type: string
-        default: ''
       enable_coverage:
         description: 'Enable coverage collection (true/false)'
         required: false
@@ -284,13 +280,6 @@ jobs:
               cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
             done
           fi
-      - name: Export KVBM MLA backend
-        if: ${{ inputs.kvbm_mla_backend != '' }}
-        shell: bash
-        env:
-          KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
-        run: |
-          echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
       # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
       # is the inner job id — "test" for every caller — so every test session
       # lands under one job name and cannot be attributed to a CI lane.
@@ -304,6 +293,7 @@ jobs:
         shell: bash
         env:
           LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_FRAMEWORK: ${{ inputs.framework }}
           LANE_TYPE: ${{ inputs.test_type }}
           LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
           LANE_PLATFORM: ${{ matrix.platform }}
@@ -319,7 +309,11 @@ jobs:
             printf '%s' "${s%-}"
           }
           lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
-          echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          # Kept as two dimensions: test_suite_name is a suite label, not a
+          # framework (it also takes planner, triton, *-efa, xpu-*).
+          # Neither may be tagged test_suite: -- ddtrace reserves that key as
+          # an object and silently drops a conflicting string tag.
+          echo "DD_TAGS=team:dynamo,lane:${lane},framework:$(slug "${LANE_FRAMEWORK}"),suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
           echo "Datadog lane tag: ${lane}"
 
       - name: Run Sanity Check on Runtime Image

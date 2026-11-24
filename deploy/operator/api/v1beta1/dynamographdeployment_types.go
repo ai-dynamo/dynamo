@@ -61,14 +61,22 @@ type DynamoGraphDeploymentSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(c1, !has(c1.name) || self.filter(c2, has(c2.name) && c2.name.lowerAscii() == c1.name.lowerAscii()).size() == 1)",message="component names must be unique case-insensitively"
 	Components []DynamoComponentDeploymentSharedSpec `json:"components,omitempty"`
 
-	// env is prepended to every component's environment. Component-specific
-	// env entries with the same name take precedence and may reference values
-	// from this list.
+	// env supplies general environment defaults for main and declared runtime
+	// containers. Container-specific definitions with the same name take
+	// precedence. For operator origins >= 1.8.0, relative order is preserved
+	// within each source list and cross-layer references are topologically
+	// ordered; cycles fail rendering. Earlier or missing origins retain legacy
+	// sorted composition. Generated DCDs preserve this list as spec.env.
+	// Names must be unique within this list. For origins >= 1.8.0, admission
+	// rejects duplicates even on unchanged updates. Earlier or missing origins
+	// permit only a completely unchanged pre-existing duplicate list; changing
+	// the list requires unique names. Same-named container overrides remain allowed.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// restart specifies the restart policy for the graph deployment.
@@ -109,6 +117,7 @@ type DynamoGraphDeploymentStatus struct {
 
 	// state is a high-level textual status of the graph deployment lifecycle.
 	// +kubebuilder:default=initializing
+	// +required
 	State DGDState `json:"state"`
 
 	// conditions contains the latest observed conditions of the graph deployment.
@@ -187,12 +196,15 @@ const (
 // to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoGraphDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// spec defines the desired state for this graph deployment.
+	// +optional
 	Spec DynamoGraphDeploymentSpec `json:"spec,omitempty"`
 	// status reflects the current observed state of this graph deployment.
+	// +optional
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 

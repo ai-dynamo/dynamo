@@ -113,6 +113,7 @@ def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
         "mm_processor_kwargs": request.get("mm_processor_kwargs"),
         "agent_context": request.get("agent_context"),
         "request_timestamp_ms": request.get("request_timestamp_ms"),
+        "elapsed_since_arrival_ms": request.get("elapsed_since_arrival_ms"),
     }
 
 

@@ -1491,13 +1491,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 			"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
 }
 
-// GetGPUDiscoveryFailureReason classifies a GPU discovery error into a stable reason string
-// for structured logging. The classification lives in the gpu package so the v1beta2
-// admission path reports the same reasons.
-func GetGPUDiscoveryFailureReason(err error) string {
-	return gpu.DiscoveryFailureReason(err)
-}
-
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource.
 // It returns true when a DGDR or Job write must be observed before advancing.
 func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (bool, error) {
@@ -1658,7 +1651,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			VolumeMounts: volumeMounts,
 			WorkingDir:   "/workspace",
 		}
-		dynamo.AddStandardEnvVars(&profilerContainer, r.Config.Infrastructure)
+		dynamo.AddStandardEnvVars(&profilerContainer, r.Config.Infrastructure, nil)
 
 		// Generate sidecar script from template
 		tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)

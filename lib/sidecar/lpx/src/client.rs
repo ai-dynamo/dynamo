@@ -14,7 +14,8 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tonic::transport::Channel;
 
 pub(crate) use dynamo_sidecar_common::{
-    engine_shutdown, invalid_argument, protocol_error, status_to_dynamo,
+    engine_shutdown, invalid_argument, is_broken_stream, protocol_error, status_to_dynamo,
+    stream_incomplete, stream_status_to_dynamo,
 };
 
 use crate::pb;

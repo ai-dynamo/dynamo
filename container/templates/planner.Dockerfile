@@ -40,9 +40,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libgomp1 \
         $EXTRA_PKGS && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 RUN useradd -m -s /bin/bash -g 0 dynamo \
@@ -83,7 +82,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
@@ -113,10 +112,6 @@ FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 ARG PLANNER_PYTHON_VERSION
 USER 0
 
-# Remove this ensurepip copy once the NGC runtime provides Python 3.13.17+.
-# https://github.com/ai-dynamo/dynamo/issues/17188
-RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)"]
-COPY --from=planner_builder /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/ /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/
 RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil, subprocess, tempfile, venv; assert tuple(map(int, ensurepip.version().split('.'))) >= (26, 2, 2); assert len(list((pathlib.Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))) == 1; d = tempfile.mkdtemp(); venv.create(d, with_pip=True); subprocess.run([d + '/bin/python', '-m', 'pip', '--version'], check=True); shutil.rmtree(d)"]
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/

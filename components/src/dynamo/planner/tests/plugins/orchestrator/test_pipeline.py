@@ -184,6 +184,9 @@ async def test_proposed_component_mask_is_captured_before_later_stage_merges(
 
     assert outcome.execute_action == "apply"
     assert outcome.proposed_components == frozenset({PREFILL})
+    assert outcome.targeted_components == frozenset(
+        {PREFILL, ComponentKey(sub_component_type="decode")}
+    )
 
 
 @pytest.mark.asyncio

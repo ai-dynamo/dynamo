@@ -29,10 +29,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +71,8 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathway            bool
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	oldEnv                  []corev1.EnvVar
+	orderedEnvironment      bool
 	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
@@ -102,7 +106,16 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha)...)
+
+	// Alpha source lists retain their complete ordered old values for ratcheting.
+	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
+	if oldDeployment != nil && validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+	}
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }
@@ -227,8 +240,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
+		orderedEnvironment:      compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations),
 		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
 		oldGroveUpdateStrategy:  oldStrategy,
+	}
+	// Preserve the full old list; duplicate-name ratcheting is limited to legacy origins.
+	if oldDGD != nil {
+		specOpts.oldEnv = oldDGD.Spec.Env
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -389,17 +407,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				if k8sptr.Deref(component.MinAvailable, 1) != 1 {
 					allErrs = append(allErrs, field.Forbidden(componentPath.Child("minAvailable"), "draft minAvailable must be omitted or 1; the shared target owns minimum availability"))
 				}
-			} else {
+			} else if replicas != 1 {
 				// Draft replicas count models; the target stands for the one shared engine.
-				if replicas != 1 {
-					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
-				}
-
-				// The target's conductor launches the shared speculative runtime; an agent sidecar serves only a single model.
-				if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
-					allErrs = append(allErrs, field.Forbidden(componentPath.Child("roles"), fmt.Sprintf(
-						"a shared draft and target pair requires the target's conductor role; the agent %q sidecar serves only a single model", consts.RuntimeContainerName)))
-				}
+				allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
 			}
 		}
 
@@ -494,6 +504,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if hasLPXComponent && independentEngineCount != lpxComponentCount && !(lpxComponentCount == 2 && independentEngineCount == 1) {
 		allErrs = append(allErrs, field.Forbidden(componentsPath, fmt.Sprintf(
 			"LPX components must each declare a conductor role or an agent %q sidecar, or form a shared draft and target pair", consts.RuntimeContainerName)))
+	}
+
+	// The source-alpha recursion owns its differently named root envs field.
+	if !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		allErrs = append(allErrs, v.validateEnvVars(spec.Env, opts.oldEnv, fldPath.Child("env"), opts.orderedEnvironment)...)
 	}
 
 	if spec.Restart != nil {

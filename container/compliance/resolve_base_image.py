@@ -37,7 +37,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--cuda-version",
-        help="CUDA version (e.g. 12.9, 13.0, 13.1) — required for runtime targets",
+        help="CUDA version (e.g. 13.0, 13.4) — required for runtime targets",
     )
     parser.add_argument(
         "--context-yaml",

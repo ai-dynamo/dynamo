@@ -13,6 +13,7 @@ use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
     PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
+use dynamo_llm::local_model::runtime_config::TOKEN_BUDGET_RUNTIME_KEY;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;
@@ -613,7 +614,7 @@ async fn decode_request_replays_the_prefill_session() {
     let handoff = collect(&prefill, agent_request.clone())
         .await
         .into_iter()
-        .find_map(|output| output.disaggregated_params)
+        .find_map(|output| output.disaggregated_params.map(|params| *params))
         .expect("prefill handoff");
 
     // Phase 2: decode replays it.
@@ -1063,6 +1064,15 @@ async fn a_configured_context_length_outranks_the_servers() {
         config.llm.expect("llm registration").context_length,
         Some(8192),
         "the configured window must outrank the server's 4096"
+    );
+    // The frontend rejects over-long prompts itself only when this budget is published.
+    assert_eq!(
+        config.runtime_data.get(TOKEN_BUDGET_RUNTIME_KEY),
+        Some(&json!({
+            "combined_limit": 8192,
+            "reject_prompt_overflow": true,
+            "reject_total_overflow": false,
+        }))
     );
     assert_eq!(
         server.service.model_info_calls.load(Ordering::SeqCst),

@@ -32,6 +32,7 @@ const (
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
 	roleLaunchOwnership       roleLaunchOwnership
+	environment               *podEnvironment
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -47,7 +48,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			// on top of --load-format gms. Standalone inter-pod GMS should not set
 			// it: those engines are active clients of the dedicated GMS weight
 			// server, not shadow engines waiting for failover activation.
-			container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"}})
 		}
 	}
 
@@ -74,14 +75,14 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 
 		if roleTemplateMP || (!preserveRoleLaunch && shouldUseMpBackend(annotations)) {
-			container.Env = append(container.Env, corev1.EnvVar{
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
 						FieldPath: "status.podIP",
 					},
 				},
-			})
+			}})
 		}
 
 		// Remove probes for multinode workers.
@@ -117,10 +118,10 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 					},
 				}
 			}
-			container.Env = append(container.Env,
-				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
-				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
-			)
+			b.environment.bind(container, "operator.backend.vllm", []corev1.EnvVar{
+				{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
+				{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
+			})
 		}
 	}
 

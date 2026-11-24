@@ -19,6 +19,7 @@ from typing import Any, AsyncGenerator, Iterator
 
 import torch
 import yaml
+from vllm.exceptions import VLLMValidationError
 from vllm_omni.config import register_pipeline
 from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
@@ -31,6 +32,7 @@ from vllm_omni.inputs.data import OmniTokensPrompt
 from dynamo import prometheus_names
 from dynamo.llm import ModelType
 from dynamo.runtime import DistributedRuntime
+from dynamo.vllm.errors import vllm_client_error_to_public_error
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
@@ -141,6 +143,8 @@ class OmniStageWorker:
                         prompt = self._build_engine_core_request_from_upstream(
                             stage_list, request_id, sampling_params_list_override
                         )
+                    except VLLMValidationError as e:
+                        raise vllm_client_error_to_public_error(e) from e
                     except RuntimeError as e:
                         yield {"error": str(e), "finished": True}
                         return
@@ -168,7 +172,12 @@ class OmniStageWorker:
             type(prompt).__name__,
         )
 
-        sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
+        try:
+            sp = _build_sampling_params(
+                self.stage_config, sampling_params_list_override
+            )
+        except VLLMValidationError as e:
+            raise vllm_client_error_to_public_error(e) from e
         last_result = None
 
         try:

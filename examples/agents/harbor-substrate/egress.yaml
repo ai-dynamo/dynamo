@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Substrate denies actor egress by default. The adapter applies this policy
+# to each actor so Pi can send HTTP requests to the Dynamo endpoint.
+# Match the protocol, hostname, and port to DYNAMO_BASE_URL in harbor-job.yaml.
+# Other destinations remain blocked. See "Allow additional egress" in the tutorial.
+rules:
+  - http:
+      # Hostname only: no scheme or path.
+      hostnames:
+        - glm53-flash-sglang-agg-gb200-frontend.inference.svc.cluster.local
+      ports:
+        # Match the endpoint's port.
+        numbers: [8000]

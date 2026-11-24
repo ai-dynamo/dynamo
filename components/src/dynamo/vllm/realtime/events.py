@@ -274,16 +274,25 @@ def conversation_item_done_event(
     return _conversation_item_event("conversation.item.done", item, previous_item_id)
 
 
+def conversation_item_deleted_event(item_id: str) -> dict[str, Any]:
+    return {
+        "type": "conversation.item.deleted",
+        "event_id": event_id(),
+        "item_id": item_id,
+    }
+
+
 def _response_item_event(
     event_type: str,
     response_id: str,
     item: dict[str, Any],
+    output_index: int,
 ) -> dict[str, Any]:
     return {
         "type": event_type,
         "event_id": event_id(),
         "response_id": response_id,
-        "output_index": 0,
+        "output_index": output_index,
         "item": item,
     }
 
@@ -291,15 +300,44 @@ def _response_item_event(
 def response_output_item_added_event(
     response_id: str,
     item: dict[str, Any],
+    output_index: int = 0,
 ) -> dict[str, Any]:
-    return _response_item_event("response.output_item.added", response_id, item)
+    return _response_item_event(
+        "response.output_item.added", response_id, item, output_index
+    )
 
 
 def response_output_item_done_event(
     response_id: str,
     item: dict[str, Any],
+    output_index: int = 0,
 ) -> dict[str, Any]:
-    return _response_item_event("response.output_item.done", response_id, item)
+    return _response_item_event(
+        "response.output_item.done", response_id, item, output_index
+    )
+
+
+def response_function_call_arguments_event(
+    event_type: str,
+    response_id: str,
+    item: dict[str, Any],
+    output_index: int,
+    arguments: str,
+) -> dict[str, Any]:
+    event = {
+        "type": event_type,
+        "event_id": event_id(),
+        "response_id": response_id,
+        "item_id": item["id"],
+        "output_index": output_index,
+        "call_id": item["call_id"],
+    }
+    if event_type.endswith(".delta"):
+        event["delta"] = arguments
+    else:
+        event["name"] = item["name"]
+        event["arguments"] = arguments
+    return event
 
 
 def response_content_part_event(

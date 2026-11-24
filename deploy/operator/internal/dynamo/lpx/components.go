@@ -54,17 +54,17 @@ func agentRuntimeSidecar(component *dynamov1beta1.DynamoComponentDeploymentShare
 
 // ServesEndpoint reports whether component serves its own endpoint, through a
 // conductor role or through its agent runtime sidecar. Admission accepts an LPX
-// component that does neither only as the shared draft of a target with a
-// conductor role. component must be non-nil.
+// component that does neither only as the draft of a target that does.
+// component must be non-nil.
 func ServesEndpoint(component *dynamov1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	return component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil || agentRuntimeSidecar(component) != nil
 }
 
 // ComponentGroups returns workload membership keyed by serving component name.
 // Each component that serves its own endpoint owns a group. Admission permits
-// a component that does not only when it shares the graph's sole conductor.
-// Member names are sorted. dgd must be non-nil and have passed admission; it
-// is not mutated.
+// a component that does not only as the draft of the graph's sole serving
+// component. Member names are sorted. dgd must be non-nil and have passed
+// admission; it is not mutated.
 func ComponentGroups(dgd *dynamov1beta1.DynamoGraphDeployment) map[string][]string {
 	components := Components(dgd)
 	groups := make(map[string][]string)
@@ -72,10 +72,10 @@ func ComponentGroups(dgd *dynamov1beta1.DynamoGraphDeployment) map[string][]stri
 	for _, component := range components {
 		groupName := component.ComponentName
 
-		// Admission makes the shared conductor unambiguous for agent-only members.
+		// Admission makes the target unambiguous for agent-only members.
 		if !ServesEndpoint(component) {
 			for _, targetComponent := range components {
-				if targetComponent.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil {
+				if ServesEndpoint(targetComponent) {
 					groupName = targetComponent.ComponentName
 					break
 				}

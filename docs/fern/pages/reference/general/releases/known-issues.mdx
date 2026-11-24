@@ -12,9 +12,27 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 Known issues summarize each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
+<a id="v170"></a>
+
+## v1.7.0 — current release
+
+The v1.7.0 known issues are listed in the **Known Issues** section of the [v1.7.0 GitHub release notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.7.0) and land on this page with the v1.7.0 release notes page.
+
+<a id="v162"></a>
+
+## v1.6.2
+
+No new known issues. The [v1.6.0 known issues](#v160) still apply, except the TensorRT-LLM HTTP 500 on oversized non-streaming `/v1/messages` requests, which v1.6.2 fixes.
+
+<a id="v161"></a>
+
+## v1.6.1
+
+No new known issues. The [v1.6.0 known issues](#v160) still apply.
+
 <a id="v160"></a>
 
-## v1.6.0 — current release
+## v1.6.0
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **Out-of-Vocab Stop Token Crash:** A request whose `stop_token_ids` includes an ID at or above the model's vocabulary size can crash the SGLang scheduler when any request in the batch sets `min_tokens`, failing every request on that worker until it restarts. The issue also affects v1.5.0. No workaround is available yet.
 
@@ -90,7 +108,7 @@ The other [v1.5.0 known issues](#v150) still apply.
 
 ## v1.4.0
 
-<span className="dynref-badge dynref-badge--blue">vLLM</span> **Omni Cases Fail On GB200:** On ARM64 (GB200) hosts, every vLLM Omni case fails at startup with `ModuleNotFoundError: No module named vllm_omni`, covering the aggregated text, audio, image, video, and image-to-video paths as well as disaggregated GLM image serving. The cause is that the `vllm_omni` module is not shipped in the ARM64 container image; ARM is not a supported platform for vLLM Omni, as noted in the installation section of the [vLLM-Omni installation guidance](../../../use-cases/diffusion/overview.md). No workaround is available yet; Omni workloads must run on x86_64 images.
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Omni Cases Fail On GB200:** On ARM64 (GB200) hosts, every vLLM Omni case fails at startup with `ModuleNotFoundError: No module named vllm_omni`, covering the aggregated text, audio, image, video, and image-to-video paths as well as disaggregated GLM image serving. The cause is that the `vllm_omni` module is not shipped in the ARM64 container image; ARM is not a supported platform for vLLM Omni, as noted in the installation section of the [vLLM-Omni installation guidance](../../../use-cases/diffusion/overview.md#install-the-backend). No workaround is available yet; Omni workloads must run on x86_64 images.
 
 <span className="dynref-badge dynref-badge--blue">vLLM</span> **Blocked vLLM Engine Reports Healthy:** On RL vLLM workers, when the engine execution loop is blocked (for example during a long weight transfer), the `/health` endpoint continues to report ready and the engine monitor emits no error, so requests stall and the worker never restarts or otherwise self-heals. This is the current intended behavior: weight transfer over IPC/ZMQ legitimately runs long on larger models such as GLM 5.2 and Kimi K3, and Dynamo does not interrupt an in-flight transfer; detection plus restart or resume responsibility is planned to move to the RL framework, with Dynamo providing only the signal. No workaround is available yet.
 

@@ -9,15 +9,12 @@
 
 use std::collections::HashSet;
 
-use dynamo_kv_router::{
-    identity::{CacheOwnerId, IndexerDomainId},
-    indexer::{
-        KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt,
-    },
-    protocols::{
-        ResidencyProjection, ResidencyProjectionError, RouterHintSourceMetadata, WorkerWithDpRank,
-    },
+use dynamo_kv_indexer::host::{
+    KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt,
+    ResidencyProjection, ResidencyProjectionError, RouterHintSourceMetadata,
 };
+use dynamo_router_protocol::identity::{CacheOwnerId, IndexerDomainId};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::component::Instance;
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +66,20 @@ impl KvStateIngressProtocol {
         matches!(self, Self::VllmResidencyV1 | Self::SglangHiCacheV1)
     }
 
+    /// True when every slot of this protocol holds engine-owned inventory.
+    /// Other protocols declare it per intent; see
+    /// [`KvStateAttachmentIntent::has_process_local_inventory`].
     pub fn has_process_local_inventory(self) -> bool {
+        matches!(self, Self::SglangHiCacheV1)
+    }
+
+    /// A raw-stream cursor gap retires the source until the engine restarts.
+    pub fn retires_source_on_cursor_gap(self) -> bool {
+        matches!(self, Self::SglangHiCacheV1)
+    }
+
+    /// See `idempotent_stores` on `KvEventSourceConfig::Zmq`.
+    pub fn has_idempotent_stores(self) -> bool {
         matches!(self, Self::SglangHiCacheV1)
     }
 }
@@ -103,8 +113,17 @@ pub struct KvStateAttachmentIntent {
     /// The raw source uses SGLang's wide multimodal pad format.
     #[serde(default)]
     pub engine_owned_mm_identity: bool,
+    /// The cache owner's inventory lives in the engine process and dies with it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub process_local_inventory: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_source: Option<RouterHintSourceMetadata>,
+}
+
+impl KvStateAttachmentIntent {
+    pub fn has_process_local_inventory(&self) -> bool {
+        self.process_local_inventory || self.ingress_protocol.has_process_local_inventory()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,11 +358,11 @@ pub fn resolve_kv_state_projection(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::identity::{
+    use dynamo_kv_indexer::host::{KvStateAgentIdentity, KvStateAttachmentStatus};
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
         StableDpSlotId,
     };
-    use dynamo_kv_router::indexer::{KvStateAgentIdentity, KvStateAttachmentStatus};
     use dynamo_runtime::component::TransportType;
 
     use super::*;

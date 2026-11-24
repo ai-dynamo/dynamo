@@ -27,12 +27,10 @@ Load ties use `WorkerWithDpRank`, so selection does not depend on Dynamo's unspe
 
 ```yaml
 worker_selection:
-  aggregated: soft-pin-repin
-  instances:
-    - name: soft-pin-repin
-      type: soft-pin-repin
-      parameters:
-        max_active_requests: 0
+  aggregated:
+    type: soft-pin-repin
+    parameters:
+      max_active_requests: 0
 ```
 
 The threshold is inclusive. With `max_active_requests: 0`, an idle target remains pinned and any in-flight request makes that target eligible for repinning.
