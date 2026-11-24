@@ -11,12 +11,6 @@ The vLLM-Omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 These are the vLLM-Omni orchestration flags. The omni worker also accepts the same underlying vLLM engine arguments and the cross-cutting [Dynamo Runtime](../components/runtime-configuration.mdx) flags (`--namespace`, `--endpoint`, and others).
 </Note>
 
-Omni chat supports `response_format.type=json_schema` when the pipeline has one
-public text output stage that is an LLM comprehension stage. Schema requests
-produce text output. Staged deployments currently support this option only with
-a single stage 0 text pipeline. Other configurations reject schema requests before
-generation.
-
 ## General Flags
 
 <ParamField path="--omni" type="flag">
@@ -84,6 +78,31 @@ limits come from registry metadata, not GPU testing.
 
 See the [Image Edits API](../api/image-edits.mdx) for request formats, input
 budgets, configuration placement, errors, and rolling upgrades.
+
+## Structured Output
+
+Omni chat requests support `response_format.type=json_schema` when exactly one
+stage produces the final text output (`final_output: true`,
+`final_output_type: text`) and that stage is an LLM comprehension stage
+(`stage_type: llm`, `is_comprehension: true`). These fields come from the stage
+config in `--stage-configs-path`, or from the model's default stage config. The
+worker's `--output-modalities` must include `text`, and the request's
+`modalities`, if set, must be `["text"]`. Schema requests return text only,
+even if the pipeline can also produce audio or images.
+
+With `--omni-router` or `--stage-id`, the stage config must contain exactly one
+stage (stage 0).
+
+Otherwise, Dynamo rejects the request before generation with the following
+error. Non-streaming requests return HTTP 400; streaming requests may return
+HTTP 200 followed by an SSE error carrying code 400.
+
+```text
+response_format.type=json_schema is not supported by this Dynamo vLLM-Omni configuration
+```
+
+Only `json_schema` is enforced. Other `response_format` types, including
+`json_object`, are not applied to Omni chat output.
 
 ## Memory & Performance
 
