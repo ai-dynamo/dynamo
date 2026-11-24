@@ -92,6 +92,10 @@ func BuildServiceImport(imp *mcsv1.ServiceImport, clusterset string, ips []strin
 		SessionAffinity:       convert.SessionAffinityFromRegistry(imp.GetSessionAffinity()),
 		SessionAffinityConfig: convert.SessionAffinityConfigFromRegistry(imp.GetSessionAffinityConfig()),
 		IPFamilies:            convert.IPFamiliesFromRegistry(imp.GetIpFamilies()),
+		InternalTrafficPolicy: convert.InternalTrafficPolicyFromRegistry(imp.GetInternalTrafficPolicy()),
+	}
+	if imp.GetTrafficDistribution() != "" {
+		spec.TrafficDistribution = new(imp.GetTrafficDistribution())
 	}
 	specMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&spec)
 	if err != nil {
@@ -183,6 +187,12 @@ func BuildDerivedService(imp *mcsv1.ServiceImport, clusterset string, owner type
 	spec := corev1ac.ServiceSpec().
 		WithType(corev1.ServiceTypeClusterIP).
 		WithSessionAffinity(convert.SessionAffinityFromRegistry(imp.GetSessionAffinity()))
+	if policy := convert.InternalTrafficPolicyFromRegistry(imp.GetInternalTrafficPolicy()); policy != nil {
+		spec.WithInternalTrafficPolicy(*policy)
+	}
+	if imp.GetTrafficDistribution() != "" {
+		spec.WithTrafficDistribution(imp.GetTrafficDistribution())
+	}
 	if imp.GetType() == mcsv1.ServiceType_SERVICE_TYPE_HEADLESS {
 		spec.WithClusterIP(corev1.ClusterIPNone)
 	}

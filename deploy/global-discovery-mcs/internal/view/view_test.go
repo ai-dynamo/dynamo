@@ -350,6 +350,8 @@ func TestLiteMatchesFull(t *testing.T) {
 	snap.Exports[0].Spec.Annotations = map[string]string{"note": "x"}
 	snap.Exports[0].Spec.SessionAffinity = store.SessionAffinityClientIP
 	snap.Exports[0].Spec.SessionAffinityConfig = &store.SessionAffinityConfig{ClientIP: &store.ClientIPConfig{TimeoutSeconds: 60}}
+	snap.Exports[0].Spec.InternalTrafficPolicy = store.InternalTrafficPolicyLocal
+	snap.Exports[0].Spec.TrafficDistribution = "PreferClose"
 	f.view.Replace(snap, t0)
 	msgs, _ := f.view.List(cs, ImportFilter{Endpoints: true})
 	require.NotEmpty(t, msgs)
@@ -367,6 +369,47 @@ func TestLiteMatchesFull(t *testing.T) {
 		}
 		assert.True(t, found, "%s", full.GetName())
 	}
+}
+
+func TestImportTrafficPoliciesFollowWinner(t *testing.T) {
+	f := newFixture(t)
+	snap := baseSnapshot()
+	snap.Exports[0].Spec.InternalTrafficPolicy = store.InternalTrafficPolicyLocal
+	snap.Exports[0].Spec.TrafficDistribution = "PreferClose"
+	snap.Exports[1].Spec.InternalTrafficPolicy = store.InternalTrafficPolicyCluster
+	snap.Exports[1].Spec.TrafficDistribution = "PreferSameZone"
+
+	// The oldest active export supplies the policies.
+	f.view.Replace(snap, t0)
+	assertImportTrafficPolicies(t, f.view, mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_LOCAL, "PreferClose")
+
+	// The newer export supplies policies after the older export's lease expires.
+	f.clock.Advance(20 * time.Second)
+	b, ok := f.view.ClusterRecord(store.ClusterKey{ClusterSet: cs, Cluster: "b"})
+	require.True(t, ok)
+	b.Lease.RenewedAt = f.clock.Now()
+	f.view.ApplyCluster(b)
+	f.clock.Advance(15 * time.Second)
+	f.view.EvaluateLeases()
+	assertImportTrafficPolicies(t, f.view, mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_CLUSTER, "PreferSameZone")
+
+	// Missing source fields remain unspecified on the wire rather than acquiring defaults.
+	rec := snap.Exports[1]
+	rec.Generation++
+	rec.UpdatedAt = f.clock.Now()
+	rec.Spec.InternalTrafficPolicy = ""
+	rec.Spec.TrafficDistribution = ""
+	f.view.ApplyExport(rec)
+	assertImportTrafficPolicies(t, f.view, mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_UNSPECIFIED, "")
+}
+
+func assertImportTrafficPolicies(t *testing.T, v *View, policy mcsv1.InternalTrafficPolicy, distribution string) {
+	t.Helper()
+	msgs, _ := v.List(cs, ImportFilter{Endpoints: true})
+	require.Len(t, msgs, 1)
+	imp := msgs[0].(*mcsv1.ServiceImport)
+	assert.Equal(t, policy, imp.GetInternalTrafficPolicy())
+	assert.Equal(t, distribution, imp.GetTrafficDistribution())
 }
 
 func TestAccessors(t *testing.T) {

@@ -60,7 +60,10 @@ func testImport() *mcsv1.ServiceImport {
 }
 
 func TestBuildServiceImport(t *testing.T) {
-	u, err := BuildServiceImport(testImport(), "cs", []string{"10.96.0.10"})
+	imp := testImport()
+	imp.InternalTrafficPolicy = mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_LOCAL
+	imp.TrafficDistribution = "PreferClose"
+	u, err := BuildServiceImport(imp, "cs", []string{"10.96.0.10"})
 	require.NoError(t, err)
 	var si mcsv1beta1.ServiceImport
 	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &si))
@@ -73,6 +76,8 @@ func TestBuildServiceImport(t *testing.T) {
 	assert.Equal(t, corev1.ServiceAffinityClientIP, si.Spec.SessionAffinity)
 	assert.Equal(t, int32(60), *si.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds)
 	assert.Equal(t, []corev1.IPFamily{corev1.IPv4Protocol}, si.Spec.IPFamilies)
+	assert.Equal(t, new(corev1.ServiceInternalTrafficPolicyLocal), si.Spec.InternalTrafficPolicy)
+	assert.Equal(t, new("PreferClose"), si.Spec.TrafficDistribution)
 	require.Len(t, si.Spec.Ports, 1)
 	assert.Equal(t, mcsv1beta1.ServicePort{Name: "http", Protocol: corev1.ProtocolTCP, Port: 80, AppProtocol: new("http")}, si.Spec.Ports[0])
 	_, hasStatus := u.Object["status"]
@@ -85,6 +90,12 @@ func TestBuildServiceImport(t *testing.T) {
 	assert.Empty(t, ports)
 	typ, _, _ := unstructuredString(empty.Object, "spec", "type")
 	assert.Equal(t, "Headless", typ)
+	_, found, err = unstructured.NestedFieldNoCopy(empty.Object, "spec", "internalTrafficPolicy")
+	require.NoError(t, err)
+	assert.False(t, found, "an unspecified policy is omitted for older registry compatibility")
+	_, found, err = unstructured.NestedFieldNoCopy(empty.Object, "spec", "trafficDistribution")
+	require.NoError(t, err)
+	assert.False(t, found, "an empty distribution is omitted")
 }
 
 func TestBuildServiceImportStatus(t *testing.T) {
@@ -122,6 +133,8 @@ func TestBuildServiceImportStatus(t *testing.T) {
 
 func TestBuildDerivedService(t *testing.T) {
 	imp := testImport()
+	imp.InternalTrafficPolicy = mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_LOCAL
+	imp.TrafficDistribution = "PreferClose"
 	ac := BuildDerivedService(imp, "cs", uid)
 	assert.Equal(t, api.DerivedServiceName(testNS, "frontend"), *ac.Name)
 	assert.Equal(t, testNS, *ac.Namespace)
@@ -137,10 +150,24 @@ func TestBuildDerivedService(t *testing.T) {
 	assert.Equal(t, int32(60), *ac.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds)
 	assert.Equal(t, []corev1.IPFamily{corev1.IPv4Protocol}, ac.Spec.IPFamilies)
 	assert.Equal(t, corev1.IPFamilyPolicySingleStack, *ac.Spec.IPFamilyPolicy)
+	assert.Equal(t, new(corev1.ServiceInternalTrafficPolicyLocal), ac.Spec.InternalTrafficPolicy)
+	assert.Equal(t, new("PreferClose"), ac.Spec.TrafficDistribution)
 	require.Len(t, ac.Spec.Ports, 1)
 	assert.Equal(t, "http", *ac.Spec.Ports[0].Name)
 	assert.Equal(t, int32(80), *ac.Spec.Ports[0].Port)
 	assert.Equal(t, "http", *ac.Spec.Ports[0].AppProtocol)
+
+	t.Log("An explicit Cluster policy and cleared distribution replace the previous values")
+	imp.InternalTrafficPolicy = mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_CLUSTER
+	imp.TrafficDistribution = ""
+	ac = BuildDerivedService(imp, "cs", uid)
+	assert.Equal(t, new(corev1.ServiceInternalTrafficPolicyCluster), ac.Spec.InternalTrafficPolicy)
+	assert.Nil(t, ac.Spec.TrafficDistribution)
+
+	t.Log("An unspecified policy remains omitted so the API server supplies its default")
+	imp.InternalTrafficPolicy = mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_UNSPECIFIED
+	ac = BuildDerivedService(imp, "cs", uid)
+	assert.Nil(t, ac.Spec.InternalTrafficPolicy)
 
 	imp.Type = mcsv1.ServiceType_SERVICE_TYPE_HEADLESS
 	imp.SessionAffinity = mcsv1.SessionAffinity_SESSION_AFFINITY_NONE

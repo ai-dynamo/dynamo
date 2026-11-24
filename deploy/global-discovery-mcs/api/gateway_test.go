@@ -114,7 +114,11 @@ func (r *recorder) ReplaceEndpoints(_ context.Context, req *mcsv1.ReplaceEndpoin
 
 func (r *recorder) GetServiceImport(_ context.Context, req *mcsv1.GetServiceImportRequest) (*mcsv1.GetServiceImportResponse, error) {
 	r.record("GetServiceImport", req)
-	return &mcsv1.GetServiceImportResponse{}, nil
+	return &mcsv1.GetServiceImportResponse{ServiceImport: &mcsv1.ServiceImport{
+		Namespace: req.Namespace, Name: req.Name,
+		InternalTrafficPolicy: mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_LOCAL,
+		TrafficDistribution:   "PreferClose",
+	}}, nil
 }
 
 func (r *recorder) ListServiceImports(_ context.Context, req *mcsv1.ListServiceImportsRequest) (*mcsv1.ListServiceImportsResponse, error) {
@@ -231,6 +235,11 @@ func TestJSONShape(t *testing.T) {
 	assert.Contains(t, body, `"state":"LEASE_STATE_ACTIVE"`, "enums as strings")
 	assert.Contains(t, body, `"epoch":"1761480000000"`, "64-bit integers as strings")
 	assert.Contains(t, body, `"generation":"3"`)
+
+	resp = serve(t, mux, "GET", "/v1/clustersets/cs1/imports/llm/router", "")
+	require.Equal(t, http.StatusOK, resp.Code)
+	assert.Contains(t, resp.Body.String(), `"internalTrafficPolicy":"INTERNAL_TRAFFIC_POLICY_LOCAL"`)
+	assert.Contains(t, resp.Body.String(), `"trafficDistribution":"PreferClose"`)
 }
 
 // TestWatchStreamShape checks that watches stream newline-delimited

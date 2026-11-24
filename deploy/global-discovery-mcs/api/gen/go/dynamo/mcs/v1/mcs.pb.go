@@ -1255,10 +1255,14 @@ type ServiceImport struct {
 	Conflict *Conflict        `protobuf:"bytes,11,opt,name=conflict,proto3" json:"conflict,omitempty"`
 	Clusters []*ClusterStatus `protobuf:"bytes,12,rep,name=clusters,proto3" json:"clusters,omitempty"`
 	// Endpoints grouped by source cluster, including the importing cluster.
-	Endpoints     []*ClusterEndpoints    `protobuf:"bytes,13,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Endpoints []*ClusterEndpoints    `protobuf:"bytes,13,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// Internal traffic policy of the winning export; unspecified means unset.
+	InternalTrafficPolicy InternalTrafficPolicy `protobuf:"varint,15,opt,name=internal_traffic_policy,json=internalTrafficPolicy,proto3,enum=dynamo.mcs.v1.InternalTrafficPolicy" json:"internal_traffic_policy,omitempty"`
+	// Kubernetes spec.trafficDistribution of the winning export; empty means unset.
+	TrafficDistribution string `protobuf:"bytes,16,opt,name=traffic_distribution,json=trafficDistribution,proto3" json:"traffic_distribution,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ServiceImport) Reset() {
@@ -1387,6 +1391,20 @@ func (x *ServiceImport) GetUpdatedAt() *timestamppb.Timestamp {
 		return x.UpdatedAt
 	}
 	return nil
+}
+
+func (x *ServiceImport) GetInternalTrafficPolicy() InternalTrafficPolicy {
+	if x != nil {
+		return x.InternalTrafficPolicy
+	}
+	return InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_UNSPECIFIED
+}
+
+func (x *ServiceImport) GetTrafficDistribution() string {
+	if x != nil {
+		return x.TrafficDistribution
+	}
+	return ""
 }
 
 type PutServiceExportRequest struct {
@@ -2339,7 +2357,7 @@ const file_dynamo_mcs_v1_mcs_proto_rawDesc = "" +
 	"\x11export_generation\x18\b \x01(\x04R\x10exportGeneration\x128\n" +
 	"\n" +
 	"conditions\x18\t \x03(\v2\x18.dynamo.mcs.v1.ConditionR\n" +
-	"conditions\"\x9d\a\n" +
+	"conditions\"\xae\b\n" +
 	"\rServiceImport\x12\x1e\n" +
 	"\n" +
 	"clusterset\x18\x01 \x01(\tR\n" +
@@ -2359,7 +2377,9 @@ const file_dynamo_mcs_v1_mcs_proto_rawDesc = "" +
 	"\bclusters\x18\f \x03(\v2\x1c.dynamo.mcs.v1.ClusterStatusR\bclusters\x12=\n" +
 	"\tendpoints\x18\r \x03(\v2\x1f.dynamo.mcs.v1.ClusterEndpointsR\tendpoints\x129\n" +
 	"\n" +
-	"updated_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x1a>\n" +
+	"updated_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\\\n" +
+	"\x17internal_traffic_policy\x18\x0f \x01(\x0e2$.dynamo.mcs.v1.InternalTrafficPolicyR\x15internalTrafficPolicy\x121\n" +
+	"\x14traffic_distribution\x18\x10 \x01(\tR\x13trafficDistribution\x1a>\n" +
 	"\x10AnnotationsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a9\n" +
@@ -2570,35 +2590,36 @@ var file_dynamo_mcs_v1_mcs_proto_depIdxs = []int32{
 	16, // 30: dynamo.mcs.v1.ServiceImport.clusters:type_name -> dynamo.mcs.v1.ClusterStatus
 	14, // 31: dynamo.mcs.v1.ServiceImport.endpoints:type_name -> dynamo.mcs.v1.ClusterEndpoints
 	37, // 32: dynamo.mcs.v1.ServiceImport.updated_at:type_name -> google.protobuf.Timestamp
-	9,  // 33: dynamo.mcs.v1.PutServiceExportRequest.spec:type_name -> dynamo.mcs.v1.ServiceExportSpec
-	10, // 34: dynamo.mcs.v1.PutServiceExportResponse.export:type_name -> dynamo.mcs.v1.ServiceExport
-	10, // 35: dynamo.mcs.v1.ListServiceExportsResponse.exports:type_name -> dynamo.mcs.v1.ServiceExport
-	13, // 36: dynamo.mcs.v1.ReplaceEndpointsRequest.endpoints:type_name -> dynamo.mcs.v1.Endpoint
-	17, // 37: dynamo.mcs.v1.GetServiceImportResponse.service_import:type_name -> dynamo.mcs.v1.ServiceImport
-	40, // 38: dynamo.mcs.v1.ListServiceImportsRequest.selector:type_name -> dynamo.mcs.v1.LabelSelector
-	17, // 39: dynamo.mcs.v1.ListServiceImportsResponse.service_imports:type_name -> dynamo.mcs.v1.ServiceImport
-	40, // 40: dynamo.mcs.v1.WatchServiceImportsRequest.selector:type_name -> dynamo.mcs.v1.LabelSelector
-	41, // 41: dynamo.mcs.v1.WatchServiceImportsResponse.type:type_name -> dynamo.mcs.v1.EventType
-	17, // 42: dynamo.mcs.v1.WatchServiceImportsResponse.service_import:type_name -> dynamo.mcs.v1.ServiceImport
-	18, // 43: dynamo.mcs.v1.ServiceExportService.PutServiceExport:input_type -> dynamo.mcs.v1.PutServiceExportRequest
-	20, // 44: dynamo.mcs.v1.ServiceExportService.DeleteServiceExport:input_type -> dynamo.mcs.v1.DeleteServiceExportRequest
-	22, // 45: dynamo.mcs.v1.ServiceExportService.ListServiceExports:input_type -> dynamo.mcs.v1.ListServiceExportsRequest
-	24, // 46: dynamo.mcs.v1.ServiceExportService.ReplaceEndpoints:input_type -> dynamo.mcs.v1.ReplaceEndpointsRequest
-	26, // 47: dynamo.mcs.v1.ServiceImportService.GetServiceImport:input_type -> dynamo.mcs.v1.GetServiceImportRequest
-	28, // 48: dynamo.mcs.v1.ServiceImportService.ListServiceImports:input_type -> dynamo.mcs.v1.ListServiceImportsRequest
-	30, // 49: dynamo.mcs.v1.ServiceImportService.WatchServiceImports:input_type -> dynamo.mcs.v1.WatchServiceImportsRequest
-	19, // 50: dynamo.mcs.v1.ServiceExportService.PutServiceExport:output_type -> dynamo.mcs.v1.PutServiceExportResponse
-	21, // 51: dynamo.mcs.v1.ServiceExportService.DeleteServiceExport:output_type -> dynamo.mcs.v1.DeleteServiceExportResponse
-	23, // 52: dynamo.mcs.v1.ServiceExportService.ListServiceExports:output_type -> dynamo.mcs.v1.ListServiceExportsResponse
-	25, // 53: dynamo.mcs.v1.ServiceExportService.ReplaceEndpoints:output_type -> dynamo.mcs.v1.ReplaceEndpointsResponse
-	27, // 54: dynamo.mcs.v1.ServiceImportService.GetServiceImport:output_type -> dynamo.mcs.v1.GetServiceImportResponse
-	29, // 55: dynamo.mcs.v1.ServiceImportService.ListServiceImports:output_type -> dynamo.mcs.v1.ListServiceImportsResponse
-	31, // 56: dynamo.mcs.v1.ServiceImportService.WatchServiceImports:output_type -> dynamo.mcs.v1.WatchServiceImportsResponse
-	50, // [50:57] is the sub-list for method output_type
-	43, // [43:50] is the sub-list for method input_type
-	43, // [43:43] is the sub-list for extension type_name
-	43, // [43:43] is the sub-list for extension extendee
-	0,  // [0:43] is the sub-list for field type_name
+	4,  // 33: dynamo.mcs.v1.ServiceImport.internal_traffic_policy:type_name -> dynamo.mcs.v1.InternalTrafficPolicy
+	9,  // 34: dynamo.mcs.v1.PutServiceExportRequest.spec:type_name -> dynamo.mcs.v1.ServiceExportSpec
+	10, // 35: dynamo.mcs.v1.PutServiceExportResponse.export:type_name -> dynamo.mcs.v1.ServiceExport
+	10, // 36: dynamo.mcs.v1.ListServiceExportsResponse.exports:type_name -> dynamo.mcs.v1.ServiceExport
+	13, // 37: dynamo.mcs.v1.ReplaceEndpointsRequest.endpoints:type_name -> dynamo.mcs.v1.Endpoint
+	17, // 38: dynamo.mcs.v1.GetServiceImportResponse.service_import:type_name -> dynamo.mcs.v1.ServiceImport
+	40, // 39: dynamo.mcs.v1.ListServiceImportsRequest.selector:type_name -> dynamo.mcs.v1.LabelSelector
+	17, // 40: dynamo.mcs.v1.ListServiceImportsResponse.service_imports:type_name -> dynamo.mcs.v1.ServiceImport
+	40, // 41: dynamo.mcs.v1.WatchServiceImportsRequest.selector:type_name -> dynamo.mcs.v1.LabelSelector
+	41, // 42: dynamo.mcs.v1.WatchServiceImportsResponse.type:type_name -> dynamo.mcs.v1.EventType
+	17, // 43: dynamo.mcs.v1.WatchServiceImportsResponse.service_import:type_name -> dynamo.mcs.v1.ServiceImport
+	18, // 44: dynamo.mcs.v1.ServiceExportService.PutServiceExport:input_type -> dynamo.mcs.v1.PutServiceExportRequest
+	20, // 45: dynamo.mcs.v1.ServiceExportService.DeleteServiceExport:input_type -> dynamo.mcs.v1.DeleteServiceExportRequest
+	22, // 46: dynamo.mcs.v1.ServiceExportService.ListServiceExports:input_type -> dynamo.mcs.v1.ListServiceExportsRequest
+	24, // 47: dynamo.mcs.v1.ServiceExportService.ReplaceEndpoints:input_type -> dynamo.mcs.v1.ReplaceEndpointsRequest
+	26, // 48: dynamo.mcs.v1.ServiceImportService.GetServiceImport:input_type -> dynamo.mcs.v1.GetServiceImportRequest
+	28, // 49: dynamo.mcs.v1.ServiceImportService.ListServiceImports:input_type -> dynamo.mcs.v1.ListServiceImportsRequest
+	30, // 50: dynamo.mcs.v1.ServiceImportService.WatchServiceImports:input_type -> dynamo.mcs.v1.WatchServiceImportsRequest
+	19, // 51: dynamo.mcs.v1.ServiceExportService.PutServiceExport:output_type -> dynamo.mcs.v1.PutServiceExportResponse
+	21, // 52: dynamo.mcs.v1.ServiceExportService.DeleteServiceExport:output_type -> dynamo.mcs.v1.DeleteServiceExportResponse
+	23, // 53: dynamo.mcs.v1.ServiceExportService.ListServiceExports:output_type -> dynamo.mcs.v1.ListServiceExportsResponse
+	25, // 54: dynamo.mcs.v1.ServiceExportService.ReplaceEndpoints:output_type -> dynamo.mcs.v1.ReplaceEndpointsResponse
+	27, // 55: dynamo.mcs.v1.ServiceImportService.GetServiceImport:output_type -> dynamo.mcs.v1.GetServiceImportResponse
+	29, // 56: dynamo.mcs.v1.ServiceImportService.ListServiceImports:output_type -> dynamo.mcs.v1.ListServiceImportsResponse
+	31, // 57: dynamo.mcs.v1.ServiceImportService.WatchServiceImports:output_type -> dynamo.mcs.v1.WatchServiceImportsResponse
+	51, // [51:58] is the sub-list for method output_type
+	44, // [44:51] is the sub-list for method input_type
+	44, // [44:44] is the sub-list for extension type_name
+	44, // [44:44] is the sub-list for extension extendee
+	0,  // [0:44] is the sub-list for field type_name
 }
 
 func init() { file_dynamo_mcs_v1_mcs_proto_init() }
