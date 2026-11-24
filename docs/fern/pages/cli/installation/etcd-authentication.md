@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: etcd Authentication
 subtitle: Run Dynamo against an etcd server that requires TLS and client authentication
@@ -43,7 +43,7 @@ TLS). etcd maps the certificate's common name (CN) to an etcd user and checks
 that user's role on every request. Use password authentication for Dynamo only
 on loopback or a network that no one else can reach.
 
-## Set up etcd and Dynamo
+## Prerequisites
 
 The steps below run one etcd member on `127.0.0.1` with TLS and client
 certificate authentication, create a `dynamo` user whose role is limited to the
@@ -52,7 +52,7 @@ certificate authentication, create a `dynamo` user whose role is limited to the
 other hosts reach, add its host names and IP addresses to the server
 certificate and use them in the URLs.
 
-### 1. Create the certificates
+## Create the certificates
 
 Create a CA, a server certificate for etcd, and two client certificates:
 `dynamo` for Dynamo components and `admin` for `etcdctl`.
@@ -83,9 +83,9 @@ chmod 600 ./*-key.pem
 
 `admin` is not an etcd user, so its certificate only lets `etcdctl` complete
 the TLS handshake; administrative commands also need the `root` password
-created in step 3. Keep `ca-key.pem` offline once the certificates exist.
+created in [Create the users and turn on authentication](#create-the-users-and-turn-on-authentication). Keep `ca-key.pem` offline once the certificates exist.
 
-### 2. Start etcd with TLS and client certificate authentication
+## Start etcd with TLS and client certificate authentication
 
 ```bash
 etcd --name dynamo-etcd --data-dir ./data \
@@ -100,7 +100,7 @@ certificate signed by `ca.pem`. Run etcd under a process manager such as
 systemd for a long-lived deployment; for this walkthrough, run it in a second
 terminal from the `etcd-tls` directory.
 
-### 3. Create the users and turn on authentication
+## Create the users and turn on authentication
 
 ```bash
 etcd_admin() {
@@ -127,7 +127,7 @@ the `v1/` prefix, so `readwrite` on `v1/` is all the `dynamo` role needs. etcd
 lets any authenticated user create leases, and the `v1/` permission covers the
 keys Dynamo attaches to them.
 
-### 4. Start Dynamo with the client certificate
+## Start Dynamo with the client certificate
 
 In each shell that starts a Dynamo component, run from the `etcd-tls`
 directory:
@@ -152,7 +152,7 @@ python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --discovery-backend etcd
 Do not set `ETCD_AUTH_USERNAME` or `ETCD_AUTH_PASSWORD` in these shells; if
 both are set, Dynamo ignores the certificate variables.
 
-### 5. Check the setup
+## Check the setup
 
 List the keys Dynamo registered, as `root`:
 

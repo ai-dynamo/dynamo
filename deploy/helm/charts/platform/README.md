@@ -937,88 +937,10 @@ To use an external etcd instance instead:
 
 ```yaml
 dynamo-operator:
-  etcdAddr: "https://my-external-etcd:2379"
+  etcdAddr: "http://my-external-etcd:2379"
 ```
 
-Dynamo components connect to an `https://` etcd address only when they also have a client certificate. See [etcd Authentication](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/etcd-authentication.md) for how components get their etcd credentials.
-
-#### Enable authentication and TLS on the bundled etcd
-
-The bundled etcd runs without authentication or TLS by default. To require TLS and a client certificate from every client, and to protect administration with a `root` password, first create two Secrets in the release namespace.
-
-The server certificate must be signed by your CA, list the etcd service names as subject alternative names, and allow both server and client use, because the etcd chart's own scripts also present it as a client certificate. For a release named `dynamo-platform` in namespace `dynamo-system`:
-
-```bash
-openssl req -newkey rsa:2048 -nodes -keyout server-key.pem -out server.csr \
-  -subj "/CN=etcd-server"
-openssl x509 -req -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial \
-  -days 365 -out server.pem \
-  -extfile <(printf "subjectAltName=DNS:dynamo-platform-etcd.dynamo-system.svc.cluster.local,DNS:*.dynamo-platform-etcd-headless.dynamo-system.svc.cluster.local,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth")
-
-kubectl create secret generic dynamo-etcd-server-tls -n dynamo-system \
-  --from-file=tls.crt=server.pem --from-file=tls.key=server-key.pem \
-  --from-file=ca.crt=ca.pem
-kubectl create secret generic dynamo-etcd-root -n dynamo-system \
-  --from-literal=root-password="$(openssl rand -base64 24)"
-```
-
-Then install the chart with these values:
-
-```yaml
-global:
-  etcd:
-    install: true
-
-dynamo-operator:
-  discoveryBackend: etcd
-  etcdAddr: "https://dynamo-platform-etcd.dynamo-system.svc.cluster.local:2379"
-
-etcd:
-  auth:
-    rbac:
-      create: true
-      allowNoneAuthentication: false
-      existingSecret: dynamo-etcd-root
-      existingSecretPasswordKey: root-password
-    client:
-      secureTransport: true
-      enableAuthentication: true
-      existingSecret: dynamo-etcd-server-tls
-      certFilename: tls.crt
-      certKeyFilename: tls.key
-      caFilename: ca.crt
-    peer:
-      secureTransport: true
-      enableAuthentication: true
-      existingSecret: dynamo-etcd-server-tls
-      certFilename: tls.crt
-      certKeyFilename: tls.key
-      caFilename: ca.crt
-```
-
-`auth.client.enableAuthentication` makes etcd reject clients without a certificate signed by `ca.crt`, and `auth.rbac.create` creates the `root` user and turns on authentication. The `auth.peer` values apply the same certificate and checks to the peer port `2380`, which etcd members use to talk to each other. Keep them even with one replica: the peer port still listens, and client certificates and RBAC on port `2379` do not cover it. The server certificate already lists the headless service names the peer URLs use.
-
-Create a `dynamo` user that can use only the `v1/` keys Dynamo stores. etcd maps the common name of a client certificate to the user, so give Dynamo components a client certificate with `CN=dynamo`, signed by the same CA:
-
-```bash
-kubectl exec -n dynamo-system dynamo-platform-etcd-0 -- bash -c '
-  etcdctl --endpoints=https://127.0.0.1:2379 --cacert="$ETCD_TRUSTED_CA_FILE" \
-    --cert="$ETCD_CERT_FILE" --key="$ETCD_KEY_FILE" \
-    --user=root --password="$(cat "$ETCD_ROOT_PASSWORD_FILE")" user add dynamo --no-password
-  etcdctl --endpoints=https://127.0.0.1:2379 --cacert="$ETCD_TRUSTED_CA_FILE" \
-    --cert="$ETCD_CERT_FILE" --key="$ETCD_KEY_FILE" \
-    --user=root --password="$(cat "$ETCD_ROOT_PASSWORD_FILE")" role add dynamo
-  etcdctl --endpoints=https://127.0.0.1:2379 --cacert="$ETCD_TRUSTED_CA_FILE" \
-    --cert="$ETCD_CERT_FILE" --key="$ETCD_KEY_FILE" \
-    --user=root --password="$(cat "$ETCD_ROOT_PASSWORD_FILE")" \
-    role grant-permission dynamo readwrite v1/ --prefix=true
-  etcdctl --endpoints=https://127.0.0.1:2379 --cacert="$ETCD_TRUSTED_CA_FILE" \
-    --cert="$ETCD_CERT_FILE" --key="$ETCD_KEY_FILE" \
-    --user=root --password="$(cat "$ETCD_ROOT_PASSWORD_FILE")" user grant-role dynamo dynamo
-'
-```
-
-Finally, give each Dynamo component the CA and its client certificate through a Secret, as shown in [Store the client credentials in a Secret](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/etcd-authentication.md#4-store-the-client-credentials-in-a-secret) and the steps after it in the etcd Authentication guide.
+For an etcd server that requires TLS and client authentication, see [etcd Authentication](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/etcd-authentication.md). The guide covers bundled and external etcd, including the chart values and component credentials.
 
 For detailed etcd configuration options, please refer to the official Bitnami etcd Helm chart documentation:
 **[etcd Helm Chart Documentation](https://github.com/bitnami/charts/tree/main/bitnami/etcd)**

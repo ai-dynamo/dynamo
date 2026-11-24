@@ -411,7 +411,7 @@ etcd:
 
   # Authentication and authorization settings
   # Authentication and TLS are off by default. To turn them on, see
-  # "Enable authentication and TLS on the bundled etcd" in this chart's README.
+  # the etcd Authentication guide linked from this chart's README.
   auth:
     rbac:
       # Whether to create RBAC authentication (disabled for internal use)
