@@ -114,14 +114,16 @@ Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before 
 
 ## Responses Reasoning Replay
 
-Set `DYN_RESPONSES_LEGACY_REASONING_REPLAY=1` on the frontend to enable the
-TensorRT-LLM-compatible replay format below. With this setting,
-`include: ["reasoning.encrypted_content"]` returns replay data.
-Without this setting, Dynamo omits the replay field. Requests that include only
-the replay field receive no reasoning text.
+Set `DYN_RESPONSES_LEGACY_REASONING_REPLAY=1` on the frontend to return reasoning
+in the replay format below. Clients built against the TensorRT-LLM serving API
+that send `encrypted_content` back on later turns need this. The frontend reads
+the variable at startup; restart it after a change.
 
-Setting `reasoning.summary` returns the full reasoning text as `reasoning_text`
-parts in the item's `content`. The `summary` array stays empty.
+| Request | Variable unset | Variable set to `1` |
+| --- | --- | --- |
+| `reasoning.summary` set | Full reasoning text as `reasoning_text` parts in `content`; `summary` stays empty | Same, plus `encrypted_content` when requested |
+| `include: ["reasoning.encrypted_content"]` without `reasoning.summary` | No reasoning output | `encrypted_content` only, with no plaintext |
+| Neither option | The deployment default (see below) | The deployment default |
 
 The replay payload is `trtllm-reasoning-v1:` followed by standard base64 of the
 exact UTF-8 reasoning text. For example, `hello` becomes
@@ -135,21 +137,27 @@ reasoning. Store, transmit, and log it with the same protections as plaintext
 reasoning.
 </Warning>
 
-On replay, nonempty readable `content` takes precedence. Dynamo accepts this
-format even when replay output is disabled. It returns HTTP 400 for malformed base64 or
-invalid UTF-8. If no readable content or recognized payload is available,
-Dynamo falls back to readable `summary` text. Other providers' opaque encodings
-are not decoded or forwarded as reasoning to the backend; do not rely on them
-to preserve conversation reasoning.
+On replay, Dynamo uses the item's plaintext `content` if it is nonempty.
+Otherwise, it decodes a `trtllm-reasoning-v1:` payload, even when replay output
+is disabled, and returns HTTP 400 if the payload has malformed base64 or
+invalid UTF-8. If neither is available, Dynamo uses the item's `summary` text.
+Payloads from other providers are accepted but not decoded or sent to the
+backend, so their encoded reasoning is lost from the conversation.
 
-Without either request option, the serving deployment controls whether Dynamo
-returns raw reasoning by default. Set `responses_emit_raw_reasoning` in the
-model deployment card's runtime data to `true` or `false` to set that policy.
-Set the same value on every worker in the deployment.
-If the setting is absent, the Kimi K3 and GLM 4.7 families retain their existing
-default when selected by the reasoning parser, or by the tool parser when no
-reasoning parser is configured. Explicit request options continue to work
-independently of that default.
+Without either request option, the serving deployment decides whether Dynamo
+returns raw reasoning. With no explicit policy, raw reasoning is returned when
+the worker's reasoning parser is `kimi_k3`, `glm47`, or `glm45`, or, when no
+reasoning parser is configured, when its tool parser is `kimi_k3` or `glm47`.
+Other parsers don't return it by default. Explicit request options work
+regardless of this default.
+
+Custom workers can override the default by publishing
+`responses_emit_raw_reasoning` (`true` or `false`) in their runtime data, for
+example `runtime_config.set_engine_specific("responses_emit_raw_reasoning", "true")`.
+The built-in vLLM, SGLang, and TensorRT-LLM workers don't set it. Use the same
+value on every worker that serves the model: this setting contributes to the
+model deployment card checksum, so differing settings register workers in
+separate worker sets.
 
 ## Deployment-Level Thinking Default
 

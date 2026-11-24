@@ -996,6 +996,10 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
 
+`POST /v1/responses` rejects duplicate JSON object fields in the request body
+with HTTP 400 before dispatching generation. Send each field once, including
+fields inside nested objects.
+
 ### Image API Compatibility
 
 **Experimental.** Image editing requires a backend and model that support

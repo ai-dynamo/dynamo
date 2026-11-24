@@ -138,8 +138,8 @@ If generated custom-tool input does not match its declared regex or Lark
 grammar, check the endpoint's decoding contract. Dynamo's Responses endpoint
 accepts these descriptors as **advisory** metadata. The model generates a
 freeform `input` string; decoding does not enforce the grammar. This also
-applies to tools grouped under a named namespace and tool declarations supplied
-by a client-side tool-search result. The response retains the descriptor.
+applies to custom tools inside a `namespace` tool and to tools added through
+`additional_tools` input items. The response retains the descriptor.
 
 The frontend logs this exact warning once per process:
 
@@ -149,7 +149,8 @@ Responses custom-tool grammars are advisory; decoding does not enforce regex or 
 
 Validate each generated custom-tool input before executing it. An HTTP 200
 response or echoed descriptor does not establish grammar enforcement. If your
-client requires constrained output, use an endpoint that enforces that grammar.
+client requires constrained output, note that Dynamo doesn't enforce custom-tool
+grammars on any endpoint: Responses treats them as advisory, and Chat Completions rejects them.
 Function-tool and response-format guided decoding use separate constraints; see
 [Structural Tags](structural-tag.md).
 

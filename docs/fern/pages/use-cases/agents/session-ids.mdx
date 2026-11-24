@@ -44,17 +44,18 @@ Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-
 For `/v1/responses`, Dynamo chooses the first nonempty session hint in this order:
 
 1. `conversation_params.conversation_id` in the request body.
-2. A supported session header, including `x-dynamo-session-id` or `x-session-id`
-   (see [Native Agent Headers](#native-agent-headers)). The canonical
-   `x-dynamo-session-id` takes precedence over agent-native headers.
+2. The `x-dynamo-session-id` header, then a supported agent-native session
+   header such as `x-session-id` (see [Native Agent Headers](#native-agent-headers)).
 3. `client_metadata.thread_id` in the request body.
 4. `client_metadata.session_id` in the request body.
 
-The chosen value also supplies the TensorRT-LLM gRPC engine's conversation
-identity. Existing parent/subagent metadata, including
-`x-dynamo-parent-session-id`, is retained unless the parent equals the selected
-session. `prompt_cache_key`, `x-correlation-id`, and arbitrary header aliases do
-not establish session affinity.
+A body `conversation_id` takes precedence over session headers, so send the
+session in one place. TensorRT-LLM workers served through the Dynamo sidecar
+also receive the chosen value as the conversation ID.
+`x-dynamo-parent-session-id` and other lineage headers still apply; if the
+parent ID equals the chosen session ID, Dynamo ignores it, so a session isn't
+its own parent. `prompt_cache_key`, `x-correlation-id`, and other headers don't
+establish session affinity.
 
 These hints do not authenticate a session or store/reconstruct conversation
 history. Enable [session affinity](session-affinity.md) separately to make
