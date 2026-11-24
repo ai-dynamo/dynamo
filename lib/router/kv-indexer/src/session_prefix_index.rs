@@ -392,23 +392,14 @@ impl SessionPrefixIndexer {
     /// source `Removed` for the same blocks. SGLang's unified cache does. An engine
     /// that removes first leaves the session's destination-tier residency unrecorded
     /// until its next tagged store.
+    ///
+    /// `also_from` names one more source, read in every tier. A cache owner's stores
+    /// name no session, so the worker it is projected to supplies the frontiers.
     pub fn inherit_stored_blocks(
         &self,
         owner: SessionResidencyOwner,
         tier: StorageTier,
-        block_hashes: &[ExternalSequenceBlockHash],
-    ) -> usize {
-        self.inherit_stored_blocks_from(owner, tier, None, block_hashes)
-    }
-
-    /// [`Self::inherit_stored_blocks`] that also reads the frontiers of `attached` in
-    /// every tier. A cache owner stores what its attached worker deposits, and its
-    /// stores name no session, so the worker's frontiers say whose blocks they are.
-    pub fn inherit_stored_blocks_from(
-        &self,
-        owner: SessionResidencyOwner,
-        tier: StorageTier,
-        attached: Option<SessionResidencyOwner>,
+        also_from: Option<SessionResidencyOwner>,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> usize {
         if block_hashes.is_empty() {
@@ -416,7 +407,7 @@ impl SessionPrefixIndexer {
         }
 
         let mut state = self.state.write();
-        let updated = state.inherit_stored_blocks((owner, tier), attached, block_hashes);
+        let updated = state.inherit_stored_blocks((owner, tier), also_from, block_hashes);
         state.maybe_cleanup();
         updated
     }
@@ -922,7 +913,7 @@ impl IndexState {
     fn inherit_stored_blocks(
         &mut self,
         key: FrontierKey,
-        attached: Option<SessionResidencyOwner>,
+        also_from: Option<SessionResidencyOwner>,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> usize {
         let stored_nodes: FxHashSet<NodeId> = block_hashes
@@ -939,12 +930,12 @@ impl IndexState {
             .iter()
             .filter(|((frontier_owner, frontier_tier), _)| {
                 (*frontier_owner == owner && *frontier_tier != tier)
-                    || Some(*frontier_owner) == attached
+                    || Some(*frontier_owner) == also_from
             })
             .map(|(_, frontiers)| frontiers);
 
-        // Each frontier in another tier of this owner, or in any tier of the attached
-        // owner, passes on the deepest stored block on its path.
+        // Each frontier in another tier of this owner, or in any tier of `also_from`,
+        // passes on the deepest stored block on its path.
         let candidates: Vec<(SessionId, NodeId)> = if self.stored_set_is_closed(&stored_nodes) {
             // No frontier lies strictly below the stored blocks, so only frontiers that
             // sit on a stored block can inherit: look them up instead of walking paths.
@@ -1631,7 +1622,7 @@ mod tests {
 
         // The device offloads its first two blocks to host memory, then evicts the last two.
         assert_eq!(
-            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, &chain[..2]),
+            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, None, &chain[..2]),
             1
         );
         indexer.update_session_from_removed_blocks(worker(1), &chain[1..]);
@@ -1662,7 +1653,7 @@ mod tests {
             .update_session_from_stored_blocks("s1", worker(2), None, &chain)
             .unwrap();
         assert_eq!(
-            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, &chain),
+            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, None, &chain),
             0,
             "another worker's frontier does not attribute blocks"
         );
@@ -1671,12 +1662,12 @@ mod tests {
             .update_session_from_stored_blocks("s1", worker(1), None, &chain)
             .unwrap();
         assert_eq!(
-            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, &chain),
+            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, None, &chain),
             1
         );
         indexer.update_session_from_removed_blocks(worker(1), &chain);
         assert_eq!(
-            indexer.inherit_stored_blocks(owner(1), StorageTier::Disk, &chain[..1]),
+            indexer.inherit_stored_blocks(owner(1), StorageTier::Disk, None, &chain[..1]),
             1,
             "disk inherits from host after the device copy is gone"
         );
@@ -1707,44 +1698,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_owner_inherits_from_its_attached_worker_and_outlives_it() {
-        let chain = hashes(vec![1, 2]);
-        let cache_owner =
-            SessionResidencyOwner::CacheOwner(ResidencyOwnerKey::from_digest([7; 16]));
-        let indexer = SessionPrefixIndexer::new();
-        indexer
-            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
-            .unwrap();
-
-        assert_eq!(
-            indexer.inherit_stored_blocks_from(
-                cache_owner,
-                StorageTier::HostPinned,
-                Some(owner(2)),
-                &chain
-            ),
-            0,
-            "a worker the owner is not attached to does not attribute blocks"
-        );
-        assert_eq!(
-            indexer.inherit_stored_blocks_from(
-                cache_owner,
-                StorageTier::HostPinned,
-                Some(owner(1)),
-                &chain
-            ),
-            1
-        );
-
-        indexer.clear_worker_id_frontiers(1);
-        assert_eq!(
-            residency_of(&indexer, "s1"),
-            vec![(cache_owner, StorageTier::HostPinned, chain[1])],
-            "the owner keeps the session's blocks after its worker is gone"
-        );
-    }
-
-    #[test]
     fn shared_cache_frontiers_are_owned_apart_from_workers() {
         let chain = hashes(vec![1, 2, 3]);
         let indexer = SessionPrefixIndexer::new();
@@ -1754,7 +1707,7 @@ mod tests {
             .update_session_from_stored_blocks("s1", worker(1), None, &chain)
             .unwrap();
         assert_eq!(
-            indexer.inherit_stored_blocks(mooncake, StorageTier::HostPinned, &chain),
+            indexer.inherit_stored_blocks(mooncake, StorageTier::HostPinned, None, &chain),
             0,
             "a shared store does not inherit a worker's frontiers"
         );
@@ -1769,7 +1722,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            indexer.inherit_stored_blocks(owner(2), StorageTier::HostPinned, &chain),
+            indexer.inherit_stored_blocks(owner(2), StorageTier::HostPinned, None, &chain),
             0,
             "a worker does not inherit the shared store's frontiers"
         );
@@ -1875,7 +1828,7 @@ mod tests {
                 .unwrap()
         };
         let inherit = |blocks: &[ExternalSequenceBlockHash]| {
-            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, blocks)
+            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, None, blocks)
         };
 
         // Blocks 1 and 3 without 2: only the run from the root counts.
@@ -1906,12 +1859,12 @@ mod tests {
         // The stored set has a child outside it, so frontiers below it are found by
         // walking: s2's frontier at 4 inherits 3.
         assert_eq!(
-            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, &short),
+            indexer.inherit_stored_blocks(owner(1), StorageTier::HostPinned, None, &short),
             2
         );
         // The full chain is closed: both frontiers sit on stored blocks.
         assert_eq!(
-            indexer.inherit_stored_blocks(owner(1), StorageTier::Disk, &long),
+            indexer.inherit_stored_blocks(owner(1), StorageTier::Disk, None, &long),
             2
         );
         for (session, chain) in [("s1", &short), ("s2", &long)] {

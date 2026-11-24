@@ -448,7 +448,7 @@ impl Indexer {
                 session_updates, ..
             } => session_updates.as_ref().and_then(|sender| {
                 sender
-                    .mutation_from_event(&event, targets_primary)
+                    .mutation_from_event(&event)
                     .map(|mutation| (sender.clone(), mutation))
             }),
             Self::Remote { .. } | Self::None => None,
@@ -1814,6 +1814,7 @@ mod session_tests {
     use super::*;
     use crate::prelude::{
         KvCacheEvent, KvCacheRemoveData, ResidencyOwner, ResidencyOwnerKeyExt, StorageTier,
+        WireResidencyDomain,
     };
     use crate::{SessionPrefixIndexer, SessionResidencyOwner};
     use dynamo_router_protocol::identity::{
@@ -2366,8 +2367,8 @@ mod session_tests {
             let tagged_store =
                 store_event(7, 0, 1, &[], &[41], StorageTier::Device).with_session_id("session-1");
             let inherited_store = store_event(7, 0, 2, &[], &[41], StorageTier::HostPinned);
-            let delayed_stored = sender.mutation_from_event(&tagged_store, true).unwrap();
-            let delayed_inherited = sender.mutation_from_event(&inherited_store, false).unwrap();
+            let delayed_stored = sender.mutation_from_event(&tagged_store).unwrap();
+            let delayed_inherited = sender.mutation_from_event(&inherited_store).unwrap();
 
             indexer.remove_worker(worker.worker_id).await;
             sender.enqueue(delayed_stored).unwrap();
@@ -2515,10 +2516,9 @@ mod session_tests {
         SessionResidencyOwner::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
     }
 
-    /// `event` as `owner` publishes it. Its worker id is not validated at ingest, so these
-    /// tests give it one no worker has.
+    /// `event` in `owner`'s residency domain.
     fn owned(event: RouterEvent, owner: CacheOwnerId) -> RouterEvent {
-        RouterEvent::with_cache_owner(99, event.event, event.storage_tier, owner)
+        RouterEvent::with_cache_owner(event.worker_id, event.event, event.storage_tier, owner)
     }
 
     /// One indexer of each kind, with `owner` attached to `worker`.
@@ -2603,7 +2603,6 @@ mod session_tests {
                 .unwrap();
             indexer.flush_session_updates().await.unwrap();
             assert_eq!(in_owner(), vec![vec![block_hashes[0]]]);
-            assert_eq!(in_worker(StorageTier::Device), vec![block_hashes.clone()]);
         }
     }
 
@@ -2638,7 +2637,7 @@ mod session_tests {
 
             // The router clears an owner whose source went away. A store ingested before
             // the clear and applied after it must not bring the frontier back.
-            let delayed = sender.mutation_from_event(&host_store(), false).unwrap();
+            let delayed = sender.mutation_from_event(&host_store()).unwrap();
             indexer
                 .try_apply_event(RouterEvent::with_cache_owner(
                     0,
@@ -2664,16 +2663,20 @@ mod session_tests {
                 "an owner clear names no worker rank"
             );
 
-            // The owner outlives its worker: a rank reset and a worker removal keep its
+            // The owner outlives its worker. A worker reset arrives as a worker-domain
+            // clear that names the owner; it and a worker removal keep the owner's
             // frontiers, and a store ingested before them still applies.
             indexer.try_apply_event(host_store()).await.unwrap();
             let delayed_disk = sender
-                .mutation_from_event(
-                    &owned(store_event(7, 0, 5, &[], &[41], StorageTier::Disk), owner),
-                    false,
-                )
+                .mutation_from_event(&owned(
+                    store_event(7, 0, 5, &[], &[41], StorageTier::Disk),
+                    owner,
+                ))
                 .unwrap();
-            indexer.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+            indexer
+                .try_apply_event(clear_event(7, 0, 6).with_state_source(owner))
+                .await
+                .unwrap();
             indexer.remove_worker(7).await;
             sender.enqueue(delayed_disk).unwrap();
             indexer.flush_session_updates().await.unwrap();
@@ -2682,12 +2685,13 @@ mod session_tests {
                 held(&index, session_owner(owner), StorageTier::Disk),
                 vec![vec![block_hashes[0]]]
             );
-            assert!(
-                index
-                    .get_session_block_lineage("session-1", worker, None)
-                    .unwrap()
-                    .is_empty()
-            );
+
+            // A legacy clear carries no domain, and covers the worker and the owner it names.
+            let mut legacy_clear = clear_event(7, 0, 7).with_state_source(owner);
+            legacy_clear.residency_domain = WireResidencyDomain::Missing;
+            indexer.try_apply_event(legacy_clear).await.unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert!(index.get_session_residency("session-1").is_empty());
         }
     }
 
@@ -2701,7 +2705,7 @@ mod session_tests {
 
             // The session ran on another worker. A peer fetch then lands its three blocks
             // in this worker's owner before the session is recorded here, so the store
-            // credits nobody. The worker's own host tier holds the fourth block.
+            // credits nobody. The worker's own host tier holds the same blocks and a fourth.
             indexer
                 .try_apply_event(
                     store_event(8, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
@@ -2720,8 +2724,8 @@ mod session_tests {
                     7,
                     0,
                     2,
-                    &[41, 42, 43],
-                    &[44],
+                    &[],
+                    &[41, 42, 43, 44],
                     StorageTier::HostPinned,
                 ))
                 .await

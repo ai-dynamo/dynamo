@@ -2804,12 +2804,25 @@ mod tests {
             };
             assert_eq!(routing_hashes.is_some(), return_hashes);
         }
-        // The last match observes all earlier queued session updates.
+        let owner_lineage = |session: &str| {
+            session_index
+                .get_session_block_lineage_in_tier(
+                    session,
+                    SessionResidencyOwner::CacheOwner(
+                        ResidencyOwner::cache_owner(owner).compact_key(),
+                    ),
+                    StorageTier::HostPinned,
+                    None,
+                )
+                .unwrap()
+        };
+        // The last request's matches observe all earlier queued session updates.
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while session_index
                 .get_session_block_lineage("booked", worker, None)
                 .unwrap()
                 .is_empty()
+                || owner_lineage("booked").is_empty()
             {
                 tokio::task::yield_now().await;
             }
@@ -2831,18 +2844,6 @@ mod tests {
                 .is_empty()
         );
         // The owner's store credited the seeded session; admitted routing credited the rest.
-        let owner_lineage = |session: &str| {
-            session_index
-                .get_session_block_lineage_in_tier(
-                    session,
-                    SessionResidencyOwner::CacheOwner(
-                        ResidencyOwner::cache_owner(owner).compact_key(),
-                    ),
-                    StorageTier::HostPinned,
-                    None,
-                )
-                .unwrap()
-        };
         for session in ["seed", "query", "booked"] {
             assert_eq!(owner_lineage(session), vec![expected.clone()]);
         }
