@@ -116,12 +116,13 @@ pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 /// The Mistral v11+ native grammar.
 #[cfg(test)]
 pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
-/// Register vendors before first parser discovery or model setup. The process uses one
-/// effective catalog for selector storage, descriptors, factories, and request policy.
 type Registration = dynamo_parsers_v2::UnifiedParserRegistration;
 static REGISTRATIONS: std::sync::OnceLock<Vec<Registration>> = std::sync::OnceLock::new();
 static REGISTRY_STARTUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Dynamo discovers built-in parsers from frontend-crates. Register vendor parsers
+/// and load plugins before the first lookup so one catalog supplies selectors,
+/// factories, and capabilities.
 fn registrations() -> &'static [Registration] {
     if let Some(entries) = REGISTRATIONS.get() {
         return entries;
