@@ -800,7 +800,7 @@ async fn anthropic_messages(
         if let Some(error) = find_canonical_error_in_chain(e.as_ref())
             && let Some(response) = anthropic_semantic_error(error)
         {
-            inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
+            inflight_guard.mark_error(super::metrics::metric_error_type_for_class(error.class()));
             return response;
         }
         if super::metrics::request_was_unavailable(e.as_ref()) {
@@ -1036,7 +1036,7 @@ async fn anthropic_messages(
                     let error_type = if super::metrics::request_was_cancelled(&error) {
                         super::metrics::ErrorType::Cancelled
                     } else {
-                        super::openai::metric_error_type_for_class(error.class())
+                        super::metrics::metric_error_type_for_class(error.class())
                     };
                     inflight_guard.mark_error(error_type);
                     anthropic_non_streaming_aggregation_error(error)

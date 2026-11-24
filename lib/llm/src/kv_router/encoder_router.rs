@@ -124,10 +124,10 @@ fn definitively_rejected(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
-/// Native HTTP adapters classify staging failures with the shared semantic HTTP policy.
+/// A required encoder failed before the language worker received the request.
 #[derive(Debug, thiserror::Error)]
 #[error("Required encoder stage failed")]
-pub(crate) struct RequiredEncoderStage;
+pub struct RequiredEncoderStage(#[from] anyhow::Error);
 
 struct EncoderBinding {
     target_id: WorkerSetTargetId,
@@ -556,7 +556,7 @@ impl
                 lease
             }
             Err(error) if self.requires_encoder_result => {
-                return Err(error.context(RequiredEncoderStage));
+                return Err(RequiredEncoderStage(error).into());
             }
             Err(error) => {
                 tracing::error!(

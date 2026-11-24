@@ -74,9 +74,6 @@ pub(crate) fn request(
         for key in ["image_data", "video_data", "audio_data"] {
             body.remove(key);
         }
-        if let Some(hashes) = protocol::caller_hashes(request)? {
-            body.insert("mm_hashes".into(), hashes.into());
-        }
         body.insert("encoder_handoff".into(), handoff.clone());
     }
     let rid = rid.to_string();

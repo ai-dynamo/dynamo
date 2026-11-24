@@ -680,6 +680,13 @@ pub(crate) fn stream_incomplete(message: impl Into<String>) -> DynamoError {
     backend(BackendError::StreamIncomplete, message)
 }
 
+pub(crate) fn invalid_stage_reply(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::BackendProtocol)
+        .message(message)
+        .build()
+}
+
 pub fn protocol_error(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Unknown, message)
 }

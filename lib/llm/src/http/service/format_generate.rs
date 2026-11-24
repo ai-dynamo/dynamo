@@ -36,7 +36,6 @@ use super::openai::{
 use super::{RouteDoc, service_v2};
 use crate::generate_format::{
     Bound, ClientError, ClientRequest, ErrorPhase, GenerateExchange, Opened, SharedFormat, Worker,
-    WorkerError,
 };
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
@@ -44,30 +43,6 @@ use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 
 pub(super) const DEFAULT_PATH: &str = "/generate";
-
-fn dispatch_error(format: &SharedFormat, error: &anyhow::Error) -> WorkerError {
-    use super::error::{
-        ClientErrorAction, Protocol, find_canonical_error_in_chain, http_action_for_error,
-        public_message_for,
-    };
-    use crate::kv_router::encoder_router::RequiredEncoderStage;
-
-    if error.is::<RequiredEncoderStage>()
-        && let Some(cause) = find_canonical_error_in_chain(error.as_ref())
-        && let ClientErrorAction::Respond {
-            status,
-            public_message,
-        } = http_action_for_error(cause)
-    {
-        return WorkerError::new(
-            super::openai::metric_error_type_for_class(cause.class()),
-            status,
-            public_message_for(cause, Protocol::OpenAi)
-                .unwrap_or_else(|| public_message.to_owned()),
-        );
-    }
-    format.worker_error(error.as_ref(), ErrorPhase::Dispatch)
-}
 
 struct GenerateRoute {
     state: Arc<service_v2::State>,
@@ -528,7 +503,7 @@ impl Dispatch {
                     kind: mut error_type,
                     status,
                     message,
-                } = dispatch_error(&format, &error);
+                } = format.worker_error(error.as_ref(), ErrorPhase::Dispatch);
                 if request_context.is_killed() || status == CANCELLED {
                     return cancelled(&mut inflight_guard);
                 }

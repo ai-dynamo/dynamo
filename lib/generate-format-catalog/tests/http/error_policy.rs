@@ -39,6 +39,50 @@ impl AsyncEngine<Input, Output, Error> for ErrorEngine {
     }
 }
 
+#[tokio::test]
+async fn required_encoder_dispatch_uses_the_selected_formats_error_policy() {
+    use dynamo_llm::kv_router::encoder_router::RequiredEncoderStage;
+
+    struct OverloadedEncoder;
+    #[async_trait::async_trait]
+    impl AsyncEngine<Input, Output, Error> for OverloadedEncoder {
+        async fn generate(&self, request: Input) -> Result<Output, Error> {
+            FailingEngine(Backend::WorkerOverloaded)
+                .generate(request)
+                .await
+                .map_err(|error| Error::new(RequiredEncoderStage::from(error)).context("dispatch"))
+        }
+    }
+
+    for (format, body, status, message) in [
+        (
+            sglang(),
+            serde_json::json!({"input_ids": [1]}),
+            529,
+            "Service temporarily overloaded",
+        ),
+        (
+            Arc::new(dynamo_vllm_generate::VllmFormat) as SharedFormat,
+            serde_json::json!({"token_ids": [1], "sampling_params": {}}),
+            503,
+            "engine rejected the request",
+        ),
+    ] {
+        let response = respond(
+            state(),
+            format,
+            Arc::new(OverloadedEncoder),
+            body,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), status);
+        let body = json(response).await.to_string();
+        assert!(body.contains(message), "{body}");
+        assert!(!body.contains("private worker details"));
+    }
+}
+
 // Literal outcomes from the two handlers at 5235cfc93d. Each row gives
 // dispatch, SGLang response-stream, and vLLM response-stream outcomes.
 #[tokio::test]

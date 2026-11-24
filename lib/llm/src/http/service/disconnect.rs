@@ -430,7 +430,7 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
     })
     .to_string();
     (
-        crate::http::service::openai::metric_error_type_for_class(error.class()),
+        crate::http::service::metrics::metric_error_type_for_class(error.class()),
         body,
     )
 }

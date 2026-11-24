@@ -48,7 +48,7 @@ use super::{
     error::{ContextLengthDetails, HttpError, Protocol, invalid_argument, public_message_for},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
+        CancellationLabels, Endpoint, ErrorType, EventConverter, metric_error_type_for_class,
         process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
@@ -382,28 +382,6 @@ fn sanitized_error_class(error: SanitizedError) -> ErrorClass {
         SanitizedError::Overloaded => ErrorClass::CapacityExhausted,
         SanitizedError::Unavailable => ErrorClass::Unavailable,
         SanitizedError::Internal | SanitizedError::PreserveServerError(_) => ErrorClass::Internal,
-    }
-}
-
-pub(super) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorClass) -> ErrorType {
-    use dynamo_runtime::error::ErrorClass;
-
-    match class.normalized() {
-        ErrorClass::InvalidRequest
-        | ErrorClass::Unauthenticated
-        | ErrorClass::PermissionDenied
-        | ErrorClass::Conflict
-        | ErrorClass::PayloadTooLarge
-        | ErrorClass::UnsupportedMedia => ErrorType::Validation,
-        ErrorClass::NotFound => ErrorType::NotFound,
-        ErrorClass::RateLimited | ErrorClass::CapacityExhausted => ErrorType::Overload,
-        ErrorClass::Unavailable => ErrorType::Unavailable,
-        ErrorClass::Cancelled => ErrorType::Cancelled,
-        ErrorClass::NotImplemented => ErrorType::NotImplemented,
-        ErrorClass::BackendProtocol | ErrorClass::DeadlineExceeded | ErrorClass::Internal => {
-            ErrorType::Internal
-        }
-        _ => ErrorType::Internal,
     }
 }
 

@@ -2524,6 +2524,28 @@ impl Status {
     }
 }
 
+pub(crate) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorClass) -> ErrorType {
+    use dynamo_runtime::error::ErrorClass;
+
+    match class.normalized() {
+        ErrorClass::InvalidRequest
+        | ErrorClass::Unauthenticated
+        | ErrorClass::PermissionDenied
+        | ErrorClass::Conflict
+        | ErrorClass::PayloadTooLarge
+        | ErrorClass::UnsupportedMedia => ErrorType::Validation,
+        ErrorClass::NotFound => ErrorType::NotFound,
+        ErrorClass::RateLimited | ErrorClass::CapacityExhausted => ErrorType::Overload,
+        ErrorClass::Unavailable => ErrorType::Unavailable,
+        ErrorClass::Cancelled => ErrorType::Cancelled,
+        ErrorClass::NotImplemented => ErrorType::NotImplemented,
+        ErrorClass::BackendProtocol | ErrorClass::DeadlineExceeded | ErrorClass::Internal => {
+            ErrorType::Internal
+        }
+        _ => ErrorType::Internal,
+    }
+}
+
 impl ErrorType {
     pub fn as_str(&self) -> &'static str {
         match self {

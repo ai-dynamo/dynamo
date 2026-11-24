@@ -45,6 +45,27 @@ impl WorkerError {
             })
     }
 
+    /// Apply the shared HTTP status policy, exposing only the public diagnostic.
+    pub fn canonical_dispatch(error: &(dyn std::error::Error + 'static)) -> Option<Self> {
+        use crate::http::service::error::{
+            ClientErrorAction, find_canonical_error_in_chain, http_action_for_error,
+        };
+
+        let cause = find_canonical_error_in_chain(error)?;
+        let ClientErrorAction::Respond {
+            status,
+            public_message,
+        } = http_action_for_error(cause)
+        else {
+            return None;
+        };
+        Some(Self::new(
+            metric_error_type_for_class(cause.class()),
+            status,
+            cause.public_message().unwrap_or(public_message),
+        ))
+    }
+
     /// Common pre-stream policy of the native Generate endpoints. The format
     /// supplies its validation message; transport failures take precedence.
     /// Dispatch counts `Overload` as an unavailable request plus a rejection.

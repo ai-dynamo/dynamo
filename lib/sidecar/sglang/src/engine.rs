@@ -519,7 +519,7 @@ impl LLMEngine for SglangSidecarEngine {
         encoder::validate_consumer(
             &request,
             ctx.id(),
-            self.route_to_encoder || state.accepts_encoder_handoff,
+            state.accepts_encoder_handoff,
             &state.staged_capabilities,
         )?;
         if request.encoder_result.is_some() && !state.accepts_encoder_handoff {

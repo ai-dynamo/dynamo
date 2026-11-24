@@ -4,6 +4,7 @@
 use axum::http::StatusCode;
 use dynamo_llm::generate_format::{ErrorPhase, WorkerError};
 use dynamo_llm::http::service::{error::SanitizedError, metrics::*};
+use dynamo_llm::kv_router::encoder_router::RequiredEncoderStage;
 use dynamo_runtime::error::DynamoError;
 
 pub(super) fn classify(
@@ -13,6 +14,12 @@ pub(super) fn classify(
     let mut current = Some(error);
     let mut invalid = None;
     while let Some(error) = current {
+        if matches!(phase, ErrorPhase::Dispatch)
+            && error.is::<RequiredEncoderStage>()
+            && let Some(classified) = WorkerError::canonical_dispatch(error)
+        {
+            return classified;
+        }
         if let Some(error) = error.downcast_ref::<DynamoError>()
             && matches!(
                 error.reason().as_str(),

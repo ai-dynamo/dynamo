@@ -589,7 +589,7 @@ impl Encoder {
                 return;
             };
             let response = response?.into_inner();
-            let transfer = response.transfer.ok_or_else(|| client::protocol_error("Stage returned no transfer"))?;
+            let transfer = response.transfer.ok_or_else(|| client::invalid_stage_reply("Stage returned no transfer"))?;
             let handoff = Handoff {
                 peer, transfer, signature: response.handoff_mac,
                 instance_id: if authenticated {
@@ -598,12 +598,14 @@ impl Encoder {
             };
             let validated = (|| {
                 if response.instance_id != instance_id {
-                    return Err(client::protocol_error("Stage came from a different encoder instance"));
+                    return Err(client::invalid_stage_reply("Stage came from a different encoder instance"));
                 }
                 if authenticated && !is_lower_hex(&handoff.signature, 64) {
-                    return Err(client::protocol_error("Stage returned no valid encoder handoff MAC"));
+                    return Err(client::invalid_stage_reply("Stage returned no valid encoder handoff MAC"));
                 }
-                handoff.validate(&request_id, counts, &native_model_type)?;
+                handoff.validate(&request_id, counts, &native_model_type).map_err(|e| {
+                    client::invalid_stage_reply(format!("Stage returned an invalid handoff: {e}"))
+                })?;
                 serde_json::to_value(&handoff).map_err(|e| client::protocol_error(e.to_string()))
             })();
             if validated.is_err() || stop.is_cancelled() || ctx.is_stopped() {
