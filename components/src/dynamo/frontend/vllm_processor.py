@@ -38,7 +38,6 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 )
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import (
@@ -746,18 +745,6 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 image_url["detail"] = "auto"
 
 
-# Request fields the vLLM worker applies from extra_args.sampling_options, sent
-# as the client wrote them: the Rust preprocessor's `sampling_passthrough_args`
-# (lib/llm/src/preprocessor.rs) without `detokenize`, which the worker's token
-# path always turns off.
-_SAMPLING_PASSTHROUGH_FIELDS = (
-    "allowed_token_ids",
-    "bad_words_token_ids",
-    "logprob_token_ids",
-    "vllm_xargs",
-)
-
-
 def _disabled_as_unset(value: Any, requested: Any) -> Any:
     """Send a disabled top_k or min_p as unset unless the client disabled it.
 
@@ -1107,14 +1094,10 @@ class VllmProcessor:
             and not nvext_extra_field_requested(request, "prompt_logprobs")
         ):
             sampling_params.prompt_logprobs = None
-        # nvext.max_thinking_tokens is enforced on the worker, not here. The
+        # The thinking token budget is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
-        # cause process_inputs._validate_params to reject the request. Pluck
-        # the value out of the request and pass it directly into dynamo_preproc
-        # below. Prefer the OpenAI-compatible root-level field, fall back to the
-        # legacy nvext passthrough.
-        thinking_token_budget = resolve_thinking_token_budget(request)
+        # cause process_inputs._validate_params to reject the request.
         cache_salt = _request_cache_salt(request)
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
@@ -1153,7 +1136,12 @@ class VllmProcessor:
             backend_defers_grammar=self.backend_defers_grammar,
         )
 
-        # Convert to a Python object that has fields that match our PreprocessedRequest
+        # The fields of a PreprocessedRequest that depend on vLLM's rendering,
+        # tokenizer, parsers or sampling defaults. Every value vLLM resolved
+        # into `sp` is sent, because the generation config can set it without
+        # the client. RoutedEngine.generate fills the rest from the client's
+        # request: routing hints, the cache salt, nvext and sampling
+        # passthrough arguments, and the sampling and stop values not set here.
         sp = vllm_preproc.sampling_params
         dynamo_preproc = {
             "model": request["model"],
@@ -1164,7 +1152,6 @@ class VllmProcessor:
                 "stop_token_ids": sp.stop_token_ids,
                 "min_tokens": sp.min_tokens,
                 "ignore_eos": sp.ignore_eos,
-                "max_thinking_tokens": thinking_token_budget,
             },
             "sampling_options": {
                 "n": sp.n,
@@ -1184,29 +1171,9 @@ class VllmProcessor:
             },
             "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
-            "routing": request.get("routing"),
         }
-        if cache_salt is not None:
-            # The router and worker must use the same public namespace. The
-            # worker adds the internal KV-event tag when it builds its prompt.
-            dynamo_preproc["routing"] = {
-                **(dynamo_preproc["routing"] or {}),
-                "cache_salt": cache_salt,
-            }
-            dynamo_preproc.setdefault("extra_args", {})["nvext"] = {
-                "cache_salt": cache_salt
-            }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
-        sampling_passthrough = {
-            key: request[key]
-            for key in _SAMPLING_PASSTHROUGH_FIELDS
-            if request.get(key) is not None
-        }
-        if sampling_passthrough:
-            dynamo_preproc.setdefault("extra_args", {})[
-                "sampling_options"
-            ] = sampling_passthrough
         if reasoning_metadata.engine_reasoning_ended is not None:
             dynamo_preproc[
                 "reasoning_ended"
