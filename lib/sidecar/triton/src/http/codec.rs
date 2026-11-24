@@ -616,6 +616,7 @@ mod tests {
                     "name": "INPUT0",
                     "data_type": "TYPE_FP32",
                     "dims": [-1, "16"],
+                    "optional": true,
                 }],
                 "output": [{"name": "OUTPUT0", "data_type": "TYPE_STRING", "dims": [1]}],
                 "instance_group": [{"kind": "KIND_GPU", "count": 1, "gpus": [0]}],
@@ -629,6 +630,7 @@ mod tests {
         assert_eq!(config.name, "identity");
         assert_eq!(config.max_batch_size, 8);
         assert_eq!(config.input[0].dims, [-1, 16]);
+        assert!(config.input[0].optional);
         assert_eq!(
             config.input[0].data_type,
             inference::DataType::TypeFp32 as i32

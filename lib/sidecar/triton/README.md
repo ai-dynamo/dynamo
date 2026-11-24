@@ -35,12 +35,12 @@ dynamo-triton-sidecar \
   --discovery-backend file
 ```
 
-| Option            | Environment Variable        | Value                                                                               |      No Value    |
-| :---------------- | :-------------------------- | :---------------------------------------------------------------------------------- | :--------------: |
-| `--grpc`          | `DYN_SIDECAR_GRPC_ENDPOINT` | port, `host:port`, or a plaintext `http://` / `grpc://` URL                         | `localhost:8001` |
-| `--http`          | `DYN_SIDECAR_HTTP_ENDPOINT` | port, `host:port`, or an `http://` / `https://` URL, optionally with a path prefix  | `localhost:8000` |
-| `--grpc-endpoint` | `DYN_SIDECAR_GRPC_ENDPOINT` | `host:port`, or a plaintext `http://` / `grpc://` URL                               |      _ERROR_     |
-| `--http-endpoint` | `DYN_SIDECAR_HTTP_ENDPOINT` | `host:port`, or an `http://` / `https://` URL, optionally with a path prefix        |      _ERROR_     |
+| Option            | Environment Variable        | Value                                                                                            |      No Value    |
+| :---------------- | :-------------------------- | :----------------------------------------------------------------------------------------------- | :--------------: |
+| `--grpc`          | `DYN_SIDECAR_GRPC_ENDPOINT` | port, `host:port`, or a URL using `http://` or `grpc://` protocol                                | `localhost:8001` |
+| `--http`          | `DYN_SIDECAR_HTTP_ENDPOINT` | port, `host:port`, or a URL using `http://` or `grpc://` protocol, optionally with a path prefix | `localhost:8000` |
+| `--grpc-endpoint` | `DYN_SIDECAR_GRPC_ENDPOINT` | `host:port`, or a URL using `http://` or `grpc://` protocol                                      |      _ERROR_     |
+| `--http-endpoint` | `DYN_SIDECAR_HTTP_ENDPOINT` | `host:port`, or a URL using `http://` or `grpc://` protocol, optionally with a path prefix       |      _ERROR_     |
 
 A bare option, such as `--http`, will be interpreted as `localhost:8000`.
 A bare port, such as `--grpc 9001`, will be interpreted as `localhost:<port>`.
@@ -58,7 +58,8 @@ Same rule applied to the `--http` and `--http-endpoint` options.
 When both protocols are enabled:
 
 - Model discovery and model configuration use gRPC.
-- Startup waits until both endpoints report ready. If a model to serve is not ready on both, startup fails, the error names one such model, and no model is served.
+- Startup waits until both endpoints report ready.
+  If a model to serve is not ready on both, startup fails, the error names one such model, and no model is served.
 - Inference requests alternate between gRPC and HTTP.
 
 The HTTP transport uses Triton's binary tensor data extension for every input and output.
@@ -96,12 +97,13 @@ dynamo-triton-sidecar --grpc \
   --discovery-backend file
 ```
 
-A classify or embeddings model must declare exactly one `TYPE_STRING` input with `dims: [1]` or `dims: [-1]` and exactly one `TYPE_FP32` output.
+A classify or embeddings model must declare exactly one `TYPE_STRING` input with `dims: [1]` or `dims: [-1]`, no other required inputs (extra inputs must set `optional: true`), and exactly one `TYPE_FP32` output.
 A named model that does not meet these requirements fails during sidecar startup; the model's name will be provided in the error message.
 
 - Each request's text prompts are sent to Triton as one `BYTES` tensor, shaped `[N, 1]` for a batching model and `[N]` otherwise, and Triton returns one `FP32` row per prompt.
 - Ensemble steps (tokenizer, encoder, and so on) that are not named are not registered; pass `--export <model>` to also serve one as a tensor model.
-- Token-ID input is rejected, as are request controls owned by the Triton model: `use_activation`, `add_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `mm_processor_kwargs`, `cache_salt`, and non-zero `priority` for classify; `dimensions`, `add_special_tokens`, and `truncate_prompt_tokens` for embeddings.
+- Token-ID input is rejected, as are request controls owned by the Triton model:
+  `use_activation`, `add_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `mm_processor_kwargs`, `cache_salt`, and non-zero `priority` for classify; `dimensions`, `add_special_tokens`, and `truncate_prompt_tokens` for embeddings.
 - Classify labels come from the output's `label_filename`.
   Triton exposes labels only through its classification extension, which rounds scores, so the sidecar reads probabilities from the raw output and fetches the labels once per model with one extra classification request.
 - Embeddings travel to the frontend as base64 little-endian `FP32`; the frontend returns floats unless the client asks for `encoding_format: "base64"`.

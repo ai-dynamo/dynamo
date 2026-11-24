@@ -91,6 +91,21 @@ impl TextModel {
             || format!("Triton {label} model '{name}'"),
             "TYPE_STRING input",
         )?;
+        // Requests carry only the STRING input, so every other input must be optional.
+        let required: Vec<&str> = config
+            .input
+            .iter()
+            .filter(|candidate| candidate.name != input && !candidate.optional)
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        if !required.is_empty() {
+            return Err(invalid_argument(format!(
+                "Triton {label} model '{name}' declares required input(s) {required:?} besides STRING input '{input}'; the {} path sends only '{input}'. \
+                 Mark those inputs `optional: true` in the model's config.pbtxt, or drop it from {} to serve it as a KServe tensor model.",
+                T::ENDPOINT,
+                T::FLAG
+            )));
+        }
         // Requests carry one string per item, so the input must be shaped [1] or [-1].
         let dims = &config
             .input
@@ -605,7 +620,7 @@ mod tests {
     #[test]
     fn resolves_the_only_string_input_and_fp32_output() {
         use inference::DataType::{TypeFp32, TypeInt32, TypeString};
-        let config = config(
+        let mut config = config(
             8,
             &[
                 tensor("TEXT", TypeString, &[1]),
@@ -616,6 +631,8 @@ mod tests {
                 tensor("ids", TypeInt32, &[-1]),
             ],
         );
+        // Extra inputs are allowed only when optional, since requests send only the STRING input.
+        config.input[1].optional = true;
         let model = resolve(&config).unwrap();
         assert_eq!(
             (model.input.as_str(), model.output.as_str()),
@@ -631,7 +648,21 @@ mod tests {
 
     #[test]
     fn rejects_ambiguous_or_unsupported_tensors() {
-        use inference::DataType::{TypeFp32, TypeString};
+        use inference::DataType::{TypeFp32, TypeInt32, TypeString};
+        let extra_required = config(
+            0,
+            &[
+                tensor("TEXT", TypeString, &[1]),
+                tensor("IDS", TypeInt32, &[-1]),
+            ],
+            &[tensor("out", TypeFp32, &[3])],
+        );
+        let error = resolve(&extra_required).err().unwrap();
+        assert!(error.contains("[\"IDS\"]"), "{error}");
+        assert!(error.contains("'TEXT'"), "{error}");
+        assert!(error.contains("/v1/classify"), "{error}");
+        assert!(error.contains("--classify"), "{error}");
+
         let two_inputs = config(
             0,
             &[
