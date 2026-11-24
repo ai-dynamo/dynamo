@@ -371,7 +371,7 @@ class AISCoreEnginePerfModel:
         self, request: EngineCapacityRequest
     ) -> Optional[EngineCapacity]:
         prefill_isl = _effective_prefill_isl(request)
-        max_batch = self._prefill_max_batch(prefill_isl)
+        max_batch = self._prefill_max_batch(prefill_isl, request.isl)
         if max_batch == 0:
             return None
 
@@ -574,15 +574,16 @@ class AISCoreEnginePerfModel:
             total_s = _checked_duration_add(total_s, duration_s, "prefill chunk time")
         return total_s
 
-    def _prefill_max_batch(self, isl: int) -> int:
+    def _prefill_max_batch(self, fresh_isl: int, context_length: int) -> int:
         budget_per_rank = self._limits.max_num_batched_tokens
-        if isl > budget_per_rank:
-            return 1
-        requests_per_rank = budget_per_rank // max(1, isl)
-        return min(
-            self._limits.max_num_seqs,
-            requests_per_rank * self._attention_dp_size,
-        )
+        # A prompt larger than one step can use a rank over multiple rounds.
+        step_slots = max(1, budget_per_rank // fresh_isl)
+        if self._attention_dp_size == 1:
+            return min(step_slots, self._limits.max_num_seqs)
+        # Cached prefix tokens still occupy KV space. Use the full context.
+        kv_slots = self._limits.max_kv_tokens // context_length
+        slots_per_rank = min(step_slots, kv_slots, self._limits.max_num_seqs)
+        return slots_per_rank * self._attention_dp_size
 
     def _decode_max_batch(self, context_length: int) -> int:
         if context_length == 0:

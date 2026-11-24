@@ -249,9 +249,10 @@ def _prefill_query_shapes(
     [
         (32, 16, 4),
         (24, 16, 4),
-        (32, 3, 3),
+        (32, 3, 4),
+        (32, 1, 2),
     ],
-    ids=["exact-fit", "per-rank-remainder", "sequence-bound"],
+    ids=["exact-fit", "per-rank-remainder", "sequence-slack", "sequence-bound"],
 )
 def test_attention_dp_prefill_capacity_assigns_whole_requests(
     isl: int, max_num_seqs: int, expected_batch: int
@@ -275,6 +276,28 @@ def test_attention_dp_prefill_capacity_assigns_whole_requests(
     ]
 
 
+@pytest.mark.parametrize("kv_hit_rate, fresh_tokens", [(0.0, 64), (0.5, 32)])
+def test_attention_dp_prefill_capacity_respects_kv_per_rank(
+    kv_hit_rate: float, fresh_tokens: int
+) -> None:
+    model, forward = _model(
+        worker_type="prefill",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=1024,
+        max_num_seqs=64,
+        max_kv_tokens=512,
+        attention_dp_size=2,
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        EngineCapacityRequest(isl=64, osl=0, kv_hit_rate=kv_hit_rate)
+    )
+
+    assert capacity is not None
+    assert capacity.rps == pytest.approx(16 / 0.01)
+    assert _prefill_query_shapes(forward)[-1] == [(8, 8 * fresh_tokens)] * 2
+
+
 def test_attention_dp_prefill_capacity_keeps_long_prompt_on_one_rank() -> None:
     model, forward = _model(
         worker_type="prefill",
@@ -288,7 +311,13 @@ def test_attention_dp_prefill_capacity_keeps_long_prompt_on_one_rank() -> None:
     assert capacity is not None
     # Two equal full chunks share one estimate, with a third round for the tail.
     assert capacity.ttft_s == pytest.approx(0.03)
-    assert _prefill_query_shapes(forward) == [[(1, 64), (0, 0)], [(1, 32), (0, 0)]]
+    assert capacity.rps == pytest.approx(2 / 0.03)
+    assert _prefill_query_shapes(forward) == [
+        [(1, 64), (0, 0)],
+        [(1, 32), (0, 0)],
+        [(1, 64), (1, 64)],
+        [(1, 32), (1, 32)],
+    ]
 
 
 @pytest.mark.parametrize(
