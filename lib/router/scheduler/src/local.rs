@@ -868,7 +868,7 @@ mod tests {
     use crate::PrefillLoadEstimator;
     use crate::overlap::OverlapSignals;
     use crate::selector::DefaultWorkerSelector;
-    use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig, local_test_scheduler_with};
     use crate::types::{ScheduleMode, TierOverlapBlocks};
     use dynamo_admission::{
         ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, WorkerView,
@@ -1041,37 +1041,16 @@ mod tests {
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
     ) {
-        let dp_range = workers
-            .iter()
-            .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
-            .collect();
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            64,
-            dp_range,
-            replica_sync,
-            0,
-            "test",
-        ));
-        let (cfg_tx, cfg_rx) = watch::channel(workers);
         let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new(
-            Arc::clone(&slots),
-            cfg_rx,
+        let (scheduler, slots, cfg_tx) = local_test_scheduler_with(
+            workers,
             PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             64,
-            DefaultWorkerSelector::new(None, "test"),
-            prefill_load_estimator,
-            None::<Arc<NoopOverlapScoresRefresh>>,
-            None,
-            None,
-            None,
-            Duration::from_secs(60),
-            true,
             cancel_token.clone(),
-            "test",
+            replica_sync,
+            prefill_load_estimator,
             monitor_worker_configs,
-        ));
+        );
         (scheduler, slots, cfg_tx, cancel_token)
     }
 

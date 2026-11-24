@@ -177,6 +177,35 @@ pub fn local_test_scheduler(
     Arc<TestScheduler>,
     watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
 ) {
+    let (scheduler, _, configs) = local_test_scheduler_with(
+        workers,
+        profile,
+        block_size,
+        cancel_token,
+        false,
+        None,
+        false,
+    );
+    (scheduler, configs)
+}
+
+/// As [`local_test_scheduler`], for the kernel's own tests: it also returns the slot tracker,
+/// and takes what that function fixes, which is replica sync, the prefill load estimator, and
+/// the config monitor.
+#[allow(clippy::type_complexity)]
+pub(crate) fn local_test_scheduler_with(
+    workers: HashMap<WorkerId, SimpleWorkerConfig>,
+    profile: PolicyProfile,
+    block_size: u32,
+    cancel_token: CancellationToken,
+    replica_sync: bool,
+    prefill_load_estimator: Option<Arc<dyn crate::PrefillLoadEstimator>>,
+    monitor_worker_configs: bool,
+) -> (
+    Arc<TestScheduler>,
+    Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
+) {
     let slots = Arc::new(ActiveSequencesMultiWorker::new(
         NoopSequencePublisher,
         block_size as usize,
@@ -189,18 +218,18 @@ pub fn local_test_scheduler(
                 )
             })
             .collect(),
-        false,
+        replica_sync,
         0,
         "test",
     ));
     let (configs, config_rx) = watch::channel(workers);
     let scheduler = Arc::new(crate::LocalScheduler::new(
-        slots,
+        Arc::clone(&slots),
         config_rx,
         profile,
         block_size,
         DefaultWorkerSelector::new(None, "test"),
-        None,
+        prefill_load_estimator,
         None::<Arc<crate::NoopOverlapScoresRefresh>>,
         None,
         None,
@@ -209,9 +238,9 @@ pub fn local_test_scheduler(
         true,
         cancel_token,
         "test",
-        false,
+        monitor_worker_configs,
     ));
-    (scheduler, configs)
+    (scheduler, slots, configs)
 }
 
 /// A request of `isl_tokens` in `mode` with nothing else set: no tracking hashes, session,
