@@ -5,6 +5,11 @@
 
 package lpx
 
+import (
+	"fmt"
+	"math"
+)
+
 // Workload is the immutable result of resolving one LPX component group
 // for scheduling and runtime materialization.
 // Its methods require a successfully resolved, non-nil workload with projections.
@@ -47,6 +52,17 @@ func (w *Workload) ServingComponentName() string {
 	return w.modelProjections[len(w.modelProjections)-1].stage
 }
 
-func (w *Workload) placesLPUUnits() bool {
-	return w.modelProjections[0].placesLPUUnits()
+// MinimumCyborgReplicas returns one complete client group for a resolved hybrid workload.
+func (w *Workload) MinimumCyborgReplicas() (int32, error) {
+	build := w.modelProjections[0].configuredBuild
+	replicas := int64(build.ioFPGACount) * int64(build.ioFanoutFactor)
+	if replicas > math.MaxInt32 {
+		return 0, fmt.Errorf("minimum Cyborg replicas %d exceeds the PodClique replica limit %d", replicas, math.MaxInt32)
+	}
+	return int32(replicas), nil
+}
+
+// ValidateCyborgReplicas ensures that the specified Cyborg replicas are in a valid configuration.
+func (w *Workload) ValidateCyborgReplicas(replicas int32) error {
+	return validateCyborgReplicas(w.modelProjections[0].configuredBuild, replicas)
 }

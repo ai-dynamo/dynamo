@@ -1,116 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  lpu_servers: |-
-    lpx-${GROVE_PCSG_INDEX}-agt-0
-    lpx-${GROVE_PCSG_INDEX}-agt-1
-    lpx-${GROVE_PCSG_INDEX}-agt-2
-    lpx-${GROVE_PCSG_INDEX}-agt-3
-    lpx-${GROVE_PCSG_INDEX}-agt-4
-    lpx-${GROVE_PCSG_INDEX}-agt-5
-    lpx-${GROVE_PCSG_INDEX}-agt-6
-    lpx-${GROVE_PCSG_INDEX}-agt-7
-    lpx-${GROVE_PCSG_INDEX}-agt-8
-    lpx-${GROVE_PCSG_INDEX}-agt-9
-    lpx-${GROVE_PCSG_INDEX}-agt-10
-    lpx-${GROVE_PCSG_INDEX}-agt-11
-    lpx-${GROVE_PCSG_INDEX}-agt-12
-    lpx-${GROVE_PCSG_INDEX}-agt-13
-    lpx-${GROVE_PCSG_INDEX}-agt-14
-    lpx-${GROVE_PCSG_INDEX}-agt-15
-    lpx-${GROVE_PCSG_INDEX}-agt-16
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-decode-54f76f5c988eb748
-  namespace: inference-engine
----
-data:
-  nodes_per_partition: |-
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-    1
-  partition_ids: |-
-    0
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-    14
-    15
-    16
-  partition_node_offsets: |-
-    0
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-    14
-    15
-    16
-  partition_paths: |-
-    part-0
-    part-1
-    part-2
-    part-3
-    part-4
-    part-5
-    part-6
-    part-7
-    part-8
-    part-9
-    part-10
-    part-11
-    part-12
-    part-13
-    part-14
-    part-15
-    part-16
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-lpu-343835eab3097dc0
-  namespace: inference-engine
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
@@ -126,9 +16,8 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-        nvidia.com/extra-resources-hash: 343835eab3097dc01883d5b3bc8ae14d7ac5d716bb79d83604c10e35d3eaa151
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:e2abf3fda8e87a95a1fedee6a4e63287f15b0c63a6eed72f30113634dd177ab1
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d924a3c2b92c2a6db614ef65f2659d08d5ded1b5509e12b677c934a779e07e92
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:af620bfd969dd32675cd961d0062acc71b7df9c906938a6d50cad2a3da1ba23c
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3966e09aa902f98237cffe47f6cce576120477db1add13703fcce1287dbadaf3
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
@@ -176,28 +65,8 @@ spec:
                     - lpu-node-23
                     - lpu-node-24
           containers:
-          - args:
-            - -c
-            - |-
-              readarray -t partition_node_counts < /configs/nodes_per_partition
-              readarray -t partition_node_offsets < /configs/partition_node_offsets
-              part=""
-              for i in "${!partition_node_counts[@]}"; do
-                if (( GROVE_PCLQ_POD_INDEX >= partition_node_offsets[i] &&
-                      GROVE_PCLQ_POD_INDEX < partition_node_offsets[i] + partition_node_counts[i] )); then
-                  part="${i}"
-                  break
-                fi
-              done
-              : "${part:?no partition row for Grove pod index ${GROVE_PCLQ_POD_INDEX}}"
-              exec agent-hybrid-v2 \
-                --assemble-dir "${GAS_DIR}" \
-                --part "${part}" \
-                --port "${RDMA_PORT}" \
-                --nic "${NIC_NAME}" \
-                --metadata-file "$(mktemp)" \
-                --readiness-port "${READINESS_PORT}"
-            env:
+          - env:
+            - name: LPX_LOCAL_PARTITION_IDS
             - name: LPX_MODEL_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: DYN_COMPONENT
@@ -212,14 +81,14 @@ spec:
               value: inference-engine
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: GAS_DIR
-              value: $(LPX_MODEL_PATH)
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
             - name: NATS_SERVER
               value: nats-address
             - name: NIC_NAME
@@ -246,7 +115,7 @@ spec:
               value: "19878"
             - name: UCX_TLS
               value: tcp
-            image: example.invalid/lpu-runtime:test
+            image: example.invalid/hydra:test
             name: main
             readinessProbe:
               failureThreshold: 6
@@ -279,8 +148,6 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /configs
-              name: config
             - mountPath: /dev/hugepages
               name: hugepages
             - mountPath: /sys
@@ -327,15 +194,11 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: dgd-lpx-v2-vllm-94cd-lpu-343835eab3097dc0
-            name: config
         replicas: 17
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-        nvidia.com/extra-resources-hash: 54f76f5c988eb748803edb9e69ca144c7be656c2028d23217ef3135cbb8fe463
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d924a3c2b92c2a6db614ef65f2659d08d5ded1b5509e12b677c934a779e07e92
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3966e09aa902f98237cffe47f6cce576120477db1add13703fcce1287dbadaf3
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -359,18 +222,12 @@ spec:
                     values:
                     - gpu-node-0
           containers:
-          - args:
-            - --dynamo-model-name
-            - meta-llama/Llama-3.2-1B-Instruct
-            - --use-disagg-prefill
-            command:
-            - /usr/local/bin/cyborg-entrypoint
-            - --expand-hosts
-            - --
-            - /usr/local/bin/cyborg
-            env:
+          - env:
+            - name: LPX_ALLOCATION
+              value: agt
+            - name: LPX_LOCAL_PARTITION_IDS
             - name: GBUILD_MANIFEST_PATH
-              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/deployment.v1.capnp.bin
             - name: LPX_MODEL_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
@@ -379,11 +236,11 @@ spec:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
             - name: RDMA_PORT
               value: "19877"
-            - name: SERVER_HOSTS_FILE
-              value: /tmp/lpu_servers
-            image: example.invalid/gpu-runtime:test
+            image: example.invalid/cyborg:test
             livenessProbe:
               failureThreshold: 1
               httpGet:
@@ -410,8 +267,6 @@ spec:
               periodSeconds: 10
               timeoutSeconds: 5
             volumeMounts:
-            - mountPath: /configs
-              name: config
             - mountPath: /dev/infiniband
               name: infiniband
             - mountPath: /nfs
@@ -520,9 +375,6 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: dgd-lpx-v2-vllm-94cd-decode-54f76f5c988eb748
-            name: config
         replicas: 1
         roleName: cond
         startsAfter:
@@ -532,7 +384,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d924a3c2b92c2a6db614ef65f2659d08d5ded1b5509e12b677c934a779e07e92
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3966e09aa902f98237cffe47f6cce576120477db1add13703fcce1287dbadaf3
       cliqueNames:
       - agt
       - cond

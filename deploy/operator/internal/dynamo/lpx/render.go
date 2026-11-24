@@ -8,7 +8,6 @@ package lpx
 import (
 	"fmt"
 	"maps"
-	"path"
 	"slices"
 	"strings"
 
@@ -19,7 +18,6 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // MaxRenderedPodCliqueSetBytes keeps headroom below the API server's request-size ceiling for
@@ -40,17 +38,15 @@ type RenderInput struct {
 	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
 }
 
-// WorkloadTemplates contains only the templates and resources contributed by one workload.
+// WorkloadTemplates contains the clique templates and scaling group contributed by one workload.
 type WorkloadTemplates struct {
 	Cliques      []*grovev1alpha1.PodCliqueTemplateSpec
 	ScalingGroup grovev1alpha1.PodCliqueScalingGroupConfig
-	Resources    []client.Object
 }
 
 // RenderNodeLocal renders a workload without constructing a PCS. workload
 // and plan must be non-nil and are read without mutation. The function may mutate
 // the reference-backed templates in input; callers must pass fresh owned values.
-// The caller assigns namespaces to the returned resources.
 //
 //nolint:gocyclo // Rendering is one transactional validation-and-materialization pass.
 func RenderNodeLocal(
@@ -109,41 +105,10 @@ func RenderNodeLocal(
 		return nil, err
 	}
 
-	// Runtimes place builds without compiler-owned LPU units from the /configs
-	// ConfigMaps. A workload whose every build records units reads placement from
-	// the builds and the environment instead, so it gets no ConfigMap.
-	var (
-		configMap        *corev1.ConfigMap
-		configHash       string
-		cyborgConfigMap  *corev1.ConfigMap
-		cyborgConfigHash string
-		extraResources   []client.Object
-	)
-	if !workload.placesLPUUnits() {
-		configMap, configHash, err = renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
-		if err != nil {
-			return nil, err
-		}
-		extraResources = []client.Object{configMap}
-	}
-
-	// Every legacy hybrid Cyborg reads its remote Agent addresses, independently
-	// of the LPU family. Preserve the legacy order: Cyborg config first, LPU config last.
-	if hybrid && configMap != nil {
-		cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
-		if err != nil {
-			return nil, err
-		}
-		extraResources = []client.Object{cyborgConfigMap, configMap}
-	}
-
 	// Consume the independently rendered conductor without copying Agent startup or placement.
 	var conductor *grovev1alpha1.PodCliqueTemplateSpec
 	if conductorTemplateName != "" {
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
-		if configMap != nil {
-			annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
-		}
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        conductorTemplateName,
 			Labels:      conductorTemplate.Labels,
@@ -176,7 +141,7 @@ func RenderNodeLocal(
 			// Agent template needs no placement or storage validation.
 			if agent.Replicas == 0 {
 				if conductorSpec != nil {
-					configureLPUConductorPod(conductorSpec, configMap, allocation)
+					configureNodeLocalConductorRuntime(conductorSpec, allocation)
 				}
 				continue
 			}
@@ -193,7 +158,11 @@ func RenderNodeLocal(
 			}
 
 			// Bind the LPX configuration and scheduling to the Agent and any conductor.
-			configureLPURolePods(&template.Spec, conductorSpec, projection, configMap, allocation)
+			applyLocalPartitionIDs(common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName), projection)
+			configureAgentScheduling(&template.Spec, projection.configuredBuild.architecture, projection.configuredBuild.devicesPerNode)
+			if conductorSpec != nil {
+				configureNodeLocalConductorRuntime(conductorSpec, allocation)
+			}
 		}
 		if agent.Replicas == 0 {
 			continue
@@ -204,9 +173,6 @@ func RenderNodeLocal(
 		}
 
 		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
-		if configMap != nil {
-			annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
-		}
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
@@ -241,8 +207,6 @@ func RenderNodeLocal(
 			workloadDigest,
 			modelStoragePath,
 			agentTemplateNames,
-			cyborgConfigMap,
-			cyborgConfigHash,
 		); err != nil {
 			return nil, fmt.Errorf("stage %s conductor: %w", projections[0].stage, err)
 		}
@@ -263,74 +227,21 @@ func RenderNodeLocal(
 		MinAvailable: new(ptr.Deref(input.MinAvailable, 1)),
 	}
 
-	// Keep every LPX role in one backend gang, including the KAI fallback roles,
-	// and reject authored legacy configuration on the units path.
+	// Keep every LPX role in one backend gang, including the KAI fallback roles.
 	for _, clique := range rendered.Cliques {
 		clique.Spec.PodSpec.SchedulerName = v1alpha1.LPXSchedulerName
-		if workload.placesLPUUnits() {
-			if err := rejectUnitsConfigMount(clique); err != nil {
-				return nil, err
-			}
-		}
 	}
 
-	rendered.Resources = extraResources
 	return rendered, nil
 }
 
-// configureLPURolePods consumes fresh, independently owned Agent and conductor
-// specs. Agent and projection are nonnil, and projection has validated partitions;
-// nil conductor means no emitted launcher. A nil configMap means the workload's
-// runtimes read placement from LPU units, so no config volume is added.
-func configureLPURolePods(
-	agentPodSpec, conductorPodSpec *corev1.PodSpec,
-	projection *ModelProjection,
-	configMap *corev1.ConfigMap,
-	allocation string,
-) {
-	family := projection.configuredBuild.family
-	if configMap != nil {
-		ensureLPUConfigVolume(agentPodSpec, configMap.Name)
-	}
-	if projection.placesLPUUnits() {
-		applyLocalPartitionIDs(common.FindContainerByName(agentPodSpec.Containers, commonconsts.MainContainerName), projection)
-	}
-	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].devicesPerNode)
-	if conductorPodSpec != nil {
-		configureLPUConductorPod(conductorPodSpec, configMap, allocation)
-	}
-}
-
-// configureLPUConductorPod shapes the conductor's LPX-owned fields. Placement is
-// already resolved. A nil configMap means no config volume, as for
-// configureLPURolePods.
-func configureLPUConductorPod(conductorPodSpec *corev1.PodSpec, configMap *corev1.ConfigMap, allocation string) {
-	if configMap != nil {
-		ensureLPUConfigVolume(conductorPodSpec, configMap.Name)
-	}
-	configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
-}
-
-// rejectUnitsConfigMount rejects legacy configuration even when a user declares
-// a backing volume. Units runtimes read the deployment artifact directly.
-func rejectUnitsConfigMount(clique *grovev1alpha1.PodCliqueTemplateSpec) error {
-	for _, container := range slices.Concat(clique.Spec.PodSpec.InitContainers, clique.Spec.PodSpec.Containers) {
-		if slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
-			return mount.Name == lpuConfigVolumeName || path.Clean(mount.MountPath) == "/configs"
-		}) {
-			return fmt.Errorf("LPX role %s container %s mounts legacy config; builds with lpuUnits must not mount a volume named config or a volume at /configs", clique.Name, container.Name)
-		}
-	}
-	return nil
-}
-
 // roleAnnotations consumes base, allocating it when nil.
-func roleAnnotations(
-	base map[string]string,
-	role string,
-	workloadDigest string,
-) map[string]string {
-	annotations := workloadAnnotations(base, workloadDigest)
+func roleAnnotations(base map[string]string, role string, workloadDigest string) map[string]string {
+	annotations := base
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
 	// Remove controller-owned role metadata before stamping canonical values.
 	for _, key := range []string{
 		WorkloadModeAnnotation,
@@ -341,14 +252,17 @@ func roleAnnotations(
 	} {
 		delete(annotations, key)
 	}
+	annotations[WorkloadDigestAnnotation] = workloadDigest
 	annotations[lpxv1alpha1.PodRoleAnnotation] = role
 	return annotations
 }
 
-func workloadAnnotations(base map[string]string, digest string) map[string]string {
-	if base == nil {
-		base = make(map[string]string)
-	}
-	base[WorkloadDigestAnnotation] = digest
-	return base
+// prependEnv puts operator-owned variables first and removes authored entries
+// with the same names. Kubernetes expands references in order, so authored
+// variables can refer to them.
+func prependEnv(container *corev1.Container, vars ...corev1.EnvVar) {
+	authored := slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool {
+		return slices.ContainsFunc(vars, func(owned corev1.EnvVar) bool { return owned.Name == variable.Name })
+	})
+	container.Env = slices.Concat(vars, authored)
 }

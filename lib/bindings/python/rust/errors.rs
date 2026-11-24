@@ -11,6 +11,9 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
+use dynamo_llm::preprocessor::media::{
+    IMAGE_FETCH_FORBIDDEN_MESSAGE, IMAGE_FETCH_NOT_FOUND_MESSAGE,
+};
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, RetryHint};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
@@ -393,7 +396,12 @@ pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<D
 /// anything else stays diagnostic and the renderer uses the class catalog.
 /// Python producers must use the same text: the Python test
 /// `test_video_public_message_matches_binding_allowlist` fails if they diverge.
-const PUBLIC_HTTP_MESSAGES: &[&str] = &["Unsupported video media"];
+const PUBLIC_HTTP_MESSAGES: &[&str] = &[
+    "Unsupported video media",
+    IMAGE_FETCH_FORBIDDEN_MESSAGE,
+    IMAGE_FETCH_NOT_FOUND_MESSAGE,
+    "Image exceeds the decoded pixel limit",
+];
 
 fn build_http_like_error(code: u16, message: String) -> DynamoError {
     let legacy_message = serde_json::json!({
@@ -588,5 +596,22 @@ mod tests {
         );
         assert_eq!(prefixed.class(), ErrorClass::UnsupportedMedia);
         assert_eq!(prefixed.public_message(), None);
+    }
+
+    #[test]
+    fn image_pixel_limit_message_requires_exact_text() {
+        let message = "Image exceeds the decoded pixel limit";
+        for status in [400, 413] {
+            assert_eq!(
+                build_http_like_error(status, message.into()).public_message(),
+                Some(message)
+            );
+        }
+        for text in [
+            format!("{message} https://example.com/?secret=private"),
+            "private decoder detail".to_string(),
+        ] {
+            assert_eq!(build_http_like_error(413, text).public_message(), None);
+        }
     }
 }
