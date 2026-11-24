@@ -703,7 +703,7 @@ fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
         .is_some_and(|ids| !ids.is_empty())
 }
 
-/// Hidden stop IDs to remove when the engine confirms they ended generation.
+/// Hidden stop IDs to send without text when the engine confirms they ended generation.
 fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
     let visible = request
         .stop_conditions
@@ -894,7 +894,8 @@ pub(crate) struct ResponseState {
     /// Hold a trailing stop until terminal usage arrives. The frontend decoder
     /// can terminate on hidden or visible stops before reading that usage.
     held_stop_ids: BTreeSet<u32>,
-    /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
+    /// See [`retained_hidden_stop_ids`]. Sent with empty text when the terminal
+    /// matched it.
     hidden_stop_ids: BTreeSet<u32>,
     pending_stop: Option<pb::TokenInfo>,
     phase: Phase,
@@ -1137,22 +1138,35 @@ impl ResponseState {
         let stop_match = finished
             .stop_match
             .and_then(|stop_match| stop_match.r#match);
+        // A confirmed hidden stop is still sent so the frontend counts it in
+        // `completion_tokens`. It carries empty text: a bare ID would show at the
+        // `min_tokens` boundary. Engine text replaces the whole chunk's decode, so
+        // when earlier held tokens share this terminal (a context-phase finish)
+        // the stop is dropped instead, keeping their text.
+        let mut text = None;
         if let Some(pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id)) =
             stop_match
             && self.hidden_stop_ids.contains(&id)
             && held.last().is_some_and(|info| info.token_id == id)
         {
-            held.pop();
+            if held.len() == 1 {
+                text = Some(String::new());
+            } else {
+                held.pop();
+            }
         }
 
         let (token_ids, log_probs, top_logprobs) = if held.is_empty() {
             (Vec::new(), None, None)
+        } else if text.is_some() {
+            (vec![held[0].token_id], None, None)
         } else {
             self.map_tokens(held)?
         };
 
         let mut terminal = LLMEngineOutput {
             token_ids,
+            text,
             log_probs,
             top_logprobs,
             index: Some(0),

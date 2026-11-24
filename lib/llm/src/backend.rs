@@ -2201,6 +2201,64 @@ mod tests {
         }
     }
 
+    /// A sidecar sends a confirmed hidden stop ID with empty text (LPX,
+    /// TensorRT-LLM). Below `min_tokens` the decoder does not apply stops, so
+    /// the empty text is what keeps the stop hidden; the ID is still counted.
+    #[tokio::test]
+    async fn test_hidden_stop_with_empty_text_is_counted_but_not_shown_below_min_tokens() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                min_tokens: Some(4),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![
+                    LLMEngineOutput {
+                        token_ids: vec![101],
+                        index: Some(0),
+                        ..Default::default()
+                    },
+                    LLMEngineOutput {
+                        token_ids: vec![103],
+                        text: Some(String::new()),
+                        finish_reason: Some(FinishReason::Stop),
+                        stop_reason: Some(StopReason::Int(103)),
+                        index: Some(0),
+                        ..Default::default()
+                    },
+                ]),
+            });
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .unwrap();
+        let outputs: Vec<_> = stream.collect().await;
+        assert_eq!(outputs.len(), 2, "unexpected outputs: {outputs:?}");
+
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            DeltaGeneratorOptions::new(None, None, false, None),
+            "test-request".to_string(),
+        );
+        let mut text = String::new();
+        for output in outputs {
+            let output = output.data.unwrap();
+            text.push_str(output.text.as_deref().unwrap_or_default());
+            generator.choice_from_postprocessor(output).unwrap();
+        }
+        assert_eq!(text, "Okay");
+        assert_eq!(generator.get_usage().completion_tokens, 2);
+    }
+
     #[tokio::test]
     async fn test_user_stop_preserves_overlapping_model_eos() {
         for (kind, system_eos) in [

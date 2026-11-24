@@ -495,8 +495,14 @@ fn held_hidden_stop_token_is_released_unless_it_ended_the_sequence() {
         .convert(finished)
         .expect("convert finished")
         .expect("terminal");
-    assert!(terminal.token_ids.is_empty());
+    // The stop that ended the sequence is sent once with empty text, so the
+    // frontend counts it (it sums `token_ids`) without showing it.
+    assert_eq!(terminal.token_ids, [2]);
+    assert_eq!(terminal.text.as_deref(), Some(""));
+    assert!(terminal.log_probs.is_none());
+    let frontend_completion_tokens = 1 + 2 + terminal.token_ids.len() as u32;
     assert_eq!(terminal.completion_usage.unwrap().completion_tokens, 4);
+    assert_eq!(frontend_completion_tokens, 4);
 }
 
 #[test]
@@ -536,9 +542,16 @@ fn hidden_stop_waits_for_terminal_cache_usage_without_visible_stops() {
         })
         .expect("convert finished")
         .expect("terminal");
-    assert!(terminal.token_ids.is_empty());
+    assert_eq!(terminal.token_ids, [2]);
+    assert_eq!(terminal.text.as_deref(), Some(""));
+    assert!(terminal.log_probs.is_none());
     assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
     let usage = terminal.completion_usage.unwrap();
+    // What the frontend counts: every delta's IDs, the hidden EOS included.
+    assert_eq!(
+        (delta.token_ids.len() + terminal.token_ids.len()) as u32,
+        usage.completion_tokens
+    );
     assert_eq!(usage.prompt_tokens, 218);
     assert_eq!(
         usage.prompt_tokens_details.unwrap().cached_tokens,
