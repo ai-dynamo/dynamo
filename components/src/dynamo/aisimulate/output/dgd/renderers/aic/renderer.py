@@ -19,8 +19,8 @@ from dynamo.aisimulate.output.dgd.renderers.base import (
 def _load_generator_api() -> tuple[Any, Any]:
     """Load the Sweeper-result bridge shipped by AISimulate."""
     try:
-        generator_api = importlib.import_module("aisimulate.generator.api")
-        generator_request = importlib.import_module("aisimulate.generator.request")
+        generator_api = importlib.import_module("aisim.generator.api")
+        generator_request = importlib.import_module("aisim.generator.request")
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "the AIC renderer requires the AISimulate generator"

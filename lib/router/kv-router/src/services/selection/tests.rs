@@ -23,20 +23,18 @@ use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
-use dynamo_kv_indexer::overlap::OverlapScores;
+use dynamo_kv_indexer::OverlapScores;
 use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::build_overlap_scores_response;
 use dynamo_scheduler::host::{
     DEFAULT_MODEL_NAME, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest,
     ReservationRequest, SelectAndReserveRequest, SelectRequest, SelectionCacheConfig,
     SelectionError, WorkerRequest,
 };
-use dynamo_scheduler::overlap::build_overlap_scores_response;
-use dynamo_scheduler::selection::input::{
-    MmRoutingInfoRequest, NormalizedPrompt, TrackingHashInput,
-};
-use dynamo_scheduler::tracking_hash::{TrackingHashContext, TrackingHashScope};
+use dynamo_scheduler::{MmRoutingInfoRequest, NormalizedPrompt, TrackingHashInput};
+use dynamo_scheduler::{TrackingHashContext, TrackingHashScope};
 use dynamo_worker_selection::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
@@ -322,7 +320,7 @@ where
         router_policy_config: Some(policy_file.path().display().to_string()),
         ..test_config()
     };
-    let factory: dynamo_scheduler::types::WorkerSelectionPolicyFactory = Arc::new(factory);
+    let factory: dynamo_scheduler::WorkerSelectionPolicyFactory = Arc::new(factory);
     let mut registry = RouterPluginRegistry::default();
     registry
         .register_worker_selection(
@@ -667,7 +665,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x35; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -721,7 +719,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x47; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -768,7 +766,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x59; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -1947,6 +1945,107 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
     service_b.shutdown().await;
 }
 
+async fn mesh_service(port: u16) -> SelectionService {
+    SelectionServiceBuilder::new(
+        test_config(),
+        dynamo_router_protocol::WorkerType::Aggregated,
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+            dynamo_worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
+        })),
+    )
+    .indexer_threads(1)
+    .replica_sync(port, Vec::new())
+    .build()
+    .await
+    .unwrap()
+}
+
+fn service_load(service: &SelectionService) -> (usize, usize, usize) {
+    let loads = service.loads(Some("model"), Some("default"));
+    let load = &loads[0].loads[0];
+    (
+        load.active_requests,
+        load.potential_decode_blocks,
+        load.potential_prefill_tokens,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_events_release_peer_load_after_router_shutdown() {
+    let port_a = reserve_tcp_port();
+    let service_a = mesh_service(port_a).await;
+    let service_b = mesh_service(reserve_tcp_port()).await;
+    service_b
+        .register_replica_peer(format!("tcp://127.0.0.1:{port_a}"))
+        .await
+        .unwrap();
+    let worker_id = 1;
+    let mut worker = WorkerSequenceEventPublisher::new(
+        "tcp://127.0.0.1:*",
+        "model".to_string(),
+        "default".to_string(),
+        WorkerWithDpRank::new(worker_id, 0),
+    )
+    .unwrap();
+    for service in [&service_a, &service_b] {
+        let worker_record: WorkerRequest = serde_json::from_value(serde_json::json!({
+            "worker_id": worker_id,
+            "model_name": "model",
+            "endpoint": "http://worker-1:8000",
+            "block_size": 4
+        }))
+        .unwrap();
+        service.upsert_worker(worker_record).await.unwrap();
+        assert!(
+            service
+                .register_worker_publisher(worker.endpoint().to_string())
+                .await
+                .unwrap()
+        );
+    }
+    // Distinct prompts, so neither reuses a recorded routing decision.
+    let reserve = |selection_id: &str, token_ids: [u32; 4]| -> SelectAndReserveRequest {
+        serde_json::from_value(serde_json::json!({
+            "model_name": "model",
+            "token_ids": token_ids,
+            "selection_id": selection_id,
+        }))
+        .unwrap()
+    };
+
+    // Subscriptions connect asynchronously: resend the free until both apply it.
+    service_a
+        .select_and_reserve(reserve("warmup", [1, 2, 3, 4]))
+        .await
+        .unwrap();
+    wait_for_service_load(&service_b, 1, 1, 4).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service_load(&service_a) != (0, 0, 0) || service_load(&service_b) != (0, 0, 0) {
+            worker.free("warmup").unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("worker free never reached both selectors");
+
+    service_a
+        .select_and_reserve(reserve("target", [5, 6, 7, 8]))
+        .await
+        .unwrap();
+    wait_for_service_load(&service_b, 1, 1, 4).await;
+    service_a.shutdown().await;
+    drop(service_a);
+
+    worker.mark_prefill_completed("target").unwrap();
+    wait_for_service_load(&service_b, 1, 1, 0).await;
+    worker.free("target").unwrap();
+    wait_for_service_load(&service_b, 0, 0, 0).await;
+    service_b.shutdown().await;
+}
+
 async fn wait_for_service_load(
     service: &SelectionService,
     expected_requests: usize,
@@ -2113,7 +2212,7 @@ async fn register_rejects_oversized_dp_range() {
             "model_name": "model",
             "endpoint": "http://worker-1:8000",
             "block_size": 4,
-            "data_parallel_size": dynamo_slot_tracker::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+            "data_parallel_size": dynamo_slot_tracker::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
         })
         .to_string(),
     )

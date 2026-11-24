@@ -826,6 +826,11 @@ fn build_media(
 
         for (index, item) in items.into_iter().enumerate() {
             let source = match item {
+                MultimodalData::Json(_) => {
+                    return Err(client::invalid_argument(
+                        "Custom JSON content requires a dynamo.vllm worker; the sidecar media transport does not support it",
+                    ));
+                }
                 MultimodalData::Url(url) => media_source(&key, url.into())?,
                 MultimodalData::RawUrl(source) => media_source(&key, source)?,
                 MultimodalData::Decoded(_) => {
@@ -1529,7 +1534,7 @@ impl ResponseState {
         }
         mapped.disaggregated_params = finish
             .kv_transfer_params
-            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS).map(Box::new))
             .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
@@ -1544,7 +1549,7 @@ impl ResponseState {
             })?;
             let params = mapped
                 .disaggregated_params
-                .as_mut()
+                .as_deref_mut()
                 .and_then(serde_json::Value::as_object_mut)
                 .ok_or_else(|| {
                     client::protocol_error("prefill kv_transfer_params is not a JSON object")
@@ -1561,7 +1566,7 @@ impl ResponseState {
         if !sampling_mask.is_empty() {
             mapped
                 .engine_data
-                .get_or_insert_with(|| serde_json::json!({}))["sampling_mask"] = serde_json::json!(
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["sampling_mask"] = serde_json::json!(
                 sampling_mask
                     .into_iter()
                     .map(|row| row.ids)
@@ -1576,7 +1581,7 @@ impl ResponseState {
         if let Some(prompt) = self.prompt_info.take() {
             output
                 .engine_data
-                .get_or_insert_with(|| serde_json::json!({}))["prompt_logprobs"] =
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["prompt_logprobs"] =
                 prompt_logprobs_to_json(prompt);
         }
     }
@@ -1697,34 +1702,23 @@ fn map_output_logprobs(
         .copied()
         .map(normalize_logprob)
         .collect();
+    // vLLM sends the true top N, including the sampled token when it ranks there.
     let top_logprobs = include_top_logprobs.then(|| {
         output
-            .token_ids
+            .candidate_tokens
             .iter()
-            .enumerate()
-            .map(|(index, token_id)| {
-                let mut entries =
-                    Vec::with_capacity(output.candidate_tokens[index].tokens.len() + 1);
-                entries.push(TopLogprob {
-                    rank: output.ranks[index],
-                    token_id: *token_id,
-                    token: None,
-                    logprob: normalize_logprob(output.logprobs[index]),
-                    bytes: None,
-                });
-                entries.extend(
-                    output.candidate_tokens[index]
-                        .tokens
-                        .iter()
-                        .map(|candidate| TopLogprob {
-                            rank: candidate.rank,
-                            token_id: candidate.id,
-                            token: None,
-                            logprob: normalize_logprob(candidate.logprob),
-                            bytes: None,
-                        }),
-                );
-                entries
+            .map(|candidates| {
+                candidates
+                    .tokens
+                    .iter()
+                    .map(|candidate| TopLogprob {
+                        rank: candidate.rank,
+                        token_id: candidate.id,
+                        token: None,
+                        logprob: normalize_logprob(candidate.logprob),
+                        bytes: None,
+                    })
+                    .collect()
             })
             .collect()
     });

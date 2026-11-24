@@ -565,31 +565,15 @@ func requirePipelineRequestNotFound(
 	require.True(t, apierrors.IsNotFound(err), "expected LPX request %s/%s to be absent, got %v", namespace, name, err)
 }
 
-func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		localPartitions *v1beta1.LPXLocalPartitions
-		wantPartitions  [][]int64
-	}{
-		{name: "all-local selection requests no LPU placement", localPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}, wantPartitions: [][]int64{}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Resolve a hybrid workload with the selected local partitions")
-			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
-			dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: tc.localPartitions}
-			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
-
-			t.Log("Publish one request per remote workload replica, listing only remote compiler partitions")
-			_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
-			partitions := make([][]int64, 0, len(missing))
-			for _, request := range missing {
-				compilerIDs := make([]int64, 0, len(request.Spec.Partitions))
-				for _, partition := range request.Spec.Partitions {
-					compilerIDs = append(compilerIDs, partition.CompilerPartitionID)
-				}
-				partitions = append(partitions, compilerIDs)
-			}
-			require.Equal(t, tc.wantPartitions, partitions)
-		})
+func TestResolvePipelineRequestsSkipsAllLocalWorkload(t *testing.T) {
+	t.Log("Resolve a hybrid workload with every unit local")
+	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{
+		LocalPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
 	}
+	desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
+
+	t.Log("An all-local workload publishes no LPU placement request")
+	_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+	require.Empty(t, missing)
 }

@@ -44,22 +44,11 @@ impl FromStr for SharedCacheType {
     }
 }
 
-pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
-    "overlap_score_credit must be a finite, non-negative number";
-
-pub fn overlap_score_credit_error_message(value: f64) -> Option<&'static str> {
-    if value.is_finite() && value >= 0.0 {
-        None
-    } else {
-        Some(OVERLAP_SCORE_CREDIT_RANGE_ERROR)
-    }
-}
-
 pub fn validate_overlap_score_credit(value: f64) -> Result<(), String> {
-    let Some(message) = overlap_score_credit_error_message(value) else {
+    if value.is_finite() && value >= 0.0 {
         return Ok(());
-    };
-    Err(message.to_string())
+    }
+    Err("overlap_score_credit must be a finite, non-negative number".to_string())
 }
 
 pub fn validate_finite_non_negative(field: &str, value: f64) -> Result<(), String> {

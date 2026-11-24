@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rmp_serde::{from_slice, to_vec, to_vec_named};
 use serde::Serialize;
+use serde_bytes::ByteBuf;
 
 use crate::event::KvCacheEventData;
 use crate::placement::{PlacementEvent, PlacementOwner};
@@ -1923,4 +1924,252 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+/// vLLM's CPU offload tier publishes a HostPinned placeholder with the same hash,
+/// no parent and no salt (ai-dynamo/dynamo#18052). It is a lower-tier copy of
+/// the salted GPU block, so the salted chain must keep inheriting the namespace.
+#[test]
+fn test_host_pinned_unsalted_copy_keeps_cache_namespace() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+
+    let mut cpu_placeholder = namespaced_block_stored(1, None, None, "CPU");
+    if let RawKvEvent::BlockStored { token_ids, .. } = &mut cpu_placeholder {
+        token_ids.clear();
+    }
+    let cpu_placeholder = normalizer
+        .preprocess(cpu_placeholder, worker)
+        .expect("CPU placeholder must still be applied");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = cpu_placeholder
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace, None);
+    assert!(matches!(
+        &normalizer.cache_namespaces[&(worker, 1)],
+        CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"
+    ));
+
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    let child = normalizer
+        .preprocess(gpu_child, worker)
+        .expect("CPU copy must not make the salted parent ambiguous");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+/// Evicting the CPU copy must not drop the namespace the resident GPU block owns.
+#[test]
+fn test_host_pinned_removal_keeps_cache_namespace() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+    let cpu_copy = namespaced_block_stored(1, None, None, "CPU");
+    assert!(normalizer.preprocess(cpu_copy, worker).is_some());
+
+    let cpu_eviction = RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(1)],
+        medium: Some("CPU".to_string()),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+    };
+    assert!(normalizer.preprocess(cpu_eviction, worker).is_some());
+
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    let child = normalizer
+        .preprocess(gpu_child, worker)
+        .expect("salted GPU parent is still resident");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+/// A salted KVCR HostPinned store inserts into the cache-owner normalizer's
+/// map. Its own removal must clear that entry. The HostPinned skip is only
+/// for framework CPU offload copies of a device block.
+#[test]
+fn test_kvcr_host_pinned_removal_clears_cache_namespace() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let mut salted = namespaced_block_stored(1, None, Some("tenant-a"), "CPU");
+    if let RawKvEvent::BlockStored { ownership, .. } = &mut salted {
+        *ownership = Some("kvcr".to_string());
+    }
+    assert!(
+        normalizer
+            .preprocess_residency_with_reason(salted, worker)
+            .is_ok()
+    );
+    assert!(matches!(
+        &normalizer.cache_namespaces[&(worker, 1)],
+        CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"
+    ));
+
+    let kvcr_eviction = RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(1)],
+        medium: Some("CPU".to_string()),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: Some("kvcr".to_string()),
+    };
+    assert!(
+        normalizer
+            .preprocess_residency_with_reason(kvcr_eviction, worker)
+            .is_ok()
+    );
+    assert!(!normalizer.cache_namespaces.contains_key(&(worker, 1)));
+
+    let mut child = namespaced_block_stored(2, Some(1), None, "CPU");
+    if let RawKvEvent::BlockStored { ownership, .. } = &mut child {
+        *ownership = Some("kvcr".to_string());
+    }
+    let child = normalizer
+        .preprocess_residency_with_reason(child, worker)
+        .expect("KVCR removal must drop the salted parent entry");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace, None);
+}
+
+/// A device-tier store without a salt reusing a salted hash is still ambiguous.
+#[test]
+fn test_device_unsalted_store_still_marks_cache_namespace_ambiguous() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+    let unsalted_gpu = namespaced_block_stored(1, None, None, "GPU");
+    assert!(normalizer.preprocess(unsalted_gpu, worker).is_some());
+
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(gpu_child, worker)
+            .unwrap_err(),
+        ZmqEventFilterReason::AmbiguousCacheNamespace
+    );
+}
+
+#[derive(Serialize)]
+struct BinaryKeyStored {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    block_hashes: Vec<u64>,
+    parent_block_hash: Option<u64>,
+    token_ids: Vec<u32>,
+    block_size: usize,
+    extra_keys: Vec<Option<Vec<ByteBuf>>>,
+}
+
+fn binary_key_stored(hash: u64, parent: Option<u64>, key: Option<Vec<u8>>) -> BinaryKeyStored {
+    BinaryKeyStored {
+        event_type: "BlockStored",
+        block_hashes: vec![hash],
+        parent_block_hash: parent,
+        token_ids: vec![0, 0],
+        block_size: 2,
+        extra_keys: vec![key.map(|key| vec![ByteBuf::from(key)])],
+    }
+}
+
+// vLLM publishes a prompt-embeds block's key as a raw SHA-256 digest.
+fn prompt_embeds_digest() -> Vec<u8> {
+    let digest = vec![0xFF_u8; 32];
+    assert!(std::str::from_utf8(&digest).is_err());
+    digest
+}
+
+// A raw key can also be valid UTF-8; on the wire it is still `bin`.
+fn utf8_raw_key() -> Vec<u8> {
+    let key = vec![b'a'; 32];
+    assert!(std::str::from_utf8(&key).is_ok());
+    key
+}
+
+// Decodes one batch and returns the block hashes each event adds to the index.
+fn indexed_block_hashes(events: &[BinaryKeyStored]) -> Vec<Vec<u64>> {
+    let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
+    let batch = decode_event_batch(&payload).unwrap();
+
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    batch
+        .events
+        .into_iter()
+        .enumerate()
+        .map(|(event_id, event)| {
+            let placement = normalizer
+                .normalize(event, event_id as u64, WorkerWithDpRank::new(7, 0))
+                .unwrap();
+            match placement.event.data {
+                KvCacheEventData::Stored(store) => store
+                    .blocks
+                    .iter()
+                    .map(|block| block.block_hash.0)
+                    .collect(),
+                KvCacheEventData::Removed(removed) => {
+                    assert!(removed.block_hashes.is_empty());
+                    Vec::new()
+                }
+                KvCacheEventData::Cleared => panic!("no clear was sent"),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn binary_extra_key_keeps_block_and_children_out_of_the_index() {
+    for key in [prompt_embeds_digest(), utf8_raw_key()] {
+        let events = [
+            binary_key_stored(11, None, Some(key.clone())),
+            binary_key_stored(12, Some(11), None),
+            binary_key_stored(21, None, None),
+        ];
+        assert_eq!(
+            indexed_block_hashes(&events),
+            vec![vec![], vec![], vec![21]],
+            "raw key {key:?}"
+        );
+    }
+}
+
+#[test]
+fn binary_extra_key_on_a_later_block_keeps_the_earlier_blocks() {
+    // The raw key is on block 1, so the store is cut at token 1 * block_size.
+    let store = BinaryKeyStored {
+        event_type: "BlockStored",
+        block_hashes: vec![11, 12],
+        parent_block_hash: None,
+        token_ids: vec![0, 0, 0, 0],
+        block_size: 2,
+        extra_keys: vec![None, Some(vec![ByteBuf::from(prompt_embeds_digest())])],
+    };
+    assert_eq!(indexed_block_hashes(&[store]), vec![vec![11]]);
 }

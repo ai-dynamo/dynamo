@@ -9548,7 +9548,9 @@ spec:
       name: v1beta2
       schema:
         openAPIV3Schema:
-          description: DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+          description: |-
+            DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+            Available without a feature gate. This API is not feature complete.
           properties:
             apiVersion:
               description: |-
@@ -9690,7 +9692,11 @@ spec:
                         - GoodputPerGPU
                       type: string
                     metrics:
-                      description: Metrics is reserved for the future Pareto implementation.
+                      description: |-
+                        Metrics selects the two objectives for a Pareto search. Ignored when mode is not Pareto.
+                        When omitted in Pareto mode, AISimulate uses its default objectives
+                        [ThroughputPerGPU, ThroughputPerUser]. When set, the pair must be exactly
+                        [ThroughputPerGPU, ThroughputPerUser]; other pairs are unsupported.
                       items:
                         description: ObjectiveMetric is a metric optimized by AISimulate.
                         enum:
@@ -9707,9 +9713,12 @@ spec:
                       type: array
                       x-kubernetes-list-type: set
                     mode:
-                      description: Mode selects scalar optimization. Only Optimize is currently supported.
+                      description: |-
+                        Mode selects the optimization mode: Optimize for a single scalar target,
+                        Pareto for a multi-objective search across two metrics.
                       enum:
                         - Optimize
+                        - Pareto
                       type: string
                     sla:
                       description: |-
@@ -9738,10 +9747,12 @@ spec:
                           rule: '!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))'
                   type: object
                   x-kubernetes-validations:
-                    - message: metrics is reserved for the future Pareto implementation
-                      rule: '!has(self.metrics)'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                    - message: Pareto mode uses metrics, not metric
+                      rule: '!has(self.mode) || self.mode != ''Pareto'' || !has(self.metric)'
+                    - message: Optimize mode uses metric, not metrics
+                      rule: '!has(self.mode) || self.mode != ''Optimize'' || !has(self.metrics)'
                 overrides:
                   description: Overrides customizes the generated DGD without changing AISimulate execution.
                   properties:
@@ -9781,6 +9792,21 @@ spec:
                       maximum: 100
                       minimum: 1
                       type: integer
+                  type: object
+                rerun:
+                  description: |-
+                    Rerun intentionally creates a new Request generation when the search inputs otherwise
+                    remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry
+                    the same immutable Run.
+                  properties:
+                    reason:
+                      description: |-
+                        Reason records why the user requested another Run. Changing this value creates a new
+                        Request generation and the value is frozen into that generation's immutable Run.
+                      minLength: 1
+                      type: string
+                  required:
+                    - reason
                   type: object
                 v1beta1:
                   description: |-
@@ -9958,7 +9984,7 @@ spec:
                 - message: exactly one of native v1beta2 fields or v1beta1 must be specified
                   rule: has(self.v1beta1) != has(self.model)
                 - message: v1beta1 is mutually exclusive with native v1beta2 fields
-                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))'
+                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.rerun) || has(self.overrides))'
                 - message: the conversion carrier is immutable
                   rule: has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)
             status:

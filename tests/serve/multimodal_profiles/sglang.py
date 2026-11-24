@@ -46,7 +46,7 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=8.0,
+                profiled_vram_gib=11.5,  # 10.5 GiB peak with the Mamba cap
                 requested_sglang_kv_tokens=8192,
                 env={"SINGLE_GPU": "true"},
                 tests=[

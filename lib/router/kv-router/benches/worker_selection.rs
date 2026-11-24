@@ -22,11 +22,11 @@ use dynamo_kv_indexer::host::{
 };
 use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::OverlapSignals;
 use dynamo_scheduler::ScheduleMode;
 use dynamo_scheduler::SchedulingRequest;
-use dynamo_scheduler::overlap::OverlapSignals;
-use dynamo_scheduler::protocols::{RoutingConstraints, WorkerConfigLike};
-use dynamo_scheduler::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+use dynamo_scheduler::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+use dynamo_scheduler::{RoutingConstraints, WorkerConfigLike};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
 use dynamo_worker_selection::{
@@ -699,10 +699,11 @@ fn worker_projection(c: &mut Criterion) {
             let mut projections = FxHashMap::default();
             group.bench_function(BenchmarkId::new("reuse", count), |b| {
                 b.iter(|| {
-                    slots.bench_project_worker_loads_into(
+                    slots.project_worker_loads_into(
                         request.token_seq.as_deref(),
                         now,
                         &mut projections,
+                        None,
                     );
                     black_box(&projections);
                 })

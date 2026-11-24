@@ -4,21 +4,21 @@
 //! What an in-tree host names from the slot-tracker stage: the load snapshots and projections
 //! it reads, the fullness rule it configures, the publisher and subscriber traits it
 //! implements, the replication wire it forwards, and the booking descriptor the kernel hands
-//! it. Every item is re-exported from its owning module; this list is the host contract
-//! (hosts inventory v2, section 3).
+//! it. Every item is re-exported from its owning module; this list is the host contract.
 
 pub use crate::booking::SchedulerBookingDescriptor;
 pub use crate::busy::{BusyRanksExt, BusyThresholds, RankLoad};
+pub use crate::decode_progress::{DecodeProgress, DecodeProgressUpdate};
 pub use crate::multi_worker::{
     ActiveSequencesMultiWorker, LocalWorkerLoad, NoopSequencePublisher,
     ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError,
     SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 pub use crate::prompt_registry::WorkerLoadProjection;
-pub use crate::single::ActiveSequences;
 pub use crate::topology::WorkerDpRange;
 pub use crate::wire::{
-    ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, SchedulerGroup, SchedulerLoad,
+    ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin, PrefillLoadHint,
+    SchedulerGroup, SchedulerLoad,
 };
 
 // What the frontend host (lib/llm) names beyond the lists above.

@@ -4,7 +4,7 @@
 //! Drive `WorkerSelectionPolicy` through the kernel's `WorkerSelector` with a scheduling
 //! request, worker configs, and eligibility: the stage and its adapter together.
 
-use crate::SessionContext;
+use crate::types::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::WorkerInputView;
@@ -18,8 +18,8 @@ use rustc_hash::FxHashMap;
 use super::DefaultWorkerSelector;
 use super::test_support::*;
 use super::{CandidatePreparerExt, WorkerSelectionInput, WorkerSelector};
-use crate::WorkerSelectionInputTrigger;
 use crate::protocols::WorkerConfigLike;
+use crate::types::WorkerSelectionInputTrigger;
 use crate::types::{KvSchedulerError, SchedulingRequest};
 use dynamo_worker_selection::*;
 
@@ -322,7 +322,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
         ) -> Result<(), WorkerSelectionPolicyError> {
             for (candidate, cost) in candidates.iter().zip(costs) {
                 let transfer = candidate
-                    .kv_transfer()
+                    .kv_copy()
                     .map(|transfer| transfer.source_prefix_blocks());
                 self.seen
                     .lock()
@@ -338,7 +338,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
 
     impl WorkerFilter for TransferFilter {
         fn required_worker_inputs(&self) -> WorkerInputs {
-            WorkerInputs::KV_TRANSFER
+            WorkerInputs::KV_COPY
         }
 
         fn keep(
@@ -347,7 +347,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
             candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             // Only scorers receive fetch inputs.
-            assert_eq!(candidate.kv_transfer(), None);
+            assert_eq!(candidate.kv_copy(), None);
             Ok(true)
         }
     }
@@ -365,7 +365,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
             vec![Box::new(TransferFilter)],
             vec![
                 Box::new(TransferScorer {
-                    inputs: WorkerInputs::KV_TRANSFER,
+                    inputs: WorkerInputs::KV_COPY,
                     seen: declared.clone(),
                 }),
                 Box::new(TransferScorer {
@@ -542,7 +542,7 @@ fn prepared_candidates_select_like_rows_built_at_selection() {
             WorkerInputs::CACHE
                 | WorkerInputs::LOAD
                 | WorkerInputs::PREFERRED_TAINT
-                | WorkerInputs::KV_TRANSFER
+                | WorkerInputs::KV_COPY
         }
 
         fn score(
@@ -555,7 +555,7 @@ fn prepared_candidates_select_like_rows_built_at_selection() {
                 let load = candidate.load().unwrap();
                 let cache = candidate.cache().unwrap();
                 let fetchable = candidate
-                    .kv_transfer()
+                    .kv_copy()
                     .and_then(|transfer| transfer.source_prefix_blocks())
                     .unwrap_or(0);
                 *cost = (load.decode_cost_blocks() + load.active_prefill_tokens() as f64
@@ -1601,8 +1601,8 @@ fn hosted_rejected_kv_policies_select_through_the_kernel() {
         ),
         // Stripped from the picker's effective inputs, but still a KV-only declaration.
         (
-            "KV_TRANSFER",
-            policy(Vec::new(), Vec::new(), WorkerInputs::KV_TRANSFER),
+            "KV_COPY",
+            policy(Vec::new(), Vec::new(), WorkerInputs::KV_COPY),
         ),
     ];
     let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);

@@ -17,7 +17,7 @@ use std::hash::Hash;
 
 use rustc_hash::FxHashMap;
 
-use dynamo_kv_indexer::kv_hints::KvTransferCandidateSource;
+use dynamo_kv_indexer::KvTransferCandidateSource;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 /// A worker's router-hint identity, with its labels hashed.

@@ -55,10 +55,7 @@ class DynamoRouterConfig(KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 "--serve-indexer and --use-remote-indexer are mutually exclusive"
             )
-        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
-            raise ValueError(
-                "--ais-perf-config requires --router-prefill-load-model=ais"
-            )
+        self.validate_ais_perf_inputs()
         if self.router_prefill_load_model == "ais":
             self.ais_perf_kwargs()
             if not self.router_track_prefill_tokens:

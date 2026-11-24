@@ -24,7 +24,7 @@ pub struct CandidateData {
     pub cache: WorkerCacheData,
     pub load: WorkerLoadInput,
     /// `Some` once the fetch column is filled, which needs the request's transfer candidates.
-    pub transfer: Option<WorkerTransferInput>,
+    pub transfer: Option<WorkerCopyInput>,
     /// The request's preference for this rank's taints, when asked for and not pinned.
     pub preferred_taint_multiplier: Option<f64>,
     /// The worker's data-parallel size, set only on prepared rows so the scheduler actor can
@@ -98,17 +98,24 @@ impl<'a> WorkerCandidate<'a> {
             .then_some(&self.data.load)
     }
 
-    /// The KV prefix this worker could fetch, only for a scorer that declared
-    /// KV_TRANSFER; filters and pickers do not receive it. None also means the
-    /// host has no transfer data for this request: no worker in the partition
-    /// consumes router hints, or the indexer cannot retain the matched block chain.
+    /// This worker's KV copy offer, only for a scorer that declared
+    /// KV_COPY; filters and pickers do not receive it. None also means the
+    /// host has no copy data for this request: no worker in the partition
+    /// advertises `router_hint`, or the indexer cannot retain the matched block chain.
     #[inline]
-    pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
-        if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
+    pub fn kv_copy(self) -> Option<WorkerCopyInput> {
+        if self.inputs.contains(WorkerInputs::KV_COPY) {
             self.data.transfer
         } else {
             None
         }
+    }
+
+    /// Previous name of [`Self::kv_copy`].
+    // TODO(v1.9): Remove this alias.
+    #[deprecated(since = "1.7.0", note = "use `WorkerCandidate::kv_copy`")]
+    pub fn kv_transfer(self) -> Option<WorkerCopyInput> {
+        self.kv_copy()
     }
 
     /// Preferred-taint cost multiplier, only when this component declared PREFERRED_TAINT.
@@ -131,6 +138,17 @@ impl<'a> WorkerCandidate<'a> {
         self.cache_snapshot
             .resident_blocks
             .and_then(|counts| counts.resident_blocks(self.data.worker))
+    }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocks::cache_owner_blocks`: the attached
+    /// cache owner's count, under the same gate as [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+            return None;
+        }
+        self.cache_snapshot
+            .resident_blocks?
+            .cache_owner_blocks(self.data.worker)
     }
 }
 
@@ -219,6 +237,10 @@ pub trait ResidentBlockSource {
     /// Blocks held for `worker` as of the host's last event for it, or `None` when the host has
     /// no count for the rank.
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
+
+    /// Host-pinned blocks the host's index holds for the cache owner (KVCR instance) attached
+    /// to `worker`, or `None` when no owner is attached or the host has no count for it.
+    fn cache_owner_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
 }
 
 /// Request-wide facts borrowed once for all cache views in a selection.
@@ -378,18 +400,22 @@ pub struct WorkerLoadInput {
 // from drifting further without a measurement.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<CandidateData>() == 128);
 
 pub use dynamo_router_protocol::columns::{WorkerInfo, WorkerInputs};
 pub use dynamo_router_protocol::worker::WorkerCapacity;
 
+/// A worker's KV copy offer, read through [`WorkerCandidate::kv_copy`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WorkerTransferInput {
-    /// Blocks of the prompt a fetch source holds beyond this rank's local prefix, when one
+pub struct WorkerCopyInput {
+    /// Blocks of the prompt a copy source holds beyond this rank's local prefix, when one
     /// was chosen for the rank.
     pub source_prefix_blocks: Option<u32>,
 }
+
+/// Previous name of [`WorkerCopyInput`].
+// TODO(v1.9): Remove this alias.
+#[deprecated(since = "1.7.0", note = "use `WorkerCopyInput`")]
+pub type WorkerTransferInput = WorkerCopyInput;
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 ///
@@ -404,6 +430,7 @@ pub struct WorkerInputView<'a> {
     load: Option<&'a [WorkerLoadInput]>,
     // Set only on the KV path, for a picker that declared RESIDENT_BLOCKS.
     resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    decode_progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
 }
 
 /// Where a picker's rows come from.
@@ -452,8 +479,8 @@ impl CandidateData {
             } else {
                 WorkerLoadInput::default()
             },
-            transfer: if inputs.contains(WorkerInputs::KV_TRANSFER) {
-                if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
+            transfer: if inputs.contains(WorkerInputs::KV_COPY) {
+                if self.inputs.contains(WorkerInputs::KV_COPY) {
                     self.transfer
                 } else {
                     additional.transfer
@@ -494,7 +521,8 @@ impl ScoredWorkerCandidate {
 impl<'a> WorkerCacheInput<'a> {
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
-    /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
+    /// Use `loadable_beyond(prefix)` for the blocks the engine can load after a worker's local
+    /// prefix; `hits_beyond(prefix)` also counts hits after a gap, which the engine cannot load.
     #[inline]
     pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
         self.snapshot.shared_hits
@@ -539,7 +567,7 @@ impl<'a> WorkerCacheInput<'a> {
     }
 }
 
-impl dynamo_slot_tracker::busy::RankLoad for WorkerLoadInput {
+impl dynamo_slot_tracker::RankLoad for WorkerLoadInput {
     #[inline]
     fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
@@ -589,18 +617,18 @@ impl WorkerLoadInput {
     }
 }
 
-impl WorkerTransferInput {
+impl WorkerCopyInput {
     /// Root-aligned prefix, in blocks, held by the source this worker would
     /// fetch from, and so the prefix it holds after the fetch. None when no
     /// eligible source holds more than this worker's device and host-pinned
     /// prefix, the `CACHE` inputs' `device_overlap_blocks() + host_overlap_blocks()`.
     ///
-    /// The host chooses the source by its router-hint rules: the same hint
-    /// worker type, neither this worker nor a cache owner attached to it, and,
-    /// when this worker sets a KV transfer domain, its topology island
-    /// (`preferred` enforcement falls back to another island). Booking this
-    /// worker attaches a fetch hint for that source. Fetches are best effort:
-    /// the source may no longer hold the blocks when the request runs.
+    /// The host chooses the source by its copy rules: the same hint worker
+    /// type, neither this worker nor a cache owner attached to it, and, when
+    /// this worker sets a KV transfer domain, its topology island (`preferred`
+    /// enforcement falls back to another island). This is the copy offer for
+    /// this worker; hint policies decide whether a booking sends it. A copy is
+    /// best effort: the source may no longer hold the blocks when it runs.
     #[inline]
     pub fn source_prefix_blocks(&self) -> Option<u32> {
         self.source_prefix_blocks
@@ -626,6 +654,7 @@ impl<'a> WorkerInputView<'a> {
             cache,
             load,
             resident_blocks,
+            decode_progress: None,
         }
     }
 
@@ -645,7 +674,27 @@ impl<'a> WorkerInputView<'a> {
             cache: None,
             load: None,
             resident_blocks: None,
+            decode_progress: None,
         }
+    }
+
+    pub(crate) fn with_decode_progress(
+        mut self,
+        progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        self.decode_progress = progress;
+        self
+    }
+
+    pub(crate) fn decode_progress_for_row(
+        self,
+        row: usize,
+    ) -> Option<dynamo_slot_tracker::host::DecodeProgress> {
+        let lookup = self.decode_progress?;
+        let PickerRows::Materialized { candidates, .. } = self.rows else {
+            return None;
+        };
+        lookup(candidates.get(row)?.worker)
     }
 
     /// Number of rows, equal to the length of [`Self::candidates`].
@@ -751,5 +800,13 @@ impl<'a> WorkerInputView<'a> {
         self.candidates()
             .get(row)
             .and_then(|candidate| counts.resident_blocks(candidate.worker))
+    }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocksByRow::cache_owner_blocks`: the
+    /// attached cache owner's count for candidate `row`, under the same gate as
+    /// [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self, row: usize) -> Option<u64> {
+        let counts = self.resident_blocks?;
+        counts.cache_owner_blocks(self.candidates().get(row)?.worker)
     }
 }

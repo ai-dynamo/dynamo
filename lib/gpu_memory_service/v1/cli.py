@@ -132,6 +132,10 @@ def main(argv: list[str] | None = None) -> None:
         logger.info("GMS V1 server listening device=%d gpu=%s", args.device, gpu_uuid)
 
         def terminate(*_args) -> None:
+            # Event.set() holds a non-reentrant lock; a nested signal inside it
+            # would deadlock, so ignore further signals once stopping begins.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             stop.set()
 
         signal.signal(signal.SIGTERM, terminate)

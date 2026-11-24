@@ -75,22 +75,21 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 
 ## Feature Interactions
 
-vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio. The matrix below shows which feature pairs are validated to work together.
+vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, LoRA adapters, and multimodal inference including video and audio. The matrix below shows which feature pairs are validated to work together.
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Disaggregated Serving** | — | | | | | | | | | |
-| **KV-Aware Routing** | ✅ | — | | | | | | | | |
-| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | ✅ | ✅ | ✅ | — | | | | | | |
-| **Multimodal** | ✅ | ✅<sup>1</sup> | — | ✅ | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | | |
-| **Request Cancellation** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | |
-| **LoRA** | ✅ | ✅<sup>2</sup> | — | ✅ | — | ✅ | ✅ | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | — | ✅ | — |
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅ | ✅<sup>1</sup> | — | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | ✅ | — | | | | |
+| **Request Cancellation** | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | |
+| **LoRA** | ✅ | ✅<sup>2</sup> | — | — | ✅ | ✅ | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend path supports model families handled by `llm-multimodal`; the Python chat-processor path delegates to vLLM's multimodal processor. ([Source](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md))

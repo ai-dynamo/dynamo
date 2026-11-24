@@ -27,22 +27,23 @@ pub(super) enum ActivationSnapshot {
 }
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
-    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
+    entrypoint::RouterConfig,
+    kv_router::{
+        RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource,
+        role_routing::{self, DecodeRouting},
+    },
     model_card::ModelDeploymentCard,
     protocols::common::timing::WORKER_TYPE_PREFILL,
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
 };
 
-/// How the prefill worker set wants to be routed to, resolved from its cards.
+/// What the prefill worker set's cards say about how to route to it.
 #[derive(Debug)]
 struct PrefillAdvertisement {
-    router_mode: RouterMode,
-    /// `None` when the card declared nothing, so the decode set's tuning applies.
-    kv_router_config: Option<KvRouterConfig>,
-    /// Taken from an advertised `router_config` whole, `None` included -- an
-    /// advertisement replaces the decode set's configuration rather than
-    /// merging with it. `None` here when nothing was advertised at all.
-    session_affinity_ttl: Option<Option<std::time::Duration>>,
+    /// The `router_config` the prefill workers advertise. `None` when they
+    /// declared nothing, so the decode set's settings apply;
+    /// `role_routing::prefill_routing` combines the two.
+    router_config: Option<RouterConfig>,
     is_eagle: bool,
     /// The prefill workers' own block size, which is what their KV events are
     /// keyed on. The decode set's value would index this pool at the wrong
@@ -50,9 +51,9 @@ struct PrefillAdvertisement {
     kv_cache_block_size: u32,
 }
 
-/// A prefill worker that declares its own `router_config` governs this hop;
-/// one that declares nothing inherits `decode_router_mode`. That is what lets a
-/// deployment run KV-routed prefill in front of round-robin decode.
+/// Read the prefill worker set's advertisement from its cards. The first card
+/// speaks for the set; `decode_router_mode` only decides whether the others
+/// agree with it.
 fn resolve_advertisement_from_cards(
     cards: &[ModelDeploymentCard],
     decode_router_mode: RouterMode,
@@ -68,30 +69,22 @@ fn resolve_advertisement_from_cards(
     };
 
     let advertisement = PrefillAdvertisement {
-        router_mode: mode_of(first),
-        kv_router_config: first
-            .router_config
-            .as_ref()
-            .map(|config| config.kv_router_config.clone()),
-        session_affinity_ttl: first.router_config.as_ref().map(|config| {
-            config
-                .session_affinity_ttl_secs
-                .map(std::time::Duration::from_secs)
-        }),
+        router_config: first.router_config.clone(),
         is_eagle: first.runtime_config.enable_eagle,
         kv_cache_block_size: first.kv_cache_block_size,
     };
 
     // Only legacy explicit endpoints can supply multiple cards here; managed
     // topology supplies the selected card and filters incompatible workers.
+    let resolved_mode = mode_of(first);
     let disagreeing = cards
         .iter()
         .skip(1)
-        .filter(|card| mode_of(card) != advertisement.router_mode)
+        .filter(|card| mode_of(card) != resolved_mode)
         .count();
     if disagreeing > 0 {
         tracing::warn!(
-            resolved_mode = ?advertisement.router_mode,
+            ?resolved_mode,
             disagreeing,
             total = cards.len(),
             "Prefill workers advertise conflicting router modes; using the first"
@@ -317,18 +310,26 @@ impl PrefillRouter {
                 Self::resolve_prefill_advertisement(context, endpoint).await?
             }
         };
-        let prefill_router_mode = advertisement.router_mode;
-
         // Everything the hop uses comes from the prefill card when it says so,
-        // falling back to the decode set. A block size of 0 means the card never
-        // declared one, so it cannot be trusted over the decode set's.
+        // falling back to the decode set.
+        let routing = role_routing::prefill_routing(
+            advertisement.router_config,
+            DecodeRouting {
+                router_mode: context.decode_router_mode,
+                kv_router_config,
+                session_affinity_ttl: context.session_affinity_ttl,
+                session_affinity_mode: context.session_affinity_mode,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        let prefill_router_mode = routing.router_mode;
+
+        // A block size of 0 means the card never declared one, so it cannot be
+        // trusted over the decode set's.
         let prefill_block_size = match advertisement.kv_cache_block_size {
             0 => kv_cache_block_size,
             advertised => advertised,
         };
-        let prefill_session_affinity_ttl = advertisement
-            .session_affinity_ttl
-            .unwrap_or(context.session_affinity_ttl);
         let load_context = RoutingLoadContext::start(
             client.clone(),
             RouterLoadSource::Prefill,
@@ -338,19 +339,6 @@ impl PrefillRouter {
         )
         .await?;
 
-        // A prefill card that declares a mode may declare KV tuning alongside it;
-        // honoring only half of its `RouterConfig` would be a trap. Whichever
-        // config wins, `router_track_active_blocks` stays off: prefill routing is
-        // prompt-side, and crediting decode blocks here would double-count load.
-        let advertised_kv_tuning = advertisement.kv_router_config.is_some();
-        let prefill_kv_config = match advertisement.kv_router_config {
-            Some(mut advertised) => {
-                advertised.router_track_active_blocks = false;
-                Some(advertised)
-            }
-            None => kv_router_config,
-        };
-
         // Logged once per activation, and deliberately the *resolved* values
         // rather than what the card asked for. An advertisement replaces the
         // decode set's configuration rather than merging with it, so a worker
@@ -359,11 +347,12 @@ impl PrefillRouter {
         tracing::info!(
             ?prefill_router_mode,
             decode_router_mode = ?context.decode_router_mode,
-            advertised = advertised_kv_tuning,
+            advertised = routing.is_advertised,
             is_eagle = advertisement.is_eagle,
             block_size = prefill_block_size,
-            session_affinity_ttl = ?prefill_session_affinity_ttl,
-            kv_tuning = ?prefill_kv_config,
+            session_affinity_ttl = ?routing.session_affinity_ttl,
+            session_affinity_mode = ?routing.session_affinity_mode,
+            kv_tuning = ?routing.kv_router_config,
             "Activating prefill router"
         );
 
@@ -375,7 +364,7 @@ impl PrefillRouter {
                     client.clone(),
                     prefill_block_size,
                     context.selection_policy.clone(),
-                    prefill_kv_config,
+                    routing.kv_router_config,
                     context.prefill_load_estimator.clone(),
                     Some(crate::worker_type::WorkerType::Prefill),
                     WORKER_TYPE_PREFILL,
@@ -387,8 +376,8 @@ impl PrefillRouter {
                 .await?;
 
             let affinity = create_affinity_coordinator(
-                prefill_session_affinity_ttl,
-                context.session_affinity_mode,
+                routing.session_affinity_ttl,
+                routing.session_affinity_mode,
                 client.clone(),
             )
             .await?;
@@ -402,9 +391,14 @@ impl PrefillRouter {
                     .await?,
             )
         } else {
+            crate::kv_router::check_hint_policies_route_on_kv_path(
+                prefill_router_mode,
+                &routing.kv_router_config.unwrap_or_default(),
+                &[crate::worker_type::WorkerType::Prefill],
+            )?;
             let affinity = create_affinity_coordinator(
-                prefill_session_affinity_ttl,
-                context.session_affinity_mode,
+                routing.session_affinity_ttl,
+                routing.session_affinity_mode,
                 client.clone(),
             )
             .await?;
@@ -669,7 +663,6 @@ mod tests {
 
     use super::*;
     use crate::discovery::CommittedWorkerSetTarget;
-    use crate::entrypoint::RouterConfig;
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
     use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
     use dynamo_kv_router::config::KvRouterConfig;
@@ -696,39 +689,19 @@ mod tests {
     }
 
     #[test]
-    fn inherits_decode_mode_when_card_advertises_nothing() {
-        // The pre-override behavior: a prefill worker that says nothing is
-        // routed exactly as the decode set is. Every deployment predating this
-        // feature lands here, so it must not shift.
-        let cards = vec![card(None)];
-        let resolved =
-            resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
-        assert_eq!(resolved.router_mode, RouterMode::RoundRobin);
-        assert!(resolved.kv_router_config.is_none());
-    }
-
-    #[test]
-    fn session_affinity_ttl_is_taken_whole_or_not_at_all() {
-        // An advertisement replaces the decode set's configuration rather than
-        // merging, so a card that advertises without a TTL means "no affinity",
-        // not "inherit the frontend's". A card advertising nothing means inherit.
-        let advertised = vec![card(Some(RouterConfig::new(
-            RouterMode::KV,
-            KvRouterConfig::default(),
-        )))];
+    fn advertisement_is_read_from_the_first_card() {
+        let advertised = vec![
+            card(Some(RouterConfig::new(
+                RouterMode::KV,
+                KvRouterConfig::default(),
+            ))),
+            card(None),
+        ];
+        let resolved = resolve_advertisement_from_cards(&advertised, RouterMode::RoundRobin)
+            .expect("resolves");
         assert_eq!(
-            resolve_advertisement_from_cards(&advertised, RouterMode::KV)
-                .expect("resolves")
-                .session_affinity_ttl,
-            Some(None),
-        );
-
-        let silent = vec![card(None)];
-        assert_eq!(
-            resolve_advertisement_from_cards(&silent, RouterMode::KV)
-                .expect("resolves")
-                .session_affinity_ttl,
-            None,
+            resolved.router_config.map(|config| config.router_mode),
+            Some(RouterMode::KV)
         );
     }
 
@@ -928,9 +901,10 @@ mod tests {
             .iter()
             .map(|worker| worker.instance().id())
             .collect();
+        // What a prefill worker started with `--router-track-output-blocks` advertises.
         let kv_config = KvRouterConfig {
             use_kv_events: false,
-            router_track_active_blocks: false,
+            router_track_output_blocks: true,
             ..Default::default()
         };
         let group_id = endpoint.id().to_string();
@@ -1126,9 +1100,9 @@ mod tests {
             let cancelled = self.0.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 worker_context.stopped().await;
@@ -1226,13 +1200,24 @@ mod tests {
             .start_with_registration()
             .await
             .unwrap();
-        let kv_config = KvRouterConfig {
+        // The prefill pool advertises nothing, so the hop inherits the frontend's
+        // config: its policy file turns block tracking on, and the frontend hands
+        // the config down with active blocks off.
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_active_blocks: true\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        let mut kv_config = KvRouterConfig {
             use_kv_events: false,
-            router_track_active_blocks: false,
+            router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
-        let mut advertised = card(Some(RouterConfig::new(RouterMode::KV, kv_config)));
-        advertised.kv_cache_block_size = 64;
+        kv_config.apply_policy_config().unwrap();
+        kv_config.router_track_active_blocks = false;
+        let mut silent = card(None);
+        silent.kv_cache_block_size = 64;
         worker_runtime
             .discovery()
             .register(
@@ -1240,7 +1225,7 @@ mod tests {
                     namespace.clone(),
                     "workers".into(),
                     "prefill".into(),
-                    &advertised,
+                    &silent,
                 )
                 .unwrap(),
             )
@@ -1259,7 +1244,7 @@ mod tests {
             RouterMode::KV,
             false,
             64,
-            None,
+            Some(kv_config),
             SelectionPolicySource::Registry,
             None,
             None,
@@ -1275,7 +1260,7 @@ mod tests {
             group: endpoint.id().to_string(),
             endpoint,
             generation: 1,
-            card: Arc::new(advertised),
+            card: Arc::new(silent),
             admitted_ids,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1285,6 +1270,16 @@ mod tests {
         })
         .await
         .expect("prefill target must activate");
+        let binding = router.binding.load_full().unwrap();
+        let hop_config = binding
+            .router
+            .kv_router_if_enabled()
+            .expect("the hop inherits KV mode")
+            .kv_router_config();
+        assert!(
+            !hop_config.router_track_active_blocks && !hop_config.router_track_output_blocks,
+            "the policy file must not turn block tracking back on for the prefill hop"
+        );
 
         // Exercise the production generate path, discovery, TCP dispatch, and
         // cancellation propagation for all output modes and both refusal paths.
@@ -1356,9 +1351,9 @@ mod tests {
             let held = self.held.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 tokio::select! {

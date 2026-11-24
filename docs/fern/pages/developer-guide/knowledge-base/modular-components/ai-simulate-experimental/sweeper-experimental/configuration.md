@@ -82,7 +82,7 @@ KV-feasible, and supported by at least one selected backend.
 ## Provider Selection
 
 Adapter names are provider entry-point names. A provider can be installed through the
-`aisimulate.sweep_config_providers` entry-point group or injected into the `Sweeper` constructor:
+`aisim.sweep_config_providers` entry-point group or injected into the `Sweeper` constructor:
 
 ```python
 sweeper = Sweeper(

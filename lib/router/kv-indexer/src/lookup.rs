@@ -123,7 +123,7 @@ impl Indexer {
             .await
     }
 
-    /// Device match details plus per-tier hits, with router-hint chain retention
+    /// Device match details plus per-tier hits, with copy-source chain retention
     /// disabled. Use [`Indexer::find_tiered_matches_with_options`] to request
     /// retention through the capability-gated variant.
     pub async fn find_matches_by_tier(
@@ -223,7 +223,7 @@ impl<'a> LookupPipeline<'a> {
             PrimaryLookup::Remote(primary) => {
                 if lower_tier_options.retain_kv_transfer_chain {
                     tracing::warn!(
-                        "KV transfer chain retention is not supported with remote primary indexer; proceeding without KV transfer hints"
+                        "KV transfer chain retention is not supported with remote primary indexer; proceeding without KV copy sources"
                     );
                 }
                 let Some(side) = self.side else {

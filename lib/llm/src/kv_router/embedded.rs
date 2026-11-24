@@ -23,8 +23,8 @@ use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_router_protocol::worker_type::WorkerType;
 use dynamo_scheduler::host::{
-    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, NonMaxOverlapSelectionObserver,
+    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostHints, HostLoad,
+    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, NonMaxOverlapSelectionObserver,
     OverloadedWorkerProvider, PrefillLoadEstimator, RejectThresholdsProvider, SelectionHost,
     SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
     WorkerAvailabilityProvider, WorkerCatalogSource, WorkerConfigLike, WorkerRequest,
@@ -69,6 +69,8 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// Builds the partition's worker-selection policy (see
     /// `SelectionPolicySource::resolve`).
     pub policy_factory: WorkerSelectionPolicyFactory,
+    /// The partition's hint policies, resolved from router configuration.
+    pub hint_policies: dynamo_kv_router::plugins::hint_policy::HintPolicyFactory,
 }
 
 fn record_queue_rejection(
@@ -292,6 +294,9 @@ impl EmbeddedSelection {
                 request_leases,
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
             },
+            hints: HostHints {
+                policies: Some(args.hint_policies),
+            },
         })
         .build()
         .await
@@ -509,6 +514,7 @@ pub(crate) fn worker_request_from_runtime_config(
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
         ),
         total_kv_blocks: config.total_kv_blocks,
+        cache_owner_capacity_blocks: config.cache_owner_capacity_blocks,
         stable_routing_id: config.stable_routing_id.clone(),
         is_eagle: Some(is_eagle),
         taints: config.taints().clone(),
@@ -582,6 +588,7 @@ mod tests {
             data_parallel_size: 2,
             max_num_batched_tokens: Some(8192),
             total_kv_blocks: Some(4096),
+            cache_owner_capacity_blocks: Some(1024),
             stable_routing_id: Some("worker-0".to_string()),
             ..ModelRuntimeConfig::default()
         };
@@ -608,6 +615,7 @@ mod tests {
         assert_eq!(request.data_parallel_size, Some(2));
         assert_eq!(request.max_num_batched_tokens, Some(8192));
         assert_eq!(request.total_kv_blocks, Some(4096));
+        assert_eq!(request.cache_owner_capacity_blocks, Some(1024));
         assert_eq!(request.stable_routing_id.as_deref(), Some("worker-0"));
         assert!(request.taints.contains("gpu=h100"));
         assert_eq!(request.router_hint_worker_type.as_deref(), Some("decode"));

@@ -299,6 +299,7 @@ impl Request {
 
         NvCreateChatCompletionRequest {
             responses_tools: None,
+            chat_template_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -701,6 +702,32 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
+    async fn input_audio_is_forwarded_once_as_audio_url() {
+        let messages = r#"[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Transcribe this"},
+                {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}}
+            ]
+        }]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+        let preprocessor = make_preprocessor();
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let media = preprocessed.multi_modal_data.as_ref().unwrap();
+        assert_eq!(media["audio_url"].len(), 1);
+        assert!(matches!(
+            &media["audio_url"][0],
+            MultimodalData::Url(url) if url.as_str() == "data:audio/wav;base64,AA=="
+        ));
+        let messages = &preprocessed.extra_args.as_ref().unwrap()["messages"];
+        assert_eq!(messages[0]["content"][1]["input_audio"]["data"], "");
+    }
+
+    #[tokio::test]
     async fn preserves_multimodal_cache_uuid_alignment() {
         let messages = r#"[
             {
@@ -990,6 +1017,7 @@ mod context_length_validation {
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
             responses_tools: None,
+            chat_template_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1070,13 +1098,22 @@ mod context_length_validation {
             "error message should tell user what to do, got: {}",
             dynamo_err.message()
         );
-        let Some(dynamo_runtime::error::PublicDetails::ContextLength { limit, actual }) =
-            dynamo_err.public_details()
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength {
+            limit,
+            actual,
+            prompt_tokens,
+        }) = dynamo_err.public_details()
         else {
             panic!("context overflow should expose structured length details");
         };
         assert_eq!(*limit, 5);
         assert!(actual.is_some_and(|actual| actual > *limit));
+        assert_eq!(*prompt_tokens, *actual);
+        assert_eq!(
+            dynamo_err.public_message(),
+            None,
+            "the producer must not overwrite ContextLength details with a public message"
+        );
     }
 
     #[tokio::test]
@@ -1160,6 +1197,22 @@ mod context_length_validation {
             )),
             "error message should state the requested token budget, got: {}",
             dynamo_err.message()
+        );
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength {
+            limit,
+            actual,
+            prompt_tokens,
+        }) = dynamo_err.public_details()
+        else {
+            panic!("total-overflow rejection must expose structured length details");
+        };
+        assert_eq!(*limit, (prompt_len + 10) as u64);
+        assert_eq!(*actual, Some((prompt_len + 11) as u64));
+        assert_eq!(*prompt_tokens, Some(prompt_len as u64));
+        assert_eq!(
+            dynamo_err.public_message(),
+            None,
+            "the producer must not replace ContextLength details with a public message"
         );
     }
 
@@ -1372,6 +1425,7 @@ mod embedding_without_chat_template {
             .unwrap();
         NvCreateChatCompletionRequest {
             responses_tools: None,
+            chat_template_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1714,5 +1768,25 @@ mod embedding_without_chat_template {
             }
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn frontend_tokenization_rejects_chat_input() {
+        let preprocessor = embedding_preprocessor_without_template();
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+        let error = preprocessor
+            .preprocess_embedding_request(&request)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--embedding-frontend-tokenization"),
+            "{error}"
+        );
     }
 }

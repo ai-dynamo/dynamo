@@ -30,6 +30,8 @@ RESTORE_RUNTIME_ENV_NAMES = {
     "DYN_DISCOVERY_BACKEND",
     "DYN_REQUEST_PLANE",
     "DYN_EVENT_PLANE",
+    # Destination policy replaces the temporary capture-time offline override.
+    "HF_HUB_OFFLINE",
     # DistributedRuntime infrastructure env read after restore.
     "DYN_EVENT_PLANE_HOST",
     "DYN_TCP_RPC_HOST",

@@ -1,10 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+use std::collections::HashMap;
+
 use dynamo_kv_router::plugins::prelude::*;
-use dynamo_kv_router::services::selection::local_selection_core;
-use dynamo_router_policies::default_factory;
+use dynamo_kv_router::services::indexer::backend::test_util::flush;
+use dynamo_kv_router::services::selection::{
+    SelectionService, SelectionServiceBuilder, local_selection_core,
+};
+use dynamo_router_policies::{default_factory, default_registry, register};
 use dynamo_scheduler::host::{
     PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
+};
+use dynamo_scheduler::test_utils::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block, make_store_event_full,
 };
 
 fn worker(worker_id: u64) -> WorkerRequest {
@@ -209,4 +217,210 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     core.free_reservation("request").await.unwrap();
     assert!(!partition.scheduler().has_request("request"));
     core.shutdown();
+}
+
+/// Tokens of the prompt the `kvcr` tests book: eight blocks of four.
+fn prompt_tokens() -> Vec<u32> {
+    (1..=32).collect()
+}
+
+/// The prompt's sequence hashes, block 0 first, as an engine publishes them.
+fn prompt_hashes() -> Vec<u64> {
+    compute_seq_hash_for_block(&compute_block_hash_for_seq(
+        &prompt_tokens(),
+        4,
+        BlockHashOptions::default(),
+    ))
+}
+
+/// Index `worker_id` as holding the prompt's first `blocks` blocks, as its KV events would.
+async fn store_prefix(service: &SelectionService, worker_id: u64, blocks: usize) {
+    let local: Vec<u64> =
+        compute_block_hash_for_seq(&prompt_tokens(), 4, BlockHashOptions::default())
+            .into_iter()
+            .take(blocks)
+            .map(|hash| hash.0)
+            .collect();
+    let partition = service
+        .core()
+        .partition(&RoutingPartitionId::new("model", "default"))
+        .unwrap();
+    partition
+        .indexer()
+        .apply_event_routed(make_store_event_full(worker_id, &local, 0, None, None))
+        .await
+        .unwrap();
+    flush(partition.indexer()).await;
+}
+
+/// A selection service built from the shipped registry with the router policy `policy_yaml`, as
+/// the standalone service builds it. Worker 1 holds the whole prompt and is busy; idle worker 2
+/// holds its first two blocks. Both advertise `router_hint` sources.
+async fn kvcr_service(policy_yaml: &str) -> (SelectionService, tempfile::NamedTempFile) {
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(policy_file.path(), policy_yaml).unwrap();
+    let config = KvRouterConfig {
+        use_kv_events: true,
+        router_queue_threshold: None,
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    let mut registry = default_registry();
+    register(&mut registry).unwrap();
+    let service = SelectionServiceBuilder::new(config, WorkerType::Aggregated, registry)
+        .indexer_threads(1)
+        .build()
+        .await
+        .unwrap();
+    for worker_id in [1, 2] {
+        service
+            .upsert_worker(WorkerRequest {
+                kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+                router_hint_worker_type: Some("decode".to_string()),
+                router_hint_source_control_endpoints: HashMap::from([(
+                    0,
+                    format!("tcp://worker-{worker_id}:9000"),
+                )]),
+                ..worker(worker_id)
+            })
+            .await
+            .unwrap();
+    }
+    store_prefix(&service, 1, 8).await;
+    store_prefix(&service, 2, 2).await;
+    // Busy worker 1 (8 prefill tokens, 2 decode blocks) costs 2 + 10 = 12 for the prompt. Worker 2
+    // costs 6 + 8 = 14, less half its 6 copyable blocks at a 0.5 multiplier: 11.
+    let mut load = reserve_request("load");
+    load.prompt.token_ids = Some((100..108).collect());
+    load.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+    service.select_and_reserve(load).await.unwrap();
+    (service, policy_file)
+}
+
+fn prompt_request(selection_id: &str) -> SelectAndReserveRequest {
+    let mut request = reserve_request(selection_id);
+    request.prompt.token_ids = Some(prompt_tokens());
+    request
+}
+
+/// `kvcr` credits worker 2 for the six blocks it can copy from worker 1, books it, and commits
+/// it to that copy; `kv_fetch`, on by default under `kvcr`, sends the copy as `kv.fetch@1.0`.
+#[tokio::test]
+async fn kvcr_books_a_copy_that_kv_fetch_sends() {
+    let (service, _policy_file) = kvcr_service(
+        r#"
+worker_selection:
+  aggregated:
+    type: kvcr
+    parameters: {shared_cache_multiplier: 0.5, overlap_score_credit_decay: 0.0}
+"#,
+    )
+    .await;
+    let response = service
+        .select_and_reserve(prompt_request("copy"))
+        .await
+        .unwrap();
+    assert_eq!(response.worker_id, 2);
+    let hint = response.kv_hint.expect("the committed copy");
+    let actions: Vec<_> = hint
+        .actions
+        .iter()
+        .map(|action| {
+            (
+                action.action_id.as_str(),
+                action.action_type.as_str(),
+                action.action_version.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(actions, [("a1", "kv.fetch", "1.0")]);
+    // Every hash from block 0 through the source's prefix, including the two worker 2 holds.
+    assert_eq!(
+        serde_json::to_value(&hint.actions[0].payload).unwrap(),
+        serde_json::json!({
+            "source_control_endpoint": "tcp://worker-1:9000",
+            "block_hashes": prompt_hashes(),
+        })
+    );
+}
+
+/// `kvcr` commits copies, so its role needs a hint that sends them: the default `kv_fetch` when the
+/// entry lists no `hints`, or a listed `kv_fetch`. Listing `hints` without one fails the
+/// partition's setup, and the worker can't be scheduled, with the reason naming the fix.
+#[tokio::test]
+async fn kvcr_partitions_need_a_hint_that_sends_copies() {
+    for (hints, sends_copies) in [
+        ("", true),
+        ("    hints:\n      - type: kv_fetch\n", true),
+        ("    hints: []\n", false),
+    ] {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            format!(
+                "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.5}}\n{hints}"
+            ),
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            router_queue_threshold: None,
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
+        let service = SelectionServiceBuilder::new(config, WorkerType::Aggregated, registry)
+            .indexer_threads(1)
+            .build()
+            .await
+            .unwrap();
+        let record = service
+            .upsert_worker(WorkerRequest {
+                kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+                ..worker(1)
+            })
+            .await
+            .unwrap();
+        let reasons = record.not_schedulable_reasons.join("; ");
+        assert_eq!(
+            reasons.contains(
+                "commits KV copies, but none of the hints in worker_selection.aggregated.hints sends them"
+            ),
+            !sends_copies,
+            "hints={hints:?}: {reasons}"
+        );
+    }
+}
+
+/// `kv_fetch` sends a fetch `kvcr` didn't commit only when it adds at least
+/// `min_additional_blocks` beyond the booked worker's own prefix, and always sends a committed one.
+/// Without copy credit, `kvcr` commits nothing.
+#[tokio::test]
+async fn kv_fetch_holds_only_uncommitted_fetches_to_min_additional_blocks() {
+    // Booked on worker 2, a fetch from worker 1 adds 8 - 2 = 6 blocks.
+    for (multiplier, min_additional_blocks, sends) in
+        [(0.0, 6, true), (0.0, 7, false), (0.5, 7, true)]
+    {
+        let (service, _policy_file) = kvcr_service(&format!(
+            r#"
+worker_selection:
+  aggregated:
+    type: kvcr
+    parameters: {{shared_cache_multiplier: {multiplier}}}
+    hints:
+      - type: kv_fetch
+        parameters: {{min_additional_blocks: {min_additional_blocks}}}
+"#
+        ))
+        .await;
+        let mut request = prompt_request("pinned");
+        request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
+        let response = service.select_and_reserve(request).await.unwrap();
+        assert_eq!(
+            response.kv_hint.is_some(),
+            sends,
+            "multiplier={multiplier} min_additional_blocks={min_additional_blocks}"
+        );
+    }
 }

@@ -763,8 +763,8 @@ impl Indexer {
             .await
     }
 
-    /// [`Self::find_tiered_matches`] with lower-tier query options. Router-hint
-    /// chain retention is honored only by a local event-driven primary (see
+    /// [`Self::find_tiered_matches`] with lower-tier query options. Block-chain
+    /// retention for KV copy sources is honored only by a local event-driven primary (see
     /// [`Self::supports_kv_transfer_chain_retention`]); other shapes ignore it.
     pub async fn find_tiered_matches_with_options(
         &self,
@@ -864,11 +864,20 @@ impl Indexer {
     }
 
     /// Live per-rank block counts from the local primary, which starts keeping them on the first
-    /// call; `None` without a local primary.
+    /// call; `None` without a local primary. The counts also carry the local lower tiers, for
+    /// cache-owner block counts.
     pub fn track_resident_blocks(&self) -> Option<ResidentBlockCountsHandle> {
         match self {
-            Self::Single { primary, .. } => Some(primary.track_resident_blocks()),
-            Self::Concurrent { primary, .. } => Some(primary.track_resident_blocks()),
+            Self::Single {
+                primary,
+                lower_tier,
+                ..
+            } => Some(primary.track_resident_blocks().with_lower_tier(lower_tier)),
+            Self::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => Some(primary.track_resident_blocks().with_lower_tier(lower_tier)),
             Self::Remote { .. } | Self::None => None,
         }
     }

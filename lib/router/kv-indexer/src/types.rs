@@ -27,9 +27,6 @@ pub enum KvRouterError {
     #[error("Indexer dropped the request")]
     IndexerDroppedRequest,
 
-    #[error("Prune operation failed: {0}")]
-    PruneFailed(String),
-
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
 }
@@ -125,7 +122,7 @@ pub struct MatchDetails {
     pub overlap_scores: OverlapScores,
     /// Last matched device sequence hash per worker, used to seed lower-tier queries.
     pub last_matched_hashes: FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
-    /// Optional root-aligned device candidates used to build compact KV transfer hints.
+    /// Optional root-aligned device candidates that KV copy sources are found from.
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
 }
 
@@ -201,7 +198,7 @@ pub struct MatchDetailsRequest {
     pub sequence: Vec<LocalBlockHash>,
     /// A boolean indicating whether to exit early if a single match is found.
     pub early_exit: bool,
-    /// When true, retain the matched root-aligned external hash chain for KV transfer hints.
+    /// When true, retain the matched root-aligned external hash chain for KV copy sources.
     pub retain_kv_transfer_chain: bool,
     /// A channel sender to send the `MatchDetails` response.
     pub resp: oneshot::Sender<MatchDetails>,
@@ -276,6 +273,7 @@ impl WorkerLookupStats {
             .sum()
     }
 
+    #[cfg(test)]
     pub fn block_count_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.worker_blocks
             .iter()
