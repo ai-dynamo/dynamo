@@ -17,7 +17,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::identity::PoolId;
+use dynamo_router_protocol::identity::PoolId;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::transports::event_plane::{Codec, EventSubscriber};
 use futures::Stream;
@@ -27,11 +27,11 @@ use super::super::identity::{CanonicalModelId, PoolCatalogSnapshot};
 use super::super::load::Coverage;
 use super::super::topology::TopologySnapshot;
 use super::{ModelServingLoad, SOURCE_RETENTION, freshness};
-use crate::frontend_load::{
-    FRONTEND_LOAD_PUBLISH_INTERVAL, FRONTEND_LOAD_TOPIC, FrontendLoadFrame, FrontendModelLoad,
-    RequestGauges, RequestTotals,
-};
+use crate::frontend_load::{FRONTEND_LOAD_PUBLISH_INTERVAL, FRONTEND_LOAD_TOPIC};
 use crate::utils::retry::{Backoff, FailureStreak};
+use dynamo_http_server::load::{
+    FrontendLoadFrame, FrontendModelLoad, RequestGauges, RequestTotals,
+};
 
 /// How long a frontend's frame counts as observed.
 pub(super) const FRONTEND_FRESHNESS: Duration = freshness(FRONTEND_LOAD_PUBLISH_INTERVAL);
@@ -510,10 +510,10 @@ mod tests {
     use std::cell::Cell;
     use std::sync::Arc;
 
-    use dynamo_kv_router::identity::{
+    use dynamo_kv_indexer::cuckoo::{CkfConfig, DcCkfState, ProducerIdentity};
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
-    use dynamo_kv_router::indexer::cuckoo::{CkfConfig, DcCkfState, ProducerIdentity};
     use dynamo_runtime::protocols::EndpointId;
 
     use super::*;

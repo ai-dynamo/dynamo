@@ -4,10 +4,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use dynamo_kv_router::protocols::{
+use dynamo_runtime::protocols::EndpointId;
+use dynamo_scheduler::host::{
     KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
 };
-use dynamo_runtime::protocols::EndpointId;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 use llm_rs::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
@@ -106,6 +106,11 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_context_length(&mut self, context_length: Option<u32>) {
         self.inner.context_length = context_length;
+    }
+
+    #[setter]
+    fn set_cache_owner_capacity_blocks(&mut self, blocks: Option<u64>) {
+        self.inner.cache_owner_capacity_blocks = blocks;
     }
 
     #[setter]
@@ -209,6 +214,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn total_kv_blocks(&self) -> Option<u64> {
         self.inner.total_kv_blocks
+    }
+
+    #[getter]
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.inner.cache_owner_capacity_blocks
     }
 
     #[getter]

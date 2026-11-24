@@ -3,8 +3,9 @@
 
 """Focused API regression coverage for vLLM GMS monkey-patches."""
 
+import inspect
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS, HAS_TORCH
@@ -62,3 +63,34 @@ def test_nixl_base_patch_covers_pull_and_push_registration(monkeypatch):
 
     assert pull._scratch_kv_pending is kv_caches
     assert push._scratch_kv_pending is kv_caches
+
+
+def test_request_memory_patch_accepts_upstream_signature(monkeypatch):
+    """The shadow-mode patch must accept every argument vLLM passes."""
+    worker_utils = pytest.importorskip("vllm.v1.worker.utils")
+    original = worker_utils.request_memory
+    monkeypatch.setattr(worker_utils, "request_memory", original)
+    monkeypatch.setattr(patches, "_request_memory_patched", False)
+
+    patches.patch_request_memory()
+
+    patched = worker_utils.request_memory
+    assert patched is not original
+    inspect.signature(patched).bind(*inspect.signature(original).parameters)
+
+
+def test_request_memory_patch_uses_default_utilization(monkeypatch):
+    """Without --gpu-memory-utilization, vLLM 0.34 leaves the field unset."""
+    worker_utils = pytest.importorskip("vllm.v1.worker.utils")
+    from vllm.config import CacheConfig
+
+    monkeypatch.setattr(worker_utils, "request_memory", worker_utils.request_memory)
+    monkeypatch.setattr(patches, "_request_memory_patched", False)
+    patches.patch_request_memory()
+
+    total_memory = 100 << 30
+    init_snapshot = SimpleNamespace(total_memory=total_memory, free_memory=0)
+
+    requested = worker_utils.request_memory(init_snapshot, CacheConfig())
+
+    assert requested == int(total_memory * 0.92)

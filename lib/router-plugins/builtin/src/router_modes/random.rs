@@ -4,9 +4,7 @@
 //! `random`: a uniform random worker.
 
 use super::{Samples, ThreadRandom, no_candidates};
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// A uniform random worker.
 pub const RANDOM: &str = "random";

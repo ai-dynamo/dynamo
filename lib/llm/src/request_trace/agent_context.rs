@@ -151,6 +151,7 @@ impl FinishReasonMetadataState {
                 tool_call_index,
                 id: pending.id.clone(),
                 name: pending.name.clone(),
+                namespace: None,
             });
         }
     }
@@ -241,6 +242,8 @@ pub(crate) struct AgentContextTraceState {
     pub finish_reason_metadata: SharedFinishReasonMetadata,
     /// Set when the client receives other tool-call IDs than the backend's.
     pub client_tool_call_ids: Option<super::ClientToolCallIds>,
+    /// Set when the client receives other tool names than the backend's.
+    pub client_tool_names: Option<super::ClientToolNames>,
 }
 
 pub(crate) fn build_agent_context_trace_state(
@@ -267,6 +270,10 @@ pub(crate) fn build_agent_context_trace_state(
             .get::<super::ClientToolCallIds>(super::CLIENT_TOOL_CALL_IDS_CONTEXT_KEY)
             .ok()
             .map(|ids| *ids),
+        client_tool_names: context
+            .get::<super::ClientToolNames>(super::CLIENT_TOOL_NAMES_CONTEXT_KEY)
+            .ok()
+            .map(|names| names.as_ref().clone()),
     })
 }
 
@@ -371,6 +378,7 @@ pub(crate) fn request_metrics_from_agent_state(
         x_request_id,
         finish_reason_metadata,
         client_tool_call_ids,
+        client_tool_names,
     } = trace_state;
 
     if request_tracker.is_none() {
@@ -407,6 +415,20 @@ pub(crate) fn request_metrics_from_agent_state(
                 .filter(|earlier| earlier.as_deref() == Some(id.as_str()))
                 .count() as u32;
             *id = derive(&chat_id, id, occurrence);
+        }
+    }
+    if let (Some(super::ClientToolNames(names)), Some(metadata)) =
+        (client_tool_names, metrics.finish_reason_metadata.as_mut())
+    {
+        // The same decode as the Responses stream converter, so the trace
+        // records the identity the client received.
+        for call in &mut metadata.tool_calls {
+            let Some(name) = call.name.as_deref() else {
+                continue;
+            };
+            let (namespace, leaf) = names.decode(name);
+            call.namespace = namespace.map(str::to_owned);
+            call.name = Some(leaf.to_owned());
         }
     }
     (agent_context, metrics)
@@ -602,6 +624,7 @@ mod tests {
                     format!("client-{chat_id}-{backend_id}-{occurrence}")
                 },
             )),
+            client_tool_names: None,
         };
 
         let (_, request) = request_metrics_from_agent_state(trace_state, "r1".to_string());
@@ -621,6 +644,65 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn request_end_records_public_responses_tool_names() {
+        let tools: Vec<dynamo_protocols::types::responses::Tool> =
+            serde_json::from_value(serde_json::json!([
+                {"type":"namespace", "name":"crm", "description":"CRM",
+                 "tools":[{"type":"function", "name":"lookup"}]},
+                {"type":"namespace", "name":"billing", "description":"Billing",
+                 "tools":[{"type":"function", "name":"lookup"}]},
+                {"type":"function", "name":"shell"}
+            ]))
+            .unwrap();
+        let names = crate::protocols::openai::responses::ToolNameMap::new(&tools, None);
+        let finish_reason_metadata = SharedFinishReasonMetadata::default();
+        {
+            let mut metadata = finish_reason_metadata.lock();
+            // A collision alias, a native qualified name, and a plain name.
+            metadata.record_tool_call_chunk(0, 0, Some("call_1"), Some("crm__lookup"));
+            metadata.record_tool_call_chunk(0, 1, Some("call_2"), Some("billing.lookup"));
+            metadata.record_tool_call_chunk(0, 2, Some("call_3"), Some("shell"));
+        }
+        let trace_state = AgentContextTraceState {
+            agent_context: AgentContext {
+                session_id: "client-names".to_string(),
+                parent_session_id: None,
+                session_final: None,
+                agent_headers: Default::default(),
+                input_trigger: None,
+            },
+            request_model: "test-model".to_string(),
+            request_tracker: None,
+            x_request_id: None,
+            finish_reason_metadata,
+            client_tool_call_ids: None,
+            client_tool_names: Some(super::super::ClientToolNames(std::sync::Arc::new(names))),
+        };
+
+        let (_, request) = request_metrics_from_agent_state(trace_state, "r1".to_string());
+
+        let metadata = request.finish_reason_metadata.expect("finish metadata");
+        let identities: Vec<_> = metadata
+            .tool_calls
+            .iter()
+            .map(|call| (call.name.as_deref(), call.namespace.as_deref()))
+            .collect();
+        assert_eq!(
+            identities,
+            vec![
+                (Some("lookup"), Some("crm")),
+                (Some("lookup"), Some("billing")),
+                (Some("shell"), None),
+            ]
+        );
+        let value = serde_json::to_value(&metadata.tool_calls).unwrap();
+        assert_eq!(value[0]["namespace"], "crm");
+        assert!(value[2].get("namespace").is_none());
+        // IDs are not rewritten without `client_tool_call_ids`.
+        assert_eq!(metadata.tool_calls[0].id.as_deref(), Some("call_1"));
+    }
+
     #[test]
     fn test_request_metrics_from_tracker() {
         let tracker = RequestTracker::new();
@@ -719,6 +801,7 @@ mod tests {
             x_request_id: Some("llm-call-1".to_string()),
             finish_reason_metadata,
             client_tool_call_ids: None,
+            client_tool_names: None,
         };
 
         let responses = vec![
@@ -812,6 +895,18 @@ mod tests {
         assert_eq!(metadata.tool_calls[0].tool_call_index, 0);
         assert_eq!(metadata.tool_calls[0].id.as_deref(), Some("call-1"));
         assert_eq!(metadata.tool_calls[0].name.as_deref(), Some("web_search"));
+        // Without a Responses name map, chat rows keep the raw name and gain no key.
+        assert_eq!(metadata.tool_calls[0].namespace, None);
+        let tool_call = serde_json::to_value(&metadata.tool_calls[0]).unwrap();
+        assert_eq!(
+            tool_call,
+            serde_json::json!({
+                "choice_index": 0,
+                "tool_call_index": 0,
+                "id": "call-1",
+                "name": "web_search"
+            })
+        );
         assert_eq!(metadata.choices.len(), 1);
         assert_eq!(metadata.choices[0].choice_index, 0);
         assert_eq!(
@@ -847,6 +942,7 @@ mod tests {
             x_request_id: Some("completion-call-1".to_string()),
             finish_reason_metadata,
             client_tool_call_ids: None,
+            client_tool_names: None,
         };
 
         let responses = vec![Annotated::from_data(NvCreateCompletionResponse {

@@ -19,10 +19,23 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
+
+func TestDGDRRunControllerStartsWithoutPublisherImage(t *testing.T) {
+	t.Log("Start the production Run controllers without the optional operator image")
+	env := sharedEnv.ForTest(t)
+	env.StartManager(func(mgr ctrl.Manager) error {
+		return SetupDynamoGraphDeploymentRunV1beta2(mgr, DynamoGraphDeploymentRunSetupOptions{
+			Config:        env.OperatorConfig(),
+			RuntimeConfig: env.RuntimeConfig(),
+			PlannerImage:  "example.com/dynamo-planner:1.2.3",
+		})
+	})
+}
 
 func TestDGDRRunPublisherRoleDoesNotEscalateManagerPermissions(t *testing.T) {
 	env := sharedEnv.ForTest(t)

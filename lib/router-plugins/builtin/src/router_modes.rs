@@ -15,15 +15,7 @@ mod round_robin;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 pub use least_loaded::LEAST_LOADED;
 pub use random::RANDOM;
@@ -72,7 +64,7 @@ fn provider<P: WorkerPicker + 'static>(
     move |parameters| {
         let _: NoParameters = parameters.deserialize()?;
         Ok(Arc::new(
-            move |config: &KvRouterConfig, worker_type, _partition| {
+            move |config: &SelectionConfig, worker_type, _partition| {
                 WorkerSelectionPolicy::new(
                     config.clone(),
                     worker_type.as_str(),

@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: units-qwen
+  namespace: test
+spec:
+  components:
+  - name: lpu
+    type: lpx
+    replicas: 1
+    lpx:
+      buildId: units-qwen
+    roles:
+    - name: conductor
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            image: example.invalid/quasar:test
+            volumeMounts:
+            - name: model-storage
+              mountPath: /nfs
+            env:
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+    - name: agent
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            image: example.invalid/quasar:test
+            volumeMounts:
+            - name: model-storage
+              mountPath: /nfs
+            env:
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            resources:
+              limits:
+                lpu.nvidia.com/devices: '1'

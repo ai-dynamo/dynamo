@@ -274,7 +274,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             .response_fields
             .validate_metadata_upload_result(
                 delta.finish_reason.as_ref(),
-                delta.engine_data.as_ref(),
+                delta.engine_data.as_deref(),
             )
         {
             self.state.tracker_ref().record_finish();
@@ -331,8 +331,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         if self.prompt_logprobs.is_none()
             && (include_root_prompt_logprobs || include_nvext_prompt_logprobs)
         {
-            self.prompt_logprobs =
-                common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?;
+            self.prompt_logprobs = common::llm_backend::prompt_logprobs_from_engine_data(
+                delta.engine_data.as_deref(),
+            )?;
         }
         let prompt_logprobs_payload = finish_reason
             .is_some()
@@ -358,7 +359,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 .build_response_nvext(NvExtResponseInput {
                     tracker: Some(self.state.tracker_ref()),
                     finish_reason: delta.finish_reason.as_ref(),
-                    engine_data: delta.engine_data,
+                    engine_data: delta.engine_data.map(|data| *data),
                     stop_reason,
                     completion_token_ids: Some(completion_token_ids_slice),
                     prompt_logprobs: nvext_prompt_logprobs,
@@ -533,9 +534,9 @@ mod tests {
             disaggregated_params: None,
             worker_trace_link: None,
             // routed_experts rides the engine's opaque passthrough.
-            engine_data: Some(serde_json::json!({
+            engine_data: Some(Box::new(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
-            })),
+            }))),
             encoder_result: None,
             routing_data: None,
             jailed_text: None,
@@ -858,11 +859,11 @@ mod tests {
             disaggregated_params: None,
             encoder_result: None,
             worker_trace_link: None,
-            engine_data: Some(serde_json::json!({
+            engine_data: Some(Box::new(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
-            })),
+            }))),
             routing_data: None,
             jailed_text: None,
         }
@@ -897,14 +898,14 @@ mod tests {
         assert!(generator.tracker().total_time_ms().is_some());
         let mut output = final_backend_output();
         let result = serde_json::json!({"kind": "generation_artifact", "mode": "inline_base64", "inline": {"encoding": "base64", "data": "AQI="}, "backend_specific": {"a": [1, 2]}});
-        output.engine_data = Some(serde_json::json!({"metadata_upload": result}));
+        output.engine_data = Some(Box::new(serde_json::json!({"metadata_upload": result})));
         let response = generator.choice_from_postprocessor(output).unwrap();
         assert_eq!(response.nvext.unwrap()["metadata_upload"], result);
 
         let mut malformed = final_backend_output();
-        malformed.engine_data = Some(
+        malformed.engine_data = Some(Box::new(
             serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": {"inline_base64": null}}}),
-        );
+        ));
         assert!(
             request
                 .response_generator("artifact-malformed".into())
@@ -957,9 +958,9 @@ mod tests {
 
             let mut partial_output = final_backend_output();
             partial_output.finish_reason = None;
-            partial_output.engine_data = Some(serde_json::json!({
+            partial_output.engine_data = Some(Box::new(serde_json::json!({
                 "prompt_logprobs": expected.clone()
-            }));
+            })));
             let partial_response = generator
                 .choice_from_postprocessor(partial_output)
                 .expect("partial choice generation");
@@ -1023,7 +1024,8 @@ mod tests {
         assert!(absent.prompt_logprobs.is_none());
 
         let mut invalid_output = final_backend_output();
-        invalid_output.engine_data = Some(serde_json::json!({"prompt_logprobs": "invalid"}));
+        invalid_output.engine_data =
+            Some(Box::new(serde_json::json!({"prompt_logprobs": "invalid"})));
         let error = request
             .response_generator("req-prompt-logprobs-invalid".to_string())
             .choice_from_postprocessor(invalid_output)

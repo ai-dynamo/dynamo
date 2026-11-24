@@ -184,6 +184,7 @@ func (p *groveProgram) Reconcile(
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
+	restartChanged := !apiequality.Semantic.DeepEqual(req.DGD.Status.Restart, restart.Status)
 
 	groveResult, err := p.workloads.Reconcile(
 		ctx,
@@ -218,7 +219,7 @@ func (p *groveProgram) Reconcile(
 		meta.SetStatusCondition(&programResult.Status.Conditions, condition)
 	}
 
-	if req.DGD.HasLPXComponent() && !apiequality.Semantic.DeepEqual(req.DGD.Status.Restart, restart.Status) {
+	if req.DGD.HasLPXComponent() && restartChanged {
 		// Persist the selected restart before delivering its token to the child.
 		programResult.RequeueAfter = time.Nanosecond
 		return programResult, nil
@@ -267,5 +268,10 @@ func (p *groveProgram) Reconcile(
 		}
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
+
+	// A status-only DGD update does not pass the primary predicate, so advance restart progress by requeueing.
+	if restartChanged {
+		programResult.RequeueAfter = time.Nanosecond
+	}
 	return programResult, nil
 }

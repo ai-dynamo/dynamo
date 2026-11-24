@@ -95,6 +95,7 @@ async def worker(argv: list[str] | None = None):
         )
 
     shutdown_event = asyncio.Event()
+    terminal_event = asyncio.Event()
     shutdown_endpoints: list = []
     runtime, loop = create_runtime(
         discovery_backend=dynamo_args.discovery_backend,
@@ -102,6 +103,8 @@ async def worker(argv: list[str] | None = None):
         event_plane=dynamo_args.event_plane,
         response_plane=dynamo_args.response_plane,
     )
+    # Manual drain checks the plane; record the one the runtime resolved.
+    dynamo_args.response_plane = runtime.response_plane
 
     # Keep the flock alive for process lifetime. Linux releases it on exit.
     if snapshot_controller is not None:
@@ -110,7 +113,7 @@ async def worker(argv: list[str] | None = None):
         )
 
     run_deferred_handlers = install_graceful_shutdown(
-        loop, runtime, shutdown_endpoints, shutdown_event
+        loop, runtime, shutdown_endpoints, shutdown_event, terminal_event=terminal_event
     )
     logger.info(
         "Signal handlers set up for graceful shutdown "
@@ -179,6 +182,7 @@ async def worker(argv: list[str] | None = None):
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
             attached_engine=attached_engine,
+            terminal_event=terminal_event,
         )
     else:
         await init_prefill(
@@ -189,6 +193,7 @@ async def worker(argv: list[str] | None = None):
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
             attached_engine=attached_engine,
+            terminal_event=terminal_event,
         )
 
 

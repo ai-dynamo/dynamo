@@ -551,6 +551,16 @@ const testCases = [
     expect: { snapshot: true, deploy: true, operator: true },
     desc: 'Operator Helm changes trigger snapshot integration'
   },
+  {
+    file: 'lib/router/kv-router/README.md',
+    expect: { rust: false, core: false, frontend: false, ignore: true },
+    desc: 'router crate docs do not run the Rust jobs'
+  },
+  {
+    file: 'lib/router/kv-router/tests/data/router-settings.yaml',
+    expect: { rust: true, core: true, frontend: true },
+    desc: 'router test data compiled in with include_str! runs the Rust jobs'
+  },
 ];
 
 // Print available filters

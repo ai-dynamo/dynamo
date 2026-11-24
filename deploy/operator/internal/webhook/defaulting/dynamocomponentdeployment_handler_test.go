@@ -138,9 +138,13 @@ func TestDCDDefaulter_CreationOrigin(t *testing.T) {
 		operation  admissionv1.Operation
 		origin     string
 		graphChild bool
+		foreign    bool
 		want       string
 	}{
 		{name: "update preserves creation origin", operation: admissionv1.Update, origin: "1.6.0", want: "1.6.0"},
+		{name: "update preserves missing origin", operation: admissionv1.Update},
+		{name: "foreign DGD update preserves missing origin", operation: admissionv1.Update, graphChild: true, foreign: true},
+		{name: "foreign DGD create acquires current origin", operation: admissionv1.Create, graphChild: true, foreign: true, want: "1.8.0"},
 		{name: "graph child create does not acquire current origin", operation: admissionv1.Create, graphChild: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -149,13 +153,23 @@ func TestDCDDefaulter_CreationOrigin(t *testing.T) {
 				dcd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: tt.origin}
 			}
 			if tt.graphChild {
-				dcd.OwnerReferences = []metav1.OwnerReference{{Kind: "DynamoGraphDeployment", Name: "graph"}}
+				dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+				if tt.foreign {
+					dcd.OwnerReferences[0].APIVersion = "example.com/v1"
+				}
 			}
-			err := NewDCDDefaulter("1.7.0").Default(admissionCtx(tt.operation, nvidiacomv1beta1.DynamoComponentDeploymentGVK), dcd)
+			t.Log("Default the DCD through the public handler without changing update origins")
+			defaulter := NewDCDDefaulter("1.8.0")
+			err := defaulter.Default(admissionCtx(tt.operation, nvidiacomv1beta1.DynamoComponentDeploymentGVK), dcd)
 			require.NoError(t, err)
 			origin, exists := dcd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 			require.Equal(t, tt.want, origin)
 			require.Equal(t, tt.want != "", exists)
+
+			t.Log("Repeat defaulting and verify the complete object remains unchanged")
+			first := dcd.DeepCopy()
+			require.NoError(t, defaulter.Default(admissionCtx(tt.operation, nvidiacomv1beta1.DynamoComponentDeploymentGVK), dcd))
+			require.Equal(t, first, dcd)
 		})
 	}
 }

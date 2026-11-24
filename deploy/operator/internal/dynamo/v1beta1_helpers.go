@@ -426,8 +426,8 @@ func ComponentRuntimeNamespace(dynamoNamespace string, componentType string, wor
 }
 
 // GetDCDEffectiveWorkerHash returns the worker hash rendered into worker pod
-// templates for this DCD. DCD metadata wins because GenerateBasePodSpecForController
-// copies that label into the pod template before worker env vars are injected.
+// templates for this DCD. A worker-hash label on the DCD metadata takes
+// precedence over one on the DCD pod template.
 func GetDCDEffectiveWorkerHash(dcd *v1beta1.DynamoComponentDeployment) string {
 	if dcd == nil || !IsWorkerComponent(string(dcd.Spec.ComponentType)) {
 		return ""

@@ -593,9 +593,8 @@ impl TcpConnection {
         // TCP_NODELAY - disable Nagle's algorithm for immediate send
         sock_ref.set_nodelay(true)?;
 
-        // Increase socket buffer sizes for better throughput under load
-        sock_ref.set_recv_buffer_size(2 * 1024 * 1024)?; // 2MB
-        sock_ref.set_send_buffer_size(2 * 1024 * 1024)?; // 2MB
+        // Buffer sizes are left to the kernel: an explicit SO_SNDBUF or SO_RCVBUF is clamped to
+        // net.core.{w,r}mem_max (208 KiB by default) and turns autotuning off.
 
         // Advanced Linux optimizations for ultra-low latency (optional feature)
         #[cfg(feature = "tcp-low-latency")]
@@ -3559,5 +3558,19 @@ mod tests {
             1,
             "Should use only 1 connection"
         );
+    }
+
+    #[tokio::test]
+    async fn configure_socket_leaves_buffer_sizes_alone() {
+        let (addr, _) = spawn_echo_server().await;
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let sock = socket2::SockRef::from(&stream);
+        let send = sock.send_buffer_size().unwrap();
+        let recv = sock.recv_buffer_size().unwrap();
+
+        TcpConnection::configure_socket(&stream).unwrap();
+
+        assert_eq!(sock.send_buffer_size().unwrap(), send);
+        assert_eq!(sock.recv_buffer_size().unwrap(), recv);
     }
 }

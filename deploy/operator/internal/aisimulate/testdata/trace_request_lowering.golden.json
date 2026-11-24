@@ -101,6 +101,7 @@
     "dgdr_run": {
       "derive_runtime_images": true,
       "generator": "direct",
+      "is_pareto": false,
       "max_candidates": 8,
       "name": "llm-rt-golden-1",
       "namespace": "test-ns",
