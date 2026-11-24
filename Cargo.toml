@@ -242,7 +242,7 @@ prost-types-v14 = { package = "prost-types", version = "0.14.3" }
 tonic-v14 = { package = "tonic", version = "0.14.6" }
 tonic-health-v14 = { package = "tonic-health", version = "0.14.6" }
 # TODO: the engine releases with the KvEvents service (DEP #19441) replace these branch pins.
-vllm-proto = { git = "https://github.com/JulienDarve/vllm", rev = "624fd5a98cd5352ceb2a2f384d7187544005501e" }
+vllm-proto = { git = "https://github.com/JulienDarve/vllm", rev = "baac27efe56bbadf79a0d50b5977ea9efb21e067" }
 sglang-api-types = { git = "https://github.com/JulienDarve/sglang", rev = "6e3d35dbe68aa45d4f721ac30e82248d312f8583" }
 sglang-kv-types = { git = "https://github.com/JulienDarve/sglang", rev = "6e3d35dbe68aa45d4f721ac30e82248d312f8583" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }

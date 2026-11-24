@@ -10334,7 +10334,7 @@ dependencies = [
 [[package]]
 name = "vllm-proto"
 version = "0.7.0"
-source = "git+https://github.com/JulienDarve/vllm?rev=624fd5a98cd5352ceb2a2f384d7187544005501e#624fd5a98cd5352ceb2a2f384d7187544005501e"
+source = "git+https://github.com/JulienDarve/vllm?rev=baac27efe56bbadf79a0d50b5977ea9efb21e067#baac27efe56bbadf79a0d50b5977ea9efb21e067"
 dependencies = [
  "prost 0.14.4",
  "prost-types 0.14.4",
