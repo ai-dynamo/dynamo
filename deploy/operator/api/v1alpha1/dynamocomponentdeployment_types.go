@@ -99,6 +99,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType string `json:"componentType,omitempty"`
 
+	// Retune requests operator-owned trace storage and frontend admin wiring for
+	// a Planner component. It is a native field with the same semantics as beta:
+	// only componentType planner accepts it, and enabled Retune requires exactly
+	// one frontend selected by type in the DGD and a traceStorage PVC reference.
+	// Absent or disabled Retune does not change ordinary rendering or autoscaling.
+	// +optional
+	Retune *v1beta1.RetuneSpec `json:"retune,omitempty"`
+
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	// +optional
 	SubComponentType string `json:"subComponentType,omitempty"`

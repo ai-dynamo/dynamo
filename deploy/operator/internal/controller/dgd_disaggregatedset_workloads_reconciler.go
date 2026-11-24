@@ -183,6 +183,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 
 	resources := append([]Resource{syncedDSResource}, nonSelectedResources...)
 	result := applyComponentCrashLoops(checkResourcesReadiness(resources), slices.Collect(maps.Values(dcds)))
+	result.RetuneTargetsAcknowledged = retuneDCDTargetsAcknowledged(dgd, slices.Collect(maps.Values(dcds)))
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
 		if err := r.stableResources.DeleteStale(ctx, dgd, selectedServiceNames); err != nil {
 			return ReconcileResult{}, err

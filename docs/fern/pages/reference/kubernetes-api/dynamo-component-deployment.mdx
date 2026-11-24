@@ -115,6 +115,42 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>frontend</Badge> <Badge intent="note" minimal>worker</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>planner</Badge> <Badge intent="note" minimal>epp</Badge> <Badge intent="note" minimal>lpx</Badge></span>
 </ParamField>
 
+<ParamField path="retune" type="RetuneSpec">
+  Requests operator-owned live Retune wiring for a `planner` component in a DGD. This is a normal component field, not an `experimental` setting. Omission or `enabled: false` leaves existing workload rendering unchanged. An enabled standalone DCD cannot resolve graph-wide wiring and is rejected.
+
+  Enabling requires exactly one frontend selected by `type: frontend`, one enabled Retune Planner in the graph, and an existing writable ReadWriteMany trace PVC. Component names do not select the frontend. The operator configures tracing and the frontend admin listener, mounts the trace claim in both components, and injects the same versioned semantic launch contract into both processes. Only its acknowledged hash is published in [component status](dynamo-graph-deployment.mdx#retunestatus); role status is not required. Search domains, scoring, advisory mode, and replica scaling remain Planner configuration. Ordinary autoscaling does not require this field.
+
+  See [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md).
+</ParamField>
+
+<Indent>
+  <ParamField path="enabled" type="boolean" default="false">
+    Enables the operator-owned wiring. Enabling, disabling, or changing semantic configuration changes the affected frontend and Planner Pod templates and follows their normal rollout behavior. Replica-only edits do not change the binding or roll the Planner. This setting does not start an optimization loop without the corresponding Planner configuration.
+  </ParamField>
+  <ParamField path="traceStorage" type="RetuneTraceStorageSpec">
+    Required when enabled. References the trace PVC; the operator does not provision storage or fetch the claim during admission.
+  </ParamField>
+  <Indent>
+    <ParamField path="claimName" type="string" required={true}>
+      Name of an existing writable ReadWriteMany PVC in the DGD namespace. Must be a valid Kubernetes PVC name. The operator mounts it at `/trace`; conflicting mounts, read-only mounts, and subpaths are not supported by this contract.
+    </ParamField>
+  </Indent>
+  <ParamField path="router" type="RetuneRouterSpec">
+    Optional startup values for the versioned `kv-v1` router profile, not Planner search domains. All three fields must be finite and non-negative. Frontend and Planner use the same runtime profile for the complete replay configuration; conflicting explicit runtime settings are rejected by the frontend.
+  </ParamField>
+  <Indent>
+    <ParamField path="overlapScoreCredit" type="number" default="1.0">
+      Initial KV overlap credit.
+    </ParamField>
+    <ParamField path="prefillLoadScale" type="number" default="1.0">
+      Initial prefill-load weight.
+    </ParamField>
+    <ParamField path="temperature" type="number" default="0.0">
+      Initial router sampling temperature.
+    </ParamField>
+  </Indent>
+</Indent>
+
 <ParamField path="lpx" type="LPXConfig">
   Experimental DGD-only compiled-model and scheduling configuration; requires the operator's `lpx.enabled` setting and may change incompatibly. Set `buildId`; placement comes from the build's `lpuUnits` (deployment contract revision 1). Builds without `lpuUnits` must be recompiled. Runtime options belong in role pod templates. See [LPXConfig](full-api-reference.mdx#lpxconfig).
 

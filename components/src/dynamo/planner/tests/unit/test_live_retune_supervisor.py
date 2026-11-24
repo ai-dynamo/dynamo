@@ -68,6 +68,7 @@ from dynamo.planner.retune.live.contracts import (
     NullMetrics,
     PolicyCallResult,
     PremiseReport,
+    RetuneCapability,
     RouterInfo,
 )
 from dynamo.planner.retune.live.state import (
@@ -89,7 +90,11 @@ from dynamo.planner.retune.live.supervisor import (
     window_index,
 )
 from dynamo.planner.retune.sweep import SweepResult
-from dynamo.planner.tests.live_retune_fakes import FakeRetuneKube
+from dynamo.planner.tests.live_retune_fakes import (
+    FakeRetuneKube,
+    retune_launch_contract,
+    retune_planner_status,
+)
 from dynamo.planner.tests.unit.test_live_retune_state import live_config
 
 pytestmark = [
@@ -98,6 +103,8 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.planner,
 ]
+
+PROCESS_CAPABILITY = RetuneCapability.from_dict(retune_launch_contract())
 
 INTERVAL = 600.0
 GRACE = 30.0
@@ -322,7 +329,11 @@ class FrontendPolicyClient:
         if frontend.no_policy_api:
             return PolicyCallResult(status=404, error="Not Found")
         routers = tuple(self._info(r) for r in frontend.routers.values())
-        return PolicyCallResult(status=200, routers=routers)
+        return PolicyCallResult(
+            status=200,
+            routers=routers,
+            retune_config_hash=PROCESS_CAPABILITY.config_hash,
+        )
 
     async def patch(self, pod, router_id, expected_revision, parameters):
         return self._write(router_id, expected_revision, "patch", dict(parameters))
@@ -345,12 +356,13 @@ def real_actuators(world: World, writer: str, advisory: bool = False):
     """The ``actuator_factory`` of a process: ``RouterActuator`` over the
     world's frontend."""
 
-    return lambda dgd, maps: RouterActuator(
+    return lambda dgd, maps, capability: RouterActuator(
         world.kube,
         FrontendPolicyClient(world, writer, advisory),
         dgd,
         maps,
         NullMetrics(),
+        config_hash=None if capability is None else capability.config_hash,
     )
 
 
@@ -632,6 +644,7 @@ class Spec:
         self.uid = "uid-1"
         self.dynamo_namespace = "dyn"
         self.frontend_replicas = 1
+        self.capability = PROCESS_CAPABILITY
 
     def startup(self) -> FrontendStartup:
         return FrontendStartup(
@@ -658,6 +671,7 @@ class Spec:
             inputs=retune_inputs(self.variant) if self.p4_ok else None,
             spec_replicas=None if self.replicas is None else dict(self.replicas),
             dgd=DgdRef(DGD_NAME, "test-ns", self.uid, self.dynamo_namespace),
+            capability=self.capability,
         )
 
 
@@ -756,7 +770,7 @@ def make_process(
         identity=f"{name}/{len(world.kube.calls)}",
         premise_evaluator=world.spec.evaluation,
         actuator_factory=actuator_factory or real_actuators(world, name, advisory),
-        fingerprint_fn=lambda startup: f"fp-{None if startup is None else startup.fingerprint_source}",
+        fingerprint_fn=lambda current: f"fp-{None if current.startup is None else current.startup.fingerprint_source}",
         resolver_factory=lambda startup: bootstrap.KvRouterResolver(
             startup.router_config, ("aggregated",)
         ),
@@ -1774,6 +1788,28 @@ async def test_p14_parity_failure_is_a_spec_failure() -> None:
     assert sup.spec_ok and sup.ready()
 
 
+async def test_historical_cleanup_cannot_establish_current_profile_readiness() -> None:
+    world = World()
+    first = await leading(world)
+    await first.sup.stop()
+
+    # A replacement Planner starts with a new profile while old frontends remain.
+    world.spec.variant = "b"
+    world.spec.capability = dataclasses.replace(
+        PROCESS_CAPABILITY, config_hash="replacement-profile", overlap_score_credit=0.5
+    )
+    replacement = await leading(world, "replacement")
+    sup = replacement.sup
+    assert sup.state.capability == PROCESS_CAPABILITY
+    assert sup._actuator_capability == PROCESS_CAPABILITY
+    assert sup._evaluation.capability == world.spec.capability
+
+    # Old routers may be cleaned up, but their parity is not the new profile's.
+    assert sup._last_report.parity_ok is False
+    assert sup._p14_ok is None
+    assert not sup._p12_ok() and not sup.ready()
+
+
 async def test_namespace_change_swaps_the_actuator_only() -> None:
     world = World()
     process = await leading(world)
@@ -1809,7 +1845,9 @@ async def test_an_actuator_round_overtaken_by_a_local_loss_is_discarded() -> Non
     rv = world.kube.leases[STATE_NAME]["metadata"]["resourceVersion"]
 
     class OvertakenActuator(RouterActuator):
-        async def reconcile(self, target, *, initials, expected_frontends):
+        async def reconcile(
+            self, target, *, initials, expected_frontends, router_hosts=None
+        ):
             sup._epoch += 1  # a local loss ran while this round awaited I/O
             return ActuationReport(
                 converged=False,
@@ -2534,9 +2572,6 @@ async def test_hooks_are_the_adapter_hooks() -> None:
 def decommission_supervisor(world: World) -> LiveRetuneSupervisor:
     """The clean-up supervisor of a planner whose retune was removed."""
 
-    frontend = SimpleNamespace(
-        parse_frontend=lambda dgd, planner_mode: world.spec.startup()
-    )
     return bootstrap.build_decommission_supervisor(
         live_config(),
         kube=world.kube,
@@ -2544,7 +2579,6 @@ def decommission_supervisor(world: World) -> LiveRetuneSupervisor:
         dynamo_namespace="dyn",
         metrics=NullMetrics(),
         actuator_factory=real_actuators(world, "gc", advisory=True),
-        frontend=frontend,
         clock=world.clock.time,
         monotonic=world.clock.monotonic,
         sleep=frozen_sleep,
@@ -2636,8 +2670,247 @@ async def test_decommission_deletes_only_the_leases_it_last_saw() -> None:
 # -------------------------------------------------------------- bootstrap
 
 
+@pytest.mark.parametrize("scaling", [False, True])
+@pytest.mark.parametrize("missing", ["status", "generation", "capability", "binding"])
+def test_unavailable_capability_disables_only_retune(scaling, missing):
+    values = live_config().model_dump()
+    values["enable_load_scaling"] = scaling
+    config = PlannerConfig.model_validate(values)
+    deployment = dgd_object(replicas=2)
+    if missing == "status":
+        deployment.pop("status")
+    elif missing == "generation":
+        deployment["status"]["observedGeneration"] = 2
+    elif missing == "capability":
+        deployment["status"]["components"]["Planner"].pop("retune")
+    else:
+        deployment["status"]["components"]["Planner"]["retune"][
+            "configHash"
+        ] = "new-target"
+    result = bootstrap.evaluate_spec(
+        deployment,
+        config=config,
+        k8s_namespace="test-ns",
+        dynamo_namespace="dyn",
+        frontend=FakeFrontendModule(Spec().startup()),
+        process_capability=PROCESS_CAPABILITY,
+    )
+    assert result.capability is None and result.inputs is None
+    assert not result.report.spec_ok
+    assert result.spec_replicas == {"aggregated": 2}
+    assert config.scaling_enabled() is scaling
+
+
+def test_replacement_binding_waits_for_its_matching_publication():
+    values = live_config().model_dump()
+    for name in ("claim_name", "mount_path", "segments_dir", "windows_dir"):
+        values["retune"]["dgdr"].pop(name)
+    config = PlannerConfig.model_validate(values)
+    deployment = dgd_object()
+    replacement = dataclasses.replace(
+        PROCESS_CAPABILITY,
+        claim_name="replacement",
+        mount_path="/new-trace",
+        config_hash="new-target",
+    )
+    kwargs = dict(
+        config=config,
+        k8s_namespace="test-ns",
+        dynamo_namespace="dyn",
+        frontend=FakeFrontendModule(Spec().startup()),
+    )
+    assert (
+        bootstrap.evaluate_spec(
+            deployment, process_capability=replacement, **kwargs
+        ).inputs
+        is None
+    )
+    deployment["status"]["components"]["Planner"]["retune"] = {
+        "configHash": replacement.config_hash
+    }
+    assert (
+        bootstrap.evaluate_spec(
+            deployment, process_capability=PROCESS_CAPABILITY, **kwargs
+        ).capability
+        is None
+    )
+    current = bootstrap.evaluate_spec(
+        deployment, process_capability=replacement, **kwargs
+    )
+    assert current.capability == replacement
+    assert current.inputs.trace_paths == (f"/new-trace/segments/{DGD_NAME}",)
+    assert (
+        bootstrap.evaluate_spec(deployment, process_capability=None, **kwargs).inputs
+        is None
+    )
+
+
+async def test_launch_binding_is_captured_once_and_registry_survives_status_gaps(
+    monkeypatch,
+):
+    world = World()
+    deployment = dgd_object(replicas=2)
+    deployment["status"].pop("observedGeneration")
+    world.kube.put_dgd(deployment)
+    monkeypatch.setenv(
+        "DYN_PLANNER_RETUNE_CAPABILITY", json.dumps(PROCESS_CAPABILITY.to_dict())
+    )
+    sup = await bootstrap.build_supervisor(
+        live_config(),
+        kube=world.kube,
+        dgd_name=DGD_NAME,
+        namespace_fn=lambda: "dyn",
+        frontend=FakeFrontendModule(Spec().startup()),
+        actuator_factory=real_actuators(world, "binding"),
+    )
+    registry = sup.registry
+    assert sup.retune_inputs() is None
+    monkeypatch.setenv("DYN_PLANNER_RETUNE_CAPABILITY", "invalid-after-launch")
+    deployment["status"]["observedGeneration"] = 3
+    await sup.apply_evaluation(sup._premise_evaluator(deployment))
+    assert sup.retune_inputs() is not None and sup.registry is registry
+    deployment["status"]["observedGeneration"] = 2
+    await sup.apply_evaluation(sup._premise_evaluator(deployment))
+    assert sup.retune_inputs() is None and sup.registry is registry
+    deployment["status"]["observedGeneration"] = 3
+    await sup.apply_evaluation(sup._premise_evaluator(deployment))
+    assert sup.retune_inputs() is not None and sup.registry is registry
+    await sup.stop()
+
+
+@pytest.mark.parametrize("retirement", ["uid", "restart", "terminating"])
+async def test_removed_capability_restart_cleanup_uses_persisted_process_ownership(
+    retirement,
+):
+    world = World()
+    first = await leading(world)
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    first.controller.restore_desired(chosen)
+    enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
+    await first.sup.outbox_round()
+    await first.sup.control_round()
+    assert world.shared_state().router_hosts
+    await first.sup.stop()
+    old = world.kube.pods[FRONTEND_POD]
+    changes = (
+        {"uid": "replacement"}
+        if retirement == "uid"
+        else (
+            {"restarts": old.restarts + 1}
+            if retirement == "restart"
+            else {"terminating": True}
+        )
+    )
+    world.kube.pods[FRONTEND_POD] = dataclasses.replace(old, **changes)
+    world.frontend.down = True  # replacement process has no admin listener
+    sup = decommission_supervisor(world)
+    await sup.start(SimpleNamespace(), background=False)
+    for _ in range(6):
+        if sup.decommissioned:
+            break
+        await sup.lease_round()
+        await sup.control_round()
+        world.clock.advance(20)
+    if retirement == "terminating":
+        assert not sup.decommissioned and world.shared_state().rollback_pending
+        world.kube.pods[FRONTEND_POD] = dataclasses.replace(old, uid="replacement")
+        for _ in range(6):
+            if sup.decommissioned:
+                break
+            await sup.lease_round()
+            await sup.control_round()
+            world.clock.advance(20)
+    assert sup.decommissioned and not world.kube.leases
+    await sup.stop()
+
+
+@pytest.mark.parametrize("decommission", [False, True])
+async def test_legacy_deployment_cannot_adopt_an_unrelated_current_binding(
+    caplog, decommission
+):
+    world = World()
+    first = await leading(world)
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    first.controller.restore_desired(chosen)
+    enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
+    await first.sup.outbox_round()
+    await first.sup.control_round()
+    await first.sup.stop()
+    store = StateStore(world.kube, first.sup.dgd)
+    snapshot = store.read()
+    legacy = dataclasses.replace(snapshot.state, capability=None, router_hosts={})
+    legacy = store.write(legacy, snapshot).state
+    target = dgd_object()
+    target["spec"]["components"][0]["name"] = "Replacement"
+    target["status"]["components"]["Replacement"] = target["status"]["components"].pop(
+        "Frontend"
+    )
+    replacement = dataclasses.replace(
+        PROCESS_CAPABILITY,
+        frontend_component_name="Replacement",
+        config_hash="new-frontend",
+    )
+    target["status"]["components"]["Planner"]["retune"] = {
+        "configHash": replacement.config_hash
+    }
+    world.kube.put_dgd(target)
+    options = dict(
+        kube=world.kube,
+        clock=world.clock.time,
+        monotonic=world.clock.monotonic,
+        sleep=frozen_sleep,
+        blocking=inline,
+    )
+    if decommission:
+        sup = bootstrap.build_decommission_supervisor(
+            live_config(), dgd=target, dynamo_namespace="dyn", **options
+        )
+    else:
+        sup = await bootstrap.build_supervisor(
+            live_config(),
+            dgd_name=DGD_NAME,
+            namespace_fn=lambda: "dyn",
+            process_capability=replacement,
+            frontend=FakeFrontendModule(Spec().startup()),
+            **options,
+        )
+    listed_before = len(
+        [call for call in world.kube.calls if call.method == "list_pods"]
+    )
+    await sup.start(SimpleNamespace(), background=False)
+    for _ in range(6):
+        await sup.lease_round()
+        await sup.control_round()
+        world.clock.advance(20)
+    assert not sup.initialized and not sup.decommissioned
+    assert world.shared_state() == legacy
+    assert (
+        len([call for call in world.kube.calls if call.method == "list_pods"])
+        == listed_before
+    )
+    assert "legacy state has no checkpointed binding" in caplog.text
+    await sup.stop()
+
+
+async def test_non_owning_legacy_state_can_adopt_current_capability():
+    world = World()
+    first = await leading(world, advisory=True)
+    await first.sup.stop()
+    store = StateStore(world.kube, first.sup.dgd)
+    snapshot = store.read()
+    store.write(
+        dataclasses.replace(snapshot.state, capability=None, router_hosts={}), snapshot
+    )
+    second = await leading(world, "replacement", advisory=True)
+    assert second.sup.initialized
+    assert world.shared_state().capability == PROCESS_CAPABILITY
+
+
 def dgd_object(mode: str = "agg", **worker) -> dict:
-    components = [{"name": "Frontend", "type": "frontend", "replicas": 1}]
+    components = [
+        {"name": "Frontend", "type": "frontend", "replicas": 1},
+        {"name": "Planner", "type": "planner"},
+    ]
     if mode == "disagg":
         components += [
             {"name": "prefill", "type": "prefill", "replicas": 2},
@@ -2653,6 +2926,13 @@ def dgd_object(mode: str = "agg", **worker) -> dict:
             "generation": 3,
         },
         "spec": {"components": components},
+        "status": {
+            "observedGeneration": 3,
+            "components": {
+                "Planner": retune_planner_status(),
+                "Frontend": {},
+            },
+        },
     }
 
 
@@ -2673,7 +2953,7 @@ def test_build_retune_inputs_agg_and_disagg() -> None:
     config = live_config()
     startup = Spec().startup()
     inputs = bootstrap.build_retune_inputs(
-        config, startup, dgd_name="graph", model_name="m"
+        config, startup, dgd_name="graph", model_name="m", capability=PROCESS_CAPABILITY
     )
     assert inputs.trace_paths == ("/trace/segments/graph",)
     assert (inputs.trace_origin_ms, inputs.arrival_speedup_ratio) == (0.0, 1.0)
@@ -2684,6 +2964,7 @@ def test_build_retune_inputs_agg_and_disagg() -> None:
         startup,
         dgd_name="graph",
         model_name=None,
+        capability=PROCESS_CAPABILITY,
     )
     assert disagg.engine.is_disagg and disagg.engine.prefill_engine_args == {}
 
@@ -2714,15 +2995,12 @@ class FakeFrontendModule:
         self.p4_ok = p4_ok
         self.spec_ok = spec_ok
 
-    def parse_frontend(self, dgd, *, planner_mode):
-        return self.startup if self.startup is not None else "P4: shell-wrapped"
-
-    def evaluate_premises(self, dgd, *, planner_config):
+    def evaluate_premises(self, dgd, *, planner_config, capability=None):
         parsed = self.startup is not None
         return PremiseReport(
             p4_ok=self.p4_ok and parsed,
             spec_ok=self.spec_ok and self.p4_ok and parsed,
-            reasons=() if parsed else ("P4: shell-wrapped",),
+            reasons=() if parsed else ("P4: unsupported-contract",),
             startup=self.startup,
         )
 
@@ -2738,6 +3016,7 @@ def test_evaluate_spec() -> None:
         config=config,
         k8s_namespace="ns",
         dynamo_namespace="dyn",
+        process_capability=PROCESS_CAPABILITY,
         frontend=frontend,
     )
     assert evaluation.dgd == DgdRef(DGD_NAME, "test-ns", "uid-1", "dyn")
@@ -2751,18 +3030,87 @@ def test_evaluate_spec() -> None:
         config=config,
         k8s_namespace="ns",
         dynamo_namespace="dyn",
+        process_capability=PROCESS_CAPABILITY,
         frontend=unparsed,
     )
     assert evaluation.inputs is None and evaluation.startup is None
-    assert evaluation.report.reasons == ("P4: shell-wrapped",)
+    assert evaluation.report.reasons == ("P4: unsupported-contract",)
     with pytest.raises(ValueError):
         bootstrap.evaluate_spec(
             {"metadata": {"name": "x"}},
             config=config,
             k8s_namespace="ns",
             dynamo_namespace="dyn",
+            process_capability=PROCESS_CAPABILITY,
             frontend=frontend,
         )
+
+
+def test_evaluate_spec_uses_launch_contract_and_target_hash_without_role_status() -> (
+    None
+):
+    config = live_config()
+    deployment = dgd_object(replicas=2)
+    deployment["spec"]["components"][0]["podTemplate"] = {
+        "spec": {
+            "containers": [
+                {"name": "main", "command": ["authored-command-is-not-the-lowering"]}
+            ]
+        }
+    }
+    deployment["status"] = {
+        "observedGeneration": 3,
+        "components": {
+            "Planner": retune_planner_status(),
+            "worker": {"servedModelName": "served"},
+        },
+    }
+
+    # A current operator target is usable without reconstructing the authored command.
+    evaluation = bootstrap.evaluate_spec(
+        deployment,
+        config=config,
+        k8s_namespace="ns",
+        dynamo_namespace="dyn",
+        process_capability=PROCESS_CAPABILITY,
+    )
+    assert evaluation.report.p4_ok and evaluation.startup is not None
+    assert evaluation.startup.router_config["router_replica_sync"] is True
+    assert evaluation.inputs.engine.model_name == "served"
+
+    # A desired edit is pending until the operator publishes that generation's target.
+    deployment["metadata"]["generation"] = 4
+    deployment["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
+        "args"
+    ] = ["--router-temperature", "0.2"]
+    pending = bootstrap.evaluate_spec(
+        deployment,
+        config=config,
+        k8s_namespace="ns",
+        dynamo_namespace="dyn",
+        process_capability=PROCESS_CAPABILITY,
+    )
+    assert not pending.report.spec_ok and pending.inputs is None
+    assert any(
+        "current Planner Retune target" in reason for reason in pending.report.reasons
+    )
+
+    # The new semantic binding is accepted only by its replacement process.
+    deployment["status"]["observedGeneration"] = 4
+    deployment["status"]["components"]["Planner"]["retune"]["configHash"] = "changed"
+    replacement = dataclasses.replace(
+        PROCESS_CAPABILITY, config_hash="changed", temperature=0.2
+    )
+    applied = bootstrap.evaluate_spec(
+        deployment,
+        config=config,
+        k8s_namespace="ns",
+        dynamo_namespace="dyn",
+        process_capability=replacement,
+    )
+    assert applied.report.p4_ok and applied.startup is not None
+    assert applied.startup.router_config["router_temperature"] == 0.2
+    assert applied.inputs is not None and applied.generation == 4
 
 
 async def test_build_supervisor_wires_the_collaborators() -> None:
@@ -2782,6 +3130,7 @@ async def test_build_supervisor_wires_the_collaborators() -> None:
         namespace_fn=lambda: "dyn",
         metrics=NullMetrics(),
         identity="pod/1",
+        process_capability=PROCESS_CAPABILITY,
         frontend=frontend,
         actuator_factory=real_actuators(world, "x"),
         reconciler=reconciler,
@@ -2837,11 +3186,6 @@ async def test_build_live_retune_uses_the_connector(monkeypatch) -> None:
 async def test_build_legacy_cleanup(monkeypatch) -> None:
     world = World()
     world.kube.put_dgd(dgd_object(replicas=2))
-    monkeypatch.setattr(
-        bootstrap.frontend_config,
-        "parse_frontend",
-        lambda dgd, planner_mode: "P4: no frontend",
-    )
     monkeypatch.setattr(bootstrap, "RetuneMetrics", NullMetrics)
     host = SimpleNamespace(
         config=live_config().model_copy(update={"retune": None}),

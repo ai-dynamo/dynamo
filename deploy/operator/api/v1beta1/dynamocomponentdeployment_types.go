@@ -137,6 +137,19 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
+	// retune requests operator-owned live Retune wiring. It is valid only for a
+	// planner component; enabled Retune requires exactly one frontend component
+	// selected by type in the same graph, one enabled Planner owner, and traceStorage.
+	// The operator configures request-end trace recording, shared PVC mounts, and
+	// a reachable frontend admin listener, and the versioned router profile. It
+	// injects one semantic contract into both processes and acknowledges its hash
+	// in status.components[name].retune. These bindings are operator-owned while enabled.
+	// The current admin API has no authentication; restrict network access to it.
+	// This setting does not enable the Planner loop, alter search parameters, or
+	// enable replica scaling. Absent or disabled Retune leaves workloads unchanged.
+	// +optional
+	Retune *RetuneSpec `json:"retune,omitempty"`
+
 	// RuntimeVersionOverride overrides the Dynamo runtime compatibility version
 	// inferred from podTemplate.spec.containers[name=main].image.
 	// In sidecar mode, it instead overrides the version inferred from

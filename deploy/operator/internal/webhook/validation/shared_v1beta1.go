@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -220,6 +221,15 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
+	// Retune is an explicit Planner-owned capability, not an inferred Pod recipe.
+	if spec.Retune != nil {
+		retunePath := fldPath.Child("retune")
+		if spec.ComponentType != nvidiacomv1beta1.ComponentTypePlanner {
+			allErrs = append(allErrs, field.Forbidden(retunePath, "may only be set when type is planner"))
+		}
+		allErrs = append(allErrs, v.validateRetuneSpec(spec.Retune, retunePath)...)
+	}
+
 	// A shared draft has no independently configurable scaling group.
 	if spec.IsLPX() && !dynamolpx.ServesEndpoint(spec) && spec.ProviderOverride != nil {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "shared LPX draft availability belongs to the target component"))
@@ -393,6 +403,49 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	return allErrs
+}
+
+// validateRetuneSpec validates operator-owned wiring intent. spec and fldPath must not be nil.
+func (v *sharedValidation) validateRetuneSpec(spec *nvidiacomv1beta1.RetuneSpec, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	if spec.TraceStorage != nil {
+		allErrs = append(allErrs, v.validateRetuneTraceStorageSpec(spec.TraceStorage, fldPath.Child("traceStorage"))...)
+	} else if spec.Enabled {
+		allErrs = append(allErrs, field.Required(fldPath.Child("traceStorage"), "must reference the trace PVC when Retune is enabled"))
+	}
+
+	// Validate numeric inputs even when this optional feature is disabled.
+	if router := spec.Router; router != nil {
+		for _, setting := range []struct {
+			name  string
+			value *float64
+		}{
+			{"overlapScoreCredit", router.OverlapScoreCredit},
+			{"prefillLoadScale", router.PrefillLoadScale},
+			{"temperature", router.Temperature},
+		} {
+			if setting.value != nil && (math.IsNaN(*setting.value) || math.IsInf(*setting.value, 0) || *setting.value < 0) {
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("router", setting.name), *setting.value, "must be finite and non-negative"))
+			}
+		}
+	}
+	return allErrs
+}
+
+// validateRetuneTraceStorageSpec validates a PVC reference without reading the cluster.
+// spec and fldPath must not be nil.
+func (v *sharedValidation) validateRetuneTraceStorageSpec(spec *nvidiacomv1beta1.RetuneTraceStorageSpec, fldPath *field.Path) field.ErrorList {
+	claimPath := fldPath.Child("claimName")
+	if spec.ClaimName == "" {
+		return field.ErrorList{field.Required(claimPath, "must specify the trace PVC name")}
+	}
+
+	// Missing or unbound claims remain ordinary workload scheduling concerns.
+	var allErrs field.ErrorList
+	for _, message := range apivalidation.NameIsDNSSubdomain(spec.ClaimName, false) {
+		allErrs = append(allErrs, field.Invalid(claimPath, spec.ClaimName, message))
+	}
 	return allErrs
 }
 

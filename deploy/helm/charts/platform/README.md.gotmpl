@@ -254,6 +254,53 @@ when that value is empty. v1beta1 Requests that set `spec.image` keep that image
 
 #### Operator behavior breaking changes
 
+##### Live Retune uses explicit component wiring
+
+**Change:** Live Retune consumes a versioned semantic launch contract instead of recognizing manually
+authored trace environment variables, PVC mounts, router arguments, and admin-port declarations. The
+deployment setting belongs to a `planner` component, not the DGD root or `experimental`:
+
+```yaml
+spec:
+  components:
+    - name: optimizer
+      type: planner
+      retune:
+        enabled: true
+        traceStorage:
+          claimName: request-traces
+        router: # Optional startup values, not Planner search domains.
+          overlapScoreCredit: 1.0
+          prefillLoadScale: 1.0
+          temperature: 0.0
+```
+
+**Required action for Live Retune users:** First finish router rollback and Retune cleanup with
+the old Planner, including removal of its Retune Leases. Old deployed state does not record its
+historical frontend binding; the new Planner retains that state rather than guessing from the
+current target. After upgrading the operator, enable the setting before starting the new Planner
+and reference an existing writable ReadWriteMany trace PVC in the DGD namespace.
+The graph must contain exactly one component of type `frontend` and at most one enabled Retune
+Planner. The operator mounts the claim at `/trace` in both components, owns the trace bindings and
+frontend admin listener, and supplies the same contract to frontend and Planner processes. Status
+publishes only the acknowledged `configHash`; role-PodSpec status is not needed. The frontend must
+support the contract and acknowledge compatible effective router configuration. Older frontends
+without acknowledgment cannot be tuned. Existing explicit Planner trace-storage settings must
+agree with the launch binding. Restrict access to frontend admin
+port `8002`; the current listener is unauthenticated and no NetworkPolicy is created automatically.
+
+Retune state now checkpoints the previous wiring and router process identities in Lease format v2.
+The new Planner reads v1 state, but older Planners cannot write v2 state. Before downgrading,
+use the new Planner to finish rollback and cleanup, then remove its Retune Leases.
+
+**Existing deployments:** An absent or disabled component setting leaves workload templates
+unchanged. Ordinary replica autoscaling needs no Retune setting. A new Planner image cannot activate
+Live Retune from a manual trace recipe alone. Enabling, disabling, or changing the setting updates
+the affected frontend and Planner templates and follows their normal rollout behavior. The operator
+does not change search domains, scaling flags, or optimization strategy in the Planner configuration.
+Replica-only scaling leaves the semantic binding unchanged. A configuration change fences old
+Planner processes from launching new windows; cleanup retains the prior binding and process IDs.
+
 ##### Environment variable order in newly created DGDs
 
 **Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.8.0 or later,

@@ -33,6 +33,7 @@ from dynamo.common.configuration.utils import (
 )
 
 from . import __version__
+from .retune import apply_retune_defaults
 
 _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
@@ -250,6 +251,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    retune_capability: Optional[str] = None
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -263,6 +265,16 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
 
     def validate(self) -> None:
+        if self.retune_capability is not None and (
+            self.interactive
+            or self.kserve_grpc_server
+            or self.tls_cert_path is not None
+            or self.tls_key_path is not None
+            or self.discovery_backend not in ("etcd", "kubernetes")
+        ):
+            raise ValueError(
+                "Retune requires the HTTP frontend with etcd or Kubernetes discovery and without TLS"
+            )
         if (
             self.chat_processor_config is not None
             and self.chat_processor in BUILTIN_CHAT_PROCESSORS
@@ -434,7 +446,10 @@ class FrontendArgGroup(ArgGroup):
     """
 
     def __init__(self, *, env: Optional[ArgEnv] = None) -> None:
+        self._is_local = env is None
         self.env = env
+        if env is None and os.environ.get("DYN_FRONTEND_RETUNE_CAPABILITY"):
+            self.env = ArgEnv(environ=dict(os.environ))
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(
@@ -637,7 +652,7 @@ class FrontendArgGroup(ArgGroup):
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup(env=self.env).add_arguments(parser)
-        if self.env is None:
+        if self._is_local:
             AisPerfArgGroup().add_arguments(parser)
 
         add_argument(
@@ -699,7 +714,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_MODEL_PATH",
             default=None,
             help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
-            arg_type=validate_model_path if self.env is None else str,
+            arg_type=validate_model_path if self._is_local else str,
             env=self.env,
         )
         add_argument(
@@ -1063,6 +1078,12 @@ class FrontendArgGroup(ArgGroup):
             ),
             env=self.env,
         )
+        if self.env is not None and (
+            capability := self.env.environ.get("DYN_FRONTEND_RETUNE_CAPABILITY")
+        ):
+            apply_retune_defaults(
+                parser, capability, self.env.environ, self.env.env_dests
+            )
 
 
 def build_frontend_parser(

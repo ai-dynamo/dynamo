@@ -809,20 +809,20 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>local</Badge> <Badge intent="note" minimal>dgdr</Badge></span>
   </ParamField>
   <ParamField path="dgdr" type="DgdrExecutorConfig" default="null">
-    Settings of executor `dgdr`. Required when `executor` is `dgdr`, and rejected otherwise. Rejects unknown fields. [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md) shows a complete example.
+    Settings of executor `dgdr`. Required when `executor` is `dgdr`, and rejected otherwise. Rejects unknown fields. Enable operator-owned wiring with `spec.components[*].retune` on the DGD's Planner component. The Planner consumes an immutable versioned launch contract for storage, admin access, and router startup configuration, gated by current target and frontend runtime acknowledgments. It reads no role Pod templates or launch recipes. [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md) shows a complete example.
   </ParamField>
   <Indent>
-    <ParamField path="claim_name" type="string" required={true}>
-      ReadWriteMany PersistentVolumeClaim, in the DGD namespace, that holds the frontend traces and the window files. The frontends and the Planner mount it.
+    <ParamField path="claim_name" type="string" deprecated={true}>
+      Optional compatibility setting. Trace storage comes from the operator-injected launch contract. An explicitly supplied claim must match that binding; omission does not infer a claim from authored Pod templates.
     </ParamField>
     <ParamField path="mount_path" type="string" default="/trace">
-      Where the Planner container mounts `claim_name`. Must be absolute.
+      Optional compatibility setting for the absolute trace mount. The launch contract supplies the actual path. An explicitly supplied value must match it.
     </ParamField>
     <ParamField path="segments_dir" type="string" default="segments">
-      Claim-relative directory of the frontend trace segments, written as `<segments_dir>/<dgd>/<pod>/`. `/`-separated names without empty, `.` or `..` segments. `segments_dir` and `windows_dir` must not contain one another.
+      Optional compatibility setting for the claim-relative frontend trace directory. The launch contract supplies the actual directory; an explicitly supplied value must match it. The layout is `<segments_dir>/<dgd>/<pod>/`.
     </ParamField>
     <ParamField path="windows_dir" type="string" default="windows">
-      Claim-relative directory of the window files, written as `<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz`, where `<selection>` is a digest of the window's start, end and cutoff. Same rules as `segments_dir`.
+      Optional compatibility setting for the claim-relative replay-window directory. The launch contract supplies the actual directory; an explicitly supplied value must match it. Window files use `<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz`, where `<selection>` is a digest of the window's start, end, and cutoff.
     </ParamField>
     <ParamField path="phase_seconds" type="number" default="0.0">
       Window phase. Window `k` is `[phase_seconds + k × interval_seconds, phase_seconds + (k+1) × interval_seconds)` in epoch seconds, so a restarted Planner continues the same windows. Must be 0 or greater.

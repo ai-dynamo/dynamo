@@ -819,6 +819,12 @@ type ComponentCheckpointStatus struct {
 
 // ComponentReplicaStatus contains replica information for a single component.
 type ComponentReplicaStatus struct {
+	// retune acknowledges the operator-generated semantic target binding for a
+	// Planner under status.observedGeneration, not a running process revision.
+	// Omission means that current target wiring has not been acknowledged.
+	// +optional
+	Retune *RetuneStatus `json:"retune,omitempty"`
+
 	// componentKind is the underlying resource kind (e.g. `PodClique`,
 	// `Deployment`, `LeaderWorkerSet`).
 	// +required

@@ -456,6 +456,9 @@ func normalizeDGDComponent(
 	}
 
 	applyDGDTemplateDefaults(normalized, parentDGD, nil, GetComponentDynamoSidecar(normalized) != nil)
+	if err := applyDGDComponentRetune(normalized, parentDGD); err != nil {
+		return nil, err
+	}
 
 	for _, podTemplate := range EnsureComponentPodTemplates(normalized) {
 		if IsWorkerComponent(string(normalized.ComponentType)) {
@@ -2373,6 +2376,9 @@ func generatePodSpecForComponent(
 		environment.ownKVTransferPolicy(component, nativeSidecar, KVTransferPolicyEnvironment(dynamoDeployment.Spec.Experimental.KvTransferPolicy))
 	}
 	applyDGDTemplateDefaults(component, dynamoDeployment, groveClusterTopologyDomains, nativeSidecar)
+	if err := applyDGDComponentRetune(component, dynamoDeployment); err != nil {
+		return nil, err
+	}
 	if operatorConfig == nil {
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}

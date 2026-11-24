@@ -110,6 +110,7 @@ class FakeFrontend:
     get_failures: list[int] = field(default_factory=list)
     # Routers GET leaves out (their control call timed out).
     timed_out: set[str] = field(default_factory=set)
+    config_hash: Optional[str] = "retune-test-config"
 
     def add(self, router: FakeRouter) -> FakeRouter:
         self.routers[router.router_id] = router
@@ -142,6 +143,7 @@ class FakePolicyClient:
             return PolicyCallResult(status=frontend.get_failures.pop(0))
         return PolicyCallResult(
             status=200,
+            retune_config_hash=frontend.config_hash,
             routers=tuple(
                 router.info()
                 for router in frontend.routers.values()
@@ -237,7 +239,6 @@ def pod(
         ready=ready,
         terminating=terminating,
         labels={POD_LABEL_DGD_NAME: DGD.name, POD_LABEL_COMPONENT_TYPE: "frontend"},
-        admin_port=8002,
         phase=phase,
         restarts=restarts,
     )
@@ -252,7 +253,12 @@ def make_actuator(
     client = FakePolicyClient()
     metrics = RecordingMetrics()
     actuator = RouterActuator(
-        kube, client, DGD, startup_maps or {"aggregated": dict(STARTUP)}, metrics
+        kube,
+        client,
+        DGD,
+        startup_maps or {"aggregated": dict(STARTUP)},
+        metrics,
+        config_hash="retune-test-config",
     )
     return actuator, kube, client, metrics
 
@@ -293,24 +299,53 @@ async def test_observe_latches_initials_and_never_writes() -> None:
     assert report.converged
 
 
-async def test_a_pod_without_an_admin_port_is_admin_disabled_at_once() -> None:
-    # Its env starts no admin listener the planner can read: P12 names the
-    # admin listener in the first round instead of after 404 rounds.
-    actuator, _, client, _ = make_actuator([replace(pod("fe-0"), admin_port=None)])
-    client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
-    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    assert report.admin_api_disabled
+@pytest.mark.parametrize("config_hash", [None, "different-target"])
+async def test_runtime_contract_gates_observation_and_apply_but_not_owned_rollback(
+    config_hash,
+):
+    actuator, _, client, _ = make_actuator([pod("fe-0")])
+    frontend = client.frontend("fe-0")
+    frontend.config_hash = config_hash
+    router = frontend.add(FakeRouter("r1", STARTUP, revision=1, current=dict(CHOSEN)))
+    for target in (OBSERVE, apply(CHOSEN)):
+        report = await actuator.reconcile(
+            target, initials={"r1": STARTUP}, expected_frontends=1
+        )
+        assert not report.routers_present and not report.converged
+        assert report.errors == {"retune_contract": 1}
+        assert client.writes() == []
+    report = await actuator.reconcile(
+        ROLLBACK, initials={"r1": STARTUP}, expected_frontends=1
+    )
+    assert report.converged and router.current == STARTUP
+    assert not report.routers_present and report.parity_ok is None
+    assert client.writes() == [("reset", "fe-0", "r1", 1)]
+
+    frontend.config_hash = "retune-test-config"
+    report = await actuator.reconcile(
+        OBSERVE, initials={"r1": STARTUP}, expected_frontends=1
+    )
+    assert report.routers_present and report.converged
+
+
+async def test_missing_admin_binding_does_not_prove_router_reset() -> None:
+    actuator, _, client, _ = make_actuator([pod("fe-0")])
+    client.frontend("fe-0").get_failures = [0] * 5
+    for _ in range(5):
+        report = await actuator.reconcile(
+            OBSERVE, initials={"r1": STARTUP}, expected_frontends=1
+        )
+        assert not report.admin_api_disabled
+        assert not report.converged
 
 
 async def test_a_terminating_pod_stops_counting_as_admin_disabled() -> None:
-    # A pod without an admin port that starts terminating gets no further
-    # outcome. While it is still listed, its count must not keep blocking P12
-    # once a replacement answers /router_policy.
-    old = replace(pod("fe-0"), admin_port=None)
+    old = pod("fe-0")
     actuator, kube, client, _ = make_actuator([old])
-    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    client.frontend("fe-0").get_failures = [404] * 5
+    for _ in range(5):
+        report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
     assert report.admin_api_disabled
-
     kube.pods = [replace(old, terminating=True), pod("fe-1", ip="10.0.0.2")]
     client.frontend("fe-1").add(FakeRouter("r1", STARTUP))
     report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
@@ -319,6 +354,50 @@ async def test_a_terminating_pod_stops_counting_as_admin_disabled() -> None:
 
 
 # ------------------------------------------------------------------- apply
+
+
+async def test_apply_checkpoints_process_identity_before_changing_policy():
+    target = pod("fe-0")
+    actuator, _, client, _ = make_actuator([target])
+    client.frontend(target.name).add(FakeRouter("r1", STARTUP))
+    first = await actuator.reconcile(
+        apply(CHOSEN), initials={"r1": STARTUP}, router_hosts={}, expected_frontends=1
+    )
+    assert not client.writes()
+    assert first.router_hosts == {"r1": ((target.uid, 0),)}
+    await actuator.reconcile(
+        apply(CHOSEN),
+        initials={"r1": STARTUP},
+        router_hosts=first.router_hosts,
+        expected_frontends=1,
+    )
+    assert client.writes()
+
+
+@pytest.mark.parametrize(
+    "change,retired",
+    [
+        ({"uid": "new-uid"}, True),
+        ({"restarts": 1}, True),
+        ({"terminating": True}, False),
+        ({"restarts": None}, False),
+    ],
+)
+async def test_checkpointed_process_retirement_is_not_inferred_from_listener_failure(
+    change, retired
+):
+    old = pod("fe-0")
+    actuator, _, client, _ = make_actuator([replace(old, **change)])
+    client.frontend(old.name).get_failures = [0] * 3
+    for _ in range(3):
+        report = await actuator.reconcile(
+            ActuationTarget(mode="rollback", include_not_ready=True),
+            initials={"r1": STARTUP},
+            router_hosts={"r1": ((old.uid, 0),)},
+            expected_frontends=1,
+        )
+        assert report.converged is retired
+        assert not report.admin_api_disabled
 
 
 async def test_apply_holds_a_router_until_its_initial_is_persisted() -> None:
@@ -472,6 +551,61 @@ async def test_only_the_dgd_namespace_and_planner_worker_types_are_managed() -> 
 # ---------------------------------------------------------------- rollback
 
 
+@pytest.mark.parametrize(
+    "historical_worker_type,completion",
+    [("aggregated", "restore"), ("prefill", "restore"), ("aggregated", "retire")],
+)
+async def test_rollback_tracks_owned_routers_across_runtime_namespace_changes(
+    historical_worker_type: str, completion: str
+) -> None:
+    old_process = pod("fe-0")
+    actuator, kube, client, _ = make_actuator([old_process])
+    frontend = client.frontend(old_process.name)
+    owned = frontend.add(
+        FakeRouter(
+            "owned",
+            STARTUP,
+            worker_type=historical_worker_type,
+            namespace="previous-runtime-namespace",
+            revision=3,
+            current=dict(CHOSEN),
+        )
+    )
+    frontend.add(FakeRouter("replacement", STARTUP))
+    initials = {owned.router_id: dict(STARTUP)}
+    hosts = {owned.router_id: ((old_process.uid, old_process.restarts),)}
+
+    # A healthy replacement cannot prove an omitted historical router is gone.
+    frontend.timed_out.add(owned.router_id)
+    report = await actuator.reconcile(
+        ROLLBACK, initials=initials, router_hosts=hosts, expected_frontends=1
+    )
+    assert not report.converged and owned.router_id in report.seen_router_ids
+    assert client.writes() == []
+
+    # Retry the known historical instance even outside the current namespace/type.
+    frontend.timed_out.clear()
+    client.write_failures = [0]
+    report = await actuator.reconcile(
+        ROLLBACK, initials=initials, router_hosts=hosts, expected_frontends=1
+    )
+    assert not report.converged and owned.current == CHOSEN
+    assert client.writes() == [("reset", old_process.name, owned.router_id, 3)]
+
+    if completion == "retire":
+        kube.pods = [replace(old_process, restarts=1)]
+        del frontend.routers[owned.router_id]
+    report = await actuator.reconcile(
+        ROLLBACK, initials=initials, router_hosts=hosts, expected_frontends=1
+    )
+    assert report.converged
+    if completion == "restore":
+        assert owned.current == STARTUP
+        assert owned.router_id in report.seen_router_ids
+    else:
+        assert owned.router_id not in report.seen_router_ids
+
+
 async def test_rollback_resets_only_deviating_routers_and_never_by_revision() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
     frontend = client.frontend("fe-0")
@@ -529,7 +663,7 @@ async def test_rollback_without_learning_leaves_unknown_routers_alone() -> None:
     assert report.converged
 
 
-async def test_rollback_targets_not_ready_pods_and_waits_only_for_ready_ones() -> None:
+async def test_rollback_waits_for_owned_processes_not_unowned_not_ready_pods() -> None:
     pods = [
         pod("ready", ip="10.0.0.1"),
         pod("not-ready", ready=False, ip="10.0.0.2"),
@@ -544,14 +678,31 @@ async def test_rollback_targets_not_ready_pods_and_waits_only_for_ready_ones() -
             FakeRouter(f"r-{name}", STARTUP, revision=1, current=dict(CHOSEN))
         )
         initials[f"r-{name}"] = dict(STARTUP)
-    # CrashLoopBackOff: an unreachable NotReady pod never blocks convergence.
+    hosts = {
+        f"r-{item.name}": ((item.uid, item.restarts),)
+        for item in pods
+        if item.name in ("ready", "not-ready", "leaving")
+    }
+
+    # An unowned CrashLoopBackOff pod does not establish historical ownership.
     client.frontend("crashing").get_failures = [0]
 
-    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
+    report = await actuator.reconcile(
+        ROLLBACK, initials=initials, router_hosts=hosts, expected_frontends=1
+    )
     assert sorted(call[1] for call in client.writes()) == ["not-ready", "ready"]
     assert ("get", "leaving") not in client.calls
     assert ("get", "pending") not in client.calls
+    assert not report.converged and report.errors == {"get:network": 1}
+
+    # Termination alone does not prove the owned process is gone; its removal does.
+    kube.pods = [item for item in pods if item.name != "leaving"]
+    client.frontend("crashing").get_failures = [0]
+    report = await actuator.reconcile(
+        ROLLBACK, initials=initials, router_hosts=hosts, expected_frontends=1
+    )
     assert report.converged and report.errors == {"get:network": 1}
+    assert "r-leaving" not in report.seen_router_ids
 
     # An unreachable Ready pod does block it; apply never targets NotReady pods.
     kube.pods = [pod("ready"), pod("crashing", ip="10.0.0.3")]
@@ -701,6 +852,7 @@ class _FrontendApp:
         self.requests: list[tuple[str, Any]] = []
         self.patch_status = 200
         self.list_body: Any = {
+            "retune": {"configHash": "retune-test-config"},
             "routers": [
                 {
                     "router_id": "6f1c",
@@ -720,7 +872,7 @@ class _FrontendApp:
                     "worker_type": "decode",
                     "configuration": None,
                 },
-            ]
+            ],
         }
 
     def app(self) -> web.Application:
@@ -766,14 +918,13 @@ async def frontend_server():
     frontend = _FrontendApp()
     server = test_utils.TestServer(frontend.app(), host="127.0.0.1")
     await server.start_server()
-    client = AiohttpRouterPolicyClient(timeout_s=2.0)
+    client = AiohttpRouterPolicyClient(timeout_s=2.0, admin_port=server.port)
     target = PodInfo(
         name="fe-0",
         uid="u",
         ip="127.0.0.1",
         ready=True,
         terminating=False,
-        admin_port=server.port,
     )
     try:
         yield frontend, client, target
@@ -787,6 +938,7 @@ async def test_client_speaks_the_router_policy_wire_format(frontend_server) -> N
 
     result = await client.get(target)
     assert result.status == 200 and result.error is None
+    assert result.retune_config_hash == "retune-test-config"
     first, custom = result.routers
     assert first == RouterInfo(
         router_id="6f1c",
@@ -833,32 +985,35 @@ async def test_client_errors_are_statuses(frontend_server) -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         closed_port = sock.getsockname()[1]
-    result = await client.get(replace(target, admin_port=closed_port))
+    closed = AiohttpRouterPolicyClient(admin_port=closed_port)
+    try:
+        result = await closed.get(target)
+    finally:
+        await closed.close()
     assert result.status == 0 and result.error
 
-    # A pod whose env enables no admin listener is never called.
+    # Without authoritative listener wiring no request is made.
     calls = len(frontend.requests)
-    result = await client.get(replace(target, admin_port=None))
+    result = await AiohttpRouterPolicyClient(admin_port=None).get(target)
     assert result.status == 0
-    assert result.error and "DYN_ENABLE_FRONTEND_ADMIN_API" in result.error
+    assert result.error and "operator-published" in result.error
     assert len(frontend.requests) == calls
 
 
 def test_client_targets_the_admin_listener() -> None:
-    client = AiohttpRouterPolicyClient()
+    client = AiohttpRouterPolicyClient(admin_port=8002)
     pod = PodInfo(
         name="fe",
         uid="u",
         ip="10.0.0.5",
         ready=True,
         terminating=False,
-        admin_port=8002,
     )
     assert client.url(pod) == "http://10.0.0.5:8002/router_policy"
     assert (
         client.url(replace(pod, ip="fd00::5")) == "http://[fd00::5]:8002/router_policy"
     )
-    assert client.url(replace(pod, admin_port=None)) is None
+    assert AiohttpRouterPolicyClient(admin_port=None).url(pod) is None
     assert client.url(replace(pod, ip=None)) is None
 
 
@@ -867,7 +1022,10 @@ def test_client_timeout_outlasts_the_server_control_timeout() -> None:
     # GET 200 without it (or PATCH 503); the client must still be listening.
     assert DEFAULT_CLIENT_TIMEOUT_S == 8.0
     assert DEFAULT_CLIENT_TIMEOUT_S > ROUTER_CONTROL_TIMEOUT_S
-    assert AiohttpRouterPolicyClient()._timeout.total == DEFAULT_CLIENT_TIMEOUT_S
+    assert (
+        AiohttpRouterPolicyClient(admin_port=8002)._timeout.total
+        == DEFAULT_CLIENT_TIMEOUT_S
+    )
 
     source = next(
         (

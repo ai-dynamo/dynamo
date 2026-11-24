@@ -59,6 +59,7 @@ from dynamo.planner.retune.live.contracts import (
     NullMetrics,
     PodInfo,
     PolicyCallResult,
+    RetuneCapability,
     RouterInfo,
 )
 from dynamo.planner.retune.live.reconciler import Reconciler
@@ -73,6 +74,8 @@ from dynamo.planner.tests.live_retune_fakes import (
     FakeDgdrOperator,
     FakeRetuneKube,
     default_metrics,
+    retune_launch_contract,
+    retune_planner_status,
 )
 from dynamo.planner.tests.retune_stubs import caps
 
@@ -150,22 +153,9 @@ def startup_map() -> dict[str, float]:
 # ------------------------------------------------------------- DGD, config
 
 
-def dgd_object() -> dict[str, Any]:
+def dgd_object(*, mount_path: str = "/trace") -> dict[str, Any]:
     """A DGD that satisfies every spec premise (P4, P6-P10)."""
 
-    env = [
-        {
-            "name": "DYN_POD_NAME",
-            "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
-        },
-        {"name": "DYN_REQUEST_TRACE", "value": "1"},
-        {"name": "DYN_REQUEST_TRACE_RECORDS", "value": "request_end"},
-        {"name": "DYN_REQUEST_TRACE_SINKS", "value": "file"},
-        {"name": "DYN_REQUEST_TRACE_FILE_FORMAT", "value": "jsonl_gz"},
-        {"name": "DYN_REQUEST_TRACE_FILE_PATH", "value": TRACE_FILE_PATH},
-        {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "1"},
-        {"name": "DYN_FRONTEND_ADMIN_HOST", "value": "0.0.0.0"},
-    ]
     frontend = {
         "name": "Frontend",
         "type": "frontend",
@@ -184,7 +174,6 @@ def dgd_object() -> dict[str, Any]:
                             "kv",
                             "--router-replica-sync",
                         ],
-                        "env": env,
                         "volumeMounts": [{"name": "traces", "mountPath": "/trace"}],
                     }
                 ],
@@ -219,8 +208,21 @@ def dgd_object() -> dict[str, Any]:
     return {
         "apiVersion": "nvidia.com/v1beta1",
         "kind": "DynamoGraphDeployment",
-        "metadata": {"name": DGD_NAME, "namespace": K8S_NAMESPACE, "uid": DGD_UID},
+        "metadata": {
+            "name": DGD_NAME,
+            "namespace": K8S_NAMESPACE,
+            "uid": DGD_UID,
+            "generation": 1,
+        },
         "spec": {"components": [frontend, worker, planner]},
+        # These independent operator facts are not computed from the authored recipe.
+        "status": {
+            "observedGeneration": 1,
+            "components": {
+                "Planner": retune_planner_status(),
+                "worker": {"servedModelName": MODEL},
+            },
+        },
     }
 
 
@@ -434,7 +436,9 @@ class FakeRouterPolicyClient:
         if routers is None:
             return PolicyCallResult(status=0, error="connection refused")
         return PolicyCallResult(
-            status=200, routers=tuple(router.info() for router in routers)
+            status=200,
+            routers=tuple(router.info() for router in routers),
+            retune_config_hash="retune-test-config",
         )
 
     async def patch(
@@ -630,8 +634,16 @@ class Planner:
             namespace_fn=lambda: DYNAMO_NAMESPACE,
             metrics=self.metrics,
             identity=self.identity,
-            actuator_factory=lambda dgd, maps: RouterActuator(
-                world.kube, self.client, dgd, maps, self.metrics
+            process_capability=RetuneCapability.from_dict(
+                retune_launch_contract(mount_path=str(world.claim.mount))
+            ),
+            actuator_factory=lambda dgd, maps, capability: RouterActuator(
+                world.kube,
+                self.client,
+                dgd,
+                maps,
+                self.metrics,
+                config_hash=capability.config_hash,
             ),
             reconciler=reconciler,
             context_factory=context_factory,
@@ -713,7 +725,7 @@ class World:
         # mid-way), so window 1 is the first one recorded in full.
         self.clock = SimClock(T0 - 600.0)
         self.kube = FakeRetuneKube(K8S_NAMESPACE, now=self.clock.time)
-        self.kube.put_dgd(dgd_object())
+        self.kube.put_dgd(dgd_object(mount_path=str(tmp_path / "claim")))
         self.dgd_ref = DgdRef(DGD_NAME, K8S_NAMESPACE, DGD_UID, DYNAMO_NAMESPACE)
         self.frontends = FakeFrontends(self.kube)
         for pod in FRONTENDS:

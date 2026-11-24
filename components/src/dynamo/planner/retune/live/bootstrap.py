@@ -5,8 +5,8 @@
 
 ``build_live_retune(host)`` runs in ``NativePlannerBase._async_init`` after
 ``environment.initialize()`` and before the engine is built. It reads the
-planner's DGD, parses the frontend's startup router configuration with a
-pure function of the DGD spec, evaluates the spec premises, and returns a
+planner's DGD, resolves the immutable semantic launch contract, evaluates the
+public graph constraints, and returns a
 ``LiveRetuneSupervisor`` whose ``retune_inputs()`` the engine's first
 controller is built from (``None`` while P4 fails: the adapter then starts
 with retune disabled) and whose ``hooks()`` every controller gets.
@@ -27,6 +27,7 @@ then deletes its Requests and Leases.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -54,11 +55,13 @@ from dynamo.planner.retune.live.actuator import (
     RouterActuator,
 )
 from dynamo.planner.retune.live.contracts import (
+    ENV_RETUNE_CAPABILITY,
     DgdRef,
     FrontendStartup,
     KubeAlreadyExists,
     KubeInvalid,
     PremiseReport,
+    RetuneCapability,
     RetuneKube,
     RetuneMetricsSink,
     WindowCutter,
@@ -166,6 +169,7 @@ def build_retune_inputs(
     *,
     dgd_name: str,
     model_name: Optional[str],
+    capability: RetuneCapability,
 ) -> RetuneInputs:
     """Live ``RetuneInputs``: the parsed startup, traces on the claim.
 
@@ -176,6 +180,7 @@ def build_retune_inputs(
     """
 
     _, dgdr = _dgdr_retune(config)
+    dgdr = frontend_config.resolve_executor_config(dgdr, capability)
     disagg = config.mode == "disagg"
     engine = RetuneEngineSpec(
         router_mode=startup.router_mode,  # type: ignore[arg-type]
@@ -201,6 +206,7 @@ def evaluate_spec(
     k8s_namespace: str,
     dynamo_namespace: str,
     frontend: Any = None,
+    process_capability: Optional[RetuneCapability] = None,
 ) -> SpecEvaluation:
     """Parse the frontend and evaluate the spec premises of one DGD read.
 
@@ -220,17 +226,29 @@ def evaluate_spec(
         uid=str(uid),
         dynamo_namespace=dynamo_namespace,
     )
-    parsed = frontend.parse_frontend(dgd, planner_mode=config.mode)
-    startup = parsed if isinstance(parsed, FrontendStartup) else None
-    report: PremiseReport = frontend.evaluate_premises(dgd, planner_config=config)
+    report: PremiseReport = frontend.evaluate_premises(
+        dgd, planner_config=config, capability=process_capability
+    )
+    startup = report.startup
+    try:
+        capability = frontend_config.retune_capability(dgd, process_capability)
+    except ValueError as error:
+        capability = None
+        reason = f"P10: {error}"
+        report = dataclasses.replace(
+            report,
+            spec_ok=False,
+            reasons=tuple(dict.fromkeys((*report.reasons, reason))),
+        )
     inputs = None
-    if report.p4_ok and startup is not None:
+    if report.p4_ok and startup is not None and capability is not None:
         try:
             inputs = build_retune_inputs(
                 config,
                 startup,
                 dgd_name=name,
                 model_name=frontend.served_model_name(dgd),
+                capability=capability,
             )
         except ValueError as error:
             logger.error("retune: building the live retune inputs failed: %s", error)
@@ -249,6 +267,7 @@ def evaluate_spec(
         spec_replicas=worker_spec_replicas(dgd, config.mode),
         dgd=ref,
         generation=generation if isinstance(generation, int) else None,
+        capability=capability,
     )
 
 
@@ -262,6 +281,10 @@ def dgdr_context_factory(
 
     def factory(supervisor: LiveRetuneSupervisor) -> DgdrContext:
         retune, dgdr = _dgdr_retune(config)
+        capability = supervisor.evaluation.capability
+        if capability is None:
+            raise ValueError("the operator's current Retune capability is unavailable")
+        dgdr = frontend_config.resolve_executor_config(dgdr, capability)
         return DgdrContext(
             dgd=supervisor.dgd,
             cfg=dgdr,
@@ -290,6 +313,10 @@ def dgdr_canary(
 
     def canary(supervisor: LiveRetuneSupervisor) -> bool:
         retune, dgdr = _dgdr_retune(config)
+        capability = supervisor.evaluation.capability
+        if capability is None:
+            return False
+        dgdr = frontend_config.resolve_executor_config(dgdr, capability)
         replicas = supervisor.evaluation.spec_replicas
         point = supervisor.startup_flat()
         if not replicas or not point:
@@ -340,10 +367,22 @@ def default_actuator_factory(
     kube: RetuneKube, metrics: RetuneMetricsSink
 ) -> ActuatorFactory:
     def factory(
-        dgd: DgdRef, startup_maps: dict[str, dict[str, float]]
+        dgd: DgdRef,
+        startup_maps: dict[str, dict[str, float]],
+        capability: Optional[RetuneCapability],
     ) -> RouterActuator:
         return RouterActuator(
-            kube, AiohttpRouterPolicyClient(), dgd, startup_maps, metrics
+            kube,
+            AiohttpRouterPolicyClient(
+                admin_port=None if capability is None else capability.admin_port
+            ),
+            dgd,
+            startup_maps,
+            metrics,
+            frontend_component_name=(
+                None if capability is None else capability.frontend_component_name
+            ),
+            config_hash=None if capability is None else capability.config_hash,
         )
 
     return factory
@@ -383,6 +422,27 @@ def _dgdr_retune(config: PlannerConfig) -> tuple[RetuneConfig, DgdrExecutorConfi
     return retune, retune.dgdr
 
 
+def _process_capability() -> Optional[RetuneCapability]:
+    """Capture the operator's immutable launch-time binding, not a Pod recipe."""
+
+    raw = os.environ.get(ENV_RETUNE_CAPABILITY)
+    if raw is None:
+        logger.warning(
+            "retune: %s is missing; waiting for an operator-rendered Planner Pod",
+            ENV_RETUNE_CAPABILITY,
+        )
+        return None
+    try:
+        return RetuneCapability.from_dict(json.loads(raw))
+    except ValueError as error:
+        logger.warning(
+            "retune: invalid %s: %s; Retune remains unavailable",
+            ENV_RETUNE_CAPABILITY,
+            error,
+        )
+        return None
+
+
 def _runtime_namespace(host: Any) -> str:
     """The routers' dynamo namespace, else the planner's configured one."""
 
@@ -407,6 +467,7 @@ async def build_supervisor(
     canary: Optional[Callable[[LiveRetuneSupervisor], bool]] = None,
     context_factory: Optional[Callable[[LiveRetuneSupervisor], Any]] = None,
     sweep_runner: Optional[Callable[..., Any]] = None,
+    process_capability: Optional[RetuneCapability] = None,
     **supervisor_kwargs: Any,
 ) -> LiveRetuneSupervisor:
     """A supervisor for ``dgd_name`` with the production collaborators by default."""
@@ -417,10 +478,11 @@ async def build_supervisor(
             "live retune requires retune.executor 'dgdr' (retune.executor "
             f"is {None if retune is None else retune.executor!r})"
         )
-    dgdr = retune.dgdr
     if metrics is None:
         metrics = RetuneMetrics()
     dgd_obj = await asyncio.to_thread(kube.get_dgd, dgd_name)
+    if process_capability is None:
+        process_capability = _process_capability()
 
     def evaluate(obj: dict) -> SpecEvaluation:
         return evaluate_spec(
@@ -429,19 +491,30 @@ async def build_supervisor(
             k8s_namespace=kube.namespace,
             dynamo_namespace=namespace_fn(),
             frontend=frontend,
+            process_capability=process_capability,
         )
 
     evaluation = evaluate(dgd_obj)
-    if reconciler is None:
-        reconciler = Reconciler(
-            kube,
-            evaluation.dgd,
-            dgdr,
-            retune,
-            dgdr.mount_path,
-            metrics,
-            history_s=retune_history_seconds(config),
-        )
+    # The Pod's immutable binding owns its mounted claim for this process's
+    # lifetime. Keep one registry across publication gaps; run it only while
+    # the current target matches that binding.
+    if reconciler is None and process_capability is not None:
+        try:
+            dgdr = frontend_config.resolve_executor_config(
+                retune.dgdr, process_capability
+            )
+        except ValueError:
+            pass  # The premise report explains the incompatible legacy assertion.
+        else:
+            reconciler = Reconciler(
+                kube,
+                evaluation.dgd,
+                dgdr,
+                retune,
+                dgdr.mount_path,
+                metrics,
+                history_s=retune_history_seconds(config),
+            )
     worker_types = worker_types_for(config.mode)
     settings = SupervisorSettings.from_config(
         config, router_keys=searched_router_keys(config)
@@ -453,7 +526,9 @@ async def build_supervisor(
         identity=identity or planner_identity(),
         premise_evaluator=evaluate,
         actuator_factory=actuator_factory or default_actuator_factory(kube, metrics),
-        fingerprint_fn=lambda startup: fingerprint(config, startup),
+        fingerprint_fn=lambda current: fingerprint(
+            config, current.startup, current.capability
+        ),
         resolver_factory=lambda startup: (
             None
             if startup is None
@@ -543,14 +618,11 @@ def build_decommission_supervisor(
     dynamo_namespace: str,
     metrics: Optional[RetuneMetricsSink] = None,
     actuator_factory: Optional[ActuatorFactory] = None,
-    frontend: Any = None,
     identity: Optional[str] = None,
     **supervisor_kwargs: Any,
 ) -> LiveRetuneSupervisor:
     """A supervisor that only rolls back and deletes (no retune config)."""
 
-    if frontend is None:
-        frontend = frontend_config
     if metrics is None:
         metrics = RetuneMetrics()
     metadata = dgd.get("metadata") or {}
@@ -560,13 +632,11 @@ def build_decommission_supervisor(
         uid=str(metadata.get("uid")),
         dynamo_namespace=dynamo_namespace,
     )
-    parsed = frontend.parse_frontend(dgd, planner_mode=config.mode)
-    startup = parsed if isinstance(parsed, FrontendStartup) else None
 
     def evaluate(obj: dict) -> SpecEvaluation:
         return SpecEvaluation(
             report=PremiseReport(p4_ok=False, spec_ok=True),
-            startup=startup,
+            startup=None,
             inputs=None,
             spec_replicas=None,
             dgd=ref,

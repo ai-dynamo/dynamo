@@ -91,28 +91,32 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
   [Auto Deploy with DGDR](auto-deploy-with-dgdr.md#prerequisites).
 - **A public model.** The Run Job has no Hugging Face credentials and no model mount, so
   `retune.dgdr.model` must be a public Hugging Face repository id that AISimulate can resolve.
-- **A ReadWriteMany claim** in the DGD namespace, dedicated to traces. Create `segments/` and
-  `windows/` at its root, writable by the user the frontend and Planner containers run as. The
+- **A ReadWriteMany claim** in the DGD namespace, dedicated to traces and writable by the user
+  the frontend and Planner containers run as. The operator does not provision the claim. The
   Planner writes each window file with mode `0644`, so the Run Job, which reads it as UID 1000
   with supplemental group 65532, can read it whatever user the Planner runs as.
-- **A KV-router frontend with default routing fields**, and workers that do not set their own
-  router mode or pass a value the Planner cannot read where an option could stand. See
-  [Deployment rules](#deployment-rules).
-- **The frontend admin listener, reachable from the Planner.** The frontend serves
-  `/router_policy` only on its admin listener, which is off by default and binds `127.0.0.1`.
-  See [Configure the frontend](#configure-the-frontend).
+- **Matching frontend and Planner runtime support.** The frontend must implement the versioned
+  Retune launch contract and acknowledge compatible effective routers through `/router_policy`.
+  An older frontend without this acknowledgment cannot be tuned. See [Deployment rules](#deployment-rules).
+- **Operator-owned Retune wiring on the Planner component.** Enable the component's `retune`
+  field and name the trace claim as shown below. This configures the frontend admin listener;
+  restrict access to its unauthenticated port before enabling the feature.
 - **One Planner replica.**
+- **An acknowledged Retune target.** The operator publishes
+  `status.components.<planner>.retune.configHash` with a global `status.observedGeneration` matching
+  `metadata.generation`. Retune does not consume role Pod templates, commands, arguments, or
+  environment lists from spec or status.
 
 ## Configure the frontend
 
-Add the trace environment, the admin listener and the claim to the frontend container of the
-DGD. The planner checks these values against `retune.dgdr` at startup and whenever the DGD
-changes.
+Enable `retune` on the component whose type is `planner`, and reference an existing writable trace
+claim. The operator selects the one `frontend` component by type, independently of its name. The
+following DGD spec excerpt omits images, workers, and the ordinary Planner configuration mount:
 
 ```yaml
 spec:
   components:
-  - name: Frontend
+  - name: gateway
     type: frontend
     replicas: 1
     podTemplate:
@@ -120,41 +124,74 @@ spec:
         containers:
         - name: main
           command: [python3]
-          args: [-m, dynamo.frontend, --router-mode, kv]
-          env:
-          - name: DYN_POD_NAME
-            valueFrom: {fieldRef: {fieldPath: metadata.name}}
-          - {name: DYN_REQUEST_TRACE, value: "1"}
-          - {name: DYN_REQUEST_TRACE_RECORDS, value: request_end}
-          - {name: DYN_REQUEST_TRACE_SINKS, value: file}
-          - {name: DYN_REQUEST_TRACE_FILE_FORMAT, value: jsonl_gz}
-          - name: DYN_REQUEST_TRACE_FILE_PATH
-            value: /trace/segments/$(DYN_PARENT_DGD_K8S_NAME)/$(DYN_POD_NAME)/req
-          - {name: DYN_REQUEST_TRACE_FILE_ROLL_BYTES, value: "67108864"}
-          - {name: DYN_REQUEST_TRACE_CAPACITY, value: "8192"}
-          - {name: DYN_ENABLE_FRONTEND_ADMIN_API, value: "1"}
-          - {name: DYN_FRONTEND_ADMIN_HOST, value: "0.0.0.0"}
-          volumeMounts:
-          - {name: request-traces, mountPath: /trace}
-        volumes:
-        - name: request-traces
-          persistentVolumeClaim: {claimName: request-traces}
+          args: [-m, dynamo.frontend]
+  - name: optimizer
+    type: planner
+    retune:
+      enabled: true
+      traceStorage:
+        claimName: request-traces
+      router:                       # Startup values, not search domains; optional.
+        overlapScoreCredit: 1.0      # Default: 1.0.
+        prefillLoadScale: 1.0        # Default: 1.0.
+        temperature: 0.0            # Default: 0.0.
 ```
 
-- `DYN_REQUEST_TRACE_FILE_PATH` is a file prefix directly under
-  `<mount_path>/<segments_dir>/$(DYN_PARENT_DGD_K8S_NAME)/$(DYN_POD_NAME)/`, such as `req`: the
-  part after `$(DYN_POD_NAME)/` must not contain `/`. `<mount_path>` is where the frontend mounts
-  `retune.dgdr.claim_name`. The operator injects `DYN_PARENT_DGD_K8S_NAME`.
-- `DYN_ENABLE_FRONTEND_ADMIN_API` and `DYN_FRONTEND_ADMIN_HOST` start the frontend admin
-  listener on the pod's addresses, on port 8002 unless `DYN_FRONTEND_ADMIN_PORT` sets another.
-  The Planner reads the port from each frontend pod and sets the router policies there; the
-  inference port does not serve `/router_policy`. The listener has no authentication: admit only
-  the Planner to its port before you enable it ([Security](#security) has a NetworkPolicy).
-  - The host is `0.0.0.0` (IPv4), `::` (IPv6 and dual-stack pods), or the pod IP through
-    `valueFrom: {fieldRef: {fieldPath: status.podIP}}`.
-  - The other values must be literal, without `$(VAR)` references: the Planner reads them from
-    the pod spec, where Kubernetes has not expanded them. Set `DYN_FRONTEND_ADMIN_PORT` in `env`
-    when an `envFrom` source could set it; otherwise the Planner assumes port 8002 and warns.
+This normal component API is not under `experimental`. It requests deployment wiring, not a
+search strategy or replica-scaling mode. Exactly one frontend and at most one enabled Retune
+Planner are supported. An enabled standalone DCD cannot provide this graph-wide wiring.
+
+The optional `router` fields must be finite, non-negative numbers. Together with the versioned
+`kv-v1` profile they fix the complete supported router startup configuration. Frontend and Planner
+resolve the same profile through the runtime SDK. These are startup values; the Planner's
+`retune.router` configuration below defines the search space instead. Equivalent explicit
+frontend settings are accepted; contradictory CLI, policy-file, or runtime-resolved environment
+settings cause a frontend configuration error rather than silently changing the replay baseline.
+
+The operator mounts the claim at `/trace` in the frontend and Planner and owns these frontend
+bindings while enabled:
+
+| Binding | Operator-owned value |
+| --- | --- |
+| `DYN_POD_NAME` | The Pod name from the Downward API |
+| `DYN_REQUEST_TRACE` | `1` |
+| `DYN_REQUEST_TRACE_RECORDS` | `request_end` |
+| `DYN_REQUEST_TRACE_SINKS` | `file` |
+| `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` |
+| `DYN_REQUEST_TRACE_FILE_PATH` | `/trace/segments/<dgd>/$(DYN_POD_NAME)/req` |
+| `DYN_ENABLE_FRONTEND_ADMIN_API` | `1` |
+| `DYN_FRONTEND_ADMIN_HOST` | The Pod IP from the Downward API |
+| `DYN_FRONTEND_ADMIN_PORT` | `8002` |
+
+These feature-owned bindings replace same-named authored values; this does not reserve all
+operator environment names. Existing direct read-write mounts of the same claim at `/trace`
+can be reused. Conflicting paths, another claim, read-only mounts, and subpaths fail rendering.
+The trace writer and Planner create their required subdirectories; the claim must be writable.
+
+The operator supplies the same versioned JSON launch contract through
+`DYN_PLANNER_RETUNE_CAPABILITY` in the Planner and `DYN_FRONTEND_RETUNE_CAPABILITY` in the frontend.
+It contains the selected frontend identity, trace layout, admin port, router profile, startup
+settings, and an opaque `configHash`. Do not set or override these operator-owned bindings.
+
+After the target workloads acknowledge lowering, the operator publishes only the binding hash:
+
+```yaml
+status:
+  observedGeneration: 7             # Applied target generation, not Pod readiness.
+  components:
+    optimizer:
+      retune:
+        configHash: "<operator-generated>"
+```
+
+Retune waits until its immutable launch hash matches the current target hash and each frontend
+runtime acknowledges compatible effective routers for that hash. Generic role status is not
+required. During a storage rollout, an old Planner still mounted to PVC A must not create replay
+requests referring to PVC B. Cleanup uses the historical binding checkpointed with the previous
+router process identities. Replica-only edits do not change this hash or roll the Planner.
+
+The admin listener is unauthenticated: admit only the Planner to port `8002` before enabling the
+feature ([Security](#security) has a NetworkPolicy). No NetworkPolicy is created automatically.
 - Records are dropped without a count for `prompt_embeds`, multimodal, `n > 1` and `best_of > 1`
   requests, and when the writer lags or a batch write fails.
 - The trace holds unkeyed xxh3 hash chains of the prompts. Anyone who can create pods in the
@@ -164,8 +201,8 @@ See [Agent Tracing](../../use-cases/agents/agent-tracing.md) for the `request_en
 
 ## Configure the Planner
 
-Mount the same claim in the Planner container at `retune.dgdr.mount_path`, and pass a
-configuration like the one below with `--config`:
+The operator supplies the shared claim mount and immutable semantic launch contract. Pass a Planner
+configuration like the one below with `--config`; search and scaling remain runtime configuration:
 
 ```yaml
 environment: kubernetes
@@ -186,10 +223,6 @@ retune:
   executor: dgdr
   dgdr:
     phase_seconds: 0
-    claim_name: request-traces
-    mount_path: /trace
-    segments_dir: segments
-    windows_dir: windows
     model: Qwen/Qwen3-32B
     sku: h200_sxm
     engine:
@@ -219,9 +252,9 @@ retune:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `claim_name` | required | ReadWriteMany claim, in the DGD namespace, that holds the traces |
-| `mount_path` | `/trace` | Where the Planner container mounts the claim; absolute |
-| `segments_dir`, `windows_dir` | `segments`, `windows` | Claim-relative directories of the frontend segments and the window files; neither may contain the other |
+| `claim_name` | launch contract | Deprecated compatibility setting; if explicitly supplied, must match the bound trace claim |
+| `mount_path` | launch contract | Deprecated compatibility setting; if explicitly supplied, must match the bound mount |
+| `segments_dir`, `windows_dir` | launch contract | Deprecated compatibility settings; explicitly supplied directories must match the bound layout |
 | `phase_seconds` | `0` | Window phase in epoch seconds |
 | `model` | required | Hugging Face repository id the workers serve; the Requests' `spec.model.name` |
 | `sku` | required | The Requests' `spec.hardware.gpu.sku` |
@@ -323,18 +356,24 @@ configuration error at startup.
 | P5 | `retune.dgdr.engine` is all scalars, as in [Engine section](#engine-section) |
 | P13 | The largest grid shard has at most 100 points and fits the [time budget](#time-budget). With scaling, the Planner points count as one more shard dimension, and the history before a window holds at most 1024 buckets of the shortest throughput interval |
 
+The Planner reads its immutable semantic launch contract, not component Pod templates. The
+frontend validates its actual parsed configuration and the effective discovered routers, including
+worker-advertised settings. ConfigMap and Secret values are checked after runtime resolution,
+not guessed by the operator. `/router_policy` acknowledges the contract only for compatible
+effective configuration; an acknowledgment is not merely an echo of the injected environment.
+
 **Deployment**, checked at startup, when the DGD changes and before every router round. While one
 fails, the Planner launches no windows, resets the routers to their startup parameters, and
 retries:
 
 | Rule | Requirement |
 |---|---|
-| P4 | The frontend runs `--router-mode kv` with every routing field the Request cannot express at its default, `kv_event_lag_ms` unset or 0, no `DYN_ROUTER_WORKER_SELECTION_POLICY`, a `none` prefill load model, router env given as plain values (no `valueFrom`), and a command that is not wrapped in a shell. The Planner cannot read `envFrom` sources: it assumes they set no router env, only warns about a source whose `prefix` could produce a `DYN_` name, and treats a `$(VAR)` that only an `envFrom` source could define as unreadable. Keep router env out of `envFrom`: P14 catches only a changed policy parameter. No worker advertises its own router configuration: worker components set neither `--router-mode` nor `DYN_ROUTER_MODE`, directly or through the graph-level `spec.env`, because a worker's advertised configuration replaces the frontend's for its workers. The Planner reads a worker's command as the operator runs it: an omitted `command` is `/bin/sh -c` with the first of `args` as the script, and a shell started through `env`, `tini --` or `dumb-init --` is a script too. For a worker whose launches are in role pod templates (`roles[].podTemplate`, no component `podTemplate`), it reads each role's main container and env. A worker with a native `runtime` sidecar is not checked: its main runs the engine, and the sidecar advertises no router configuration. A value the Planner cannot read and that could hold an option (a ConfigMap, Secret or annotation `valueFrom`, or a `$(VAR)` that the container's `env` leaves to an `envFrom` source) must not stand where a worker option could: attach it to its option (`--option=$(VAR)`) or pass it as the separate value right after `--model`, `--model-path`, `--served-model-name`, `--model-name` or `--speculative-config`. A frontend argument follows the same rule, with `--tool-call-parser`, `--reasoning-parser` and `--chat-template` as the options whose separate value it may be. In a worker shell script any such `$(VAR)` fails, since Kubernetes substitutes it before the shell parses the script; use the shell's own `$VAR` instead. A `$VAR` or `${VAR}` of such a value fails when it is unquoted, stands alone as an argument of the worker or of `env`, `export`, `source` or a shell (also by path and behind `exec`, `nohup`, `command` or `builtin`), or sits in text that `eval` or a shell given `-c` parses again; quote it outside the worker's arguments and attach it to its option among them (`--option="$VAR"`). A redirection target, such as `> "$LOG"`, is fine. The Planner does not follow the script's conditions, so the script's own assignment to a ConfigMap, Secret or annotation variable does not clear it. With an `envFrom` source that has no `prefix`, every name the container's `env` leaves undefined counts as such a value, image env such as `PATH` and `LD_LIBRARY_PATH` included, so quote those references too (`export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"`). Names the operator sets on the container do not count: `DYN_NAMESPACE`, `DYN_COMPONENT`, `DYN_PARENT_DGD_K8S_*` and `POD_*`, a worker's `DYN_SYSTEM_*`, `DYN_HEALTH_CHECK_ENABLED`, `NIXL_TELEMETRY_*` and `DYN_FORWARDPASS_METRIC_PORT`, and a multinode component's `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. Other `fieldRef` values, such as the pod name, may stand anywhere except inside an option's name (`--x-$(POD_NAME)`) or as the value of a frontend router flag. The Planner does not evaluate command substitution, backticks, the scripts a worker runs, text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or a script that `su -c` runs, so keep router flags and such values out of them |
+| P4 | The supported versioned launch contract resolves to a complete `kv-v1` router configuration through the runtime SDK. The frontend validates actual settings and effective routers; incompatible or unsupported configurations are not acknowledged |
 | P7 | The DGD serves one model; the frontend is not an EPP, not a `frontendSidecar`, and has no TLS |
-| P8 | One frontend replica, or `--router-replica-sync` |
+| P8 | Effective router configuration satisfies frontend replica-synchronization requirements |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
-| P10 | The frontend trace environment, claim mount and admin listener match [Configure the frontend](#configure-the-frontend): the trace file prefix is directly under `$(DYN_POD_NAME)/`, and the admin API is on, bound to `0.0.0.0`, `::` or the pod IP, with literal values and a port from 1 to 65535 |
-| P14 | Every router's startup parameters equal the ones the Planner parsed from the frontend |
+| P10 | The immutable launch hash matches current `status.components.<planner>.retune.configHash`; explicitly configured legacy trace-storage values agree with the launch contract |
+| P14 | Every relevant frontend acknowledges the same hash and every router's startup parameters match the shared semantic profile |
 
 **Health**, checked every round. While one fails, windows do not launch; nothing is reset:
 
@@ -347,8 +386,8 @@ The Planner only warns when AISimulate does not list the model among its default
 
 ## Roll out
 
-1. Prepare the claim and its directories, then add the frontend trace configuration and the
-   Planner mount.
+1. Prepare a writable trace claim and restrict frontend admin access, then enable the Planner
+   component's `retune` setting with that claim.
 2. Start with `advisory: true`. In advisory mode the Planner records the decision it would make
    and changes no router value it has not set itself. Watch `dynamo_planner_retune_ready` and the
    decision history:
@@ -368,7 +407,8 @@ The Planner only warns when AISimulate does not list the model among its default
    `dynamo_planner_retune_rollback_pending` is 0. The routers are then back at their startup
    parameters. The mode stored in the state alone does not show that.
 2. Remove `retune` from the Planner configuration.
-3. Remove the trace environment from the frontend.
+3. Keep the Planner component's operator-owned `retune` wiring enabled while cleanup completes,
+   so the old frontend admin endpoint and trace storage remain reachable.
 4. Delete the Planner's Requests and both Leases. Select the Requests by the DGD's
    `metadata.uid`: the `nvidia.com/planner-retune-dgd` label holds a hash instead of the name
    when the name is longer than 63 characters.
@@ -384,10 +424,22 @@ The Planner only warns when AISimulate does not list the model among its default
    transient API error), resets any router the removed retune changed, then deletes the
    Requests and both Leases.
 
-5. Delete `<segments_dir>/<dgd>` and `<windows_dir>/<dgd>` from the claim.
+5. Set the Planner component's `retune.enabled` to `false`, or remove that component field. This
+   removes the operator-owned wiring on the next normal frontend/Planner rollout. Do not remove
+   the wiring before confirming router rollback.
+6. Delete `<segments_dir>/<dgd>` and `<windows_dir>/<dgd>` from the claim.
 
 Before upgrading the operator or its CRDs, switch to advisory or disable retune, then delete the
 retune Requests.
+
+The Planner checkpoints prior wiring and router process identities in Retune Lease state format
+v2, and can read v1 state. Before upgrading an active deployment from v1 state, finish rollback
+and cleanup with the old Planner, including removal of its Retune Leases. A legacy state that
+may still own router policies has no historical binding: the new Planner retains it and reports
+that cleanup is blocked rather than guessing that the current frontend is the old one.
+
+Before downgrading to an older Planner that cannot read v2, complete
+the rollback and cleanup above with the newer Planner, including removal of its Retune Leases.
 
 ## Security
 
@@ -395,8 +447,8 @@ retune Requests.
   which has no authentication. The same listener serves the busy-threshold API
   (`/busy_threshold` and `/router_policy/busy_threshold`), and a threshold set there makes the
   frontend reject requests. [Configure the frontend](#configure-the-frontend) binds the listener
-  to the pod's addresses, so anything that reaches a frontend pod on the admin port (8002 by
-  default) can change its router policies and its busy thresholds. Admit only the Planner to that
+  to the Pod's IP, so anything that reaches a frontend Pod on port `8002`
+  can change its router policies and its busy thresholds. Admit only the Planner to that
   port, for example with the NetworkPolicy below, and do not expose it through a Service or an
   Ingress. While a frontend's admin listener does not answer `/router_policy`, the Planner
   launches no windows (P12) and logs why.
@@ -407,7 +459,7 @@ retune Requests.
 For a DGD named `my-dgd`, this NetworkPolicy admits only its Planner pods to port 8002 of its
 frontend pods and leaves every other port of the frontends as open as with no policy: the other
 TCP ports, and every UDP port, which the QUIC response plane (`DYN_RESPONSE_PLANE=quic`) uses to
-receive worker responses. With another `DYN_FRONTEND_ADMIN_PORT`, move the three port numbers. It
+receive worker responses. The component contract owns admin port `8002`. The policy
 takes effect only where the cluster's network plugin enforces NetworkPolicy, and needs Kubernetes
 1.25 or later for `endPort`:
 
@@ -501,8 +553,9 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 | Load-predictor history beyond 1024 buckets of the shortest throughput interval | The warm-up travels inside every Request and Candidate |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
 | Workers that set their own router mode (`--router-mode` or `DYN_ROUTER_MODE`) | A worker's advertised router configuration replaces the frontend's for its workers, and the Run replays only the frontend's |
-| Worker arguments that pass a ConfigMap, Secret, annotation or `envFrom` value where an option could stand, including an unquoted `$VAR` of one in a worker shell script or one that `eval` or a shell given `-c` parses again (P4 fails) | The Planner cannot read the value, so it cannot rule out a router mode the worker would advertise |
-| Router flags that a worker produces through shell command substitution, backticks, script variables, positional parameters, literal text that `eval` or a nested shell parses again, or a script file, and ConfigMap, Secret, annotation or `envFrom` values in text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or that `su -c` runs (P4 does not see them) | The Planner reads the worker's spec and does not run its script |
+| Missing/stale target roles or a target container without a declared command | The Planner waits for current operator facts; it does not infer an image entrypoint or reconstruct defaults from the authored spec |
+| Worker arguments that put an unknown status value where an option could stand, including an unquoted `$VAR` of one in a worker shell script or one that `eval` or a shell given `-c` parses again (P4 fails) | The Planner cannot read the value, so it cannot rule out a router mode the worker would advertise. No injected name or raw source kind makes an unknown value automatically safe |
+| Router flags that a worker produces through shell command substitution, backticks, script variables, positional parameters, literal text that `eval` or a nested shell parses again, or a script file, and unknown values in text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or that `su -c` runs (P4 does not see them) | The Planner reads the declared target command and does not run its script |
 | Raising `overlap_score_credit` on a frontend that starts it at 0: an omitted credit then searches only 0, and a written positive value fails P4 | A live router rejects a positive credit after starting at 0 |
 | Private, fine-tuned or local-path models | The Run Job has no Hugging Face credentials or model mount |
 | Several frontends without router replica sync | AISimulate simulates one router |

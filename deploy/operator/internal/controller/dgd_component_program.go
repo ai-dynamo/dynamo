@@ -158,6 +158,7 @@ func (p *componentProgram) Reconcile(
 		}
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
+	programResult.applyRetuneStatus(req.DGD, result.RetuneTargetsAcknowledged)
 	return programResult, nil
 }
 

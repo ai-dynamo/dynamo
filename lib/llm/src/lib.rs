@@ -43,6 +43,7 @@ pub mod reasoning_field;
 pub mod recorder;
 pub mod request_template;
 pub mod request_trace;
+pub mod retune;
 mod routing_policy;
 pub mod session_affinity;
 pub mod telemetry;

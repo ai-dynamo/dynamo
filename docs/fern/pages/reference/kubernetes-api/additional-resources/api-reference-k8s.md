@@ -325,6 +325,7 @@ _Appears in:_
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  | Optional: \{\} <br /> |
 | `serviceName` _string_ | The name of the component |  | Optional: \{\} <br /> |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Optional: \{\} <br /> |
+| `retune` _[RetuneSpec](#retunespec)_ | Retune requests operator-owned trace storage and frontend admin wiring for<br />a Planner component. It is a native field with the same semantics as beta:<br />only componentType planner accepts it, and enabled Retune requires exactly<br />one frontend selected by type in the DGD and a traceStorage PVC reference.<br />Absent or disabled Retune does not change ordinary rendering or autoscaling. |  | Optional: \{\} <br /> |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,<br />DGD admission requires it when any selected runtime image has no parseable semantic-version tag;<br />controller-generated DCDs may omit it. Untyped components and custom component types do not require it.<br />Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  | Optional: \{\} <br /> |
@@ -373,6 +374,7 @@ _Appears in:_
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  | Optional: \{\} <br /> |
 | `serviceName` _string_ | The name of the component |  | Optional: \{\} <br /> |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Optional: \{\} <br /> |
+| `retune` _[RetuneSpec](#retunespec)_ | Retune requests operator-owned trace storage and frontend admin wiring for<br />a Planner component. It is a native field with the same semantics as beta:<br />only componentType planner accepts it, and enabled Retune requires exactly<br />one frontend selected by type in the DGD and a traceStorage PVC reference.<br />Absent or disabled Retune does not change ordinary rendering or autoscaling. |  | Optional: \{\} <br /> |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,<br />DGD admission requires it when any selected runtime image has no parseable semantic-version tag;<br />controller-generated DCDs may omit it. Untyped components and custom component types do not require it.<br />Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  | Optional: \{\} <br /> |
@@ -1508,6 +1510,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `retune` _[RetuneStatus](#retunestatus)_ | Retune acknowledges the semantic target binding for a Planner.<br />This native field shares the beta schema and belongs to the resource's<br />status.observedGeneration. Omission means current wiring is unavailable. |  | Optional: \{\} <br /> |
 | `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br />Required: \{\} <br /> |
 | `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  | Required: \{\} <br /> |
 | `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
@@ -1824,6 +1827,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `retune` _[RetuneStatus](#retunestatus)_ | retune acknowledges the operator-generated semantic target binding for a<br />Planner under status.observedGeneration, not a running process revision.<br />Omission means that current target wiring has not been acknowledged. |  | Optional: \{\} <br /> |
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br />Required: \{\} <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
@@ -2023,6 +2027,7 @@ _Appears in:_
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />`topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD<br />OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
+| `retune` _[RetuneSpec](#retunespec)_ | retune requests operator-owned live Retune wiring. It is valid only for a<br />planner component; enabled Retune requires exactly one frontend component<br />selected by type in the same graph, one enabled Planner owner, and traceStorage.<br />The operator configures request-end trace recording, shared PVC mounts, and<br />a reachable frontend admin listener, and the versioned router profile. It<br />injects one semantic contract into both processes and acknowledges its hash<br />in status.components[name].retune. These bindings are operator-owned while enabled.<br />The current admin API has no authentication; restrict network access to it.<br />This setting does not enable the Planner loop, alter search parameters, or<br />enable replica scaling. Absent or disabled Retune leaves workloads unchanged. |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride overrides the Dynamo runtime compatibility version<br />inferred from podTemplate.spec.containers[name=main].image.<br />In sidecar mode, it instead overrides the version inferred from<br />podTemplate.spec.initContainers[name=runtime].image.<br />The same rules apply to roles[].podTemplate. For non-LPX components in<br />sidecar mode, main container images are not used to infer Dynamo versions,<br />including for roles without a runtime init container.<br />This field does not change container images.<br />For frontend, worker, prefill, decode, planner, and epp components, DGD<br />admission requires this field when any runtime image tag lacks a parseable<br />semantic version. Components without a type and controller-generated DCDs<br />may omit it. An override is also needed when the parsed tag differs from<br />the Dynamo runtime version.<br />The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",<br />and match the Dynamo version in every affected runtime container.<br />Setting or changing an override of 1.5.0 or later may trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate supplies the Pod configuration shared by this component's roles.<br />It is mutually exclusive with roles[].podTemplate. New components using this<br />template must include podTemplate.spec.containers[name=main] with a non-empty<br />image. Existing components without a podTemplate may retain that omission<br />on update.<br />By default, the operator merges Dynamo defaults into<br />podTemplate.spec.containers[name=main]. Declaring<br />podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode.<br />The main container runs the inference engine, and the runtime init container<br />receives Dynamo environment, identity, system port, and probe defaults.<br />The operator does not create the runtime init container. Its declaration must<br />include a non-empty image and restartPolicy: Always.<br />Sidecar mode supports worker, prefill, and decode components.<br />Multinode sidecars support backendFramework: sglang, vllm, and trtllm.<br />Multinode sidecars require complete leader and worker roles[].podTemplate<br />definitions instead of this shared template.<br />The leader must declare a runtime init container. The worker may omit it.<br />Each role's template supplies the engine command and topology arguments.<br />Declared runtime init containers still receive Dynamo defaults.<br />Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode.<br />Graph-level env applies to podTemplate.spec.containers[name=main] and any<br />declared podTemplate.spec.initContainers[name=runtime]. Compilation cache<br />and shared memory apply to the main container. Other containers require<br />their own configuration, including an image.<br />See runtimeVersionOverride for runtime image version requirements. |  | Optional: \{\} <br /> |
@@ -2058,6 +2063,7 @@ _Appears in:_
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env supplies general environment defaults for main and declared runtime<br />containers. Container-specific env overrides entries with the same name.<br />For origins using semantic environment composition, source-list order is<br />preserved and cross-layer references are topologically ordered; cycles<br />fail rendering. Graph-generated DCDs carry the DGD spec.env here so the<br />original layers remain separate until operator defaults are available.<br />Older origins retain legacy sorted composition. No default is applied.<br />For origins >= 1.8.0, admission requires unique names within this list,<br />even when the list is unchanged on update. Container overrides remain allowed. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
+| `retune` _[RetuneSpec](#retunespec)_ | retune requests operator-owned live Retune wiring. It is valid only for a<br />planner component; enabled Retune requires exactly one frontend component<br />selected by type in the same graph, one enabled Planner owner, and traceStorage.<br />The operator configures request-end trace recording, shared PVC mounts, and<br />a reachable frontend admin listener, and the versioned router profile. It<br />injects one semantic contract into both processes and acknowledges its hash<br />in status.components[name].retune. These bindings are operator-owned while enabled.<br />The current admin API has no authentication; restrict network access to it.<br />This setting does not enable the Planner loop, alter search parameters, or<br />enable replica scaling. Absent or disabled Retune leaves workloads unchanged. |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride overrides the Dynamo runtime compatibility version<br />inferred from podTemplate.spec.containers[name=main].image.<br />In sidecar mode, it instead overrides the version inferred from<br />podTemplate.spec.initContainers[name=runtime].image.<br />The same rules apply to roles[].podTemplate. For non-LPX components in<br />sidecar mode, main container images are not used to infer Dynamo versions,<br />including for roles without a runtime init container.<br />This field does not change container images.<br />For frontend, worker, prefill, decode, planner, and epp components, DGD<br />admission requires this field when any runtime image tag lacks a parseable<br />semantic version. Components without a type and controller-generated DCDs<br />may omit it. An override is also needed when the parsed tag differs from<br />the Dynamo runtime version.<br />The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",<br />and match the Dynamo version in every affected runtime container.<br />Setting or changing an override of 1.5.0 or later may trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate supplies the Pod configuration shared by this component's roles.<br />It is mutually exclusive with roles[].podTemplate. New components using this<br />template must include podTemplate.spec.containers[name=main] with a non-empty<br />image. Existing components without a podTemplate may retain that omission<br />on update.<br />By default, the operator merges Dynamo defaults into<br />podTemplate.spec.containers[name=main]. Declaring<br />podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode.<br />The main container runs the inference engine, and the runtime init container<br />receives Dynamo environment, identity, system port, and probe defaults.<br />The operator does not create the runtime init container. Its declaration must<br />include a non-empty image and restartPolicy: Always.<br />Sidecar mode supports worker, prefill, and decode components.<br />Multinode sidecars support backendFramework: sglang, vllm, and trtllm.<br />Multinode sidecars require complete leader and worker roles[].podTemplate<br />definitions instead of this shared template.<br />The leader must declare a runtime init container. The worker may omit it.<br />Each role's template supplies the engine command and topology arguments.<br />Declared runtime init containers still receive Dynamo defaults.<br />Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode.<br />Graph-level env applies to podTemplate.spec.containers[name=main] and any<br />declared podTemplate.spec.initContainers[name=runtime]. Compilation cache<br />and shared memory apply to the main container. Other containers require<br />their own configuration, including an image.<br />See runtimeVersionOverride for runtime image version requirements. |  | Optional: \{\} <br /> |
@@ -3081,6 +3087,81 @@ _Appears in:_
 | --- | --- |
 | `Sequential` |  |
 | `Parallel` |  |
+
+
+#### RetuneRouterSpec
+
+
+
+RetuneRouterSpec supplies the supported startup settings for Retune.
+
+
+
+_Appears in:_
+- [RetuneSpec](#retunespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `overlapScoreCredit` _float_ | overlapScoreCredit is the initial KV overlap credit. Defaults to 1. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `prefillLoadScale` _float_ | prefillLoadScale is the initial prefill-load weight. Defaults to 1. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `temperature` _float_ | temperature is the initial router sampling temperature. Defaults to 0. | 0 | Minimum: 0 <br />Optional: \{\} <br /> |
+
+
+#### RetuneSpec
+
+
+
+RetuneSpec requests operator-owned semantic startup configuration for one Planner.
+Search domains, intervals, scoring, and replica scaling remain Planner configuration.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | enabled configures the frontend selected by type in the same DGD and the<br />Planner with shared trace storage, a reachable frontend admin listener, and<br />a versioned KV-router profile validated against the effective runtime.<br />It does not enable replica scaling or choose an optimization strategy.<br />Omission or false leaves ordinary component rendering unchanged. Enabling,<br />disabling, or changing semantic settings changes the affected Pod templates. |  | Optional: \{\} <br /> |
+| `traceStorage` _[RetuneTraceStorageSpec](#retunetracestoragespec)_ | traceStorage references the user-provided trace PVC. Required when enabled.<br />The operator owns the mounts, trace layout, and associated environment<br />bindings. Component status acknowledges the semantic target contract's hash. |  | Optional: \{\} <br /> |
+| `router` _[RetuneRouterSpec](#retunerouterspec)_ | router supplies startup values for the versioned kv-v1 Retune profile.<br />These are initial serving values, not Planner search domains. The profile<br />pins the remaining replay-relevant router settings. Conflicting explicit<br />frontend settings fail runtime validation instead of being silently replaced.<br />Omission uses overlapScoreCredit 1, prefillLoadScale 1, and temperature 0. |  | Optional: \{\} <br /> |
+
+
+#### RetuneStatus
+
+
+
+RetuneStatus acknowledges synchronized semantic target configuration for a Planner.
+It is associated with the resource's status.observedGeneration and does not
+assert runtime readiness or the effective configuration of running processes.
+
+
+
+_Appears in:_
+- [ComponentReplicaStatus](#componentreplicastatus)
+- [ServiceReplicaStatus](#servicereplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `configHash` _string_ | configHash is the opaque binding of the operator-generated launch contract.<br />Publication acknowledges that the frontend and Planner target lowerings<br />have been applied, independently of readiness or optional role projections.<br />The Planner must also match its immutable launch binding and obtain a<br />compatible frontend runtime acknowledgment before starting tuning windows. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### RetuneTraceStorageSpec
+
+
+
+RetuneTraceStorageSpec references storage shared by the frontend and Planner.
+
+
+
+_Appears in:_
+- [RetuneSpec](#retunespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `claimName` _string_ | claimName is an existing writable ReadWriteMany PVC in the DGD namespace.<br />The operator does not create the claim or wait for it during admission. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### RollingUpdatePhase

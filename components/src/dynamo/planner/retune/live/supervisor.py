@@ -98,7 +98,9 @@ from dynamo.planner.retune.live.contracts import (
     KubeError,
     KubeNotFound,
     NullMetrics,
+    PodInstance,
     PremiseReport,
+    RetuneCapability,
     RetuneKube,
     RetuneMetricsSink,
     SweepRegistry,
@@ -117,7 +119,6 @@ from dynamo.planner.retune.live.state import (
     deploy,
     deployed_off,
     has_decision,
-    maps_equal,
     merge_initials,
     record_decision,
     reset,
@@ -156,7 +157,8 @@ async def _to_thread(call: Callable[[], Any]) -> Any:
 class SpecEvaluation:
     """One evaluation of the DGD spec (frontend parse and spec premises).
 
-    ``inputs`` is the live ``RetuneInputs``, ``None`` iff P4 fails.
+    ``inputs`` is the live ``RetuneInputs``, ``None`` when P4 or the
+    operator-published/process-bound capability is unavailable.
     ``spec_replicas`` maps worker type to the DGD spec replicas (``None``
     when the workers cannot be resolved). ``dgd`` carries the DGD's current
     uid and the routers' dynamo namespace.
@@ -168,6 +170,7 @@ class SpecEvaluation:
     spec_replicas: Optional[dict[str, int]]
     dgd: DgdRef
     generation: Optional[int] = None
+    capability: Optional[RetuneCapability] = None
 
 
 # DGD object -> evaluation; may raise (the round is then skipped).
@@ -196,6 +199,7 @@ class ActuatorLike(Protocol):
         *,
         initials: Mapping[str, Mapping[str, float]],
         expected_frontends: int,
+        router_hosts: Optional[Mapping[str, Sequence[PodInstance]]] = None,
     ) -> ActuationReport:
         ...
 
@@ -204,7 +208,9 @@ class ActuatorLike(Protocol):
 
 
 # (DgdRef, startup maps per worker type) -> actuator
-ActuatorFactory = Callable[[DgdRef, dict[str, dict[str, float]]], ActuatorLike]
+ActuatorFactory = Callable[
+    [DgdRef, dict[str, dict[str, float]], Optional[RetuneCapability]], ActuatorLike
+]
 SweepRunner = Callable[..., SweepResult]
 
 
@@ -599,7 +605,7 @@ class LiveRetuneSupervisor:
         identity: str,
         premise_evaluator: PremiseEvaluator,
         actuator_factory: ActuatorFactory,
-        fingerprint_fn: Callable[[Optional[FrontendStartup]], str],
+        fingerprint_fn: Callable[[SpecEvaluation], str],
         resolver_factory: Optional[ResolverFactory] = None,
         reconciler: Optional[Any] = None,
         metrics: Optional[RetuneMetricsSink] = None,
@@ -653,10 +659,13 @@ class LiveRetuneSupervisor:
         self._evaluation = evaluation
         self._p14_ok: Optional[bool] = None
         self._spec_ok = bool(evaluation.report.spec_ok)
-        self._fingerprint = fingerprint_fn(evaluation.startup)
+        self._fingerprint = fingerprint_fn(evaluation)
         self._resolver = self._make_resolver(evaluation.startup)
+        self._actuator_capability = evaluation.capability
         self._actuator = actuator_factory(
-            evaluation.dgd, self._actuator_maps(evaluation.startup)
+            evaluation.dgd,
+            self._actuator_maps(evaluation.startup),
+            evaluation.capability,
         )
         self._log_report(evaluation.report)
 
@@ -797,6 +806,8 @@ class LiveRetuneSupervisor:
         """The launch conditions that fail now; ``ready()`` when none."""
 
         reasons: list[str] = []
+        if self._capability_pending():
+            reasons.append("previous Retune binding is still rolling back")
         if not self._spec_ok:
             spec = list(self._evaluation.report.reasons) or ["P14 parity"]
             reasons.append("spec: " + "; ".join(spec))
@@ -1147,6 +1158,8 @@ class LiveRetuneSupervisor:
         reasons = []
         if startup_changed:
             reasons.append("startup changed")
+        if old.capability != evaluation.capability:
+            reasons.append("Retune capability changed")
         if spec_ok != self._spec_ok:
             reasons.append(f"spec_ok {self._spec_ok} -> {spec_ok}")
         if bool(old.report.p4_ok) != bool(evaluation.report.p4_ok):
@@ -1247,11 +1260,35 @@ class LiveRetuneSupervisor:
             snapshot = await self._read_own_snapshot()
             if snapshot is None:
                 return False
-            # Claim: only leader_term, conditional on the resourceVersion.
+            # Claim the term and its authoritative cleanup binding together,
+            # conditional on the resourceVersion.
             for attempt in range(_CLAIM_ATTEMPTS):
                 if not current():
                     return False
+                if (
+                    snapshot.state is not None
+                    and snapshot.state.capability is None
+                    and deployed_off(snapshot.state, None)
+                ):
+                    # Target publication (or this Pod's launch binding) cannot
+                    # identify the endpoints an older Planner previously tuned.
+                    logger.warning(
+                        "retune: legacy state has no checkpointed binding and may own deployed policies; "
+                        "finish rollback with the previous Planner before upgrading; state is retained"
+                    )
+                    return False
                 claimed = claim(snapshot.state, dgd_uid=self._dgd.uid, term=term)
+                # Remember only operator-published wiring under the owned state
+                # Lease. It remains usable for rollback after opt-out or restart.
+                desired = self._evaluation.capability
+                binding_transition = (
+                    claimed.capability is not None
+                    and desired is not None
+                    and claimed.capability != desired
+                    and deployed_off(claimed, None)
+                )
+                if desired is not None and not binding_transition:
+                    claimed = dataclasses.replace(claimed, capability=desired)
                 try:
                     snapshot = await self._io(self._store.write, claimed, snapshot)
                     break
@@ -1268,14 +1305,18 @@ class LiveRetuneSupervisor:
                 self._metrics.failure("state_write")
                 return False
             assert snapshot.state is not None
+            if self._actuator_capability != snapshot.state.capability:
+                await self._swap_actuator(
+                    self._evaluation, capability=snapshot.state.capability
+                )
             now_s = self._clock()
             plan = plan_initialization(
                 snapshot.state,
-                spec_ok=self._spec_ok,
+                spec_ok=self._spec_ok and not binding_transition,
                 advisory=settings.advisory or settings.decommission,
                 fingerprint=self._fingerprint,
                 startup_flat=self._startup_flat(),
-                startup_by_wt=self._startup_by_wt(),
+                startup_by_wt=None if binding_transition else self._startup_by_wt(),
                 router_keys=self._router_keys(),
                 promote=settings.promote_last_advisory,
                 now_ms=int(round(now_s * 1000.0)),
@@ -1696,6 +1737,7 @@ class LiveRetuneSupervisor:
             target,
             initials=state.initials,
             expected_frontends=max(1, startup.replicas if startup is not None else 1),
+            router_hosts=state.router_hosts,
         )
         if epoch != self._epoch:
             return None
@@ -1707,7 +1749,11 @@ class LiveRetuneSupervisor:
             else:
                 logger.warning("retune: P12 fails: %s", self._p12_detail())
             self._p12_logged = p12
-        if startup is not None and report.parity_ok is not None:
+        if (
+            startup is not None
+            and report.parity_ok is not None
+            and self._actuator_capability == self._evaluation.capability
+        ):
             if report.parity_ok != self._p14_ok:
                 logger.info(
                     "retune: P14 parity %s -> %s", self._p14_ok, report.parity_ok
@@ -1718,21 +1764,28 @@ class LiveRetuneSupervisor:
     async def _persist_initials(
         self, report: ActuationReport
     ) -> Optional[WriteOutcome]:
-        """Merge the newly latched initials into the state and drop those of
-        routers that are gone; ``None`` when nothing changes."""
+        """Checkpoint initials and process ownership before policy changes.
+
+        Keep retired ownership through rollback's convergence interval so a
+        restart or the next round can still prove those processes vanished.
+        """
 
         state = self.state
         if state is None:
             return None
-        merged = merge_initials(state, report.new_initials, keep=report.seen_router_ids)
-        if maps_equal(merged.initials, state.initials):
+        keep = None if state.rollback_pending else frozenset(report.seen_router_ids)
+        merged = merge_initials(
+            state, report.new_initials, keep=keep, router_hosts=report.router_hosts
+        )
+        if merged == state:
             return None
         latched = dict(report.new_initials)
-        keep = frozenset(report.seen_router_ids)
 
         def mutate(current: RetuneState) -> Union[RetuneState, None, object]:
-            new = merge_initials(current, latched, keep=keep)
-            return _ALREADY if maps_equal(new.initials, current.initials) else new
+            new = merge_initials(
+                current, latched, keep=keep, router_hosts=report.router_hosts
+            )
+            return _ALREADY if new == current else new
 
         outcome = await self._write_state(mutate, "initials")
         if outcome == "lost_term":
@@ -1768,12 +1821,24 @@ class LiveRetuneSupervisor:
         }
 
         def mutate(current: RetuneState) -> Union[RetuneState, None, object]:
-            return rollback_complete(current, expected_deploy_seq=expected, entry=entry)
+            completed = rollback_complete(
+                current, expected_deploy_seq=expected, entry=entry
+            )
+            if completed is not None and self._evaluation.capability is not None:
+                completed = dataclasses.replace(
+                    completed, capability=self._evaluation.capability
+                )
+            return completed
 
         outcome = await self._write_state(mutate, "rollback complete")
         self._rollback_since = None
         if outcome == "ok":
             logger.info("retune: rollback complete (deploy_seq %d)", expected)
+            if (
+                self._actuator_capability != self._evaluation.capability
+                and self._evaluation.capability is not None
+            ):
+                self._request_reinit("previous Retune binding rolled back")
         elif outcome == "lost_term":
             self._request_reinit("the state's leader_term is not ours")
 
@@ -1826,7 +1891,12 @@ class LiveRetuneSupervisor:
     def _start_reconcile(self, epoch: int) -> None:
         """Start one reconciler round in its own task, unless one still runs."""
 
-        if self._reconciler is None or not self._reconcile_allowed(epoch):
+        if (
+            self._reconciler is None
+            or self._evaluation.capability is None
+            or self._capability_pending()
+            or not self._reconcile_allowed(epoch)
+        ):
             return
         if self.reconcile_running():
             logger.debug("retune reconciler: the previous round is still running")
@@ -1974,7 +2044,11 @@ class LiveRetuneSupervisor:
             self._p14_ok = None
         self._evaluation = evaluation
         self._spec_ok = bool(evaluation.report.spec_ok) and self._p14_ok is not False
-        self._fingerprint = self._fingerprint_fn(evaluation.startup)
+        self._fingerprint = self._fingerprint_fn(evaluation)
+        capability_changed = old.capability != evaluation.capability
+        if capability_changed:
+            self._canary_ok = None
+            self._canary_at = None
         if startup_changed:
             self._resolver = self._make_resolver(evaluation.startup)
         if old.dgd != evaluation.dgd:
@@ -2007,13 +2081,30 @@ class LiveRetuneSupervisor:
                 "retune: moving the reconciler to DGD uid %s failed", dgd.uid
             )
 
-    async def _swap_actuator(self, evaluation: SpecEvaluation) -> None:
+    def _capability_pending(self) -> bool:
+        state = self.state
+        desired = self._evaluation.capability
+        return state is not None and desired is not None and state.capability != desired
+
+    async def _swap_actuator(
+        self,
+        evaluation: SpecEvaluation,
+        *,
+        capability: Optional[RetuneCapability] = None,
+    ) -> None:
         """A new actuator for a new DGD identity or dynamo namespace."""
 
+        if capability is None:
+            capability = evaluation.capability or (
+                self._actuator_capability
+                if self._dgd.uid == evaluation.dgd.uid
+                else None
+            )
         self._dgd = evaluation.dgd
+        self._actuator_capability = capability
         previous = self._actuator
         self._actuator = self._actuator_factory(
-            evaluation.dgd, self._actuator_maps(evaluation.startup)
+            evaluation.dgd, self._actuator_maps(evaluation.startup), capability
         )
         self._last_report = None
         await self._close_actuator(previous)
@@ -2080,7 +2171,11 @@ class LiveRetuneSupervisor:
         """P12 from the last actuator round (routers present, admin API on)."""
 
         report = self._last_report
-        if report is None or report.admin_api_disabled:
+        if (
+            report is None
+            or report.admin_api_disabled
+            or self._actuator_capability != self._evaluation.capability
+        ):
             return False
         present = report.routers_present
         return bool(report.converged if present is None else present)
@@ -2094,7 +2189,7 @@ class LiveRetuneSupervisor:
         if report.admin_api_disabled:
             return (
                 "P12: a frontend serves no /router_policy the planner can reach: "
-                "its admin listener is off, unreadable from the pod spec, or "
+                "its operator-bound admin listener is off or "
                 "answers 404 (DYN_ENABLE_FRONTEND_ADMIN_API, "
                 "DYN_FRONTEND_ADMIN_HOST, DYN_FRONTEND_ADMIN_PORT)"
             )

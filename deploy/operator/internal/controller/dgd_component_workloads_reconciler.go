@@ -126,6 +126,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	result := applyComponentCrashLoops(checkResourcesReadiness(resources), syncedDCDs)
+	result.RetuneTargetsAcknowledged = retuneDCDTargetsAcknowledged(dgd, syncedDCDs)
 	if rollingUpdateCtx.InProgress() {
 		oldWorkerStatuses, err := r.rollout.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
 		if err != nil {
