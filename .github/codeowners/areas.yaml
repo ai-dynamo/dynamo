@@ -223,6 +223,7 @@ areas:
   - components/src/dynamo/vllm/omni/
   - lib/llm/src/preprocessor/media.rs
   - lib/llm/src/preprocessor/media/
+  - lib/vendor/llm-multimodal/
   - tests/benchmarks/multimodal/
   - tests/mm_router/
 - label: diffusion
