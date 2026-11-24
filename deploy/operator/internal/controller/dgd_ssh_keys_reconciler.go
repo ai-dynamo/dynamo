@@ -68,7 +68,7 @@ func (r *dgdSSHKeysReconciler) Reconcile(
 		return nil
 	}
 
-	// Only templates that use the MPI key need a graph-owned key pair.
+	// Authored volumes can require a graph key even when the backend does not inject one.
 	needed, err := r.needsDGDSecret(dgd)
 	if err != nil {
 		return err

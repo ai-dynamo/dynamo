@@ -181,7 +181,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
 		}
-		// Repoint the rendered role using the parent graph's immutable identity.
+		// Rewrite after rendering so authored and injected volumes follow the same Secret.
 		dynamo.RepointMPISSHSecret(&template.Spec, dgd.UID, dgd.Annotations, r.config.MPI.SSHSecretName)
 		templates[role] = template
 	}
@@ -374,8 +374,8 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	}
 
 	// Standalone DCDs have no parent UID and retain the shared Secret.
-	if owner := metav1.GetControllerOf(dcd); owner != nil && owner.Kind == "DynamoGraphDeployment" && schema.FromAPIVersionAndKind(owner.APIVersion, owner.Kind).Group == nvidiacomv1beta1.GroupVersion.Group {
-		dynamo.RepointMPISSHSecret(&template.Spec, owner.UID, dynamo.GetPodTemplateAnnotations(component), r.config.MPI.SSHSecretName)
+	if uid, managed := managedDGDUIDForDCD(dcd); managed {
+		dynamo.RepointMPISSHSecret(&template.Spec, uid, dynamo.GetPodTemplateAnnotations(component), r.config.MPI.SSHSecretName)
 	}
 	return template, nil
 }
