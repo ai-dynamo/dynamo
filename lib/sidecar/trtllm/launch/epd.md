@@ -119,6 +119,9 @@ allowing text requests to use conditional prefill bypass.
 - Separate D: `disable_mm_encoder: true`, the same native KV transfer backend,
   and a sidecar with `--disaggregation-mode decode`.
 
+Every D host must also use the pinned compatible TRT-LLM build. The decode
+sidecar does not enforce the EPD schema pin at startup.
+
 Set `TRTLLM_OPENENGINE_ENCODER_TRANSFER=nixl` and
 `TRTLLM_OPENENGINE_ENCODER_MODEL_REVISION` to the immutable revision on E and its
 consumers. Encoder control and native transfer endpoints must be reachable across

@@ -533,11 +533,11 @@ async fn cancelled_terminal_releases_unobserved_reference() {
 }
 
 #[tokio::test]
-async fn invalid_encode_response_releases_only_bounded_references() {
-    for (request_id, bytes, expected_release) in [
-        ("wrong-request", 3, true),
-        ("", 64 * 1024 + 1, false),
-        ("", 128 * 1024 + 1, false),
+async fn invalid_encode_response_does_not_release_untrusted_references() {
+    for (request_id, bytes) in [
+        ("wrong-request", 3),
+        ("", 64 * 1024 + 1),
+        ("", 128 * 1024 + 1),
     ] {
         let (mut fixture, _) = fixture(DisaggregationMode::Encode).await;
         let context = mock_context();
@@ -563,7 +563,7 @@ async fn invalid_encode_response_releases_only_bounded_references() {
             .unwrap()
             .unwrap_err();
         assert!(
-            error.to_string().contains(if expected_release {
+            error.to_string().contains(if !request_id.is_empty() {
                 "request_id"
             } else if bytes > 128 * 1024 {
                 "Encode"
@@ -573,27 +573,12 @@ async fn invalid_encode_response_releases_only_bounded_references() {
             "{error}"
         );
         drop(stream);
-        if expected_release {
-            bounded(
-                "invalid Encode reference release",
-                release.wait(Event::Dropped),
-            )
-            .await;
-            assert_eq!(
-                release
-                    .native_request()
-                    .unwrap()
-                    .native
-                    .encoded_media
-                    .unwrap()
-                    .opaque_state,
-                vec![1; bytes]
-            );
-        }
-        assert_eq!(
-            fixture.encoder.release.received_count(),
-            usize::from(expected_release)
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), release.wait(Event::Received))
+                .await
+                .is_err()
         );
+        assert_eq!(fixture.encoder.release.received_count(), 0);
         encoder.cleanup().await.unwrap();
         fixture.shutdown().await;
     }
@@ -655,7 +640,6 @@ async fn probe_releases_reference_before_success_without_changing_normal_encode(
     assert_eq!(output.finish_reason, Some(FinishReason::Cancelled));
     assert!(output.encoder_result.is_none());
     assert_eq!(fixture.encoder.encode.received_count(), 3);
-    assert_eq!(fixture.encoder.aborts.lock().unwrap().len(), 0);
     encoder.cleanup().await.unwrap();
     fixture.shutdown().await;
 }
@@ -852,30 +836,52 @@ async fn encoder_follower_cannot_start_direct_inference() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consumer_follower_accepts_route_flag_and_cancels_initial_reconnect() {
+async fn consumer_follower_validates_identity_and_cancels_initial_reconnect() {
     bounded("follower reconnect shutdown", async {
         let env = Environment::new().await;
-        let (mut fixture, _) = fixture(DisaggregationMode::Aggregated).await;
-        let mut info = node_info(false);
-        info.engine_role = pb::EngineRole::Aggregated as i32;
-        *fixture.discovery.server_info.lock().unwrap() = Some(info);
-        fixture
-            .discovery
-            .server_info_hold_after
-            .store(1, Ordering::SeqCst);
-        let mut process = env.spawn_with_args::<Fixture>(
-            &fixture.endpoint(),
-            DisaggregationMode::Aggregated,
-            60,
-            &["--route-to-encoder"],
-        );
-        while fixture.discovery.server_info_blocked.load(Ordering::SeqCst) == 0 {
-            assert!(process.is_running(), "{}", process.logs());
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        for invalid in [Some("role"), Some("schema"), None] {
+            let (mut fixture, _) = fixture(DisaggregationMode::Aggregated).await;
+            let mut info = node_info(false);
+            if invalid != Some("role") {
+                info.engine_role = pb::EngineRole::Aggregated as i32;
+            }
+            if invalid == Some("schema") {
+                info.schema_release = "old".into();
+            }
+            *fixture.discovery.server_info.lock().unwrap() = Some(info);
+            if invalid.is_none() {
+                fixture
+                    .discovery
+                    .server_info_hold_after
+                    .store(1, Ordering::SeqCst);
+            }
+            let mut process = env.spawn_with_args::<Fixture>(
+                &fixture.endpoint(),
+                DisaggregationMode::Aggregated,
+                60,
+                &["--route-to-encoder"],
+            );
+            if let Some(invalid) = invalid {
+                assert!(!process.exit().await.success(), "{}", process.logs());
+                assert!(
+                    process.logs().contains(if invalid == "role" {
+                        "sidecar role"
+                    } else {
+                        "schema release"
+                    }),
+                    "{}",
+                    process.logs()
+                );
+            } else {
+                while fixture.discovery.server_info_blocked.load(Ordering::SeqCst) == 0 {
+                    assert!(process.is_running(), "{}", process.logs());
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                process.shutdown().await;
+            }
+            assert!(env.cards().await.is_empty());
+            fixture.shutdown().await;
         }
-        assert!(env.cards().await.is_empty());
-        process.shutdown().await;
-        fixture.shutdown().await;
     })
     .await;
 }

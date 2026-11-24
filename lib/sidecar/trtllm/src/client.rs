@@ -421,7 +421,7 @@ impl TrtllmClient {
             .encode(request)
             .await
             .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("Encode", status))
+            .map_err(|status| stream_status_to_dynamo("Encode", status))
     }
 
     pub(crate) async fn release_encoder_handoff(
@@ -444,15 +444,15 @@ impl TrtllmClient {
                 Ok(_) => return Ok(()),
                 Err(status)
                     if attempt < 2
-                        && matches!(
+                        && (matches!(
                             status.code(),
                             tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
-                        ) =>
+                        ) || dynamo_sidecar_common::is_broken_stream(&status)) =>
                 {
                     attempt += 1;
                     sleep_until((Instant::now() + ENCODER_RELEASE_RETRY_DELAY).min(deadline)).await;
                 }
-                Err(status) => return Err(status_to_dynamo("ReleaseEncodedMedia", status)),
+                Err(status) => return Err(stream_status_to_dynamo("ReleaseEncodedMedia", status)),
             }
         }
     }

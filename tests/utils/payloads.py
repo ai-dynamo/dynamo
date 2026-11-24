@@ -575,13 +575,12 @@ class EncoderImagePayload(ChatPayload):
             0,
         ):
             raise ValueError(f"Expected uncached image request: {usage!r}")
+        if result["choices"][0].get("finish_reason") != "stop":
+            raise ValueError(f"Unexpected EPD finish reason: {result['choices'][0]!r}")
         observation = {
             "request": {k: v for k, v in self.body.items() if k != "model"},
             "color": self.color,
-            "usage": {
-                name: usage[name]
-                for name in ("prompt_tokens", "completion_tokens", "total_tokens")
-            },
+            "usage": {"prompt_tokens": usage["prompt_tokens"]},
         }
         if not self.is_baseline:
             if observation != json.loads(baseline_path.read_text()):
@@ -615,8 +614,7 @@ class EncoderImagePayload(ChatPayload):
         answer = choice["message"].get("content")
         if (
             not isinstance(answer, str)
-            or set(re.findall(r"\b(red|green)\b", answer.lower())) != {self.color}
-            or choice.get("finish_reason") != "stop"
+            or answer.strip().rstrip(".").lower() != self.color
         ):
             raise AssertionError(choice)
 

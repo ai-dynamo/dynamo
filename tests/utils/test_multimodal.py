@@ -195,7 +195,7 @@ def test_sidecar_usage_and_cache_failures_are_not_content_retries(
         assert len(payload._observed) == (3 if invalid == "probe_worker" else 1)
 
 
-@pytest.mark.parametrize("invalid", ["usage", "stages", "worker"])
+@pytest.mark.parametrize("invalid", ["usage", "stages", "worker", "finish"])
 def test_epd_empty_caption_does_not_hide_invalid_execution(
     tmp_path, monkeypatch, invalid
 ) -> None:
@@ -215,14 +215,17 @@ def test_epd_empty_caption_does_not_hide_invalid_execution(
     }
     if invalid == "usage":
         response.json.return_value["usage"]["total_tokens"] = 1
+    elif invalid == "finish":
+        response.json.return_value["choices"][0]["finish_reason"] = None
     with pytest.raises(EngineResponseError) as failure:
         process.check_response(payload, response)
     assert not isinstance(failure.value, ResponseValidationError)
-    assert metrics.call_count == (1 if invalid == "usage" else 2)
+    assert metrics.call_count == (1 if invalid in ("usage", "finish") else 2)
 
 
-def test_epd_empty_caption_checks_stages_once_and_preserves_baseline(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("answer", ["", "blue, not green"])
+def test_epd_content_retry_checks_stages_once_and_preserves_baseline(
+    tmp_path, monkeypatch, answer
 ) -> None:
     payload = make_encoder_image_payloads(split=True)[0]
     payload.baseline_path = tmp_path / "baseline.json"
@@ -236,7 +239,8 @@ def test_epd_empty_caption_checks_stages_once_and_preserves_baseline(
     original = payload.baseline_path.read_bytes()
     metrics = Mock(side_effect=[(0, 0, 0), (1, 1, 1), (1, 1, 1), (2, 2, 2)])
     monkeypatch.setattr(payload, "_stage_counts", metrics)
-    response = _sidecar_image_response("", 0, 0.0)
+    response = _sidecar_image_response(answer, 0, 0.0)
+    response.json.return_value["usage"].update(completion_tokens=2, total_tokens=258)
     response.json.return_value["nvext"]["worker_id"] = {
         "prefill_worker_id": 1,
         "decode_worker_id": 2,
@@ -246,7 +250,8 @@ def test_epd_empty_caption_checks_stages_once_and_preserves_baseline(
         process.check_response(payload, response)
     assert metrics.call_count == 2
     payload.before_request()
-    response.json.return_value["choices"][0]["message"]["content"] = "green"
+    response.json.return_value["choices"][0]["message"]["content"] = "Green."
+    response.json.return_value["usage"].update(completion_tokens=3, total_tokens=259)
     process.check_response(payload, response)
     assert metrics.call_count == 4
     assert payload.baseline_path.read_bytes() == original

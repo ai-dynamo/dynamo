@@ -121,8 +121,16 @@ impl TrtllmSidecarEngine {
                 };
                 let response = match encoded {
                     Ok(response) => response,
+                    Err(_) if ctx.is_stopped() || shutdown.is_cancelled() => {
+                        yield Ok(LLMEngineOutput::cancelled());
+                        return;
+                    }
                     Err(error) => { yield Err(error); return; }
                 };
+                if response.request_id != request_id {
+                    yield Err(client::protocol_error("Encode returned a different request_id"));
+                    return;
+                }
                 let Some(handoff) = response.encoded_media else {
                     yield Err(client::protocol_error("Encode returned no encoded_media reference"));
                     return;
@@ -136,10 +144,6 @@ impl TrtllmSidecarEngine {
                     handoff: Some(handoff),
                     context: None,
                 };
-                if response.request_id != request_id {
-                    yield Err(client::protocol_error("Encode returned a different request_id"));
-                    return;
-                }
                 if ctx.is_stopped() || shutdown.is_cancelled() {
                     yield Ok(LLMEngineOutput::cancelled());
                     return;

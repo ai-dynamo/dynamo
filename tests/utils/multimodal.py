@@ -492,7 +492,7 @@ def make_encoder_image_payloads(*, split: bool) -> list[EncoderImagePayload]:
                 split=split,
                 expected_response=payload.expected_response,
                 expected_log=payload.expected_log,
-                # Content-only retry: https://github.com/ai-dynamo/dynamo/pull/19290
+                # Content-only retry: https://github.com/ai-dynamo/dynamo/issues/19445
                 max_attempts=3,
             )
         )

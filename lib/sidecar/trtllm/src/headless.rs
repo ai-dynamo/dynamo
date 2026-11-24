@@ -41,6 +41,16 @@ pub(crate) async fn relay(
             .await?
             .context("Follower metadata disappeared")?;
         ensure!(
+            (info.engine_role == pb::EngineRole::Encoder as i32) == is_encoder,
+            "sidecar role does not match native encoder role"
+        );
+        if is_encoder || args.sidecar.common.route_to_encoder {
+            ensure!(
+                info.schema_release == include_str!("../proto/REVISION").trim(),
+                "encoder routing requires the pinned OpenEngine schema release"
+            );
+        }
+        ensure!(
             NodeMetadata::from_info(Some(&info))?.as_ref() == Some(&node),
             "Engine incarnation changed during startup"
         );
@@ -58,7 +68,8 @@ pub(crate) async fn relay(
             .parallelism
             .as_ref()
             .and_then(|p| p.data_parallel_size)
-            .unwrap_or(1);
+            .unwrap_or(1)
+            .max(1);
         if !is_encoder {
             node.select_local_sources(&mut sources)?;
             sources.sort_by_key(|source| source.data_parallel_rank);
