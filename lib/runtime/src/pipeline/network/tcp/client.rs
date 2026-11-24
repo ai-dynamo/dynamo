@@ -1402,7 +1402,7 @@ mod tests {
     /// that parks indefinitely waiting for application bytes (so without the
     /// abort, `tokio::join!` on the previous implementation would never wake).
     /// Expect: `wait_for_connection_tasks` returns Err within the timeout.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_connection_monitor_aborts_writer_when_reader_panics() {
         // Reader task that panics immediately. The explicit JoinHandle type
         // pins the inferred return type to the one wait_for_connection_tasks
@@ -1425,8 +1425,9 @@ mod tests {
         let controller = Arc::new(Controller::default());
         let context: Arc<dyn AsyncEngineContext> = controller.clone();
 
-        // 250 ms is generous — the abort + JoinHandle resolution should fire
-        // sub-millisecond. We are checking for "doesn't hang", not "fast".
+        // The clock is paused, so this deadline only passes once no task can
+        // make progress, which is the hang we guard against. Time the thread
+        // spends off-CPU on a loaded runner does not count toward it.
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(250),
             wait_for_connection_tasks(
