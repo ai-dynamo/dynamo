@@ -3,6 +3,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -85,3 +86,48 @@ sleep 0.3
         assert "Need 4 visible GPUs" in result.stderr
     launches = [file.read_text().strip() for file in sorted(tmp_path.glob("[0-9]*"))]
     assert launches == [f"{group} {len(group.split(','))}" for group in groups]
+
+
+@pytest.mark.parametrize("existing_key", [False, True])
+def test_epd_workers_share_handoff_key(tmp_path, existing_key):
+    # Each E/P/D process observes the file while the launcher's children are live.
+    recorder = tmp_path / "record"
+    recorder.write_text(
+        f"#!{sys.executable}\n"
+        """import os, sys
+from pathlib import Path
+if "sglang.launch_server" in sys.argv:
+    key = Path(os.environ["SGLANG_ENCODER_HANDOFF_KEY_FILE"])
+    assert len(key.read_bytes()) == 32
+    port = sys.argv[sys.argv.index("--nccl-port") + 1]
+    (Path(os.environ["RECORDS"]) / port).write_text(str(key))
+"""
+    )
+    recorder.chmod(0o755)
+    env = {
+        "PATH": os.environ["PATH"],
+        "RECORDS": str(tmp_path),
+        "DYNAMO_PYTHON": str(recorder),
+        "SGLANG_PYTHON": str(recorder),
+        "DYNAMO_SIDECAR_BIN": str(recorder),
+        "DYN_LAUNCH_WAIT_ALL": "1",
+    }
+    supplied = tmp_path / "existing.key"
+    if existing_key:
+        supplied.write_bytes(os.urandom(32))
+        env["SGLANG_ENCODER_HANDOFF_KEY_FILE"] = str(supplied)
+    subprocess.run(
+        [str(LAUNCHER), "--split-pd", "--single-gpu"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        start_new_session=True,
+        timeout=20,
+    )
+    paths = [Path(result.read_text()) for result in tmp_path.glob("[0-9]*")]
+    assert len(paths) == 3 and len(set(paths)) == 1
+    if existing_key:
+        assert paths[0] == supplied and supplied.is_file()
+    else:
+        assert not paths[0].exists()

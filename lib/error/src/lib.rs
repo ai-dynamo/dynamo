@@ -1154,6 +1154,17 @@ impl DynamoErrorBuilder {
         self
     }
 
+    /// Attach a process-local cause for callers that need to distinguish where
+    /// an operation failed. The wire retains the outer semantic error.
+    pub fn local_cause(mut self, cause: impl std::error::Error + Send + Sync + 'static) -> Self {
+        let diagnostic = self
+            .diagnostic
+            .take()
+            .unwrap_or_else(|| Diagnostic::new(cause.to_string()));
+        self.diagnostic = Some(diagnostic.with_source(cause));
+        self
+    }
+
     /// Build the `DynamoError` and fail closed on a class/reason mismatch.
     pub fn build(self) -> DynamoError {
         let raw_class = self.class.unwrap_or(ErrorClass::Internal);

@@ -3,8 +3,8 @@
 
 """CPU smoke with real Dynamo frontend, sidecars and SGLang Stage/Deliver leases.
 
-Supply the patched SGLang Python package on PYTHONPATH. The driver needs
-grpcio-tools and pyzmq. --model is a local Qwen-VL or Qwen-Omni tokenizer/config directory.
+Run the driver in the patched SGLang runtime with grpcio-tools and pyzmq installed.
+--model is a local Qwen-VL or Qwen-Omni tokenizer/config directory.
 The fixture replaces model computation with identifiable byte strings. No GPU
 or KV data is accessed. --split verifies P/D bootstrap and the metadata-only D.
 --native-generate also exercises the patched frontend's public /generate route
@@ -18,6 +18,7 @@ import hashlib
 import importlib
 import json
 import os
+import secrets
 import socket
 import struct
 import subprocess
@@ -38,7 +39,12 @@ import zmq
 import zmq.asyncio
 from sglang.encoder.v1 import encoder_pb2, encoder_pb2_grpc
 from sglang.srt.disaggregation.encoder.handoff import EncoderHandoff
-from sglang.srt.disaggregation.encoder.staged import StagedImageService
+from sglang.srt.disaggregation.encoder.handoff_auth import (
+    EncoderHandoffSigner,
+    handoff_key_id,
+    verify_handoff,
+)
+from sglang.test.staged_encoder import StagedEncoderFixture
 
 try:
     from aiohttp import web
@@ -78,7 +84,7 @@ AUDIOS = ["data:audio/wav;base64,AA==", "data:audio/mpeg;base64,AQ=="]
 AUDIO_MODEL_TYPE = "qwen3_omni_moe"
 
 
-class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
+class Encoder(StagedEncoderFixture):
     def __init__(self, model, sockets):
         self.sockets = sockets
         self.parts = {}
@@ -89,22 +95,26 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
         self.stage_failure = None
         self.stage_calls = 0
         super().__init__(
-            encode=self.encode,
-            describe=lambda part: encoder_pb2.DescribeResponse(
-                shape=[len(self.parts[part]), 16], dtype="bfloat16"
-            ),
-            send=self.send,
-            release=self.release,
-            make_part_id=lambda key, i: f"{key}_local_part_{i}",
-            info=encoder_pb2.GetEncoderInfoResponse(
+            encoder_pb2.GetEncoderInfoResponse(
                 model_path=model,
                 served_model_name="vision",
                 supports_staged_video=True,
                 staged_audio_model_type=AUDIO_MODEL_TYPE,
             ),
+            backend="zmq_to_scheduler",
             capacity=4,
             ttl=30,
             stage_timeout=5,
+        )
+
+    def bind_signer(self, port, key):
+        self._handoff_signer = EncoderHandoffSigner(f"grpc://127.0.0.1:{port}", key)
+        self._info.handoff_key_id = self._handoff_signer.key_id
+        self._info.handoff_peer = self._handoff_signer.peer
+
+    def _describe_part(self, part):
+        return encoder_pb2.DescribeResponse(
+            shape=[len(self.parts[part]), 16], dtype="bfloat16"
         )
 
     async def Stage(self, request, context):
@@ -116,7 +126,7 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
             await context.abort(self.stage_failure, "private injected Stage error")
         return await super().Stage(request, context)
 
-    async def encode(self, part, images, videos, audios):
+    async def _stage_media(self, part, images, videos, audios):
         assert images == IMAGES[: len(images)]
         assert videos == VIDEOS[: len(videos)]
         assert audios == AUDIOS[: len(audios)]
@@ -145,7 +155,8 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
                     h=2,
                     w=2,
                     identities=[digest(video).hex()],
-                    second_per_grid_ts=0.5,
+                    # This 29.97-fps interval needs a correctly rounded JSON parser.
+                    second_per_grid_ts=27 / 29.97,
                     embedding_rows=int(bool(audios)),
                 )
                 for video in videos
@@ -161,13 +172,15 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
             ],
         )
 
-    async def send(self, part, url):
+    async def send(self, state, destination):
+        part, url = state.req_id, destination.endpoint
         self.sends.append((part, url))
         with self.sockets.socket(zmq.PUSH) as sock:
             sock.connect("tcp://" + url)
             await sock.send_multipart([part.encode(), *self.parts[part]])
 
-    async def release(self, part):
+    async def release(self, state):
+        part = state.req_id
         self.parts.pop(part, None)
         self.releases.append(part)
 
@@ -221,6 +234,7 @@ async def run(args, tmp, stack):
     sockets = zmq.asyncio.Context()
     stack.callback(sockets.destroy, 0)
     requests = []
+    handoff_key = secrets.token_bytes(32)
 
     class Language(service_pb2_grpc.SglangServiceServicer):
         def __init__(self, role):
@@ -244,6 +258,7 @@ async def run(args, tmp, stack):
                 incremental_streaming_output=True,
                 disaggregation_mode=self.role,
                 accepts_encoder_handoff=True,
+                encoder_handoff_key_id=handoff_key_id(handoff_key),
                 staged_audio_model_type=AUDIO_MODEL_TYPE,
                 supports_staged_video=True,
                 host="127.0.0.1",
@@ -279,6 +294,7 @@ async def run(args, tmp, stack):
             transfer = None
             if images or videos or audios:
                 transfer = EncoderHandoff.parse(handoff, images, videos, audios)
+                verify_handoff(transfer, handoff_key)
                 assert transfer.version == (4 if audios else 2 if videos else 1)
                 if self.role != "decode":
                     await asyncio.sleep(0.05)
@@ -424,10 +440,13 @@ async def run(args, tmp, stack):
     encoders = [Encoder(model, sockets) for _ in range(2)]
     endpoints = [EncoderEndpoint(encoder) for encoder in encoders]
     encoder_workers = []
+    encoder_ports = []
     for i, endpoint in enumerate(endpoints):
         port = await serve(
             encoder_pb2_grpc.add_SglangEncoderServicer_to_server, endpoint
         )
+        encoders[i].bind_signer(port, handoff_key)
+        encoder_ports.append(port)
         encoder_workers.append(
             await start(
                 f"encode-{i}",
@@ -707,6 +726,7 @@ async def run(args, tmp, stack):
     print("deliveries per receiver", [len(language.receives) for language in languages])
 
     replacement = Encoder(model, sockets)
+    replacement.bind_signer(encoder_ports[1], handoff_key)
     endpoints[1].serving = replacement
     before_requests = len(requests)
     try:

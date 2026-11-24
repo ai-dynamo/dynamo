@@ -824,6 +824,7 @@ where
                 "No workers available for endpoint {}",
                 self.client.endpoint.id()
             ))
+            .local_cause(PipelineError::NoRoutableWorkers)
             .build()
             .into()
     }
@@ -1865,6 +1866,7 @@ where
                     instance_id,
                     self.client.endpoint.id()
                 ))
+                .local_cause(PipelineError::NoRoutableWorkers)
                 .build()
                 .into()),
         }

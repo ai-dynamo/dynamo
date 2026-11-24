@@ -434,6 +434,7 @@ impl LLMEngine for SglangSidecarEngine {
                 video: infos.iter().all(|info| info.supports_staged_video),
                 native_model_type: node.engine.native_model_type.clone(),
                 audio_model_type: node.engine.staged_audio_model_type.clone(),
+                handoff_key_id: node.engine.encoder_handoff_key_id.clone(),
             };
             capabilities.advertise(&mut config);
             capabilities

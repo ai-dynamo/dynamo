@@ -101,6 +101,7 @@ pub(crate) struct EngineInfo {
     pub supports_staged_images: bool,
     pub supports_staged_video: bool,
     pub staged_audio_model_type: String,
+    pub encoder_handoff_key_id: String,
     pub native_model_type: String,
     /// Reported prefill bootstrap port, validated only for prefill workers.
     pub disaggregation_bootstrap_port: Option<u64>,
@@ -263,6 +264,10 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         supports_staged_images: server_info.supports_staged_images.unwrap_or(true),
         supports_staged_video: server_info.supports_staged_video,
         staged_audio_model_type: server_info.staged_audio_model_type.clone(),
+        encoder_handoff_key_id: server_info
+            .encoder_handoff_key_id
+            .clone()
+            .unwrap_or_default(),
         native_model_type: server_info.native_model_type.clone(),
         disaggregation_bootstrap_port: deployment.disaggregation_bootstrap_port.map(u64::from),
         host: Some(server_info.host.clone()).filter(|host| !host.is_empty()),

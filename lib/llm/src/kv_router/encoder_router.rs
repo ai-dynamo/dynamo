@@ -8,28 +8,121 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
-    engine::AsyncEngine,
+    engine::{AsyncEngineContext, AsyncEngineContextProvider},
     error::{DynamoError, ErrorType},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
-        async_trait,
+        Context, ManyOut, Operator, PipelineError, PushRouter, ResponseStream, RouterMode,
+        ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
 use crate::protocols::common::{
+    FinishReason,
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::{MultimodalData, TraceLink},
 };
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+
+/// Encode workers that can release an unclaimed result through their own endpoint
+/// set this flag on the terminal. A cleanup call carries the original request ID
+/// in context metadata under the same key and the opaque result in the request.
+pub const ENCODER_RELEASE: &str = "dynamo.encoder.release";
+
+struct EncoderLease {
+    router: Arc<EncodePushRouter>,
+    worker_id: u64,
+    caller: Arc<dyn AsyncEngineContext>,
+    model: String,
+    result: Option<serde_json::Value>,
+}
+
+impl EncoderLease {
+    fn release(&mut self) {
+        let Some(result) = self.result.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let model = self.model.clone();
+        let request_id = self.caller.id().to_owned();
+        let worker_id = self.worker_id;
+        let router = self.router.clone();
+        runtime.spawn(async move {
+            let release = async {
+                let request = PreprocessedRequest::builder()
+                    .model(model)
+                    .token_ids(Vec::new())
+                    .stop_conditions(Default::default())
+                    .sampling_options(Default::default())
+                    .output_options(Default::default())
+                    .encoder_result(Some(result))
+                    .build()?;
+                let mut call = Context::new(request);
+                call.insert_metadata(ENCODER_RELEASE, &request_id);
+                let mut response = router.direct(call, worker_id).await?;
+                while let Some(item) = response.next().await {
+                    if item.into_data()?.is_some_and(|out| out.finish_reason == Some(FinishReason::Stop)) {
+                        return Ok(());
+                    }
+                }
+                anyhow::bail!("encoder release ended without an acknowledgement")
+            };
+            let timeout = std::time::Duration::from_secs(2);
+            if !matches!(tokio::time::timeout(timeout, release).await, Ok(Ok(()))) {
+                tracing::debug!(%request_id, worker_id, "producer expiry will reclaim the unconfirmed encoder release");
+            }
+        });
+    }
+}
+
+impl Drop for EncoderLease {
+    fn drop(&mut self) {
+        if self.caller.is_stopped() {
+            self.release();
+        }
+    }
+}
+
+// A connection timeout or interrupted stream may leave a live consumer. Only
+// revoke on a known rejection or cancellation. Lost receipts expire at E.
+fn definitively_rejected(error: &(dyn std::error::Error + 'static)) -> bool {
+    use super::prefill_router::PrefillError;
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if matches!(
+            cause.downcast_ref::<PipelineError>(),
+            Some(PipelineError::NoRoutableWorkers)
+        ) || matches!(
+            cause.downcast_ref::<PrefillError>(),
+            Some(PrefillError::NotActivated | PrefillError::Cancelled)
+        ) || cause.downcast_ref::<DynamoError>().is_some_and(|e| {
+            // These semantic reasons survive the request-plane wire, including
+            // an admission refusal wrapped in a transport prologue error.
+            matches!(
+                e.reason().as_str(),
+                "capacity.pool_exhausted"
+                    | "capacity.worker_overloaded"
+                    | "backend.worker_unavailable"
+                    | "request.cancelled"
+                    | "backend.cancelled"
+            ) || e.class() == ErrorType::InvalidRequest
+        }) {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
 
 /// Native HTTP adapters classify staging failures with the shared semantic HTTP policy.
 #[derive(Debug, thiserror::Error)]
@@ -369,7 +462,7 @@ impl EncoderRouter {
 
     async fn consume_encode_stream(
         mut response: ManyOut<Annotated<LLMEngineOutput>>,
-    ) -> Result<(serde_json::Value, Option<TraceLink>)> {
+    ) -> Result<(serde_json::Value, Option<TraceLink>, bool)> {
         let mut terminal = None;
         while let Some(item) = response.next().await {
             let Some(output) = item
@@ -389,7 +482,17 @@ impl EncoderRouter {
             .map(|result| *result)
             .filter(serde_json::Value::is_object)
             .context("Encode worker terminal is missing an object-shaped encoder_result")?;
-        Ok((result, terminal.worker_trace_link.map(|link| *link)))
+        let releasable = terminal
+            .extra_args
+            .as_deref()
+            .and_then(|v| v.get(ENCODER_RELEASE))
+            .and_then(|v| v.as_bool())
+            == Some(true);
+        Ok((
+            result,
+            terminal.worker_trace_link.map(|link| *link),
+            releasable,
+        ))
     }
 }
 
@@ -424,23 +527,33 @@ impl
                     .message("No encoder is available for this model")
                     .build()
             })?;
-            let encode_context = Context::with_id_and_metadata(
+            let mut encode_context = Context::with_id_and_metadata(
                 request.clone(),
                 context.id().to_string(),
                 context.metadata().clone(),
             );
-            let response = binding.router.generate(encode_context).await?;
-            Self::consume_encode_stream(response).await
+            encode_context.metadata_mut().remove(ENCODER_RELEASE);
+            let (worker_id, response) = binding
+                .router
+                .select_and_dispatch(encode_context, |_, worker_id| Ok(worker_id))
+                .await?;
+            let (result, link, releasable) = Self::consume_encode_stream(response).await?;
+            let lease = releasable.then(|| EncoderLease {
+                router: binding.router.clone(),
+                worker_id,
+                caller: context.context(),
+                model: request.model.clone(),
+                result: Some(result.clone()),
+            });
+            anyhow::Ok((result, link, lease))
         }
         .await;
 
-        match encode_result {
-            Ok((encoder_result, worker_link)) => {
-                // Once the Encode worker has emitted a transfer handle, always hand it
-                // to the downstream worker even if the caller disconnected. The
-                // receiver owns transfer completion and buffer release.
+        let lease = match encode_result {
+            Ok((encoder_result, worker_link, lease)) => {
                 request.encoder_result = Some(encoder_result);
                 request.migration_link = worker_link;
+                lease
             }
             Err(error) if self.requires_encoder_result => {
                 return Err(error.context(RequiredEncoderStage));
@@ -452,9 +565,49 @@ impl
                     namespace = %self.namespace,
                     "Encoder hop failed; falling back to downstream inline encoding"
                 );
+                None
             }
+        };
+        if lease.is_some() && context.controller().is_stopped() {
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::cancelled(),
+                )])),
+                context.context(),
+            ));
         }
-        next.generate(context.map(|_| request)).await
+        let response = next.generate(context.map(|_| request)).await;
+        let Some(mut lease) = lease else {
+            return response;
+        };
+        let response = response.inspect_err(|error| {
+            if definitively_rejected(error.as_ref()) {
+                lease.release();
+            }
+        })?;
+        let ctx = response.context();
+        let response = response.inspect(move |item| {
+            if item
+                .error
+                .as_ref()
+                .is_some_and(|e| definitively_rejected(e))
+                || item
+                    .data
+                    .as_ref()
+                    .is_some_and(|out| out.finish_reason == Some(FinishReason::Cancelled))
+            {
+                lease.release();
+            } else if item.data.as_ref().is_some_and(|out| {
+                !out.token_ids.is_empty()
+                    || matches!(
+                        out.finish_reason,
+                        Some(FinishReason::Stop | FinishReason::Length | FinishReason::EoS)
+                    )
+            }) {
+                lease.result = None;
+            }
+        });
+        Ok(ResponseStream::new(Box::pin(response), ctx))
     }
 }
 
@@ -473,8 +626,8 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::EventTransportKind,
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-        engine::AsyncEngineContextProvider,
-        pipeline::{Error, ResponseStream, context::Controller, network::Ingress},
+        engine::AsyncEngine,
+        pipeline::{Error, context::Controller, network::Ingress},
         storage::kv,
     };
 
@@ -544,7 +697,37 @@ mod tests {
             .unwrap()
     }
 
-    struct EncodeWorker(u64, Arc<AtomicUsize>);
+    struct EncodeWorker(
+        u64,
+        Arc<AtomicUsize>,
+        tokio::sync::mpsc::UnboundedSender<(u64, String)>,
+    );
+
+    struct RouteOutcome(Option<ErrorType>);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for RouteOutcome
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            if let Some(kind) = &self.0 {
+                return Err(DynamoError::builder()
+                    .error_type(*kind)
+                    .message("route failed")
+                    .build()
+                    .into());
+            }
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::cancelled(),
+                )])),
+                request.context(),
+            ))
+        }
+    }
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -554,10 +737,25 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            if let Some(original_id) = request.metadata().get(ENCODER_RELEASE) {
+                let receipt = request.encoder_result.as_ref().unwrap();
+                assert_eq!(receipt["worker_id"], self.0);
+                assert_eq!(receipt["stage_request"], *original_id);
+                assert_ne!(request.id(), original_id);
+                assert!(request.multi_modal_data.is_none() && request.token_ids.is_empty());
+                self.2.send((self.0, original_id.clone())).unwrap();
+                return Ok(stream_of(vec![Annotated::from_data(
+                    LLMEngineOutput::stop(),
+                )]));
+            }
             self.1.fetch_add(1, Ordering::SeqCst);
-            let output = LLMEngineOutput::encode_terminal(
-                json!({"worker_id": self.0}).as_object().unwrap().clone(),
+            let mut output = LLMEngineOutput::encode_terminal(
+                json!({"worker_id": self.0, "stage_request": request.id()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
             );
+            output.extra_args = Some(Box::new(json!({(ENCODER_RELEASE): true})));
             Ok(ResponseStream::new(
                 Box::pin(stream::iter([Annotated::from_data(output)])),
                 request.context(),
@@ -625,6 +823,7 @@ mod tests {
         let mut workers = Vec::new();
         let mut runtimes = Vec::new();
         let encode_calls = Arc::new(AtomicUsize::new(0));
+        let (release_tx, mut releases) = tokio::sync::mpsc::unbounded_channel();
         for _ in 0..3 {
             let drt = DistributedRuntime::new(runtime.clone(), config())
                 .await
@@ -641,6 +840,7 @@ mod tests {
                     Ingress::for_engine(Arc::new(EncodeWorker(
                         drt.connection_id(),
                         encode_calls.clone(),
+                        release_tx.clone(),
                     )))
                     .unwrap(),
                 )
@@ -763,6 +963,50 @@ mod tests {
         })
         .await
         .expect("compatible members must become reachable through the admission channel");
+
+        // A transport timeout can leave a live consumer; a refusal and a
+        // terminal cancellation must each revoke the exact producer receipt.
+        for (kind, revoke) in [
+            (Some(ErrorType::ConnectionTimeout), false),
+            (Some(ErrorType::InvalidRequest), true),
+            (None, true),
+        ] {
+            let request = SingleIn::new(multimodal_request());
+            let id = request.id().to_owned();
+            let output = router.generate(request, Arc::new(RouteOutcome(kind))).await;
+            if let Ok(stream) = output {
+                stream.collect::<Vec<_>>().await;
+            }
+            if revoke {
+                let (worker, released_id) =
+                    tokio::time::timeout(Duration::from_secs(2), releases.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(released_id, id);
+                assert!(ids[..2].contains(&worker));
+            } else {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), releases.recv())
+                        .await
+                        .is_err()
+                );
+            }
+        }
+        let request = SingleIn::new(multimodal_request());
+        let caller = request.context();
+        let response = router
+            .generate(request, Arc::new(CaptureEngine::default()))
+            .await
+            .unwrap();
+        caller.stop();
+        drop(response);
+        let (_, released_id) = tokio::time::timeout(Duration::from_secs(2), releases.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(released_id, caller.id());
+        assert!(releases.try_recv().is_err());
 
         let retired = router.binding.load_full().unwrap();
         admissions.send_replace(Vec::new());
@@ -1008,12 +1252,31 @@ mod tests {
         assert!(downstream.request.lock().unwrap().is_some());
     }
 
+    #[test]
+    fn only_local_empty_pool_proves_no_consumer_was_dispatched() {
+        let unavailable = || {
+            DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message("no workers")
+        };
+        let local = unavailable()
+            .local_cause(PipelineError::NoRoutableWorkers)
+            .build();
+        let remote = unavailable().build();
+        assert!(definitively_rejected(&local));
+        assert!(!definitively_rejected(&remote));
+        assert_eq!(
+            serde_json::to_value(local).unwrap(),
+            serde_json::to_value(remote).unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn consumes_object_shaped_encode_terminal() {
         let output = LLMEngineOutput::encode_terminal(
             json!({"schema_version": 1}).as_object().unwrap().clone(),
         );
-        let (result, _) =
+        let (result, _, _) =
             EncoderRouter::consume_encode_stream(stream_of(vec![Annotated::from_data(output)]))
                 .await
                 .unwrap();

@@ -61,6 +61,8 @@ the 4096 context, two sequences and nixl P/D transfer defaults.
 E to P/PD uses nixl by default and requires the NIXL UCX plugin on both
 ends. Select zmq_to_scheduler with --encoder-transfer-backend or set
 SGLANG_ENCODER_TRANSFER_BACKEND. The flag takes precedence over the variable.
+This launcher generates a private temporary key for E and the language workers.
+Set SGLANG_ENCODER_HANDOFF_KEY_FILE to reuse a file containing 32 random bytes.
 HELP
             exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -113,7 +115,17 @@ if $packed; then
     if ((${#mem_args[@]} == 0)); then mem_args=(--max-total-tokens "$(( 2 * MAX_MODEL_LEN ))"); fi
 fi
 
-trap dynamo_exit_trap EXIT
+# All native workers in this local launch share a private receipt key. Multi-node
+# deployments mount the same key file on their encoder and language workers.
+generated_key=""
+if [[ -z "${SGLANG_ENCODER_HANDOFF_KEY_FILE:-}" ]]; then
+    generated_key=$(mktemp)
+    trap 'rc=$?; rm -f -- "$generated_key"; dynamo_reap_and_exit "$rc"' EXIT
+    openssl rand -out "$generated_key" 32
+    export SGLANG_ENCODER_HANDOFF_KEY_FILE="$generated_key"
+else
+    trap dynamo_exit_trap EXIT
+fi
 print_launch_banner --multimodal "SGLang native sidecars ($encoders encoders, split P/D=$split)" \
     "$model" "${DYN_HTTP_PORT:-8000}"
 "$frontend_py" -m dynamo.frontend &

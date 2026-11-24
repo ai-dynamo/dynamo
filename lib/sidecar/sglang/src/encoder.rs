@@ -9,6 +9,7 @@ use std::time::Duration;
 use dynamo_backend_common::{
     DynamoError, EngineConfig, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
+use dynamo_llm::kv_router::encoder_router::ENCODER_RELEASE;
 use dynamo_llm::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
@@ -70,6 +71,8 @@ pub(crate) struct StagedCapabilities {
     pub(crate) video: bool,
     pub(crate) native_model_type: String,
     pub(crate) audio_model_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) handoff_key_id: String,
 }
 
 impl StagedCapabilities {
@@ -106,6 +109,10 @@ impl StagedCapabilities {
 #[derive(Deserialize, Serialize)]
 struct Handoff {
     peer: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    instance_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    signature: String,
     #[serde(flatten)]
     transfer: pb::StagedImageTransfer,
 }
@@ -279,6 +286,13 @@ pub(crate) fn validate_consumer(
     if let Some(result) = &request.encoder_result {
         let handoff = Handoff::deserialize(result)
             .map_err(|e| client::invalid_arg(format!("invalid SGLang encoder_result: {e}")))?;
+        if !capabilities.handoff_key_id.is_empty()
+            && !(is_lower_hex(&handoff.signature, 64) && is_lower_hex(&handoff.instance_id, 32))
+        {
+            return Err(client::invalid_request(
+                "missing or malformed signed encoder receipt",
+            ));
+        }
         // The native consumer counts placeholders in the original token IDs.
         // When Dynamo retains sources for retries, also check each modality's count.
         let counts = match &request.multi_modal_data {
@@ -388,6 +402,23 @@ impl Encoder {
                 "GetEncoderInfo must identify the staged encoder with a 16-byte instance_id",
             ));
         }
+        let peer = if info.handoff_key_id.is_empty() {
+            advertised_peer(advertised.unwrap_or(endpoint.as_str()))?
+        } else {
+            let peer = advertised_peer(&info.handoff_peer)?;
+            if !is_lower_hex(&info.handoff_key_id, 64)
+                || peer != info.handoff_peer
+                || advertised
+                    .map(advertised_peer)
+                    .transpose()?
+                    .is_some_and(|explicit| explicit != peer)
+            {
+                return Err(client::invalid_arg(
+                    "encoder handoff key or advertised signing endpoint mismatch",
+                ));
+            }
+            peer
+        };
         let media = info
             .staged_media_policy
             .as_ref()
@@ -400,10 +431,11 @@ impl Encoder {
                 video: info.supports_staged_video,
                 native_model_type: info.native_model_type.clone(),
                 audio_model_type: info.staged_audio_model_type.clone(),
+                handoff_key_id: info.handoff_key_id.clone(),
             },
             info,
             media,
-            peer: advertised_peer(advertised.unwrap_or(endpoint.as_str()))?,
+            peer,
             pool: OnceCell::new(),
             stage_timeout,
         })
@@ -487,6 +519,46 @@ impl Encoder {
         ctx: GenerateContext,
         stop: CancellationToken,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        if let Some(original_id) = ctx.metadata().get(ENCODER_RELEASE) {
+            let handoff = request
+                .encoder_result
+                .as_ref()
+                .and_then(|value| Handoff::deserialize(value).ok())
+                .ok_or_else(|| {
+                    client::invalid_request("encoder release requires a staged result")
+                })?;
+            // The original worker and its existing native channel are the only
+            // release targets. Never dial a peer supplied in the receipt.
+            if original_id.is_empty()
+                || handoff.transfer.request_id != *original_id
+                || handoff.peer != self.peer
+                || !is_lower_hex(&handoff.transfer.transfer_id, 32)
+                || media_counts(&request)? != [0; 3]
+                || !request.token_ids.is_empty()
+                || (!self.capabilities.handoff_key_id.is_empty()
+                    && handoff.instance_id
+                        != self
+                            .info
+                            .instance_id
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>())
+            {
+                return Err(client::invalid_request(
+                    "encoder release does not match its original stage",
+                ));
+            }
+            let mut rpc = self.rpc()?;
+            let transfer_id = handoff.transfer.transfer_id;
+            let expected = self.info.instance_id.clone();
+            return Ok(Box::pin(async_stream::try_stream! {
+                let ack = client::rpc_with_deadline("Release", Instant::now() + Duration::from_secs(2), rpc.release(pb::ReleaseRequest { transfer_id })).await?;
+                if ack.into_inner().instance_id != expected {
+                    Err(client::protocol_error("Release came from a different encoder instance"))?;
+                }
+                yield LLMEngineOutput::stop();
+            }));
+        }
         let request_id = ctx.id().to_string();
         let mut message = stage_request(request, request_id.clone(), &self.capabilities)?;
         let images = message.mm_items.len();
@@ -496,6 +568,7 @@ impl Encoder {
         let mut rpc = self.rpc()?;
         let peer = self.peer.clone();
         let instance_id = self.info.instance_id.clone();
+        let authenticated = !self.capabilities.handoff_key_id.is_empty();
         let native_model_type = self.capabilities.model_for(counts)?.to_owned();
         let media = self.media.clone();
         let stage_timeout = self.stage_timeout;
@@ -517,18 +590,32 @@ impl Encoder {
             };
             let response = response?.into_inner();
             let transfer = response.transfer.ok_or_else(|| client::protocol_error("Stage returned no transfer"))?;
-            let handoff = Handoff { peer, transfer };
-            let validation = if response.instance_id == instance_id {
-                handoff.validate(&request_id, counts, &native_model_type)
-            } else {
-                Err(client::protocol_error("Stage came from a different encoder instance"))
+            let handoff = Handoff {
+                peer, transfer, signature: response.handoff_mac,
+                instance_id: if authenticated {
+                    instance_id.iter().map(|b| format!("{b:02x}")).collect()
+                } else { String::new() },
             };
-            if let Err(error) = validation {
+            let validated = (|| {
+                if response.instance_id != instance_id {
+                    return Err(client::protocol_error("Stage came from a different encoder instance"));
+                }
+                if authenticated && !is_lower_hex(&handoff.signature, 64) {
+                    return Err(client::protocol_error("Stage returned no valid encoder handoff MAC"));
+                }
+                handoff.validate(&request_id, counts, &native_model_type)?;
+                serde_json::to_value(&handoff).map_err(|e| client::protocol_error(e.to_string()))
+            })();
+            if validated.is_err() || stop.is_cancelled() || ctx.is_stopped() {
                 let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
                     transfer_id: handoff.transfer.transfer_id.clone(),
                 })).await;
-                Err(error)?;
+                if stop.is_cancelled() || ctx.is_stopped() {
+                    yield LLMEngineOutput::cancelled();
+                    return;
+                }
             }
+            let result = validated?;
             tracing::debug!(
                 peer = %handoff.peer,
                 request_id = %request_id,
@@ -538,11 +625,12 @@ impl Encoder {
                 audio_count = audios,
                 "native SGLang encoder staged media"
             );
-            let result = serde_json::to_value(&handoff).map_err(|e| client::protocol_error(e.to_string()))?;
             let serde_json::Value::Object(object) = result else {
                 unreachable!("the encoder handoff is a struct")
             };
-            yield LLMEngineOutput::encode_terminal(object);
+            let mut terminal = LLMEngineOutput::encode_terminal(object);
+            terminal.extra_args = Some(Box::new(serde_json::json!({ (ENCODER_RELEASE): true })));
+            yield terminal;
         }))
     }
 }
@@ -562,6 +650,40 @@ mod tests {
             };
             assert!(Encoder::new(info, &endpoint, None, Duration::from_secs(1)).is_err());
         }
+    }
+
+    #[test]
+    fn signed_encoder_advertises_its_peer_and_key_in_the_worker_contract() {
+        let local = GrpcEndpoint::parse("127.0.0.1:9100", "encoder").unwrap();
+        let key = "ab".repeat(32);
+        let info = pb::GetEncoderInfoResponse {
+            model_path: "vision".into(),
+            instance_id: vec![1; 16],
+            handoff_peer: "grpc://worker:9100".into(),
+            handoff_key_id: key.clone(),
+            ..Default::default()
+        };
+        let connect =
+            |info, advertised| Encoder::new(info, &local, advertised, Duration::from_secs(1));
+        let encoder = connect(info.clone(), Some("worker:9100")).unwrap();
+        assert_eq!(encoder.peer, "grpc://worker:9100");
+        let mut config = EngineConfig::default();
+        encoder.capabilities.advertise(&mut config);
+        assert_eq!(
+            config.runtime_data[ENCODER_HANDOFF_CONTRACT]["sglang"]["handoff_key_id"],
+            key
+        );
+        assert!(connect(info.clone(), Some("other:9100")).is_err());
+        assert!(
+            connect(
+                pb::GetEncoderInfoResponse {
+                    handoff_key_id: "bad".into(),
+                    ..info
+                },
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

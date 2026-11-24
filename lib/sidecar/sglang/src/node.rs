@@ -139,7 +139,8 @@ impl NodeInfo {
         }
         let start = infos[0];
         if infos.iter().any(|info| {
-            info.accepts_encoder_handoff != start.accepts_encoder_handoff
+            info.encoder_handoff_key_id != start.encoder_handoff_key_id
+                || info.accepts_encoder_handoff != start.accepts_encoder_handoff
                 || info.native_model_type != start.native_model_type
                 || info.staged_audio_model_type != start.staged_audio_model_type
                 || info.supports_staged_images != start.supports_staged_images
