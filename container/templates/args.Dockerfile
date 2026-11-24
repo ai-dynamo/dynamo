@@ -65,24 +65,18 @@ ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
 # NIXL configuration
+{% if device in ("xpu", "cpu") -%}
 {% if "nixl_ucx_ref" in context[framework].get(device_key, {}) -%}
 ARG NIXL_UCX_REF={{ context[framework][device_key].nixl_ucx_ref }}
 {% else -%}
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
 {% endif -%}
-{# Resolved most-specific first: per-target, then per-device, then framework. #}
-{% if "nixl_ref" in context[framework].get(target, {}) -%}
-ARG NIXL_REF={{ context[framework][target].nixl_ref }}
-{% elif "nixl_ref" in context[framework].get(device_key, {}) -%}
+{% endif -%}
+{# Resolved most-specific first: per-device, then framework. #}
+{% if "nixl_ref" in context[framework].get(device_key, {}) -%}
 ARG NIXL_REF={{ context[framework][device_key].nixl_ref }}
 {% elif "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
-{% endif -%}
-{% if device == "cuda" %}
-ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
-ARG NIXL_LIBFABRIC_REPO={{ context.dynamo.nixl_libfabric_repo }}
-ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
-ARG HWLOC_VERSION={{ context.dynamo.hwloc_version }}
 {% endif %}
 
 {% if target == "dev" or target == "local-dev" %}
@@ -111,11 +105,7 @@ ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
 {% endif -%}
 ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
-{% if device == "cuda" -%}
-# aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
-ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
-{% endif %}
-{%- endif -%}
+{% endif -%}
 
 {% if framework in ["vllm", "sglang"] -%}
 # ModelExpress Python client for model loading (optional)

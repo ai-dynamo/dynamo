@@ -2567,6 +2567,7 @@ dependencies = [
  "axum 0.8.4",
  "bytes",
  "dashmap",
+ "dynamo-http-server",
  "dynamo-kv-events",
  "dynamo-kv-router",
  "dynamo-llm",
@@ -2612,6 +2613,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "dynamo-http-server",
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sglang-generate",
@@ -2698,6 +2700,7 @@ dependencies = [
  "dynamo-global-router-store-dynamodb",
  "dynamo-global-view-broadcaster",
  "dynamo-global-view-receiver",
+ "dynamo-http-server",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
@@ -2779,6 +2782,8 @@ dependencies = [
  "axum 0.8.4",
  "dynamo-runtime",
  "futures",
+ "http-body 1.0.1",
+ "http-body-util",
  "hyper-util",
  "parking_lot",
  "prometheus",
@@ -2786,6 +2791,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -2943,6 +2949,7 @@ dependencies = [
  "dynamo-global-common",
  "dynamo-global-discovery-client",
  "dynamo-global-view-broadcaster",
+ "dynamo-http-server",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-kv-hints",
@@ -2974,9 +2981,7 @@ dependencies = [
  "galil-seiferas",
  "half",
  "hf-hub 0.4.3",
- "http-body 1.0.1",
  "http-body-util",
- "hyper-util",
  "image",
  "indicatif 0.18.4",
  "insta",
@@ -3509,6 +3514,7 @@ dependencies = [
  "axum 0.8.4",
  "base64 0.22.1",
  "dynamo-error",
+ "dynamo-http-server",
  "dynamo-llm",
  "dynamo-protocols 10.0.1",
  "dynamo-runtime",
@@ -3780,6 +3786,7 @@ dependencies = [
  "axum 0.8.4",
  "base64 0.22.1",
  "dynamo-error",
+ "dynamo-http-server",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-llm",
@@ -6801,9 +6808,9 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "1.3.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "858d83bef88bf58fbd29b33df9974fdc91a47b80aebe0de26b8614b1a801064c"
+checksum = "b50b94f1cc19206ca61eb956199a8313069570090e641290bd91bd1c021be17d"
 dependencies = [
  "anyhow",
  "bincode",

@@ -108,6 +108,8 @@ struct AttachmentDescriptorInput {
     #[serde(default)]
     engine_owned_mm_identity: bool,
     #[serde(default)]
+    process_local_inventory: bool,
+    #[serde(default)]
     router_hint_source: Option<dynamo_kv_indexer::host::RouterHintSourceMetadata>,
 }
 
@@ -145,6 +147,7 @@ impl KvStateAttachmentOwner {
                     image_token_id: input.image_token_id,
                     video_token_id: input.video_token_id,
                     engine_owned_mm_identity: input.engine_owned_mm_identity,
+                    process_local_inventory: input.process_local_inventory,
                     router_hint_source: input.router_hint_source,
                 })
             })

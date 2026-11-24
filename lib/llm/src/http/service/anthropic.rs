@@ -31,14 +31,8 @@ use tracing::Instrument;
 
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
-    disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
-        monitor_for_disconnects_with_activity_and_error_signal,
-    },
-    metrics::{
-        CancellationLabels, Endpoint, ErrorType, InflightGuard,
-        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
-    },
+    disconnect::{StreamErrorSignal, monitor_for_disconnects_with_activity_and_error_signal},
+    metrics::process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
@@ -62,16 +56,21 @@ use crate::protocols::openai::chat_completions::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_http_server::{
+    disconnect::{ConnectionHandle, create_connection_monitor},
+    metrics::{CancellationLabels, Endpoint, ErrorType, InflightGuard},
+};
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
     Protocol, anthropic_context_length_message, invalid_argument, public_message_for,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
-use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
+use super::openai::{get_or_create_request_id, warn_nvext_disabled};
 use dynamo_error::http::{
     ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
 };
+use dynamo_http_server::request::get_body_limit;
 
 mod validation;
 use validation::ValidatedRequest;
@@ -771,19 +770,20 @@ async fn anthropic_messages(
         // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
         // (`rate_limit_error`) with a `Cancelled` metric label and no
         // rejection accounting.
-        if let Some(error) = super::metrics::queue_deadline_error(e.as_ref()) {
-            super::metrics::record_failure(error);
-            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+        if let Some(error) = dynamo_http_server::metrics::queue_deadline_error(e.as_ref()) {
+            dynamo_http_server::metrics::record_failure(error);
+            inflight_guard.mark_error(dynamo_http_server::metrics::ErrorType::Cancelled);
             return anthropic_error_unrecorded(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limit_error",
-                super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model,
+                dynamo_http_server::metrics::Endpoint::AnthropicMessages,
+            );
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Overloaded,
                 format!("{e:#}"),
@@ -791,7 +791,7 @@ async fn anthropic_messages(
             )
             .into_marked_response(&mut inflight_guard);
         }
-        if super::metrics::request_was_cancelled(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_cancelled(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Cancelled,
                 format!("{e:#}"),
@@ -805,7 +805,7 @@ async fn anthropic_messages(
             inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
             return response;
         }
-        if super::metrics::request_was_unavailable(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_unavailable(e.as_ref()) {
             return AnthropicHandlerError::sanitized(
                 SanitizedError::Unavailable,
                 format!("{e:#}"),
@@ -1035,8 +1035,8 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, aggregation_options)
                 .await
                 .map_err(|error| {
-                    let error_type = if super::metrics::request_was_cancelled(&error) {
-                        super::metrics::ErrorType::Cancelled
+                    let error_type = if dynamo_http_server::metrics::request_was_cancelled(&error) {
+                        dynamo_http_server::metrics::ErrorType::Cancelled
                     } else {
                         super::openai::metric_error_type_for_class(error.class())
                     };
@@ -1497,7 +1497,7 @@ fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> An
 }
 
 fn anthropic_non_streaming_aggregation_error(error: DynamoError) -> Response {
-    if super::metrics::request_was_cancelled(&error) {
+    if dynamo_http_server::metrics::request_was_cancelled(&error) {
         return anthropic_sanitized_error_with_details(SanitizedError::Cancelled, error);
     }
     anthropic_semantic_error(&error)
@@ -1513,7 +1513,7 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
         return None;
     };
 
-    super::metrics::record_failure(error);
+    dynamo_http_server::metrics::record_failure(error);
     if matches!(
         error.class(),
         dynamo_runtime::error::ErrorClass::Internal
@@ -1657,7 +1657,7 @@ mod tests {
             .class(ErrorClass::BackendProtocol)
             .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
             .build();
-        let counter = super::super::metrics::DYNAM_FAILURES_TOTAL
+        let counter = dynamo_http_server::metrics::DYNAM_FAILURES_TOTAL
             .with_label_values(&[error.class().as_str(), error.reason().as_str()]);
         let before = counter.get();
         let event = Annotated::<NvCreateChatCompletionStreamResponse> {
