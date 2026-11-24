@@ -1426,8 +1426,7 @@ mod tests {
         let context: Arc<dyn AsyncEngineContext> = controller.clone();
 
         // The clock is paused, so this deadline only passes once no task can
-        // make progress, which is the hang we guard against. Time the thread
-        // spends off-CPU on a loaded runner does not count toward it.
+        // make progress (the hang); off-CPU time on a loaded runner doesn't count.
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(250),
             wait_for_connection_tasks(
