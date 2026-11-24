@@ -1908,12 +1908,18 @@ def test_vllm_validation_error_is_public_invalid_argument():
 
 
 @pytest.mark.asyncio
-async def test_worker_translates_vllm_validation_error_to_invalid_argument():
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The decoder prompt is longer than the maximum model length.",
+        # A JSON-schema keyword the structured-output grammar backend rejects.
+        'Grammar error: Unimplemented keys: ["uniqueItems"]',
+    ],
+)
+async def test_worker_translates_vllm_validation_error_to_invalid_argument(message):
     from vllm.exceptions import VLLMValidationError
 
     from dynamo.vllm.handlers import _translate_vllm_client_errors
-
-    message = "The decoder prompt is longer than the maximum model length."
 
     async def generator():
         yield "first"
