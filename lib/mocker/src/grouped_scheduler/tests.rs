@@ -161,7 +161,7 @@ fn cache_usage_retains_admission_measurement_without_inventing_missing_counts() 
     let compatibility = CompatibilityState::new(args(1));
     let request_id = Uuid::from_u128(29);
     compatibility.native_request(request(29, 0)).unwrap();
-    let output = |completed| aisimulate_core::engine::Output {
+    let output = |completed| aisim_core::engine::Output {
         request_id,
         token_id: None,
         completed,
@@ -209,7 +209,7 @@ fn cache_usage_retains_admission_measurement_without_inventing_missing_counts() 
     );
     assert_eq!(
         compatibility
-            .output_signal(aisimulate_core::engine::Output {
+            .output_signal(aisim_core::engine::Output {
                 cached_tokens: Some(3),
                 ..output(false)
             })
@@ -234,7 +234,7 @@ fn terminal_cache_usage_preserves_explicit_counts_and_cleans_up() {
             reused_input_tokens: 2,
             cache_tier_attribution: None,
         }]);
-        let output = aisimulate_core::engine::Output {
+        let output = aisim_core::engine::Output {
             request_id,
             token_id: None,
             completed: true,
@@ -245,7 +245,7 @@ fn terminal_cache_usage_preserves_explicit_counts_and_cleans_up() {
         compatibility.native_request(request(30, 0)).unwrap();
         assert_eq!(
             compatibility
-                .output_signal(aisimulate_core::engine::Output {
+                .output_signal(aisim_core::engine::Output {
                     request_id,
                     token_id: None,
                     completed: true,
@@ -334,7 +334,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         dispatch_command_effects(
             23,
             EngineEffects {
-                by_rank: vec![aisimulate_core::engine::generalized::RankEffects {
+                by_rank: vec![aisim_core::engine::generalized::RankEffects {
                     dp_rank: 0,
                     effects: CommandEffects {
                         result: CommandResult::Noop,
@@ -368,7 +368,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
             }
         );
 
-        let output = compatibility.output_signal(aisimulate_core::engine::Output {
+        let output = compatibility.output_signal(aisim_core::engine::Output {
             request_id,
             token_id: Some(9),
             completed: true,
@@ -968,7 +968,7 @@ async fn applied_midpass_cancellation_publishes_empty_occupancy_immediately() {
     dispatch_command_effects(
         24,
         EngineEffects {
-            by_rank: vec![aisimulate_core::engine::generalized::RankEffects {
+            by_rank: vec![aisim_core::engine::generalized::RankEffects {
                 dp_rank: 0,
                 effects: CommandEffects {
                     result: CommandResult::Applied,
@@ -1033,13 +1033,13 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
     )]));
     let mut deferred = vec![DeferredCommandPublication::default()];
     let command_effects = EngineEffects {
-        by_rank: vec![aisimulate_core::engine::generalized::RankEffects {
+        by_rank: vec![aisim_core::engine::generalized::RankEffects {
             dp_rank: 0,
             effects: CommandEffects {
                 result: CommandResult::Applied,
                 lifecycle_events: Vec::new(),
                 kv_events: vec![KvEvent {
-                    tier: aisimulate_core::engine::KvEventTier::Device,
+                    tier: aisim_core::engine::KvEventTier::Device,
                     event_id: 1,
                     dp_rank: 0,
                     data: KvEventData::Removed {

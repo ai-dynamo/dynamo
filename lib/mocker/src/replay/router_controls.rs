@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use crate::replay::default_selector::DefaultWorkerSelectorControl;
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyConfig, RuntimePolicyUpdate};
+use dynamo_kv_router::plugins::worker_selection::{
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
 use dynamo_router_protocol::WorkerType;
 use parking_lot::Mutex;
 
@@ -50,16 +52,16 @@ impl ReplayRouterControls {
             .collect()
     }
 
-    /// Current revision and resolved parameters of every registered control, in registration
-    /// order.
+    /// Current revision and resolved parameters of every registered control whose policy has
+    /// runtime parameters, in registration order.
     pub fn runtime_configs(&self) -> Result<Vec<(WorkerType, RuntimePolicyConfig)>> {
         self.controls()
             .into_iter()
-            .map(|(worker_type, control)| {
-                control
-                    .runtime_config()
-                    .map(|config| (worker_type, config))
-                    .with_context(|| format!("reading the {worker_type} replay router policy"))
+            .filter_map(|(worker_type, control)| match control.runtime_config() {
+                Ok(config) => Some(Ok((worker_type, config))),
+                Err(RuntimePolicyError::Unsupported) => None,
+                Err(error) => Some(Err(anyhow::Error::new(error)
+                    .context(format!("reading the {worker_type} replay router policy")))),
             })
             .collect()
     }

@@ -143,7 +143,7 @@ class WorkerConfig:
     # KV event/recovery ownership endpoint. None uses this worker's serving endpoint.
     kv_state_endpoint: Optional[str] = None
     default_thinking_mode: Optional[str] = None
-    response_plane: str = "tcp"
+    response_plane: Optional[str] = None
     # False skips configure_dynamo_logging() in run(), for engines embedded in a
     # host process that owns its Python logging.
     configure_logging: bool = True
@@ -170,7 +170,7 @@ class WorkerConfig:
             ),
             "discovery_backend": runtime_cfg.discovery_backend,
             "request_plane": runtime_cfg.request_plane,
-            "response_plane": getattr(runtime_cfg, "response_plane", "tcp"),
+            "response_plane": getattr(runtime_cfg, "response_plane", None),
             "event_plane": runtime_cfg.event_plane,
             "use_kv_events": getattr(runtime_cfg, "use_kv_events", False),
             "custom_jinja_template": getattr(
@@ -237,9 +237,10 @@ class Worker:
                 stacklevel=2,
             )
 
-        if self.config.response_plane not in {"tcp", "quic", "velo"}:
-            raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
-        os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
+        if self.config.response_plane is not None:
+            if self.config.response_plane not in {"tcp", "quic", "velo"}:
+                raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
+            os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
 
         runtime_cfg = _backend.RuntimeConfig(
             discovery_backend=self.config.discovery_backend,

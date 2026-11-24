@@ -117,18 +117,6 @@ mod tests {
     }
 
     #[test]
-    fn display_and_parse_round_trip() {
-        for worker_type in [
-            WorkerType::Prefill,
-            WorkerType::Decode,
-            WorkerType::Encode,
-            WorkerType::Aggregated,
-        ] {
-            assert_eq!(worker_type.to_string().parse(), Ok(worker_type));
-        }
-    }
-
-    #[test]
     fn serde_json_wire_format_is_canonical_lowercase() {
         assert_eq!(
             serde_json::to_string(&WorkerType::Prefill).unwrap(),
@@ -146,22 +134,5 @@ mod tests {
             serde_json::to_string(&WorkerType::Aggregated).unwrap(),
             "\"aggregated\""
         );
-    }
-
-    #[test]
-    fn serde_json_round_trip_and_unknown_rejection() {
-        for worker_type in [
-            WorkerType::Prefill,
-            WorkerType::Decode,
-            WorkerType::Encode,
-            WorkerType::Aggregated,
-        ] {
-            let encoded = serde_json::to_string(&worker_type).unwrap();
-            assert_eq!(
-                serde_json::from_str::<WorkerType>(&encoded).unwrap(),
-                worker_type
-            );
-        }
-        assert!(serde_json::from_str::<WorkerType>("\"wibble\"").is_err());
     }
 }

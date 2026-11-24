@@ -154,7 +154,7 @@ use super::RouteDoc;
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
-const UNSET_DP_RANK_LABEL: &str = "none";
+pub(crate) const UNSET_DP_RANK_LABEL: &str = "none";
 const LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
@@ -1285,7 +1285,9 @@ impl Metrics {
     /// MDC metrics (from ModelDeploymentCard):
     /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length for a worker serving the model
     /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size for a worker serving the model
-    /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit for a worker serving the model
+    ///
+    /// Frontend config metrics (set alongside the MDC metrics):
+    /// - `{prefix}_model_migration_limit` - IntGaugeVec for the frontend's `--migration-limit` for the model
     ///
     /// ## Runtime Config Polling Configuration
     ///
@@ -1669,7 +1671,7 @@ impl Metrics {
         let model_migration_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
-                "Total number of request migrations due to worker unavailability",
+                "Total number of permitted request migration attempts after a worker failure",
             ),
             &["model", frontend_service::MIGRATION_TYPE_LABEL],
         )
@@ -2006,8 +2008,14 @@ impl Metrics {
     }
 
     /// Update metrics from a ModelDeploymentCard
-    /// This updates both runtime config metrics and MDC-specific metrics
-    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
+    /// This updates both runtime config metrics and MDC-specific metrics.
+    /// `migration_limit` is the frontend's configured limit: it is what `Migration`
+    /// enforces, while workers leave `card.migration_limit` at 0.
+    pub fn update_metrics_from_mdc(
+        &self,
+        card: &ModelDeploymentCard,
+        migration_limit: u32,
+    ) -> anyhow::Result<()> {
         self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
 
         self.model_context_length
@@ -2020,7 +2028,7 @@ impl Metrics {
 
         self.model_migration_limit
             .with_label_values(&[&card.display_name])
-            .set(card.migration_limit as i64);
+            .set(i64::from(migration_limit));
 
         tracing::debug!(
             model = %card.display_name,
@@ -2030,17 +2038,11 @@ impl Metrics {
         Ok(())
     }
 
-    /// Increment the migration counter for a new request migration
-    pub fn inc_migration_new_request(&self, model: &str) {
+    /// Increment the migration counter when a permitted retry begins.
+    /// `migration_type` names the failure that caused the replacement.
+    pub fn inc_migration(&self, model: &str, migration_type: &str) {
         self.model_migration_total
-            .with_label_values(&[model, frontend_service::migration_type::NEW_REQUEST])
-            .inc();
-    }
-
-    /// Increment the migration counter for an ongoing request migration
-    pub fn inc_migration_ongoing_request(&self, model: &str) {
-        self.model_migration_total
-            .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .with_label_values(&[model, migration_type])
             .inc();
     }
 
@@ -2769,14 +2771,13 @@ impl ResponseMetricCollector {
             // Falls back to WORKER_TYPE_PREFILL if not available.
             if let Some(worker_id) = self.prefill_worker_id {
                 let worker_id_str = worker_id.to_string();
-                let dp_rank_str = self
-                    .prefill_dp_rank
-                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+                let dp_rank_str = self.prefill_dp_rank.map(|r| r.to_string());
+                let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
                 let worker_type = self
                     .prefill_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_PREFILL);
-                let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+                let labels = &[worker_id_str.as_str(), dp_rank, worker_type];
                 WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
                     .with_label_values(labels)
                     .set(ttft);
@@ -2819,9 +2820,8 @@ impl ResponseMetricCollector {
                 && let Some(worker_id) = self.decode_worker_id
             {
                 let worker_id_str = worker_id.to_string();
-                let dp_rank_str = self
-                    .decode_dp_rank
-                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+                let dp_rank_str = self.decode_dp_rank.map(|r| r.to_string());
+                let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
                 let worker_type = self
                     .decode_worker_type
                     .as_deref()
@@ -2829,7 +2829,7 @@ impl ResponseMetricCollector {
                 self.decode_itl_gauge =
                     Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
                         worker_id_str.as_str(),
-                        dp_rank_str.as_str(),
+                        dp_rank,
                         worker_type,
                     ]));
             }
@@ -3163,6 +3163,7 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
     fn response_collector(metrics: &Arc<Metrics>, model: &str) -> ResponseMetricCollector {
         ResponseMetricCollector::new(
@@ -3285,6 +3286,25 @@ mod tests {
         worker_tx.send(Vec::new()).unwrap();
         assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
         assert!(!load_ready());
+    }
+
+    #[test]
+    fn migration_limit_gauge_reports_frontend_limit() {
+        let metrics = Metrics::new();
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "test-model".to_string();
+        // Workers publish 0 here; the frontend's own limit must win.
+        card.migration_limit = 0;
+
+        metrics.update_metrics_from_mdc(&card, 3).unwrap();
+
+        assert_eq!(
+            metrics
+                .model_migration_limit
+                .with_label_values(&["test-model"])
+                .get(),
+            3
+        );
     }
 
     #[test]
@@ -4454,7 +4474,7 @@ mod tests {
         collector.observe_response(10, 1);
         // Elapse measurable time so ITL > 0, then a second chunk drives the cached
         // per-worker ITL gauge.
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        sleep(Duration::from_millis(2));
         collector.observe_response(10, 1);
 
         let worker_id_str = worker_id.to_string();
@@ -4468,6 +4488,39 @@ mod tests {
             "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",
             gauge.get()
         );
+    }
+
+    #[test]
+    fn test_worker_last_gauges_use_unset_label_without_dp_rank() {
+        let metrics = Arc::new(Metrics::new());
+        // Distinctive worker id, as above: the per-worker gauges are process-global.
+        let worker_id: u64 = 9_876_543_211;
+        let mut collector = response_collector(&metrics, "unset-rank-model");
+        collector.set_worker_info(
+            Some(worker_id),
+            None,
+            Some(WORKER_TYPE_PREFILL.to_string()),
+            Some(worker_id),
+            None,
+            Some(WORKER_TYPE_DECODE.to_string()),
+        );
+
+        // The first chunk writes TTFT and ISL for the prefill worker. The second,
+        // after measurable time, writes ITL for the decode worker.
+        collector.observe_response(10, 1);
+        sleep(Duration::from_millis(2));
+        collector.observe_response(10, 1);
+
+        // The scrape filter and the worker cleanup match an unset rank by this value.
+        let worker_id = worker_id.to_string();
+        let isl = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            .with_label_values(&[worker_id.as_str(), "none", WORKER_TYPE_PREFILL])
+            .get();
+        assert_eq!(isl, 10);
+        let itl = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            .with_label_values(&[worker_id.as_str(), "none", WORKER_TYPE_DECODE])
+            .get();
+        assert!(itl > 0.0, "ITL gauge should be positive, got {itl}");
     }
 
     #[test]

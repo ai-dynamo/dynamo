@@ -21,7 +21,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -306,6 +305,18 @@ func (r *graphReconciler) reconcileWorkloads(
 		readinessResult = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, plans, desiredRequests, scalingDeferred)
 	}
 
+	// Let the API server refuse a new request before a PCS update rolls the running workload to it.
+	// PCS replacement is not covered: it deletes the workload before its requests are prepared.
+	if len(missingRequests) > 0 {
+		change, err := commoncontroller.GetSpecChangeResult(pcs, desiredPCS, commoncontroller.WithPreservedListOrder())
+		if err == nil && change.SpecNeedsUpdate {
+			err = r.validatePipelineRequests(ctx, pcs, missingRequests)
+		}
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Synchronize configuration before any scale-up, scale-down, or request retirement.
 	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
 		return ctrl.Result{}, err
@@ -384,9 +395,7 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, nil
 	}
 
-	result = readinessResult
-	// Old configmaps remain available until all workloads are Ready.
-	return result, r.deleteUnusedConfigMaps(ctx, deployment, resources)
+	return readinessResult, nil
 }
 
 // pipelineRequestDeadlineSeconds selects each model's source component policy.
@@ -631,51 +640,6 @@ func downloadRefreshAt(status *v1alpha1.LPXGraphDeploymentStatus) (refreshAt tim
 		return time.Time{}, false
 	}
 	return slices.MinFunc(lastChecks, time.Time.Compare).Add(modelDownloadRefreshInterval), true
-}
-
-// deleteUnusedConfigMaps runs only after readiness so existing pods keep their
-// immutable configuration during replacement. Maps belong to the non-nil LPXGD,
-// not the PCS, and therefore survive PCS garbage collection.
-func (r *graphReconciler) deleteUnusedConfigMaps(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, resources []client.Object) error {
-	// Keep old runtime configuration until the replacement workload is Ready.
-	if !meta.IsStatusConditionTrue(deployment.Status.Conditions, v1alpha1.LPXReadyCondition) {
-		return nil
-	}
-
-	// Retain every ConfigMap rendered for the current workload.
-	desiredNames := make(map[string]struct{}, len(resources))
-	for _, resource := range resources {
-		if _, ok := resource.(*corev1.ConfigMap); ok {
-			desiredNames[resource.GetName()] = struct{}{}
-		}
-	}
-
-	// Discover obsolete ConfigMaps rooted in this exact LPX child.
-	configMaps := &corev1.ConfigMapList{}
-	if err := r.List(ctx, configMaps,
-		client.InNamespace(deployment.Namespace),
-		client.MatchingLabels{deploymentUIDLabel: string(deployment.UID)},
-	); err != nil {
-		return err
-	}
-
-	// Preconditions prevent stale observations from deleting replacements.
-	for index := range configMaps.Items {
-		configMap := &configMaps.Items[index]
-		if !metav1.IsControlledBy(configMap, deployment) || !configMap.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if _, desired := desiredNames[configMap.Name]; desired {
-			continue
-		}
-		uid, resourceVersion := configMap.GetUID(), configMap.GetResourceVersion()
-		if err := r.Delete(ctx, configMap, &client.DeleteOptions{Preconditions: &metav1.Preconditions{
-			UID: &uid, ResourceVersion: &resourceVersion,
-		}}); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
 }
 
 // podCliqueSetLayoutMatches compares the variable immutable fields emitted by LPX.

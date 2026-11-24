@@ -3,7 +3,9 @@
 
 use axum::http::StatusCode;
 
-use crate::http::service::{error::SanitizedError, metrics::*};
+use dynamo_error::http::SanitizedError;
+
+use crate::http::service::metrics::*;
 
 /// Whether dispatch failed or a returned response stream failed.
 #[derive(Clone, Copy)]
@@ -33,13 +35,13 @@ impl WorkerError {
     pub fn canonical_invalid_request_message(
         error: &(dyn std::error::Error + 'static),
     ) -> Option<String> {
-        crate::http::service::error::find_canonical_error_in_chain(error)
+        use crate::http::service::error::{Protocol, public_message_for};
+
+        dynamo_error::http::find_canonical_error_in_chain(error)
             .filter(|error| error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
             .map(|error| {
-                error
-                    .public_message()
-                    .unwrap_or("Invalid request")
-                    .to_string()
+                public_message_for(error, Protocol::OpenAi)
+                    .unwrap_or_else(|| "Invalid request".to_string())
             })
     }
 
