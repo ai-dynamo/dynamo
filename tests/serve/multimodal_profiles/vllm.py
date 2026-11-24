@@ -442,7 +442,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 health_check_workers=True,
                 marks=[pytest.mark.pre_merge],
-                timeout_s=400,
+                # Startup (~130 s) plus three requests at their 180 s timeout.
+                timeout_s=720,
                 profiled_vram_gib=8.0,
                 requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
@@ -453,6 +454,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.7,
                             prompt_filler_repeats=120,
+                            # First decode step (probe uses max_tokens=1): sm_120 CI
+                            # JIT-compiles sm_80-only FA2 kernels from PTX, ~60 s.
+                            timeout=180,
                         )
                     )
                 ],
