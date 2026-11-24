@@ -240,8 +240,7 @@ def test_recommendation_config_uses_reproducible_model_and_parallelism(
 
     assert engine["model"] == "fixtures/qwen-revision"
     assert engine["workers"] == {
-        role: {"parallelism": {"preset": [values]}}
-        for role, values in preset.items()
+        role: {"parallelism": {"preset": [values]}} for role, values in preset.items()
     }
 
 

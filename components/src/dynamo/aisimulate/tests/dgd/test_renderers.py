@@ -386,9 +386,7 @@ def test_trtllm_resources_follow_disaggregated_candidate_topology() -> None:
         decode_cp=1,
     )
 
-    base_module._apply_trtllm_worker_resources(
-        dgd, candidate, num_gpus_per_node=8
-    )
+    base_module._apply_trtllm_worker_resources(dgd, candidate, num_gpus_per_node=8)
 
     prefill, decode = dgd["spec"]["components"]
     assert prefill["multinode"] == {"nodeCount": 2}

@@ -153,9 +153,7 @@ def test_assert_dgd_outputs_handles_backend_specific_manifests(
         "case_name": "example",
         "input_config": {
             "engine": {"workers": {"aggregated": {}}},
-            "optimization": {
-                "constraints": {"max_candidate_gpus": max_candidate_gpus}
-            },
+            "optimization": {"constraints": {"max_candidate_gpus": max_candidate_gpus}},
         },
         "options": {
             "name": "example",
