@@ -6433,9 +6433,9 @@ mod tests {
                 counter(&local, "dynamo_frontend_requests_total");
                 let (state, _attachment) = attached(local, &drt);
                 let state = Arc::new(state);
-                let scrape = || {
+                let handler = || {
                     let state = state.clone();
-                    tokio::spawn(async move {
+                    Box::pin(async move {
                         let response = handler_metrics(State(state)).await.into_response();
                         assert_eq!(response.status(), StatusCode::OK);
                         axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -6444,20 +6444,22 @@ mod tests {
                     })
                 };
 
-                // The first scrape is rendering when two more arrive. They wait
-                // on the gate, leaving the pool's other thread free.
+                // The first scrape is rendering when two more arrive. Polling
+                // each to Pending samples its arrival and parks it on the gate
+                // before the first render is released, so both arrivals precede
+                // the second render.
                 let within = std::time::Duration::from_secs(5);
-                let first = scrape();
+                let first = tokio::spawn(handler());
                 tokio::time::timeout(within, started.recv())
                     .await
                     .expect("first render started")
                     .expect("started");
-                let second = scrape();
-                let third = scrape();
-                tokio::time::timeout(within, tokio::task::spawn_blocking(|| ()))
-                    .await
-                    .expect("a waiting scrape occupied a blocking thread")
-                    .expect("probe");
+                let mut second = handler();
+                let mut third = handler();
+                assert!(futures::poll!(second.as_mut()).is_pending());
+                assert!(futures::poll!(third.as_mut()).is_pending());
+                let second = tokio::spawn(second);
+                let third = tokio::spawn(third);
 
                 // The second scrape renders once the first finishes; the third
                 // arrived before that render started and shares it.

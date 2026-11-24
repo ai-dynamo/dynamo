@@ -176,8 +176,6 @@ mod tests {
         });
     }
 
-    /// A render that panics is reported as an error, and the next scrape
-    /// renders afresh.
     #[tokio::test]
     async fn a_panicking_render_is_an_error_and_the_next_scrape_renders() {
         let scrapes = ScrapeCoalescer::new();
