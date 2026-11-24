@@ -81,7 +81,7 @@ def test_frontend_acknowledges_retune_and_records_replay_traces(
             QWEN,
             ports.frontend_port,
             ports.system_ports[0],
-            extra_args=["--namespace", namespace],
+            extra_env={"DYN_NAMESPACE": namespace},
         )
         worker.health_check_urls.append(
             (
