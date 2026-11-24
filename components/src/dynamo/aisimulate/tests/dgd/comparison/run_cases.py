@@ -441,6 +441,7 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
         ),
         "hardware": search_space["hardware_sku"],
         "backend": backend,
+        "backend_version": _backend_version_for_case(case, backend),
         "workers": workers,
     }
     if "context_length" in search_space:
@@ -479,6 +480,16 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
     if sla is not None:
         config["evaluation"] = {"sla": copy.deepcopy(sla)}
     return config
+
+
+def _backend_version_for_case(case: ComparisonCase, backend: str) -> str:
+    """Keep recommendation evaluation aligned with the generated runtime image."""
+    from aisim.generator.utils import resolve_backend_version_for_dynamo
+
+    return resolve_backend_version_for_dynamo(
+        case.generation_options.dynamo_runtime_version,
+        backend,
+    )
 
 
 def _derive_runtime_image(profiler_image: str, backend: str) -> str:

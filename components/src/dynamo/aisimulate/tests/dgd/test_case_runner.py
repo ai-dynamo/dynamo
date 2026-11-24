@@ -55,7 +55,7 @@ def _write_case_and_hardware(tmp_path, monkeypatch, *, backend="vllm"):
             {
                 "model": "Qwen/Qwen3-32B",
                 "backend": backend,
-                "image": "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.0",
+                "image": "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0",
                 "workload": {"isl": 1024, "osl": 128},
             }
         )
@@ -124,7 +124,7 @@ def test_load_case_composes_hardware_and_derives_dgd_options(
     assert case.dgdr_input["hardware"]["gpuSku"] == "h200_sxm"
     assert case.sweeper_input["search_space"]["gpu_budget"] == 8
     assert case.generation_options.runtime_image == (
-        "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0"
+        "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
     )
     assert case.generation_options.num_gpus_per_node == 8
     assert case.generated_dir == tmp_path / "output/h200-sxm-8gpu/qwen"
@@ -183,6 +183,7 @@ def test_recommendation_config_preserves_comparison_intent(
             "model": "Qwen/Qwen3-32B",
             "hardware": "h200_sxm",
             "backend": "vllm",
+            "backend_version": "0.24.0",
             "context_length": 131072,
             "workers": {
                 "prefill": {"parallelism": {"preset": "default"}},
@@ -207,7 +208,6 @@ def test_recommendation_config_preserves_comparison_intent(
 def test_recommendation_config_uses_reproducible_model_and_parallelism(
     monkeypatch, tmp_path
 ) -> None:
-    _write_case_and_hardware(tmp_path, monkeypatch, backend="sglang")
     fixture_path = tmp_path / "fixtures" / "qwen-revision"
     fixture_path.mkdir(parents=True)
     monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
@@ -232,13 +232,32 @@ def test_recommendation_config_uses_reproducible_model_and_parallelism(
         },
     }
     monkeypatch.setattr(run_cases, "_PARALLELISM_PRESETS", {"qwen": preset})
-    case = run_cases.load_case(
-        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    case = SimpleNamespace(
+        name="qwen",
+        sweeper_input={
+            "search_space": {
+                "model_name": "Qwen/Qwen3-32B",
+                "deployment_mode": ["disagg"],
+                "backend": ["sglang"],
+                "hardware_sku": "h200_sxm",
+                "gpu_budget": 16,
+            },
+            "workload": {
+                "isl": 1024,
+                "osl": 128,
+                "request_rate": 10,
+                "num_request_ratio": 10,
+            },
+            "goal": {"target": "goodput_per_gpu"},
+            "sweep": {"max_eval_seconds": 120},
+        },
+        generation_options=SimpleNamespace(dynamo_runtime_version="1.3.0"),
     )
 
     engine = run_cases.recommendation_config(case)["engine"]
 
     assert engine["model"] == "fixtures/qwen-revision"
+    assert engine["backend_version"] == "0.5.16"
     assert engine["workers"] == {
         role: {"parallelism": {"preset": [values]}} for role, values in preset.items()
     }
