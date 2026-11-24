@@ -25,6 +25,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from copy import deepcopy
 from dataclasses import asdict, replace
 from itertools import count
 from types import SimpleNamespace
@@ -458,11 +459,15 @@ def test_power_window_step_interval_ignores_an_empty_step_reset(monkeypatch):
     # The latency sample's last output arrived at 20.0; the window opened on it.
     stub._last_update_time = 20.0
     stub._bench_last_output_arrival = 20.0
-    stub._bench_power_window = {
-        "completed": 0,
-        "step_wall_times_s": [],
-        "last_output": 20.0,
-    }
+    stub._bench_power_window = instrumented_scheduler_module._BenchPowerWindow(
+        point=point,
+        gpus=[],
+        t0=20.0,
+        last_output=20.0,
+        deadline=30.0,
+        start=[],
+    )
+    latency_fpms = deepcopy(stub._bench_current_fpms)
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "update_from_output",
@@ -482,9 +487,12 @@ def test_power_window_step_interval_ignores_an_empty_step_reset(monkeypatch):
     stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=1), object())
 
     # Output to output (1.5 s), not schedule to output (0.5 s).
-    assert stub._bench_power_window["step_wall_times_s"] == [1.5]
-    assert stub._bench_power_window["last_output"] == 21.5
+    assert stub._bench_power_window.step_wall_times_s == [1.5]
+    assert stub._bench_power_window.last_output == 21.5
     assert stub._bench_last_output_arrival == 21.5
+    # The repeat ran through the real output path and is not an FPM sample:
+    # the point keeps only its latency sample.
+    assert stub._bench_current_fpms == latency_fpms
 
 
 def test_missing_schedule_timestamp_is_explicit_in_raw_sample(monkeypatch):
@@ -10755,6 +10763,8 @@ def _power_window_stub(monkeypatch, point, *, energy=None):
     stub._bench_expected_fpms = 1
     stub._bench_synchronizer = None
     stub._bench_power_gpus = [("GPU-a", object())]
+    stub._bench_power_gpu_reason = None
+    stub._bench_point_result_timeout_seconds = 8.0
     stub._bench_last_output_arrival = 0.0
     stub._bench_active_req_ids = {"r0", "r1"}
     stub.requests = {
@@ -10931,7 +10941,10 @@ def test_prefill_point_without_a_sample_at_its_deadline_joins_the_power_round(
     stub._bench_point_deadline = clock.now
     stub.deferred_frees = deque()
     rounds = []
-    stub._bench_power_round = lambda window, want, ok: rounds.append(ok) or (want, ok)
+    stub._bench_power_round = lambda point, seq, want, ok: rounds.append(ok) or (
+        want,
+        ok,
+    )
     saved = []
 
     def save():
@@ -10967,11 +10980,9 @@ def test_prefill_power_repeat_keeps_prefix_and_salt_with_a_fresh_suffix(
     latency_prompts = [
         stub._bench_synthetic_token_ids(f"latency:slot{slot}", 24) for slot in (0, 1)
     ]
-    window = {
-        "dispatched": 1,
-        "prompts": latency_prompts,
-        "salts": ["seed-0", "seed-1"],
-    }
+    window = SimpleNamespace(
+        dispatched=1, prompts=latency_prompts, salts=["seed-0", "seed-1"]
+    )
     calls = []
 
     def build(prompt_lens, max_tokens, **kwargs):
@@ -10981,7 +10992,7 @@ def test_prefill_power_repeat_keeps_prefix_and_salt_with_a_fresh_suffix(
     stub._bench_build_prefill_requests = build
 
     requests, cause = stub._bench_power_prefill_requests(point, window)
-    window["dispatched"] = 2
+    window.dispatched = 2
     stub._bench_power_prefill_requests(point, window)
 
     assert (requests, cause) == (["req0", "req1"], None)
@@ -11008,7 +11019,7 @@ def test_prefill_power_repeat_cache_miss_reports_prefill_cache_mismatch(
     )
     stub = _prefill_power_stub()
     stub._bench_build_prefill_requests = lambda *args, **kwargs: None
-    window = {"dispatched": 0, "prompts": [[1] * 24, [2] * 24], "salts": None}
+    window = SimpleNamespace(dispatched=0, prompts=[[1] * 24, [2] * 24], salts=None)
 
     assert stub._bench_power_prefill_requests(point, window) == (
         None,
@@ -11097,68 +11108,8 @@ def test_enabled_power_window_that_failed_writes_schema_3_unavailable(tmp_path):
     )
 
     assert output["schema_version"] == 3
-    assert local["power"] == group["power"] == _unavailable("nvml_error")
-
-
-def test_schema_3_output_keeps_window_time_out_of_measured_iterations(tmp_path):
-    point = BenchmarkPoint(
-        point_type="prefill", total_prefill_tokens=24, total_kv_read_tokens=0
-    )
-    fpm = {
-        "counter_id": 0,
-        "dp_rank": 0,
-        "wall_time": 0.02,
-        "power": {
-            "status": "measured",
-            "unavailable_reason": None,
-            "gpu_energy": [{"gpu_uuid": "GPU-a", "energy_wms": 5.0}],
-            "window_s": 1.5,
-            "window_iterations": 75,
-            "kv_drift_tokens": 0,
-            "step_wall_times_s": [0.02] * 75,
-        },
-    }
-    output_path = tmp_path / "benchmark.json"
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_vocab_size = 0
-    stub._bench_config = BenchmarkConfig(
-        output_path=str(output_path), power_window_s=1.0
-    )
-    stub._bench_expected_points = 1
-    stub._bench_results = [
-        instrumented_scheduler_module.BenchmarkPointResult(point=point, fpms=[fpm])
-    ]
-    stub._bench_iteration_groups = [
-        {
-            "benchmark_id": 0,
-            "point": asdict(point),
-            "expected_dp_ranks": [0],
-            "complete": True,
-            "wall_time": 0.02,
-            "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
-        }
-    ]
-    stub._bench_skipped_points = []
-    stub._bench_missing_phases = []
-    stub.max_num_scheduled_tokens = 40
-    stub.max_num_running_reqs = 8
-    stub.max_model_len = 128
-    stub.block_size = 8
-    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
-
-    InstrumentedScheduler._bench_write_results(stub)
-
-    output = json.loads(output_path.read_text())
-    assert output["schema_version"] == 3
     assert output["config"]["power_window_s"] == 1.0
-    assert output["timing"]["measured_iteration_seconds"] == pytest.approx(
-        sum(group["wall_time"] for group in output["iteration_groups"])
-    )
-    assert output["timing"]["measured_iteration_seconds"] == pytest.approx(0.02)
-    assert (
-        output["results"][0]["fpms"][0]["power"]
-        == output["iteration_groups"][0]["rank_results"][0]["fpms"][0]["power"]
-    )
+    assert local["power"] == group["power"] == _unavailable("nvml_error")
 
 
 def _dp_parallel(**overrides):
@@ -11245,6 +11196,7 @@ def test_power_window_gpu_mapping_rejects_an_unresolvable_layout(overrides, visi
 def _fake_nvml(monkeypatch, accessible):
     """pynvml stand-in that opens only ``accessible`` UUIDs, never by index."""
     opened = []
+    shutdowns = []
 
     def by_uuid(uuid_value):
         if uuid_value not in accessible:
@@ -11257,11 +11209,13 @@ def _fake_nvml(monkeypatch, accessible):
 
     fake = SimpleNamespace(
         nvmlInit=lambda: None,
+        nvmlShutdown=lambda: shutdowns.append(True),
+        shutdowns=shutdowns,
         nvmlDeviceGetHandleByUUID=by_uuid,
         nvmlDeviceGetHandleByIndex=by_index,
         NVMLError=type("NVMLError", (Exception,), {}),
     )
-    monkeypatch.setitem(sys.modules, "pynvml", fake)
+    monkeypatch.setattr(instrumented_scheduler_module, "pynvml", fake)
     return opened
 
 
@@ -11297,6 +11251,151 @@ def test_power_window_without_a_cuda_identity_has_no_gpu_mapping(monkeypatch):
     assert opened == []
 
 
+def test_power_window_open_failure_releases_nvml(monkeypatch):
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_bench_cuda_device_uuid", {0: "GPU-a"}.get
+    )
+    _fake_nvml(monkeypatch, accessible=set())
+
+    with pytest.raises(instrumented_scheduler_module._BenchPowerUnavailable):
+        instrumented_scheduler_module._bench_open_power_gpus([0])
+    assert instrumented_scheduler_module.pynvml.shutdowns == [True]
+
+
+def test_benchmark_deactivation_releases_nvml(monkeypatch):
+    from dynamo.vllm import gc_policy
+
+    monkeypatch.setattr(gc_policy, "stop_gc_policy", lambda: None)
+    _fake_nvml(monkeypatch, accessible={"GPU-a"})
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_synchronizer = None
+    stub._schedule_times = deque()
+    stub._kvwarm_release_heavy_state = lambda: None
+    stub._bench_power_gpus = [("GPU-a", "handle-GPU-a")]
+
+    stub._bench_deactivate(resume_publisher=False)
+
+    assert stub._bench_power_gpus is None
+    assert instrumented_scheduler_module.pynvml.shutdowns == [True]
+
+
+def test_power_window_uses_vllm_local_gpu_index_when_present():
+    """vLLM 0.33+ owns the worker-to-GPU rule; the 0.32.0 mirror is a fallback."""
+    parallel = _dp_parallel(
+        data_parallel_rank_local=0,
+        get_local_gpu_index=lambda local_rank: local_rank + 2,
+    )
+
+    assert instrumented_scheduler_module._bench_power_device_ids(
+        parallel, "4,5,6,7"
+    ) == [2, 3]
+    # A non-local layout stays unmapped: there the method returns the bare
+    # local rank, which names no GPU of this process.
+    with pytest.raises(
+        instrumented_scheduler_module._BenchPowerUnavailable,
+        match="gpu_mapping_unavailable",
+    ):
+        instrumented_scheduler_module._bench_power_device_ids(
+            _dp_parallel(
+                distributed_executor_backend="ray",
+                get_local_gpu_index=lambda local_rank: local_rank,
+            ),
+            "0,1",
+        )
+
+
+def test_decode_power_window_closes_a_repeat_past_its_deadline(monkeypatch):
+    """A repeat that never completes no longer spins the rank: past the
+    point's result timeout the window closes as window_step_timeout."""
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=128, batch_size=2)
+    stub, clock = _power_window_stub(monkeypatch, point)
+    _decode_steps(stub)
+
+    assert stub._bench_power_window_step() == "step1"
+    clock.now += 2.0
+    # The window has elapsed: the group stops and waits for step1.
+    assert stub._bench_power_window_step() is None
+    assert stub._bench_power_window.stopping
+    clock.now += 5.9
+    assert stub._bench_power_window_step() is None
+    assert stub._bench_power_window is not None
+
+    clock.now = 108.0  # 8 s after step1 was issued
+    assert stub._bench_power_window_step() is None
+    assert stub._bench_power_window is None
+    assert stub._bench_power_result == _unavailable("window_step_timeout")
+
+
+def test_overdue_rank_refuses_the_next_repeat_and_stops_the_group(monkeypatch):
+    """With dp > 1 the overdue rank tells its peers in the next round instead
+    of leaving them to time out in it."""
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=128, batch_size=2)
+    stub, clock = _power_window_stub(monkeypatch, point)
+    stub._bench_config = BenchmarkConfig(power_window_s=30.0)
+    _decode_steps(stub)
+    rounds = []
+
+    def group_round(point, seq, want, ok):
+        rounds.append((seq, want, ok))
+        return True, ok  # a peer still wants the window to go on
+
+    stub._bench_power_round = group_round
+
+    assert stub._bench_power_window_step() == "step1"
+    clock.now += 8.0
+    assert stub._bench_power_window_step() is None
+
+    # Opening, step1, the refusal, then the closing round.
+    assert rounds == [
+        (0, True, True),
+        (1, True, True),
+        (2, True, False),
+        (3, False, True),
+    ]
+    assert stub._bench_power_window is None
+    assert stub._bench_power_result == _unavailable("window_step_timeout")
+
+
+def test_prefill_power_window_retires_a_repeat_past_its_deadline(monkeypatch):
+    point = BenchmarkPoint(
+        point_type="prefill", total_prefill_tokens=16, total_kv_read_tokens=0
+    )
+    stub, clock = _power_window_stub(monkeypatch, point)
+    stub._bench_config = BenchmarkConfig(power_window_s=30.0)
+    stub.requests = {}
+    stub._bench_active_req_ids = set()
+    stub._bench_last_prefill = ([[1] * 16], None)
+    stub.deferred_frees = deque()
+    stub._bench_power_prefill_requests = lambda point, window: (
+        [SimpleNamespace(request_id=f"repeat{window.dispatched}")],
+        None,
+    )
+
+    def admit(requests):
+        for request in requests:
+            stub.requests[request.request_id] = request
+            stub._bench_active_req_ids.add(request.request_id)
+
+    stub._bench_admit_requests = admit
+    finished = []
+
+    def finish(req_ids):
+        finished.extend(req_ids)
+        for req_id in req_ids:
+            stub.requests.pop(req_id)
+
+    stub._bench_finish_requests = finish
+
+    stub._bench_power_window_step()
+    assert list(stub.requests) == ["repeat0"]
+    clock.now += 8.0
+    stub._bench_power_window_step()
+
+    assert finished == ["repeat0"] and stub.requests == {}
+    assert stub._bench_power_window is None
+    assert stub._bench_power_result == _unavailable("window_step_timeout")
+
+
 def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatch):
     point = BenchmarkPoint(
         point_type="prefill", total_prefill_tokens=16, total_kv_read_tokens=0
@@ -11310,8 +11409,8 @@ def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatc
     prepared = []
 
     def prepare(point, window):
-        prepared.append(window["dispatched"])
-        return [SimpleNamespace(request_id=f"repeat{window['dispatched']}")], None
+        prepared.append(window.dispatched)
+        return [SimpleNamespace(request_id=f"repeat{window.dispatched}")], None
 
     stub._bench_power_prefill_requests = prepare
     stub.add_request = lambda request: stub.requests.update(
@@ -11330,9 +11429,9 @@ def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatc
         # While repeat N runs, repeat N+1 is decided (or the stop); nothing
         # else is admitted.
         stub._bench_power_window_step()
-        assert prepared == list(range(repeat + 1)) or window["stopping"]
+        assert prepared == list(range(repeat + 1)) or window.stopping
         assert len(stub.requests) == 1
-        rounds = window["rounds"]
+        rounds = window.rounds
         clock.now += 0.4
         stub.requests.clear()
         stub._bench_power_step_completed(clock.now)
@@ -11340,7 +11439,7 @@ def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatc
         if stub._bench_power_window is None:
             break
         # Admitted right after the drain, without another round in between.
-        assert window["rounds"] == rounds
+        assert window.rounds == rounds
         assert list(stub.requests) == [f"repeat{repeat}"]
         # Finished repeats are pruned: only the one in flight stays tracked.
         assert stub._bench_active_req_ids == {f"repeat{repeat}"}

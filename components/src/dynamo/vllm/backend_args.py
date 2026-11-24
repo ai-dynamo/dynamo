@@ -632,7 +632,10 @@ class DynamoVllmArgGroup(ArgGroup):
                 "in synchronized iterations until this much time has elapsed, and "
                 "the NVML energy counter of every GPU of the rank is read at the "
                 "window's edges. The latency sample is collected as without the "
-                f"window. Must be 0 or at least {FPM_POWER_MIN_WINDOW_S}."
+                "window. Every measured point then takes at least this long, so "
+                "scale --benchmark-timeout with it: at 2 s, the default 900 s "
+                "fits about 450 points. "
+                f"Must be 0 or at least {FPM_POWER_MIN_WINDOW_S}."
             ),
         )
 
