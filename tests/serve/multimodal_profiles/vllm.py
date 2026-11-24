@@ -106,17 +106,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[
                     # Vanilla / baseline single-GPU multimodal smoke
                     # (HTTP-URL image, no frontend decoding).
-                    # TODO: remove these two pre_merge marks after the
-                    # requested CI timing run.
-                    MmCase(
-                        payload=make_image_payload(["green"]),
-                        marks=[pytest.mark.pre_merge, pytest.mark.post_merge],
-                    ),
+                    MmCase(payload=make_image_payload(["green"])),
                     # Vanilla inline base64 path (no Rust frontend decode).
                     MmCase(
                         suffix="b64",
                         payload=make_image_payload_b64(["green"]),
-                        marks=[pytest.mark.pre_merge, pytest.mark.post_merge],
                     ),
                     # --frontend-decoding (HTTP-URL): exercises strip_inline_data_urls
                     # + NIXL RDMA. post_merge-only — local pre-merge builds outside
