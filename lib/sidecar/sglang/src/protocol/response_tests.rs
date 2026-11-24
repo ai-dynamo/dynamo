@@ -52,7 +52,10 @@ fn frame(tokens: &[i64], meta: pb::GenerateMetaInfo) -> pb::GenerateResponse {
 }
 
 fn length() -> FinishKind {
-    FinishKind::Length(pb::FinishLength { length: None })
+    FinishKind::Length(pb::FinishLength {
+        length: None,
+        ignored_stop: None,
+    })
 }
 
 fn stream_error(code: u32, message: &str) -> pb::GenerateStreamError {

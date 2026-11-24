@@ -464,13 +464,8 @@ where
         .map(|kind| KvCacheSpecKind::from_wire(&kind));
     let kv_cache_spec_sliding_window =
         parse_unsigned::<E>(fields.next().flatten(), "kv_cache_spec_sliding_window")?;
-    let locality = parse_text::<E>(fields.next().flatten(), "locality")?.map(|locality| {
-        match locality.as_str() {
-            "LOCAL" => Locality::Local,
-            "REMOTE" => Locality::Remote,
-            _ => Locality::Unknown,
-        }
-    });
+    let locality = parse_text::<E>(fields.next().flatten(), "locality")?
+        .map(|locality| Locality::from_wire(&locality));
     let ownership = parse_text::<E>(fields.next().flatten(), "ownership")?;
 
     Ok(ParsedCommonTrailing {
@@ -522,7 +517,7 @@ where
 /// as an absent field so an unset medium stays on the default device tier
 /// instead of failing closed as an unknown medium. Mirrors the empty-string
 /// normalization applied to `cache_salt`.
-fn normalize_medium(medium: Option<String>) -> Option<String> {
+pub fn normalize_medium(medium: Option<String>) -> Option<String> {
     medium.filter(|value| !value.is_empty())
 }
 
@@ -533,7 +528,7 @@ fn narrow_token_id(token_id: u64) -> u32 {
 /// A raw binary key, such as vLLM's prompt-embeds digest, is an identity that the
 /// block's tokens do not carry and a request cannot reproduce. Marking the first such
 /// block makes `mm_exclusion` keep it and the blocks chained after it out of the index.
-fn mark_first_raw_key_block(
+pub fn mark_first_raw_key_block(
     token_ids: &mut [u32],
     block_size: usize,
     extra_keys: Option<&[Option<Vec<ExtraKeyItem>>]>,
@@ -553,7 +548,7 @@ fn mark_first_raw_key_block(
     }
 }
 
-fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
+pub fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
     match token_ids {
         KvTokenIds::Single(tids) => (tids.into_iter().map(narrow_token_id).collect(), false),
         KvTokenIds::Bigram(tids) => {

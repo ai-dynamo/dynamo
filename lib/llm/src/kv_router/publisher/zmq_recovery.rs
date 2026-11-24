@@ -12,7 +12,7 @@ use dynamo_kv_events::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::transports::zmq::ipv6_option_for;
 use futures::{FutureExt, SinkExt, StreamExt};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -278,7 +278,7 @@ impl<'a> RecoveryIngest<'a> {
                         batch,
                         self.normalizer,
                         self.worker,
-                        self.next_event_id,
+                        || self.next_event_id.fetch_add(1, Ordering::SeqCst),
                         &mut events,
                     );
                     if !events.is_empty() {

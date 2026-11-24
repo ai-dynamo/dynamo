@@ -256,7 +256,8 @@ pub(crate) fn build_generate_request(
             repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
             logit_bias: sampling.logit_bias.unwrap_or_default(),
             allowed_token_ids,
-            structured_output: structured_output(sampling.guided_decoding)?,
+            legacy_structured_output: structured_output(sampling.guided_decoding)?,
+            structured_output: None,
             bad_words_token_ids,
         }),
         stopping: Some(pb::StoppingCriteria {
@@ -294,6 +295,7 @@ pub(crate) fn build_generate_request(
         watermarking: None,
         engine_reasoning_gate,
         kv_hints: None,
+        media_io_kwargs: None,
     })
 }
 
@@ -1077,7 +1079,7 @@ fn stop_token_ids(
 
 fn structured_output(
     guided: Option<GuidedDecodingOptions>,
-) -> Result<Option<pb::decoding_parameters::StructuredOutput>, DynamoError> {
+) -> Result<Option<pb::decoding_parameters::LegacyStructuredOutput>, DynamoError> {
     let Some(guided) = guided else {
         return Ok(None);
     };
@@ -1087,7 +1089,7 @@ fn structured_output(
         ));
     }
 
-    use pb::decoding_parameters::StructuredOutput;
+    use pb::decoding_parameters::LegacyStructuredOutput as StructuredOutput;
     let mut values = Vec::new();
     if let Some(json) = guided.json {
         values.push(StructuredOutput::Json(json.to_string()));
@@ -1097,7 +1099,7 @@ fn structured_output(
     }
     if let Some(choice) = guided.choice {
         values.push(StructuredOutput::Choice(
-            pb::decoding_parameters::StringChoices { choices: choice },
+            pb::structured_output::StringChoices { choices: choice },
         ));
     }
     if let Some(grammar) = guided.grammar {

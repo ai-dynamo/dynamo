@@ -783,9 +783,10 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
 
 #[tokio::test]
 async fn kv_event_discovery_follows_regular_mocker_rules() {
+    // A publishing rank lists its gRPC stream and its ZMQ publisher.
     for (mode, prefix_caching, expected_sources) in [
-        (ServerMode::Aggregated, true, 1),
-        (ServerMode::Prefill, true, 1),
+        (ServerMode::Aggregated, true, 2),
+        (ServerMode::Prefill, true, 2),
         (ServerMode::Decode, true, 0),
         (ServerMode::Aggregated, false, 0),
     ] {

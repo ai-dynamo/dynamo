@@ -44,6 +44,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 sglang-api-types = { workspace = true }
+sglang-kv-types = { workspace = true }
 tonic-v14 = { workspace = true }
 
 [dev-dependencies]

@@ -230,7 +230,8 @@ async fn omitted_max_new_tokens_uses_native_default() {
         terminal.finish_reason,
         Some(pb::FinishReason {
             kind: Some(pb::finish_reason::Kind::Length(pb::FinishLength {
-                length: Some(128)
+                length: Some(128),
+                ignored_stop: None,
             })),
         })
     );

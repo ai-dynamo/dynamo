@@ -13,6 +13,7 @@ use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use serde_json::{Map, Value};
 use sglang_api_types::api::v1::sglang_service_server::SglangServiceServer;
+use sglang_kv_types::kv::v1::kv_events_server::KvEventsServer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -122,7 +123,8 @@ async fn main() -> anyhow::Result<()> {
         "starting Mocker-backed SGLang gRPC server"
     );
     tonic::transport::Server::builder()
-        .add_service(SglangServiceServer::new(service))
+        .add_service(SglangServiceServer::new(service.clone()))
+        .add_service(KvEventsServer::new(service))
         .serve_with_shutdown(args.listen, async {
             let _ = tokio::signal::ctrl_c().await;
         })

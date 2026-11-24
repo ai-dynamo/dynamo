@@ -14,6 +14,7 @@ use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
+use dynamo_vllm_sidecar::proto::kv_events_server::KvEventsServer;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -21,12 +22,23 @@ use tokio_stream::wrappers::TcpListenerStream;
 
 struct RunningServer {
     endpoint: String,
+    service: VllmMockerService,
     shutdown: Option<oneshot::Sender<()>>,
     _model_dir: Option<tempfile::TempDir>,
 }
 
 impl RunningServer {
     async fn start(mode: ServerMode, engine_args: MockerConfig, supports_multimodal: bool) -> Self {
+        Self::start_with(mode, engine_args, supports_multimodal, true).await
+    }
+
+    /// `kv_events: false` plays an engine that predates the `KvEvents` service.
+    async fn start_with(
+        mode: ServerMode,
+        engine_args: MockerConfig,
+        supports_multimodal: bool,
+        kv_events: bool,
+    ) -> Self {
         // Keep image-token discovery local; text fixtures keep their original model.
         let model_dir = supports_multimodal.then(|| {
             let dir = tempfile::tempdir().unwrap();
@@ -52,6 +64,7 @@ impl RunningServer {
         let (shutdown, shutdown_rx) = oneshot::channel();
         let inference_service = service.clone();
         let control_service = service.clone();
+        let kv_events_service = service.clone();
         let (health, health_service) = tonic_health::server::health_reporter();
         health
             .set_serving::<ControlServer<VllmMockerService>>()
@@ -67,6 +80,7 @@ impl RunningServer {
                         .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
                 )
                 .add_service(ControlServer::new(control_service))
+                .add_optional_service(kv_events.then(|| KvEventsServer::new(kv_events_service)))
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
@@ -76,6 +90,7 @@ impl RunningServer {
         });
         Self {
             endpoint: format!("http://{address}"),
+            service,
             shutdown: Some(shutdown),
             _model_dir: model_dir,
         }
@@ -266,14 +281,24 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
 #[path = "../../tests/common/mod.rs"]
 mod common;
 
-#[tokio::test]
-async fn sidecar_relays_stored_and_evicted_blocks() {
+async fn relays_stored_and_evicted_blocks(grpc: bool) {
     let mut args = fast_engine_args();
     args.num_gpu_blocks = 8;
     args.max_num_seqs = 1;
     let block_size = u32::try_from(args.block_size).unwrap();
-    let server = RunningServer::start(ServerMode::Aggregated, args, false).await;
+    let server = RunningServer::start_with(ServerMode::Aggregated, args, false, grpc).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
-    common::check_kv_events(&engine, block_size).await;
+    let clear = || server.service.publish_all_blocks_cleared();
+    common::check_kv_events(&engine, block_size, false, grpc.then_some(&clear)).await;
+}
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    relays_stored_and_evicted_blocks(true).await;
+}
+
+#[tokio::test]
+async fn sidecar_relays_the_zmq_events_of_an_engine_without_the_grpc_stream() {
+    relays_stored_and_evicted_blocks(false).await;
 }

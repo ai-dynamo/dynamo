@@ -15,6 +15,7 @@ use dynamo_sglang_sidecar::{
     SglangSidecarEngine, proto::sglang_service_server::SglangServiceServer,
 };
 use futures::StreamExt;
+use sglang_kv_types::kv::v1::kv_events_server::KvEventsServer;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -27,6 +28,11 @@ struct RunningServer {
 
 impl RunningServer {
     async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
+        Self::start_with(mode, engine_args, true).await
+    }
+
+    /// `kv_events: false` plays an engine that predates the `KvEvents` service.
+    async fn start_with(mode: ServerMode, engine_args: MockerConfig, kv_events: bool) -> Self {
         let service = SglangMockerService::new(
             MockerServerConfig {
                 mode,
@@ -39,9 +45,11 @@ impl RunningServer {
         let address = listener.local_addr().unwrap();
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server_service = service.clone();
+        let kv_events_service = service.clone();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(SglangServiceServer::new(server_service))
+                .add_optional_service(kv_events.then(|| KvEventsServer::new(kv_events_service)))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
                 })
@@ -338,14 +346,24 @@ async fn request_cancellation_is_isolated_and_shutdown_reaches_grpc_streams() {
 #[path = "../../tests/common/mod.rs"]
 mod common;
 
-#[tokio::test]
-async fn sidecar_relays_stored_and_evicted_blocks() {
+async fn relays_stored_and_evicted_blocks(grpc: bool) {
     let mut args = fast_engine_args();
     args.enable_prefix_caching = true;
     args.num_gpu_blocks = 8;
     let block_size = u32::try_from(args.block_size).unwrap();
-    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let server = RunningServer::start_with(ServerMode::Aggregated, args, grpc).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
-    common::check_kv_events(&engine, block_size).await;
+    let clear = || server.service.publish_all_blocks_cleared();
+    common::check_kv_events(&engine, block_size, true, grpc.then_some(&clear)).await;
+}
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    relays_stored_and_evicted_blocks(true).await;
+}
+
+#[tokio::test]
+async fn sidecar_relays_the_zmq_events_of_an_engine_without_the_grpc_stream() {
+    relays_stored_and_evicted_blocks(false).await;
 }

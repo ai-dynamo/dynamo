@@ -10,6 +10,8 @@ mod args;
 mod endpoint;
 mod error;
 mod json;
+#[cfg(feature = "tonic-v14")]
+pub mod kv_events;
 mod run;
 mod transport;
 

@@ -107,7 +107,9 @@ raw bytes and preprocessed features are also accepted at the gRPC boundary.
 
 Like regular mock workers, the server publishes KV cache events when prefix
 caching is enabled, except in decode mode. It uses the existing Mocker ZMQ
-publisher and reports the endpoint through native engine discovery. The
+publisher and reports the endpoint through native engine discovery. The same
+events are served as vLLM's `KvEvents` gRPC stream, listed by
+`GetKvEventSources` as a `grpc` source, which the sidecar prefers. The
 sidecar forwards these events to Dynamo's router.
 
 The event publisher binds a free port by default. For this gRPC server, an

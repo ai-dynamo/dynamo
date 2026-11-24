@@ -92,7 +92,14 @@ fn setup_kv_publishers(
                 }),
                 None,
             ),
-            KvEventSource::Push { on_ready, .. } => (None, Some(on_ready)),
+            KvEventSource::Push {
+                on_ready,
+                idempotent_stores,
+                ..
+            } => (
+                Some(KvEventSourceConfig::Push { idempotent_stores }),
+                Some(on_ready),
+            ),
         };
         let publisher = KvEventPublisher::new_with_local_indexer_at(
             endpoint.clone(),

@@ -2462,6 +2462,17 @@ mod event_processor_tests {
         assert_eq!(remove_tiers, [StorageTier::HostPinned, StorageTier::Device]);
     }
 
+    #[test]
+    fn pushed_events_follow_the_source_dedup_policy() {
+        for (idempotent_stores, policy) in [
+            (true, EventDedupPolicy::SetLike),
+            (false, EventDedupPolicy::RefCounted),
+        ] {
+            let config = KvEventSourceConfig::Push { idempotent_stores };
+            assert_eq!(worker_dedup_policy(Some(&config)), policy);
+        }
+    }
+
     #[tokio::test]
     async fn test_native_list_merges_removals_and_preserves_type_order() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();

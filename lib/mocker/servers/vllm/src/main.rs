@@ -13,6 +13,7 @@ use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
+use dynamo_vllm_sidecar::proto::kv_events_server::KvEventsServer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -103,7 +104,8 @@ async fn main() -> anyhow::Result<()> {
                 .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
                 .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
         )
-        .add_service(ControlServer::new(service))
+        .add_service(ControlServer::new(service.clone()))
+        .add_service(KvEventsServer::new(service))
         .add_service(health_service)
         .serve_with_shutdown(args.listen, async {
             let _ = tokio::signal::ctrl_c().await;

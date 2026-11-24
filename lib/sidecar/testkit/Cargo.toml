@@ -32,6 +32,7 @@ dynamo-trtllm-sidecar = { path = "../trtllm" }
 # Also plays an LPX engine, which speaks the same OpenEngine contract.
 dynamo-trtllm-mocker = { path = "../../mocker/servers/trtllm" }
 dynamo-lpx-sidecar = { path = "../lpx" }
+sglang-kv-types = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 tonic-health = { workspace = true }

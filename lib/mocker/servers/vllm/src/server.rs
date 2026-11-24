@@ -21,10 +21,19 @@ use futures::Stream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 
+use kv_events::{KvEventResponses, KvEventStream};
 use request::{PreparedRequest, SequenceOutputExt};
 
 #[path = "server_request.rs"]
 mod request;
+
+mod kv_events {
+    dynamo_mocker::grpc_kv_events!(
+        dynamo_vllm_sidecar::proto,
+        dynamo_vllm_sidecar::proto::block_hash::Value::UnsignedValue,
+        Some(0)
+    );
+}
 
 const DP_RANK: u32 = 0;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
@@ -77,6 +86,7 @@ pub struct VllmMockerService {
     server_info: Arc<pb::ServerInfo>,
     engine: LiveEngine,
     kv_event_sources: Arc<Vec<pb::KvEventSource>>,
+    kv_events: Option<Arc<KvEventStream>>,
     request_permits: Arc<Semaphore>,
 }
 
@@ -176,18 +186,29 @@ impl VllmMockerService {
         };
         let kv_event_sources = sink
             .as_ref()
-            .map(|sink| pb::KvEventSource {
-                transport: "zmq".to_string(),
-                endpoint: sink.endpoint().to_string(),
-                topic: String::new(),
-                data_parallel_rank: Some(DP_RANK),
-                replay_endpoint: sink.replay_endpoint().unwrap_or_default().to_string(),
-                encoding: "msgpack".to_string(),
-                schema_version: 1,
-                ..Default::default()
+            .map(|sink| {
+                let grpc = pb::KvEventSource {
+                    transport: "grpc".to_string(),
+                    data_parallel_rank: Some(DP_RANK),
+                    ..Default::default()
+                };
+                let zmq = pb::KvEventSource {
+                    transport: "zmq".to_string(),
+                    endpoint: sink.endpoint().to_string(),
+                    topic: String::new(),
+                    data_parallel_rank: Some(DP_RANK),
+                    replay_endpoint: sink.replay_endpoint().unwrap_or_default().to_string(),
+                    encoding: "msgpack".to_string(),
+                    schema_version: 1,
+                    ..Default::default()
+                };
+                [grpc, zmq]
             })
             .into_iter()
+            .flatten()
             .collect();
+        let kv_events =
+            sink.map(|zmq| Arc::new(KvEventStream::new(zmq, DP_RANK, server_info.kv_block_size)));
         // Buffer the full response so a slow gRPC consumer is never shed, as in the TRT-LLM mock.
         let engine = LiveEngine::start_with_config_and_request_output_buffering(
             engine_args,
@@ -195,7 +216,7 @@ impl VllmMockerService {
             LiveEngineConfig {
                 kv_event_publishers: KvEventPublishers::new(
                     None,
-                    sink.map(|sink| Arc::new(sink) as _),
+                    kv_events.clone().map(|sink| sink as _),
                 ),
                 ..Default::default()
             },
@@ -207,6 +228,7 @@ impl VllmMockerService {
             server_info: Arc::new(server_info),
             engine,
             kv_event_sources: Arc::new(kv_event_sources),
+            kv_events,
             request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
         })
     }
@@ -217,6 +239,15 @@ impl VllmMockerService {
 
     pub fn active_request_count(&self) -> usize {
         self.engine.active_request_count()
+    }
+
+    /// Tell KV event subscribers that every block was cleared, as a prefix
+    /// cache reset does. The Mocker's own cache is left as it is.
+    #[doc(hidden)]
+    pub fn publish_all_blocks_cleared(&self) {
+        if let Some(kv_events) = &self.kv_events {
+            kv_events.publish_all_blocks_cleared();
+        }
     }
 
     pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
@@ -508,6 +539,21 @@ impl pb::control_server::Control for VllmMockerService {
         _request: Request<pb::GetWeightVersionRequest>,
     ) -> Result<Response<pb::GetWeightVersionResponse>, Status> {
         Err(rl_control_unavailable())
+    }
+}
+
+#[tonic::async_trait]
+impl pb::kv_events_server::KvEvents for VllmMockerService {
+    type SubscribeKvEventsStream = KvEventResponses;
+
+    async fn subscribe_kv_events(
+        &self,
+        request: Request<pb::SubscribeKvEventsRequest>,
+    ) -> Result<Response<Self::SubscribeKvEventsStream>, Status> {
+        let kv_events = self.kv_events.as_ref().ok_or_else(|| {
+            Status::failed_precondition("the Mocker does not publish KV cache events")
+        })?;
+        kv_events.subscribe(request.into_inner()).map(Response::new)
     }
 }
 
