@@ -232,8 +232,9 @@ registers its pool with `POST /pools` and renews it on the lease heartbeat; with
 MCS, Global Discovery lists the pools MCS imports and takes no registrations.
 A listing says where a pool is, not what it serves: the router routes each
 discovered pool for every model, alias and adapter that one of its live Relay
-views reports ready, and weighs the pool's load over all of them. Scope the
-Relay's discovery sources to that DGD. Each `GET /routers` endpoint must address a replica's gRPC
+views reports ready, and weighs the pool's load over all of them. A name must
+mean one model in every pool: pools that report the same name for different
+models share its requests. Scope the Relay's discovery sources to that DGD. Each `GET /routers` endpoint must address a replica's gRPC
 receiving port. Relays send a fresh catalog/readiness/load snapshot on every
 connection, then updates. Separate Relay views keep active-active reports from
 being summed; loss of the last view removes the pool even when a failed GDS read

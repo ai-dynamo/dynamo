@@ -35,6 +35,9 @@
 //! too. Exporting the Service again then found no slice until the Service
 //! changed.
 //!
+//! Karmada watches a member's `ServiceExport`s only while it has propagated
+//! at least one `ServiceExport` there, so propagate one to each member.
+//!
 //! ```ignore
 //! let regions = ClusterRegions::new(configured, Some(client.clone()));
 //! let pools = McsPoolDirectory::new(client.clone(), mcs, suffix, frontends, regions)?;

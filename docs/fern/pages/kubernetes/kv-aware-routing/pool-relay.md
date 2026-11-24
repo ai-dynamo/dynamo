@@ -396,6 +396,12 @@ pool. It finds the frontends by a Service name suffix, `-frontend` by default, w
 frontend component named `Frontend`. The operator does not know that suffix, so a frontend component
 with another name is exported but not found until the suffix matches it.
 
+The exports must reach the cluster where the Global Discovery Service reads them. With `karmada`,
+Karmada imports a Service only into the clusters that its `ServiceImport` is propagated to, the pool's
+own cluster included, and it watches a member's `ServiceExport`s only while it has propagated at least
+one `ServiceExport` there. See the
+[Global Discovery Service configuration](../../reference/components/global-discovery-service-configuration.md).
+
 The operator exports a Service only while it exists, and a Service that does not exist yet is
 exported once it does. It finds a frontend's Service by its name alone, whichever workload path
 created it, so it also exports a Service of that name that someone else created in the DGD's

@@ -16,10 +16,10 @@
 //!   enabled. Static and MCS router directories answer `501`.
 //!
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
-//!   while the list may be missing pools: with registrations, for a lease
-//!   after a start or a store outage; with MCS, while its watch keeps failing.
-//!   A caller merges a partial list into its own, removing pools only on a
-//!   complete one ([`crate::pool_discovery`] has the rules).
+//!   while the service knows the list may lack live pools: with registrations,
+//!   for a lease after a start or a store outage; with MCS, while its watch
+//!   fails, for a minute after a pool leaves, and while it lists none. Callers
+//!   remove pools only on a complete list ([`crate::pool_discovery`]).
 //!
 //! - `GET /healthz`: readiness. OK once the backend has answered, which with
 //!   DynamoDB follows the startup check of the table. A later failure of the

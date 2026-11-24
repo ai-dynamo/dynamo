@@ -11,13 +11,19 @@
 # endpoints of its `<DGD name>-frontend` Service. Set the --router-* arguments
 # to the Global Router's namespace, Service and the port PoolRelays connect to.
 #
-# It reads the imported slices with the pod's credentials, so this cluster
-# needs a ServiceImport for each pool's PoolRelay and frontend Services and for
-# the router Service. To read the Karmada control plane instead, mount its
-# kubeconfig from a Secret, point KUBECONFIG at it, and grant this access there.
+# It reads the imported slices with the pod's credentials, so Karmada must
+# propagate to this cluster a ServiceImport for each pool's PoolRelay and
+# frontend Services and for the router Service, this cluster's own pools
+# included. Karmada watches a member's ServiceExports only once it has
+# propagated at least one ServiceExport there.
+#
+# To read the Karmada control plane instead, which holds every exported
+# Service's slices, mount its kubeconfig from a Secret, point KUBECONFIG at
+# it, and grant this access there.
 #
 # A pool's region is its member Cluster's spec.region on the Karmada control
-# plane, else its cluster's --cluster-region. It keeps no state, so run any number.
+# plane, else its cluster's --cluster-region, else the cluster's name. It
+# keeps no state, so run any number.
 apiVersion: v1
 kind: Namespace
 metadata:

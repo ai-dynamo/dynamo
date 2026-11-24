@@ -29,14 +29,18 @@ use super::super::stream::{EVENT_BUFFER, wake_at, watch_stream};
 /// as `Estimated`. It keeps serving that view, and the service stays ready.
 pub(super) const STALE_AFTER: Duration = Duration::from_secs(60);
 
-/// How long without an error before a failing watch counts as working again.
-/// kube resumes a watch without an event, so silence is the only sign of it.
-/// While the watch fails, errors come at least every 30 s backoff plus the
-/// time an attempt takes to fail: within the client's connect and read
-/// timeouts, which together should be under 90 s (the service's are 10 s and
-/// 75 s), since a watch asks the server to end it after
-/// [`WATCH_TIMEOUT_SECS`].
-pub(super) const RECOVERED_AFTER: Duration = Duration::from_secs(120);
+/// How long without an error before a failing watch counts as working again,
+/// since kube resumes a watch without an event. While it fails, errors come
+/// at least every 30 s of backoff (60 s should kube ever apply its jitter)
+/// plus up to 85 s for an attempt to fail within the client's 10 s connect
+/// and 75 s read timeouts.
+pub(super) const RECOVERED_AFTER: Duration = Duration::from_secs(180);
+
+/// How long the view stays `Estimated` after a pool or router leaves it, so
+/// readers keep what left until a complete list shows it is still gone. An
+/// MCS implementation can drop healthy clusters' imports for a while, as when
+/// its registry restarts or a cluster's lease lapses.
+pub(super) const REMOVAL_HOLD: Duration = Duration::from_secs(60);
 
 /// Each watch asks the server to end it after this long and starts again, so
 /// a server that stops answering fails within the client's read timeout
@@ -106,15 +110,23 @@ pub(super) trait SliceIndex: Default + Send + Sync + 'static {
     ) -> Vec<WatchEvent<Self::Item, Self::Key>>;
 
     /// A relist: every slice at once. The cache publishes one `Resync`.
-    fn replace(&mut self, rules: &Self::Rules, entries: HashMap<SliceKey, Self::Entry>);
+    /// Returns whether an item listed before is gone.
+    fn replace(&mut self, rules: &Self::Rules, entries: HashMap<SliceKey, Self::Entry>) -> bool;
 
     fn snapshot(&self) -> Snapshot<Self::Item>;
+
+    /// Lists no item.
+    fn is_empty(&self) -> bool;
 }
 
 pub(super) struct CacheState<I: SliceIndex> {
     pub(super) synced: bool,
     /// The current run of watch errors. `None` while the watch works.
     failures: Option<Failures>,
+    /// When an item last left the index, until [`REMOVAL_HOLD`] after.
+    removed_at: Option<Instant>,
+    /// The completeness watchers last learned from a `Resync`.
+    published: Completeness,
     /// Slices listed since the current relist began; they replace the index
     /// at `InitDone`.
     relist: Option<HashMap<SliceKey, I::Entry>>,
@@ -126,6 +138,8 @@ impl<I: SliceIndex> Default for CacheState<I> {
         Self {
             synced: false,
             failures: None,
+            removed_at: None,
+            published: Completeness::Exact,
             relist: None,
             index: I::default(),
         }
@@ -133,24 +147,51 @@ impl<I: SliceIndex> Default for CacheState<I> {
 }
 
 impl<I: SliceIndex> CacheState<I> {
+    /// `Estimated` while the watch keeps failing, for [`REMOVAL_HOLD`] after
+    /// an item left, and while nothing is listed: an MCS implementation that
+    /// dropped every import looks the same as no pools or routers at all.
+    fn completeness(&self, now: Instant) -> Completeness {
+        let stale = self.failures.is_some_and(|failures| failures.stale(now));
+        let held = self.removed_at.is_some_and(|at| now < at + REMOVAL_HOLD);
+        if stale || held || self.index.is_empty() {
+            Completeness::Estimated
+        } else {
+            Completeness::Exact
+        }
+    }
+
     /// `None` until the first list completes.
     fn snapshot(&self) -> Option<Snapshot<I::Item>> {
         let mut snapshot = self.synced.then(|| self.index.snapshot())?;
-        if self
-            .failures
-            .is_some_and(|failures| failures.stale(Instant::now()))
-        {
-            snapshot.completeness = Completeness::Estimated;
-        }
+        snapshot.completeness = self.completeness(Instant::now());
         Some(snapshot)
     }
 
-    /// The index with the given completeness, for a `Resync` that tells
-    /// watchers it changed. `None` until the first list completes.
-    fn resync(&self, completeness: Completeness) -> Option<WatchEvent<I::Item, I::Key>> {
+    /// The index as a `Resync`, which tells watchers its completeness. `None`
+    /// until the first list completes.
+    fn resync(&mut self, now: Instant) -> Option<WatchEvent<I::Item, I::Key>> {
         let mut snapshot = self.synced.then(|| self.index.snapshot())?;
-        snapshot.completeness = completeness;
+        snapshot.completeness = self.completeness(now);
+        self.published = snapshot.completeness;
         Some(WatchEvent::Resync(snapshot))
+    }
+
+    /// A `Resync` if the completeness changed since watchers last learned it.
+    fn resync_if_changed(&mut self, now: Instant) -> Option<WatchEvent<I::Item, I::Key>> {
+        if !self.synced || self.completeness(now) == self.published {
+            return None;
+        }
+        self.resync(now)
+    }
+
+    /// Ends the run of errors if it has been quiet for `RECOVERED_AFTER`.
+    fn end_quiet_run(&mut self, now: Instant) {
+        if self
+            .failures
+            .is_some_and(|failures| now.saturating_duration_since(failures.last) >= RECOVERED_AFTER)
+        {
+            self.failures = None;
+        }
     }
 }
 
@@ -206,16 +247,15 @@ impl<I: SliceIndex> SliceCache<I> {
     /// Applies one watch event. Returns `true` for a relist that found
     /// nothing.
     pub(super) fn apply(&self, event: watcher::Event<EndpointSlice>) -> bool {
+        let now = Instant::now();
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         // `Apply`, `Delete` and `InitDone` show that the watch works and the
         // index is current. A relist's slices replace the index only at
         // `InitDone`, so `InitApply` does not end a run of errors, and kube
         // sends `Init` before each relist attempt, before any request.
-        let ended_long_run = !matches!(event, watcher::Event::Init | watcher::Event::InitApply(_))
-            && state
-                .failures
-                .take()
-                .is_some_and(|failures| failures.long());
+        if !matches!(event, watcher::Event::Init | watcher::Event::InitApply(_)) {
+            state.failures = None;
+        }
         let mut listed_nothing = false;
         let mut events = match event {
             watcher::Event::Init => {
@@ -236,11 +276,13 @@ impl<I: SliceIndex> SliceCache<I> {
             }
             watcher::Event::InitDone => {
                 let entries = state.relist.take().unwrap_or_default();
-                state.index.replace(&self.rules, entries);
+                if state.index.replace(&self.rules, entries) {
+                    state.removed_at = Some(now);
+                }
                 state.synced = true;
-                let snapshot = state.index.snapshot();
-                listed_nothing = snapshot.items.is_empty();
-                vec![WatchEvent::Resync(snapshot)]
+                listed_nothing = state.index.is_empty();
+                // A relist tells watchers everything.
+                state.resync(now).into_iter().collect()
             }
             watcher::Event::Apply(slice) => {
                 let entry = I::entry(&self.rules, &slice);
@@ -250,11 +292,14 @@ impl<I: SliceIndex> SliceCache<I> {
                 state.index.upsert(&self.rules, slice_key(&slice), None)
             }
         };
-        // Watchers learn that the view is complete again, as a relist would
-        // tell them.
-        if ended_long_run && !matches!(events.last(), Some(WatchEvent::Resync(_))) {
-            events.extend(state.resync(Completeness::Exact));
+        if events
+            .iter()
+            .any(|event| matches!(event, WatchEvent::Removed(_)))
+        {
+            state.removed_at = Some(now);
         }
+        // Watchers learn when the view turns `Estimated` or back.
+        events.extend(state.resync_if_changed(now));
         for event in events {
             // No subscribers is not an error.
             let _ = self.events.send(event);
@@ -269,60 +314,52 @@ impl<I: SliceIndex> SliceCache<I> {
         // A relist that failed starts over, so its slices so far are dropped.
         state.relist = None;
         // A run that has been quiet for `RECOVERED_AFTER` is over, though
-        // `quiet` may not have run yet; this error starts a new one.
-        self.end_quiet_run(&mut state, now);
-        let (failures, was_long) = match state.failures {
-            Some(failures) => (
-                Failures {
-                    last: now,
-                    ..failures
-                },
-                failures.long(),
-            ),
-            None => (
-                Failures {
-                    first: now,
-                    last: now,
-                },
-                false,
-            ),
+        // `recheck` may not have run yet; this error starts a new one.
+        state.end_quiet_run(now);
+        let failures = match state.failures {
+            Some(failures) => Failures {
+                last: now,
+                ..failures
+            },
+            None => Failures {
+                first: now,
+                last: now,
+            },
         };
         state.failures = Some(failures);
-        // Watchers learn that the view turned `Estimated`.
-        if failures.long()
-            && !was_long
-            && let Some(event) = state.resync(Completeness::Estimated)
-        {
+        // Watchers learn when the view turns `Estimated`.
+        if let Some(event) = state.resync_if_changed(now) {
             // No subscribers is not an error.
             let _ = self.events.send(event);
         }
         now.saturating_duration_since(failures.first)
     }
 
-    /// Ends a run of errors that has been quiet for `RECOVERED_AFTER`: kube
-    /// resumed the watch without an event. Watchers learn that the view is
-    /// complete again.
-    pub(super) fn quiet(&self) {
+    /// Ends a run of errors that has been quiet for `RECOVERED_AFTER`, as kube
+    /// resumes a watch without an event, and a hold that has run out.
+    /// Watchers learn if the view is complete again.
+    pub(super) fn recheck(&self) {
+        let now = Instant::now();
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        self.end_quiet_run(&mut state, Instant::now());
-    }
-
-    /// Ends the run of errors if it has been quiet for `RECOVERED_AFTER`, and
-    /// tells watchers if it had made the view `Estimated`.
-    fn end_quiet_run(&self, state: &mut CacheState<I>, now: Instant) {
-        let Some(failures) = state.failures else {
-            return;
-        };
-        if now.saturating_duration_since(failures.last) < RECOVERED_AFTER {
-            return;
+        state.end_quiet_run(now);
+        if state.removed_at.is_some_and(|at| now >= at + REMOVAL_HOLD) {
+            state.removed_at = None;
         }
-        state.failures = None;
-        if failures.long()
-            && let Some(event) = state.resync(Completeness::Exact)
-        {
+        if let Some(event) = state.resync_if_changed(now) {
             // No subscribers is not an error.
             let _ = self.events.send(event);
         }
+    }
+
+    /// When the view's completeness can next change without a watch event:
+    /// a run of errors falls quiet, or a hold runs out.
+    pub(super) fn next_recheck(&self) -> Option<Instant> {
+        let state = self.read();
+        let quiet = state
+            .failures
+            .map(|failures| failures.last + RECOVERED_AFTER);
+        let held = state.removed_at.map(|at| at + REMOVAL_HOLD);
+        quiet.into_iter().chain(held).min()
     }
 
     /// A watch stream that starts at the first full listing and ends when
@@ -374,22 +411,21 @@ pub(super) async fn follow<I: SliceIndex>(
     stop: &CancellationToken,
 ) {
     let mut events = std::pin::pin!(events);
-    // When a run of errors counts as over, unless another error comes first.
-    let mut quiet_at = None;
+    // When the view's completeness can change without an event.
+    let mut recheck_at = None;
     loop {
         let event = tokio::select! {
             biased;
             () = stop.cancelled() => return,
-            () = wake_at(quiet_at) => {
-                quiet_at = None;
-                cache.quiet();
+            () = wake_at(recheck_at) => {
+                cache.recheck();
+                recheck_at = cache.next_recheck();
                 continue;
             }
             event = events.next() => event,
         };
         match event {
             Some(Ok(event)) => {
-                quiet_at = None;
                 if cache.apply(event) {
                     tracing::warn!(
                         %selector,
@@ -402,7 +438,6 @@ pub(super) async fn follow<I: SliceIndex>(
             // `STALE_AFTER`, the view is `Estimated`.
             Some(Err(error)) => {
                 let failing_for = cache.failed();
-                quiet_at = Some(Instant::now() + RECOVERED_AFTER);
                 if failing_for < STALE_AFTER {
                     tracing::warn!(%error, %selector, "EndpointSlice watch error");
                 } else {
@@ -416,6 +451,7 @@ pub(super) async fn follow<I: SliceIndex>(
             }
             None => return,
         }
+        recheck_at = cache.next_recheck();
     }
 }
 
@@ -501,7 +537,11 @@ impl<I: SliceIndex> Directory<I::Item, I::Key> for SliceDirectory<I> {
             .collect();
         let mut index = I::default();
         index.replace(&self.cache.rules, entries);
-        Ok(index.snapshot())
+        let mut snapshot = index.snapshot();
+        if index.is_empty() {
+            snapshot.completeness = Completeness::Estimated;
+        }
+        Ok(snapshot)
     }
 
     /// The stream starts at the first full listing. Until then it waits while

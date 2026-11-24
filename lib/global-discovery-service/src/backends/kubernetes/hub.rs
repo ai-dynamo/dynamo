@@ -306,7 +306,13 @@ impl SliceIndex for PoolIndex {
 
     /// A relist: every slice at once. Rebuilds every pool; the cache
     /// publishes one `Resync` instead of per-pool events.
-    fn replace(&mut self, naming: &PoolNaming, slices: HashMap<SliceKey, SliceEntry>) {
+    fn replace(&mut self, naming: &PoolNaming, slices: HashMap<SliceKey, SliceEntry>) -> bool {
+        let live: Vec<PoolKey> = self
+            .pools
+            .iter()
+            .filter(|(_, pool)| pool.listing.is_some())
+            .map(|(key, _)| key.clone())
+            .collect();
         self.slices = slices;
         for pool in self.pools.values_mut() {
             pool.slices.clear();
@@ -322,6 +328,11 @@ impl SliceIndex for PoolIndex {
         for pool in &pools {
             self.rebuild(naming, pool);
         }
+        live.iter().any(|key| {
+            self.pools
+                .get(key)
+                .is_none_or(|pool| pool.listing.is_none())
+        })
     }
 
     fn snapshot(&self) -> Snapshot<PoolListing> {
@@ -333,6 +344,10 @@ impl SliceIndex for PoolIndex {
                 .collect(),
             completeness: Completeness::Exact,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pools.values().all(|pool| pool.listing.is_none())
     }
 }
 
@@ -447,7 +462,10 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
-    use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache, follow, slice_key};
+    use super::super::cache::{
+        RECOVERED_AFTER, REMOVAL_HOLD, STALE_AFTER, SliceCache, follow, slice_key,
+    };
+    use super::super::regions::FIRST_READ_WAIT;
     use super::mcs::{
         KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL, REGION_LABEL,
     };
@@ -456,8 +474,9 @@ mod tests {
     const SUFFIX: &str = "-pool-relay";
 
     /// A Kubernetes API that lists `slices` and Karmada's `clusters`, or
-    /// answers 404 for them without `clusters`, and holds every watch open.
-    /// Also returns how many lists of clusters it has answered.
+    /// answers 404 for them without `clusters`, never answers for them if
+    /// `clusters` is `"hang"`, and holds every watch open. Also returns how
+    /// many lists of clusters it has answered.
     async fn fake_api(
         slices: &[EndpointSlice],
         clusters: Option<serde_json::Value>,
@@ -488,6 +507,9 @@ mod tests {
                     .starts_with("/apis/cluster.karmada.io/");
                 if karmada {
                     counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if clusters["items"] == "hang" {
+                        std::future::pending::<()>().await;
+                    }
                 }
                 match (karmada, clusters["items"].is_null()) {
                     (true, true) => {
@@ -558,13 +580,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_region_watch_stops_where_no_cluster_objects_are_served() {
+    async fn the_region_watch_rarely_asks_where_no_cluster_objects_are_served() {
         let (client, cluster_lists) = fake_api(&[], None).await;
         let regions = ClusterRegions::new(HashMap::new(), Some(client));
         regions.first_read().await;
         // kube's backoff would list again within about a second.
         tokio::time::sleep(Duration::from_millis(1_500)).await;
         assert_eq!(cluster_lists.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cluster_list_that_hangs_holds_lists_back_once() {
+        let slices = [slice("east", "mocker", "a1b2c", &[("10.43.0.1", true)])];
+        let (client, _) = fake_api(&slices, Some(serde_json::json!("hang"))).await;
+        let regions = ClusterRegions::new(HashMap::new(), Some(client.clone()));
+        let pools = McsPoolDirectory::new(
+            client,
+            McsImplementation::Karmada,
+            SUFFIX.to_owned(),
+            naming().frontends,
+            regions,
+        )
+        .unwrap();
+        // A caller that gives up first, as a readiness probe does, does not
+        // keep later lists waiting.
+        let early = tokio::time::timeout(Duration::from_millis(200), pools.list()).await;
+        assert!(early.is_err());
+        tokio::time::sleep(FIRST_READ_WAIT).await;
+        let listed = tokio::time::timeout(Duration::from_millis(500), pools.list())
+            .await
+            .expect("a list still waited for regions")
+            .unwrap();
+        assert_eq!(listed.items[0].location.region, "east");
     }
 
     fn naming() -> PoolNaming {
@@ -1116,16 +1163,21 @@ mod tests {
     fn changes_publish_added_and_removed() {
         let cache = cache();
         sync(&cache, Vec::new());
-        let mut events = cache.events.subscribe();
+        let mut receiver = cache.events.subscribe();
+        // Pool events; a `Resync` only reports the view's completeness.
+        let mut next_event = move || loop {
+            match receiver.try_recv() {
+                Ok(WatchEvent::Resync(_)) => {}
+                Ok(event) => return Some(event),
+                Err(_) => return None,
+            }
+        };
 
         let live = slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
         cache.apply(watcher::Event::Apply(live.clone()));
-        assert!(matches!(
-            events.try_recv().unwrap(),
-            WatchEvent::Upserted(_)
-        ));
+        assert!(matches!(next_event().unwrap(), WatchEvent::Upserted(_)));
         cache.apply(watcher::Event::Apply(live.clone()));
-        assert!(events.try_recv().is_err());
+        assert!(next_event().is_none());
         // The Relay stops being Ready.
         cache.apply(watcher::Event::Apply(slice(
             "west",
@@ -1134,16 +1186,13 @@ mod tests {
             &[("10.43.0.1", false)],
         )));
         assert!(
-            matches!(events.try_recv().unwrap(), WatchEvent::Removed(k) if k == key("west", "mocker"))
+            matches!(next_event().unwrap(), WatchEvent::Removed(k) if k == key("west", "mocker"))
         );
         // Ready again.
         cache.apply(watcher::Event::Apply(live.clone()));
-        assert!(matches!(
-            events.try_recv().unwrap(),
-            WatchEvent::Upserted(_)
-        ));
+        assert!(matches!(next_event().unwrap(), WatchEvent::Upserted(_)));
         cache.apply(watcher::Event::Delete(live));
-        assert!(matches!(events.try_recv().unwrap(), WatchEvent::Removed(_)));
+        assert!(matches!(next_event().unwrap(), WatchEvent::Removed(_)));
         assert!(cache.read().index.pools.is_empty());
     }
 
@@ -1217,7 +1266,7 @@ mod tests {
 
         // Recovered by silence.
         tokio::time::advance(RECOVERED_AFTER).await;
-        cache.quiet();
+        cache.recheck();
         assert_eq!(next_resync(), Some(Completeness::Exact));
         assert_eq!(next_resync(), None);
 
@@ -1229,7 +1278,7 @@ mod tests {
         assert_eq!(next_resync(), Some(Completeness::Estimated));
         cache.apply(watcher::Event::Apply(ready()));
         assert_eq!(next_resync(), Some(Completeness::Exact));
-        cache.quiet();
+        cache.recheck();
         assert_eq!(next_resync(), None);
 
         // Recovered by a relist, which announces only its own view.
@@ -1245,7 +1294,7 @@ mod tests {
         assert_eq!(next_resync(), None);
 
         // An error after a quiet spell ends the old run first, though
-        // `quiet` has not run.
+        // `recheck` has not run.
         for _ in 0..3 {
             cache.failed();
             tokio::time::advance(STALE_AFTER / 2).await;
@@ -1286,6 +1335,78 @@ mod tests {
         // kube resumed the watch without an event, so only the loop's timer
         // can end the run.
         tokio::time::advance(RECOVERED_AFTER).await;
+        let resync = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+        assert!(
+            matches!(resync, Ok(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Exact)
+        );
+        stop.cancel();
+        following.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_list_that_lost_a_pool_stays_partial_for_a_while() {
+        let cache = cache();
+        let west = || slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
+        let ohio = || slice("ohio", "mocker", "d3e4f", &[("10.42.0.1", true)]);
+        sync(&cache, vec![west(), ohio()]);
+        assert_eq!(completeness(&cache), Completeness::Exact);
+
+        // An MCS implementation drops a healthy cluster's import for a while,
+        // as when its registry restarts. Readers keep what a partial list
+        // leaves out, so the pool keeps its traffic.
+        cache.apply(watcher::Event::Delete(ohio()));
+        assert!(listing(&cache, &key("ohio", "mocker")).is_none());
+        assert_eq!(completeness(&cache), Completeness::Estimated);
+        tokio::time::advance(REMOVAL_HOLD / 2).await;
+        cache.apply(watcher::Event::Apply(ohio()));
+        assert_eq!(completeness(&cache), Completeness::Estimated);
+        tokio::time::advance(REMOVAL_HOLD / 2).await;
+        assert_eq!(completeness(&cache), Completeness::Exact);
+
+        // So does a relist that no longer lists a pool.
+        sync(&cache, vec![west()]);
+        assert_eq!(completeness(&cache), Completeness::Estimated);
+        tokio::time::advance(REMOVAL_HOLD).await;
+        assert_eq!(completeness(&cache), Completeness::Exact);
+    }
+
+    #[test]
+    fn an_empty_list_is_never_complete() {
+        // An MCS implementation that dropped every import, as during an outage
+        // of its store, looks the same as no pools at all.
+        let cache = cache();
+        sync(&cache, Vec::new());
+        assert_eq!(completeness(&cache), Completeness::Estimated);
+        let live = slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
+        cache.apply(watcher::Event::Apply(live));
+        assert_eq!(completeness(&cache), Completeness::Exact);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_watch_ends_a_hold_that_runs_out() {
+        let cache = cache();
+        let ohio = slice("ohio", "mocker", "d3e4f", &[("10.42.0.1", true)]);
+        let west = slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
+        sync(&cache, vec![west, ohio.clone()]);
+        let mut events = cache.events.subscribe();
+        let (slices, watch) = futures::channel::mpsc::unbounded();
+        let stop = CancellationToken::new();
+        let following = tokio::spawn({
+            let (cache, stop) = (Arc::clone(&cache), stop.clone());
+            async move { follow(watch, "test", &cache, &stop).await }
+        });
+        slices
+            .unbounded_send(Ok(watcher::Event::Delete(ohio)))
+            .unwrap();
+        let removed = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+        assert!(matches!(removed, Ok(Ok(WatchEvent::Removed(_)))));
+        let held = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+        assert!(
+            matches!(held, Ok(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Estimated)
+        );
+
+        // No watch event comes, so only the loop's timer can end the hold.
+        tokio::time::advance(REMOVAL_HOLD).await;
         let resync = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
         assert!(
             matches!(resync, Ok(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Exact)

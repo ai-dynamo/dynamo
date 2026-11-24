@@ -54,13 +54,13 @@ while MCS imports a Ready Pool Relay endpoint for it, so `complete` needs no lea
 any number of replicas can run without shared storage. MCS supplies the pool's key, relay identities
 and frontend addresses; export each pool's frontend Service to supply its addresses. Global Routers
 learn what each pool serves from its Pool Relays' state streams, so a Pool Relay's `--cluster-id` must
-be the MCS cluster ID or Karmada member cluster name: a stream names its pool by that key.
+be the MCS cluster ID or Karmada member cluster name: a stream names its pool by that key. These modes
+assume a trusted network on which pod addresses are reachable between clusters.
 
 A pool's region is the `topology.kubernetes.io/region` label of its imported EndpointSlices, when the
-MCS implementation sets it, as `deploy/global-discovery-mcs` does. Otherwise, with `karmada`, it is the
-`spec.region` of its member `Cluster` on the Karmada control plane. A cluster without either takes its
-`--cluster-region`. A cluster with no region is listed with its name as the region, and the service logs
-a warning once per cluster.
+MCS implementation sets it. Otherwise, with `karmada`, it is the `spec.region` of its member `Cluster`
+on the Karmada control plane. A cluster without either takes its `--cluster-region`. A cluster with no
+region is listed with its name as the region, and the service logs a warning once per cluster.
 
 The service needs read access to `endpointslices`, and with `karmada`, to `clusters.cluster.karmada.io`
 for regions; without that access it logs a warning and uses `--cluster-region` or the cluster's name.
@@ -68,6 +68,27 @@ When it reads a member cluster rather than the Karmada control plane, it finds n
 logs that once, and takes every region from `--cluster-region`.
 `karmada` reads slices named the Karmada way, and `mcs` reads slices with the standard
 `multicluster.kubernetes.io` labels.
+
+The service sees only what MCS imports into the cluster it reads. With `karmada`, reading a member
+cluster, each pool's Pool Relay and frontend Services and the router Service need a `ServiceImport`
+that Karmada propagates to that cluster, for pools in that same cluster too; the Karmada control plane
+holds every exported Service's slices, so reading it needs none. Karmada also watches a member's
+`ServiceExport`s only while it has propagated at least one `ServiceExport` there. With `mcs`, check
+where the implementation imports: some import only into namespaces that exist in the cluster, or that
+they are set to watch.
+
+An MCS implementation can drop a healthy cluster's imports for a while, as when its registry restarts or
+the cluster's lease lapses, and an empty list looks like one whose imports all went. So a list is
+partial for a minute after a pool or router leaves it and while it is empty, and readers keep what it
+leaves out. A list cannot show that MCS stopped updating it: while Karmada cannot reach a member, or its
+control plane is down, the imports keep their last pools, frontend addresses and router replicas, and the
+list stays complete. Routers send requests only to pools whose state streams are live, but an address
+that changed meanwhile, as in a rollout, is not updated until MCS is back, and requests can reach
+whichever pod has the old address by then.
+
+These modes trust what MCS imports: whoever can export a Service named like a Pool Relay, frontend or
+router Service, or write to an MCS implementation that does not authenticate its clients, can add
+frontends or router replicas.
 
 ### With `--registration-storage dynamodb`
 
@@ -103,6 +124,10 @@ the service must take registrations without a model before Pool Relays stop send
      Routers and Pool Relays keep their last lists while the service restarts.
    - With `registrations`, a rolling update works.
 3. Upgrade the Pool Relays.
+
+To roll back, go in the reverse order: Pool Relays, then the Global Discovery Service, then the Global
+Routers. An older router does not route a pool listed without a model, and an older service refuses a
+registration without one.
 
 ## Environment
 
@@ -173,8 +198,8 @@ registrations.
 
 | Field | Meaning |
 | --- | --- |
-| `pools[].relay_identities` | The identities of the Pool Relay allowed to stream the pool's state, such as `ip:10.43.66.175`. Empty in `registrations` mode. |
-| `complete` | `true` when the service believes it lists every live pool; `false` when the list may be missing some. It is not an authoritative inventory: with `dynamodb`, an item that cannot be decoded is logged and left out, and another region's writes arrive by replication. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. With `dynamodb` it is also `false` while the table cannot be reached, and for one lease after, since Pool Relays could not renew meanwhile; and with a Global Table, while a pool from another region is listed past its lease (see `--dynamodb-replication-grace-secs`). In `karmada` and `mcs` modes, it is `false` only while the MCS watch has been failing for a minute. |
+| `pools[].relay_identities` | The addresses of the pool's Ready Pool Relay pods, such as `ip:10.43.66.175`, for routers that check which Pool Relays stream the pool's state. Routers do not check them yet. Empty in `registrations` mode. |
+| `complete` | `true` when the service believes it lists every live pool; `false` when the list may be missing some. It is not an authoritative inventory: with `dynamodb`, an item that cannot be decoded is logged and left out, and another region's writes arrive by replication. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. With `dynamodb` it is also `false` while the table cannot be reached, and for one lease after, since Pool Relays could not renew meanwhile; and with a Global Table, while a pool from another region is listed past its lease (see `--dynamodb-replication-grace-secs`). In `karmada` and `mcs` modes, it is `false` after about 80 s of MCS watch errors until three minutes pass without one, for a minute after a pool leaves the list, and while the list is empty. |
 
 ### `GET /routers`
 
@@ -187,7 +212,8 @@ registrations.
 ```
 
 With `complete: false`, merge the response with known replicas and retain missing ones. Only a
-complete response removes missing replicas. Clients accept older services without this field as
+complete response removes missing replicas. With `karmada` and `mcs`, a router list is also partial for
+a minute after a replica leaves it and while it is empty. Clients accept older services without this field as
 complete. Upgrade Pool Relays before enabling router self-registration, because older clients
 ignore `complete`.
 

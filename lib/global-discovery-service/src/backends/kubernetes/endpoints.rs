@@ -213,8 +213,12 @@ impl SliceIndex for ReplicaIndex {
 
     /// A relist: every slice at once. Rebuilds every replica; the cache
     /// publishes one `Resync` instead of per-replica events.
-    fn replace(&mut self, _naming: &ReplicaNaming, entries: HashMap<SliceKey, Vec<RouterReplica>>) {
-        self.replicas.clear();
+    fn replace(
+        &mut self,
+        _naming: &ReplicaNaming,
+        entries: HashMap<SliceKey, Vec<RouterReplica>>,
+    ) -> bool {
+        let before = std::mem::take(&mut self.replicas);
         for (key, endpoints) in &entries {
             for endpoint in endpoints {
                 self.replicas
@@ -227,6 +231,7 @@ impl SliceIndex for ReplicaIndex {
             .into_iter()
             .filter(|(_, endpoints)| !endpoints.is_empty())
             .collect();
+        before.keys().any(|id| !self.replicas.contains_key(id))
     }
 
     fn snapshot(&self) -> Snapshot<RouterReplica> {
@@ -238,6 +243,10 @@ impl SliceIndex for ReplicaIndex {
                 .collect(),
             completeness: Completeness::Exact,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.replicas.is_empty()
     }
 }
 
@@ -251,7 +260,7 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
-    use super::super::cache::SliceCache;
+    use super::super::cache::{REMOVAL_HOLD, SliceCache};
     use super::super::mcs::{
         KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL,
     };
@@ -417,7 +426,15 @@ mod tests {
     fn changes_publish_added_and_removed() {
         let cache = cache();
         sync(&cache, Vec::new());
-        let mut events = cache.events.subscribe();
+        let mut receiver = cache.events.subscribe();
+        // Replica events; a `Resync` only reports the view's completeness.
+        let mut next_event = move || loop {
+            match receiver.try_recv() {
+                Ok(WatchEvent::Resync(_)) => {}
+                Ok(event) => return Some(event),
+                Err(_) => return None,
+            }
+        };
 
         let one = slice(
             "ohio",
@@ -426,10 +443,10 @@ mod tests {
         );
         cache.apply(watcher::Event::Apply(one.clone()));
         assert!(
-            matches!(events.try_recv().unwrap(), WatchEvent::Upserted(e) if e.replica == id("ohio/global-router-0"))
+            matches!(next_event().unwrap(), WatchEvent::Upserted(e) if e.replica == id("ohio/global-router-0"))
         );
         cache.apply(watcher::Event::Apply(one.clone()));
-        assert!(events.try_recv().is_err());
+        assert!(next_event().is_none());
         // The pod moves to a new address: the replica changes.
         cache.apply(watcher::Event::Apply(slice(
             "ohio",
@@ -437,7 +454,7 @@ mod tests {
             &[("10.42.0.9", Some(true), Some("global-router-0"))],
         )));
         assert!(
-            matches!(events.try_recv().unwrap(), WatchEvent::Upserted(e) if e.url.as_str() == "http://10.42.0.9:50051/")
+            matches!(next_event().unwrap(), WatchEvent::Upserted(e) if e.url.as_str() == "http://10.42.0.9:50051/")
         );
         // It stops being Ready.
         cache.apply(watcher::Event::Apply(slice(
@@ -446,9 +463,31 @@ mod tests {
             &[("10.42.0.9", Some(false), Some("global-router-0"))],
         )));
         assert!(
-            matches!(events.try_recv().unwrap(), WatchEvent::Removed(r) if r == id("ohio/global-router-0"))
+            matches!(next_event().unwrap(), WatchEvent::Removed(r) if r == id("ohio/global-router-0"))
         );
         assert!(cache.read().index.replicas.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_router_list_that_is_empty_or_lost_a_replica_is_partial() {
+        // PoolRelays keep the routers they know while the list is partial, so
+        // an MCS implementation that drops imports for a while cuts no stream.
+        let complete = |cache: &SliceCache<ReplicaIndex>| {
+            cache.snapshot().unwrap().completeness == Completeness::Exact
+        };
+        let cache = cache();
+        sync(&cache, Vec::new());
+        assert!(!complete(&cache));
+        let two = [
+            ("10.42.0.5", Some(true), Some("global-router-0")),
+            ("10.42.0.6", Some(true), Some("global-router-1")),
+        ];
+        cache.apply(watcher::Event::Apply(slice("ohio", "a1b2c", &two)));
+        assert!(complete(&cache));
+        cache.apply(watcher::Event::Apply(slice("ohio", "a1b2c", &two[..1])));
+        assert!(!complete(&cache));
+        tokio::time::advance(REMOVAL_HOLD).await;
+        assert!(complete(&cache));
     }
 
     #[test]

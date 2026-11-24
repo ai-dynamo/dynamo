@@ -24,9 +24,8 @@ pub const SOURCE_CLUSTER_LABEL: &str = "multicluster.kubernetes.io/source-cluste
 /// Standard MCS: name of the imported Service a slice belongs to.
 pub const SERVICE_NAME_LABEL: &str = "multicluster.kubernetes.io/service-name";
 
-/// The well-known region label. A standard implementation, such as
-/// `deploy/global-discovery-mcs`, may set it on an imported slice to the source
-/// cluster's region; Karmada does not.
+/// The well-known region label. A standard implementation may set it on an
+/// imported slice to the source cluster's region; Karmada does not.
 pub const REGION_LABEL: &str = "topology.kubernetes.io/region";
 
 /// Kubernetes: name of the Service a slice belongs to.

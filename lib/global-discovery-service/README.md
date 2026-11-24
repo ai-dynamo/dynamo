@@ -24,8 +24,10 @@ through `POST /routers`.
   the standard way. A pool is listed while MCS imports a Ready Pool Relay endpoint for it. MCS
   supplies the addresses. The region comes from the imported slice's `topology.kubernetes.io/region`
   label when the MCS implementation sets it, then from the member `Cluster`'s `spec.region` with
-  Karmada, or else from `--cluster-region`. These modes take no registrations: `POST /pools` answers 501,
-  and `GET /routers` tells Pool Relays not to call it.
+  Karmada, then from `--cluster-region`, and is otherwise the cluster's name. These modes take no
+  registrations: `POST /pools` answers 501, and `GET /routers` tells Pool Relays not to call it. A list
+  is partial while the MCS watch keeps failing, for a minute after a pool or router leaves it, and
+  while it is empty, so readers keep what an MCS implementation drops for a while.
 
 ## Router self-registration
 

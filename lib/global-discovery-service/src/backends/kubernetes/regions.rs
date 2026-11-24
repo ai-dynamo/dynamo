@@ -6,7 +6,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -22,10 +21,15 @@ use tokio_util::sync::CancellationToken;
 use super::cache::{WATCH_TIMEOUT_SECS, retried};
 use crate::pool_discovery::PoolListing;
 
-/// How long a list waits for the first read of Karmada's clusters, so that a
-/// replica that just started does not list its pools under a stand-in region.
-/// Once one wait runs out, lists stop waiting.
-const FIRST_READ_WAIT: Duration = Duration::from_secs(5);
+/// How long after the region watch starts lists wait for Karmada's clusters to
+/// be read, so a replica that just started does not list its pools under a
+/// stand-in region. Short, since readiness and `GET /pools` wait for it too.
+pub(super) const FIRST_READ_WAIT: Duration = Duration::from_secs(3);
+
+/// How long before an API server that serves no Karmada `Cluster` objects is
+/// asked again: a member cluster never will, a control plane may while it
+/// starts.
+const NOT_SERVED_RECHECK: Duration = Duration::from_secs(300);
 
 /// Where each pool cluster is, by the name MCS gives the cluster, for pools
 /// whose slices name no region: with Karmada, the `spec.region` of its member
@@ -51,8 +55,8 @@ impl ClusterRegions {
         }
     }
 
-    /// Waits, up to [`FIRST_READ_WAIT`], until Karmada's clusters have been
-    /// read once or cannot be.
+    /// Waits until Karmada's clusters have been read once or cannot be, at
+    /// most until [`FIRST_READ_WAIT`] after the watch started.
     pub(super) async fn first_read(&self) {
         if let Some(karmada) = &self.karmada {
             karmada.first_read().await;
@@ -62,20 +66,16 @@ impl ClusterRegions {
     /// Gives each listing whose slices named no region (an empty one) its
     /// cluster's location.
     pub(super) fn locate(&self, listings: &mut [PoolListing]) {
-        let karmada = self
-            .karmada
-            .as_ref()
-            .map(KarmadaRegions::locations)
-            .unwrap_or_default();
         for listing in listings
             .iter_mut()
             .filter(|listing| listing.location.region.is_empty())
         {
             let cluster = listing.key.cluster_id();
-            listing.location = karmada
-                .get(cluster)
-                .or_else(|| self.configured.get(cluster))
-                .cloned()
+            listing.location = self
+                .karmada
+                .as_ref()
+                .and_then(|karmada| karmada.location(cluster))
+                .or_else(|| self.configured.get(cluster).cloned())
                 .unwrap_or_else(|| self.stand_in(cluster));
         }
     }
@@ -113,10 +113,9 @@ struct KarmadaRegions {
     store: Store<DynamicObject>,
     /// Taken when the watch starts.
     writer: Mutex<Option<Writer<DynamicObject>>>,
-    /// Whether the clusters have been read once, or cannot be.
+    /// Lists stop waiting: the clusters have been read once or cannot be, or
+    /// [`FIRST_READ_WAIT`] has passed since the watch started.
     settled: watch::Sender<bool>,
-    /// Lists no longer wait for the first read.
-    gave_up_waiting: AtomicBool,
     watching: OnceLock<()>,
     stop: CancellationToken,
 }
@@ -131,38 +130,27 @@ impl KarmadaRegions {
             store: writer.as_reader(),
             writer: Mutex::new(Some(writer)),
             settled: watch::Sender::new(false),
-            gave_up_waiting: AtomicBool::new(false),
             watching: OnceLock::new(),
             stop: CancellationToken::new(),
         }
     }
 
-    /// Each member's location, by member name, from its usable `spec.region`.
-    fn locations(&self) -> HashMap<String, PoolLocation> {
+    /// A member's location, from its usable `spec.region`.
+    fn location(&self, cluster: &str) -> Option<PoolLocation> {
         self.ensure_watching();
-        self.store
-            .state()
-            .iter()
-            .filter_map(|cluster| {
-                let region = cluster.data.get("spec")?.get("region")?.as_str()?;
-                Some((
-                    cluster.metadata.name.clone()?,
-                    PoolLocation::in_region(region)?,
-                ))
-            })
-            .collect()
+        let member = self
+            .store
+            .find(|member| member.metadata.name.as_deref() == Some(cluster))?;
+        PoolLocation::in_region(member.data.get("spec")?.get("region")?.as_str()?)
     }
 
+    /// The watch settles on every path, so no caller waits longer than
+    /// [`FIRST_READ_WAIT`] after it started, even one that gave up earlier.
     async fn first_read(&self) {
         self.ensure_watching();
-        if self.gave_up_waiting.load(Ordering::Relaxed) {
-            return;
-        }
         let mut settled = self.settled.subscribe();
-        let read = tokio::time::timeout(FIRST_READ_WAIT, settled.wait_for(|settled| *settled));
-        if read.await.is_err() {
-            self.gave_up_waiting.store(true, Ordering::Relaxed);
-        }
+        // The sender lives in `self`, so the wait cannot fail.
+        let _ = settled.wait_for(|settled| *settled).await;
     }
 
     /// Every caller runs in a Tokio runtime, so the spawn is safe.
@@ -191,8 +179,8 @@ impl Drop for KarmadaRegions {
     }
 }
 
-/// Keeps `writer`'s store current until `stop`, or until the API server
-/// turns out not to serve `Cluster`s, as a member cluster does not.
+/// Keeps `writer`'s store current until `stop`. An API server that serves no
+/// `Cluster`s, as a member cluster does not, is asked again only rarely.
 async fn watch_clusters(
     clusters: Api<DynamicObject>,
     writer: Writer<DynamicObject>,
@@ -213,11 +201,18 @@ async fn watch_clusters(
         writer,
         watcher(clusters, config)
     )));
+    // Lists stop waiting by then, whatever the watch has done: a list can hang
+    // until the client's read timeout, and a failed one is retried.
+    let mut first_read_wait = std::pin::pin!(tokio::time::sleep(FIRST_READ_WAIT));
     let mut last_error = None;
     loop {
         let event = tokio::select! {
             biased;
             () = stop.cancelled() => return,
+            () = &mut first_read_wait, if !*settled.borrow() => {
+                settled.send_replace(true);
+                continue;
+            }
             event = events.next() => event,
         };
         match event {
@@ -229,27 +224,36 @@ async fn watch_clusters(
                     settled.send_replace(true);
                 }
             }
-            Some(Err(error)) if not_served(&error) => {
-                tracing::info!(
-                    "this API server serves no Karmada Cluster objects, so it is not the Karmada \
-                     control plane; pool regions come from --cluster-region"
-                );
+            Some(Err(error)) => {
+                let reason = error.to_string();
+                let not_served = not_served(&error);
+                if last_error.as_ref() != Some(&reason) {
+                    if not_served {
+                        tracing::info!(
+                            "this API server serves no Karmada Cluster objects, so it is not \
+                             the Karmada control plane; pool regions come from --cluster-region"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = reason,
+                            "cannot read Karmada's Cluster objects for pool regions; regions \
+                             come from --cluster-region or the cluster's name until they can be read"
+                        );
+                    }
+                    last_error = Some(reason);
+                }
+                if not_served {
+                    settled.send_replace(true);
+                    tokio::select! {
+                        () = stop.cancelled() => return,
+                        () = tokio::time::sleep(NOT_SERVED_RECHECK) => {}
+                    }
+                }
+            }
+            None => {
                 settled.send_replace(true);
                 return;
             }
-            Some(Err(error)) => {
-                let reason = error.to_string();
-                if last_error.as_ref() != Some(&reason) {
-                    tracing::warn!(
-                        error = reason,
-                        "cannot read Karmada's Cluster objects for pool regions; regions come \
-                         from --cluster-region or the cluster's name until they can be read"
-                    );
-                    last_error = Some(reason);
-                }
-                settled.send_replace(true);
-            }
-            None => return,
         }
     }
 }
