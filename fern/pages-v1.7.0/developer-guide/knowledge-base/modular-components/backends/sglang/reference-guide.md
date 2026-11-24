@@ -1,0 +1,237 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Reference Guide
+subtitle: Architecture, configuration, and operational details for the SGLang backend
+---
+
+## Overview
+
+The SGLang backend in Dynamo uses a modular architecture where `main.py` dispatches to specialized initialization modules based on the worker type. Each worker type has its own init module, request handler, health check, and registration logic.
+
+Dynamo SGLang uses SGLang's native argument parser -- all SGLang engine arguments (e.g., `--model-path`, `--tp`, `--trust-remote-code`) are passed through directly. Dynamo adds its own arguments for worker mode selection, tokenizer control, and disaggregation configuration.
+
+### Worker Types
+
+| Worker Type | Description |
+|------------|-------------|
+| **Decode** *(default)* | Standard LLM inference (aggregated or disaggregated decode) |
+| **Prefill** | Disaggregated prefill phase (`--disaggregation-mode prefill`) |
+| **Embedding** | Text embedding models (`--embedding-worker`) |
+| **Multimodal Encode** | Frontend-facing: vision encoding, embeddings generation (`--enable-multimodal --disaggregation-mode encode`) |
+| **Native Multimodal P/D** | Normal prefill/decode workers that pass raw media to SGLang (`--enable-multimodal --disaggregation-mode prefill/decode`) |
+| **Internal Multimodal Worker** | E/PD or E/P/D worker that consumes embeddings from a separate encode worker (`--enable-multimodal --dedicated-mm-encoder --disaggregation-mode pd/decode`) |
+| **Internal Multimodal Prefill** | Prefill phase for E/P/D multimodal disaggregation (`--enable-multimodal --dedicated-mm-encoder --disaggregation-mode prefill`) |
+| **Image Diffusion** | Image generation via DiffGenerator (`--image-diffusion-worker`) |
+| **Video Generation** | Text/image-to-video via DiffGenerator (`--video-generation-worker`) |
+| **LLM Diffusion** | Diffusion language models like LLaDA (`--dllm-algorithm <algo>`) |
+
+## Argument Reference
+
+### Dynamo-Specific Arguments
+
+These arguments are added by Dynamo on top of SGLang's native arguments. For the complete field-by-field reference of every Dynamo SGLang flag, default, and environment variable, see [SGLang Configuration](../../../../../reference/backends/sglang-configuration.mdx).
+
+| Argument | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
+| `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](chat-processor.md). |
+| `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
+| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers) parser for chain-of-thought models |
+| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default); explicit request controls take precedence |
+| `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
+| `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
+| `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](multimodal.md) inputs on this worker |
+| `--dedicated-mm-encoder` | `DYN_SGL_DEDICATED_MM_ENCODER` | `false` | Select the internal encode-worker topology for multimodal PD/P/D workers |
+| `--frontend-decoding` | `DYN_SGL_FRONTEND_DECODING` | `false` | Decode images and supported videos in the Rust frontend and transfer pixels through NIXL. Use it on aggregated/native workers or the frontend-facing encode worker, not internal multimodal workers. |
+| `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](../../../../../use-cases/diffusion/workflows/text-to-image.md#sglang) worker |
+| `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](../../../../../use-cases/diffusion/workflows/text-to-video.md#sglang) worker |
+| `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
+| `--disagg-config-key` | `DYN_SGL_DISAGG_CONFIG_KEY` | `None` | Key to select from disaggregation config (e.g., `prefill`, `decode`) |
+| `--engine-route` | `DYN_SGLANG_ENGINE_ROUTES` | `None` | Expose a startup-allowlisted SGLang Engine or tokenizer-manager method under `/engine/<path>`; repeat the flag or separate environment descriptors with whitespace |
+
+<Note>
+`--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
+</Note>
+
+The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers).
+
+## Tokenizer Behavior
+
+By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang. This enables all frontend endpoints (`v1/chat/completions`, `v1/completions`, `v1/embeddings`).
+
+For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](chat-processor.md) for architecture and usage.
+
+Set `--default-chat-template-kwargs` on the frontend, not on the SGLang worker. The frontend renders the chat template, so SGLang's flag has no effect behind Dynamo, and the worker refuses it at startup. The SGLang sidecar logs a warning instead, because its engine can also serve SGLang's own HTTP server. The frontend applies the defaults to every chat request, for workers and sidecars, before it reads the thinking controls. A key in the request's `chat_template_kwargs` takes precedence unless its value is `null` or `"auto"`, and a request thinking control replaces the thinking keys in the defaults. The flag cannot set `chat_template`; use `--custom-jinja-template` to replace the chat template.
+
+<Warning>
+`--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
+</Warning>
+
+## Request Cancellation
+
+When a client disconnects, Dynamo automatically cancels the in-flight request across all workers, freeing compute resources. A background cancellation monitor detects disconnection and aborts the SGLang request.
+
+| Mode | Prefill | Decode |
+|------|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated** | ⚠️ | ✅ |
+
+<Warning>Cancellation during remote prefill in disaggregated mode is not currently supported.</Warning>
+
+For details on the cancellation architecture, see [Request Cancellation](../../../concepts/fault-tolerance/request-cancellation-architecture.md).
+
+## Graceful Shutdown
+
+SGLang workers use Dynamo's graceful shutdown mechanism. When a `SIGTERM` or `SIGINT` is received:
+
+1. **Discovery unregister**: The worker is removed from service discovery so no new requests are routed to it
+2. **Grace period**: In-flight requests are allowed to complete
+3. **Deferred handlers**: SGLang's internal signal handlers (captured during startup via monkey-patching `loop.add_signal_handler`) are invoked after the graceful period
+
+This ensures zero dropped requests during rolling updates or scale-down events.
+
+For more details, see [Graceful Shutdown](../../../../../kubernetes/fault-tolerance/graceful-shutdown.md).
+
+## Health Checks
+
+Each worker type has a specialized health check payload that validates the full inference pipeline:
+
+| Worker Type | Health Check Strategy |
+|------------|----------------------|
+| Decode / Aggregated | Short generation request (`max_new_tokens=1`) |
+| Prefill | Wrapped prefill-specific request structure |
+| Image Diffusion | Minimal image generation request |
+| Video Generation | Minimal video generation request |
+| Embedding | Standard embedding request |
+
+Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. See [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks) for the active health-check design.
+
+## Metrics and KV Events
+
+### Prometheus Metrics
+
+Enable metrics with `--enable-metrics` on the worker. Set `DYN_SYSTEM_PORT` to expose the `/metrics` endpoint:
+
+```bash
+DYN_SYSTEM_PORT=8081 python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --enable-metrics
+```
+
+Both SGLang engine metrics (`sglang:*` prefix) and Dynamo runtime metrics (`dynamo_*` prefix) are served from the same endpoint.
+
+For metric details, see [SGLang Observability](observability.md). For a visualization
+walkthrough, see [Metrics and Dashboards](../../../../../cli/operations/observability.mdx#view-metrics-and-dashboards).
+
+### KV Events
+
+When configured with `--kv-events-config`, workers publish KV cache events (block creation/deletion) for the [KV-aware router](../../router/overview.md). Events are published via ZMQ from SGLang's scheduler and relayed through Dynamo's event plane.
+
+For DP attention mode (`--enable-dp-attention`), the publisher handles multiple DP ranks per node, each with its own KV event stream.
+
+## Engine Routes
+
+SGLang workers expose operational endpoints via Dynamo's system server:
+
+| Route | Description |
+|-------|-------------|
+| `/engine/control/start_profile` | Start PyTorch profiling |
+| `/engine/control/stop_profile` | Stop profiling and save traces |
+| `/engine/pause_generation` | Pause generation and remove the worker from routing |
+| `/engine/continue_generation` | Continue generation and return the worker to routing |
+| `/engine/release_memory_occupation` | Release GPU memory while generation is paused |
+| `/engine/resume_memory_occupation` | Restore GPU memory before generation continues |
+| `/engine/control/update_weights_from_disk` | Update model weights from disk |
+| `/engine/control/update_weights_from_tensor` | Update model weights from tensor payload |
+| `/engine/control/update_weights_from_distributed` | Update model weights from distributed source |
+| `/engine/control/update_weights_from_ipc` | Update model weights from IPC payload |
+| `/engine/control/update_weight_version` | Update weight version metadata |
+
+<Note>
+Earlier docs listed the memory routes under `/engine/control/`. Those paths return HTTP 404; use `/engine/release_memory_occupation` and `/engine/resume_memory_occupation`.
+</Note>
+
+### Release and Resume GPU Memory
+
+Workers expose `pause_generation`, `continue_generation`, `release_memory_occupation`, and `resume_memory_occupation` by default, without [`--engine-route`](#configurable-sglang-method-routes). Each route calls the SGLang tokenizer-manager method of the same name. An `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` descriptor with the same path replaces the default route.
+
+<Warning>
+Start SGLang with `--enable-memory-saver` (`--load-format gms` turns it on). Without it, `release_memory_occupation` returns success but frees no managed GPU allocations. SGLang selects a [memory-saver adapter whose `pause` method does nothing](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/utils/torch_memory_saver_adapter.py).
+</Warning>
+
+With an empty `tags` list, release and resume cover the weights, the KV cache, and CUDA graphs. What happens to the weights on release:
+
+- **`--load-format gms`:** the GPU Memory Service keeps them, and resume maps them back.
+- **`--enable-weights-cpu-backup` without GMS:** SGLang keeps a CPU copy and restores it on resume.
+- **Neither:** the weights are discarded. Reload them with an `/engine/control/update_weights_from_*` route after you resume memory and before you continue generation.
+
+Call the routes in this order:
+
+1. **Pause generation** with `{"mode": "retract"}`. Running requests return to SGLang's waiting queue, and the worker leaves discovery so the router stops sending it new requests. Do not use `in_place`: SGLang releases memory only when no request is running. Releasing memory with running requests fails [SGLang's idle assertion](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/managers/scheduler_components/weight_updater.py#L337-L341) and can terminate the scheduler. Restart the worker if this happens.
+
+   <Note>
+The XPU image pins SGLang 0.5.19, which also needs an empty waiting queue before release. On XPU, pause with `{"mode": "abort"}`. This aborts all in-flight requests.
+   </Note>
+
+2. **Release memory.** `release_memory_occupation` frees GPU memory. The worker stays out of discovery.
+3. **Resume memory.** `resume_memory_occupation` restores GPU memory. The worker stays out of discovery. Send resume only once after each release. With GMS, a second resume crashes the scheduler; see [Known Issues](../../../../../../pages-dev/reference/general/releases/known-issues.mdx).
+4. **Continue generation.** `continue_generation` resumes SGLang and registers the worker in discovery again.
+
+After each of these routes, Dynamo checks SGLang's pause state and updates discovery to match. Release and resume do not change discovery on their own.
+
+Set `DYN_SYSTEM_PORT` on the worker (the system server is disabled by default) and send the requests to that port:
+
+```bash
+WORKER_URL=http://localhost:8081
+
+curl --fail-with-body -X POST "$WORKER_URL/engine/pause_generation" \
+  -H 'Content-Type: application/json' -d '{"mode": "retract"}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/release_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/resume_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/continue_generation" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+The request bodies follow the SGLang request schemas for the installed SGLang version. For example, the release and resume bodies accept SGLang's optional `tags` list, such as `{"tags": ["weights", "kv_cache"]}`. `--fail-with-body` makes curl exit with an error on an HTTP error status, and `&&` stops the sequence there. A failed resume leaves the worker paused and out of discovery. Check the worker logs and restart the worker after fixing the reported cause. Do not retry resume or call continue: resume can fail after restoring only part of the memory, and a second resume can crash the scheduler.
+
+### Configurable SGLang Method Routes
+
+Set `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` to expose additional SGLang methods on a worker's system server without changing Dynamo. Each descriptor uses this grammar:
+
+```text
+<path>[=<method>][:engine|tm]
+```
+
+- `<path>` becomes `/engine/<path>` and can contain `/`-separated segments.
+- `<method>` defaults to `<path>`. Use `server_info=get_server_info` to expose an alias. A path containing `/` therefore needs an explicit method.
+- The target defaults to the `sgl.Engine` instance. Set `:tm` to target its tokenizer manager.
+- Repeat `--engine-route` for multiple routes. Separate multiple `DYN_SGLANG_ENGINE_ROUTES` descriptors with whitespace.
+
+For per-worker generation control with NVIDIA Collective Communications Library (NCCL) weight updates, expose these additional routes. Pause and continue are already on by default:
+
+```bash
+export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info flush_cache init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group"
+python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B
+```
+
+Call these routes on each worker's system-server address. Send inference requests to the Dynamo frontend and reserve the system server for worker control.
+
+SGLang 0.5.15 exposes `get_internal_state` only on the tokenizer manager, where it returns a list with one state dictionary per data-parallel rank. The Engine `get_server_info` adapter merges the server arguments and scheduler topology into the top-level dictionary expected by control clients, so `/engine/server_info` returns that dictionary directly without a `result` envelope.
+
+The `update_weights_from_distributed:tm` form accepts SGLang's tokenizer-manager request schema, including `weight_version`. The public SGLang Engine wrapper omits that field. This configurable `/engine/update_weights_from_distributed` route is separate from Dynamo's fixed `/engine/control/update_weights_from_distributed` route.
+
+Configured Engine methods receive JSON object keys as keyword arguments. For tokenizer-manager methods with an annotated dataclass or msgspec request, Dynamo constructs the request object from the JSON body and supplies `None` for an HTTP request parameter when the SGLang signature requires one. Async methods are awaited, sync Engine wrappers run outside the server loop, and nested results are converted to JSON. Empty request bodies become `{}`. Configured routes accept the ordinary HTTP methods handled by the Dynamo system server.
+
+Dynamo parses and resolves the complete route list during worker startup. Startup fails for malformed descriptors, unknown targets, duplicate paths, private methods, missing methods, or non-callable attributes. An unconfigured method has no route. Request content cannot select or replace the method captured for a configured path, and failure values such as `{"success": false}` remain failures in the response.
+
+<Warning>
+Treat each configured descriptor as remote administrative access to that SGLang method. Expose only the required allowlist and restrict network access to the Dynamo system server.
+</Warning>
+
+## See Also
+
+- **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
+- **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
+- **[Diffusion](../../../../../use-cases/diffusion/overview.md)**: LLM, image, and video diffusion models
+- **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration

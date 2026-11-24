@@ -1,0 +1,164 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Sidecar Backends
+subtitle: Run Dynamo beside a stock inference engine through its native gRPC API.
+---
+
+<Warning>
+**Experimental.** Sidecar integration is under active development, so this page and the linked support notes may become stale. The sidecar path does not yet match every feature of the in-process backends.
+</Warning>
+
+A Dynamo sidecar runs beside the inference engine process. It registers the
+engine with Dynamo discovery, forwards engine events into the Dynamo event
+plane, and serves requests from the Dynamo frontend by calling the engine's
+native gRPC API.
+
+## Backend Support Matrix
+
+**Legend:** Supported = available through the sidecar; Limited = available with restrictions; Engine-configured = enabled in the native engine; No = unavailable. See the linked backend support notes for details.
+
+| Capability | [vLLM](https://github.com/ai-dynamo/dynamo/blob/v1.7.0/lib/sidecar/SUPPORT_NOTES.md#vllm) | [SGLang](https://github.com/ai-dynamo/dynamo/blob/v1.7.0/lib/sidecar/SUPPORT_NOTES.md#sglang) | [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/v1.7.0/lib/sidecar/SUPPORT_NOTES.md#tensorrt-llm) |
+|---|---|---|---|
+| Text generation, streaming, and cancellation | Supported | Supported | Supported |
+| Tool calling through the Dynamo frontend | Supported | Supported | Supported |
+| Disaggregated prefill/decode serving | Supported | Supported | Supported |
+| KV-aware routing | Supported | Supported | Supported |
+| Multimodal input | Supported: image, video, audio | Supported: image, video, audio | Limited: images and video |
+| Separate multimodal encoder workers | Supported | No | No |
+| LoRA adapters | Supported | No | No |
+| Structured output and logprobs | Supported | Supported | Supported: no prompt logprobs |
+| Embedding endpoints | No | No | No |
+| Runtime weight updates and sleep/wake controls | Limited | No | No |
+
+### Deployment
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Kubernetes single-node deployment | Supported | Supported | Supported |
+| Kubernetes multinode deployment | Supported | Supported | Supported |
+
+### Operations and Recovery
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Observability: metrics, logs, and tracing | Limited | Limited | Limited |
+| SLA-based planner and autoscaling | No | No | No |
+| Native engine cache offloading | Engine-configured | Engine-configured | Engine-configured |
+| GPU Memory Service (GMS) | Requires separate integration | Requires separate integration | Requires separate integration |
+| Checkpoint/restore | Requires separate integration | Requires separate integration | Requires separate integration |
+| Shadow-engine failover | Requires separate integration | Requires separate integration | Requires separate integration |
+| In-flight request migration | Supported: opt-in token replay | Supported: opt-in token replay | Supported: opt-in token replay |
+| Graceful shutdown and draining | Limited: bounded drain | Limited: bounded drain | Limited: bounded drain |
+| Speculative decoding | Engine-configured | Engine-configured | Engine-configured |
+
+For engine-version requirements and launch examples, see [vLLM](../../modular-components/backends/vllm/sidecar.md), [SGLang](../../modular-components/backends/sglang/sidecar.md), and [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md).
+
+## Design Goals
+
+- Keep the upstream engine's native serve path and argument surface.
+- Move toward public, versioned gRPC contracts with explicit backward
+  compatibility instead of importing private engine APIs.
+- Isolate Dynamo and engine dependencies in separate processes.
+- Attribute failures through engine-specific and Dynamo-specific logs and health
+  checks.
+- Reuse Dynamo's frontend, routing, planning, and disaggregated-serving
+  orchestration.
+
+## Architecture
+
+![Dynamo Sidecar architecture. A client sends OpenAI-compatible HTTP to the Dynamo Frontend, which tokenizes, routes, and sends token IDs over the request plane to the Dynamo Sidecar.](../../../../../assets/img/sidecar-architecture.svg)
+
+The frontend and router discover sidecars and send requests to them over the
+Dynamo request plane. Each sidecar converts requests to the engine's native gRPC
+API and streams responses back.
+
+## Responsibilities
+
+| Layer | Responsibility |
+|---|---|
+| Dynamo frontend and router | OpenAI-compatible API, preprocessing, and routing to sidecars |
+| Dynamo sidecar | Engine registration and discovery, request forwarding over native gRPC, and event forwarding |
+| Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
+
+## Container Packaging
+
+The sidecar Dockerfile builds all four engine-specific sidecar executables into
+one CPU-only image. Deployments select an engine by setting the container
+`command`:
+
+| Engine | Container command |
+|---|---|
+| vLLM | `dynamo-vllm-sidecar` |
+| SGLang | `dynamo-sglang-sidecar` |
+| TensorRT-LLM | `dynamo-trtllm-sidecar` |
+| LPX | `dynamo-lpx-sidecar` |
+
+The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
+`sglang`, `trtllm`, and `lpx` onto those executables. It is a convenience for ad-hoc
+`docker run`; the deployment manifests override it with `command`. The inference
+engine remains in a separate GPU container, so the sidecar image does not
+include vLLM, SGLang, TensorRT-LLM, LPX engines, CUDA, or engine-specific Python
+dependencies. The image runs as the non-root `dynamo` user with numeric user ID
+`1000` and declares port `9090` for Dynamo system endpoints, so Kubernetes can
+enforce `runAsNonRoot`.
+
+The sidecar image is published to NGC for each release, starting with 1.6.0:
+
+```bash
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>  # 1.6.0 or later
+```
+
+To build it from source instead, run from the repository root with the
+[sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/v1.7.0/lib/sidecar/Dockerfile):
+
+```bash
+docker build -f lib/sidecar/Dockerfile -t dynamo-sidecar:1.6.0-dev .
+```
+
+## Pod Layout
+
+<Note>Kubernetes sidecar mode is a work in progress.</Note>
+
+The engine and sidecar share one worker pod. The engine is the `main`
+container; the sidecar is a
+[native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/):
+an init container named `runtime` with `restartPolicy: Always`, which requires
+Kubernetes 1.29 or later. The two connect over loopback or a Unix socket.
+
+```yaml
+podTemplate:
+  spec:
+    initContainers:
+    - name: runtime
+      image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
+      command: [dynamo-vllm-sidecar]
+      args: [--grpc-endpoint, 127.0.0.1:30001]
+      restartPolicy: Always
+    containers:
+    - name: main
+      image: vllm/vllm-openai:<version>
+```
+
+Kubernetes starts the sidecar before the engine and keeps it running for the
+life of the pod. Declaring the `runtime` init container enables sidecar mode in
+the Dynamo operator, which gives the sidecar `/live` and `/health` probes on
+port `9090`; in host-network LPX Agent Pods the sidecar keeps only the probes its
+template declares. These probes do not track engine loading, so keep the engine's own
+probes on `main`. Sidecar mode supports worker, prefill, and decode components,
+and LPX components through their role templates.
+SGLang, vLLM, and TensorRT-LLM multinode deployments require explicit leader and
+worker role PodTemplates. Set `backendFramework` explicitly, as the examples do: the
+operator does not infer a backend from a native engine command. The leader declares
+`runtime`. Worker placement depends on the engine topology. See the
+[SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+the [vLLM guide](../../modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and the [TensorRT-LLM guide](../../modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes).
+
+## Topologies
+
+Each engine page shows its single-node TP, multi-node TP, and multi-node DP
+topologies:
+[vLLM](../../modular-components/backends/vllm/sidecar.md#topologies),
+[SGLang](../../modular-components/backends/sglang/sidecar.md#topologies),
+[TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md#topologies).

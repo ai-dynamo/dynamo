@@ -1,0 +1,138 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Request Rejection Architecture
+subtitle: Worker-load event processing, busy-state aggregation, and overload errors.
+---
+
+Dynamo implements request rejection (load shedding) in Frontend routing. The router avoids workers
+reported as busy and rejects requests when every eligible worker is busy.
+
+Frontend discovery uses first-wins admission for each model and target group. The first observed checksum
+cohort remains the incumbent; an incompatible newcomer is excluded by its individual worker ID and does
+not remove or change the incumbent. If the incumbent cohort disappears, the next remaining cohort can
+become its successor after initialization. Each Frontend observes this lifecycle independently, so
+separate Frontends can choose different incumbents.
+
+For deployment steps, see [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md). For exact
+configuration fields, see [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance).
+
+## Request Flow
+
+```text
+                                    ┌─────────────────┐
+                                    │ Worker Monitor  │
+                                    │  (background)   │
+                                    └────────┬────────┘
+                                             │ worker-load updates
+                                             ▼
+┌──────────┐    ┌──────────┐    ┌─────────────────────┐    ┌──────────┐
+│  Client  │───▶│ Frontend │───▶│     Push Router     │───▶│  Worker  │
+└──────────┘    └──────────┘    │ excludes busy set   │    └──────────┘
+                                └──────────┬──────────┘
+                                           │ every eligible worker busy
+                                           ▼
+                                ┌─────────────────────┐
+                                │ HTTP 529 Overloaded │
+                                └─────────────────────┘
+```
+
+The router distinguishes two failure classes:
+
+- **Overloaded** means workers are registered but every eligible worker is busy. The Frontend returns
+  HTTP 529 by default.
+- **Unavailable** means no usable service path exists. The Frontend returns HTTP 503.
+
+`DYN_HTTP_OVERLOAD_STATUS_CODE` can change the overload response code for client compatibility. Values
+from 200 through 999 are accepted. Informational values from 100 through 199, invalid values, and
+out-of-range values fall back to 529. The value is read and cached on first use.
+
+## Independently Enabled Signals
+
+All three busy thresholds are `None` by default. Setting a numeric value activates only that signal;
+there is no master admission-control switch.
+
+For each data-parallel rank, the monitor evaluates the configured checks with OR logic:
+
+```text
+decode_busy = active_decode_blocks / kv_total_blocks > decode_threshold
+absolute_prefill_busy = active_prefill_tokens > absolute_prefill_threshold
+fractional_prefill_busy =
+    active_prefill_tokens > fractional_prefill_threshold * max_num_batched_tokens
+
+rank_busy = any(configured check is true)
+worker_busy = all(data-parallel ranks are busy)
+```
+
+The fractional and absolute prefill checks can be enabled separately or together. The absolute check,
+`--active-prefill-tokens-threshold`, is deprecated and will be removed in v1.7; use
+`--active-prefill-tokens-threshold-frac`. A worker is not excluded until all of its data-parallel ranks
+are busy, which avoids discarding capacity on ranks that can still admit work.
+
+Decode-block rejection depends on the KV router worker-load path. `--router-mode kv` initializes that
+path. `--router-track-output-blocks` adds generated output tokens to the router's observed active-block
+count; without it, long outputs can consume KV cache without appearing in the tracked load. The
+separate `--router-track-active-blocks` option affects the router cost model and is not a prerequisite
+for busy rejection.
+
+## Worker Load Monitoring
+
+`KvWorkerMonitor`:
+
+1. Subscribes to worker KV and prefill load events.
+2. Stores per-worker, per-rank values such as `active_decode_blocks`, `kv_total_blocks`,
+   `active_prefill_tokens`, and `max_num_batched_tokens`.
+3. Recalculates the busy set when load or runtime configuration changes.
+4. Publishes the current busy set to the router.
+
+A [`POST /busy_threshold`](../../../../reference/components/frontend-configuration.mdx#admin)
+update changes the stored threshold configuration. It does not synchronously recompute every worker.
+The next worker-load or runtime-configuration update triggers reevaluation, so a new threshold can
+take a short time to change routing decisions.
+
+With `--router-mode kv`, the KV router applies the thresholds itself. While it projects each rank's
+booked load for a request, it judges that load against the current thresholds and the capacity the
+rank reports, and selection skips workers whose ranks are all busy. In this mode `KvWorkerMonitor` keeps only the decode threshold and applies it to the worker-reported `kv_used_blocks`, the signal the router's bookings cannot see: generated tokens, requests from other frontends, and prefill workers that track no active blocks. Selection skips a worker that either check marks busy. A `POST /busy_threshold` update takes effect at the next selection and at the monitor's next load event.
+
+A frontend in direct routing mode (`--router-mode direct`) does not pick workers: the caller does. It
+ignores busy thresholds, does not subscribe to worker load events, and returns a worker's overload
+refusal to the caller without excluding the worker.
+
+## Rejection Path
+
+When a request arrives:
+
+1. The push router resolves the registered workers for the model.
+2. If at least one busy threshold is configured, the router removes workers in the current busy set.
+3. If registered workers exist but no eligible worker remains, the router returns
+   `PipelineError::ServiceOverloaded`.
+4. The HTTP layer maps overload to the configured overload status, 529 by default.
+5. The Frontend increments `dynamo_frontend_model_rejection_total`.
+
+The Frontend also exports the latest observed worker values through
+`dynamo_frontend_worker_active_decode_blocks` and
+`dynamo_frontend_worker_active_prefill_tokens`. These gauges include only currently committed,
+available workers. A missing sample can mean that the worker was removed or excluded, not only
+that load telemetry is missing.
+
+Use `dynamo_frontend_router_worker_state` on the same Frontend to check the worker's current state
+and exclusion reason before diagnosing its load feed. For example, `state="excluded"` with
+`reason="checksum_mismatch"` identifies an individual worker whose Model Deployment Card checksum
+differs from the incumbent. During incumbent initialization, the incumbent remains
+`state="pending",reason="initializing"`; rejecting a newcomer never makes the incumbent pending or
+excluded. A worker removed from discovery has no per-worker state sample;
+`dynamo_frontend_router_workers` disappears when discovery withdraws the group after its last worker
+is removed. An observed group with pending or excluded workers still reports `available=0`; alerts
+for worker loss must also handle absent series. If the worker is available but its load sample is missing, investigate load
+publication and subscriptions. Transient overload is separate from this availability check, so busy
+workers can still expose load samples for comparison with the configured threshold. Do not aggregate
+inventory across Frontends as worker-global readiness.
+See [Router Worker Inventory](../../../../reference/observability/metrics-catalog.mdx#router-worker-inventory)
+for state, label, and lifetime semantics.
+
+## Related Documentation
+
+- [Admission Control Architecture](admission-control-architecture.md) - Backend admission limits and queueing
+- [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md) - Enable, tune, verify, and troubleshoot load shedding
+- [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance) - Threshold and overload response fields
+- [Observability Architecture](../observability-architecture.md#active-worker-health-checks) - Worker health monitoring

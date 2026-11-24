@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="600" viewBox="-20 -20 880 400" data-orig-vb="-20 -20 880 400"><!-- INJ:BG --><rect x="-20" y="-20" width="880" height="400" fill="#000000"/><!-- /INJ:BG -->
+  <rect x="-20" y="-20" width="880" height="400" fill="#000000"/>
+
+  <defs>
+    <marker id="arr-wht" markerWidth="8" markerHeight="10" refX="6" refY="5"
+            viewBox="0 0 8 10" orient="auto" markerUnits="userSpaceOnUse">
+      <polygon points="0,0 8,5 0,10" fill="#e0e0e0"/>
+    </marker>
+  </defs>
+
+  <!-- ==================== QUERY SEQUENCE CONTAINER ==================== -->
+
+  <rect x="10" y="-5" width="730" height="120" rx="0" fill="#1e1e1e" stroke="#616161" stroke-width="1"/>
+  <text x="375" y="14" text-anchor="middle" fill="#c0c0c0" font-size="16" font-family="sans-serif">Query Sequence &#x2014; 128 Blocks</text>
+
+  <!-- Position 0 -->
+  <rect x="20" y="30" width="130" height="55" fill="#2a4a10" stroke="#5a9a30" stroke-width="1" opacity="0.75"/>
+  <text x="85" y="55" text-anchor="middle" fill="#e0e0e0" font-size="16" font-family="sans-serif">Position 0</text>
+  <text x="85" y="74" text-anchor="middle" fill="#e0e0e0" font-size="13" font-style="italic" font-family="sans-serif">W1, W2, W3, W4</text>
+  <text x="85" y="100" text-anchor="middle" fill="#e0e0e0" font-size="13" font-style="italic" font-family="sans-serif">Jump Checkpoint</text>
+
+  <!-- Position 64 -->
+  <rect x="310" y="30" width="130" height="55" fill="#2a4a10" stroke="#5a9a30" stroke-width="1" opacity="0.75"/>
+  <text x="375" y="55" text-anchor="middle" fill="#e0e0e0" font-size="16" font-family="sans-serif">Position 64</text>
+  <text x="375" y="74" text-anchor="middle" fill="#e0e0e0" font-size="13" font-style="italic" font-family="sans-serif">W1, W2, W3, W4</text>
+  <text x="375" y="100" text-anchor="middle" fill="#e0e0e0" font-size="13" font-style="italic" font-family="sans-serif">Jump Checkpoint</text>
+
+  <!-- Position 128 -->
+  <rect x="600" y="30" width="130" height="55" fill="#2a4a10" stroke="#5a9a30" stroke-width="1" opacity="0.75"/>
+  <text x="665" y="55" text-anchor="middle" fill="#e0e0e0" font-size="16" font-family="sans-serif">Position 128</text>
+  <text x="665" y="74" text-anchor="middle" fill="#e0e0e0" font-size="13" font-style="italic" font-family="sans-serif">W1, W3</text>
+  <text x="665" y="100" text-anchor="middle" fill="#e0e0e0" font-size="13" font-style="italic" font-family="sans-serif">Jump Checkpoint</text>
+
+  <!-- All Match: Position 0 -> Position 64 -->
+  <path d="M 152 57 L 306 57" stroke="#e0e0e0" stroke-width="1" stroke-dasharray="4 3" fill="none" marker-end="url(#arr-wht)"/>
+  <text x="229" y="49" text-anchor="middle" fill="#c0c0c0" font-size="14" font-style="italic" font-family="sans-serif">All Match</text>
+
+  <!-- Partial Match: Position 64 -> Position 128 -->
+  <path d="M 442 57 L 596 57" stroke="#e0e0e0" stroke-width="1" stroke-dasharray="4 3" fill="none" marker-end="url(#arr-wht)"/>
+  <text x="519" y="49" text-anchor="middle" fill="#c0c0c0" font-size="14" font-style="italic" font-family="sans-serif">Partial Match</text>
+
+  <!-- ==================== SCAN ROW ==================== -->
+
+  <rect x="60" y="212" width="640" height="110" rx="0" fill="#1e1e1e" stroke="#616161" stroke-width="1"/>
+  <text x="380" y="232" text-anchor="middle" fill="#c0c0c0" font-size="16" font-family="sans-serif">Linear Scan &#x2014; 65...127</text>
+
+  <!-- Pos 65 -->
+  <rect x="80" y="248" width="90" height="40" fill="#1a1a1a" stroke="#636363" stroke-width="1" opacity="0.75"/>
+  <text x="125" y="274" text-anchor="middle" fill="#e0e0e0" font-size="14" font-family="sans-serif">Pos 65</text>
+
+  <text x="202" y="274" text-anchor="middle" fill="#787878" font-size="18" font-family="sans-serif">...</text>
+
+  <!-- Pos 78: W2 Drains -->
+  <rect x="230" y="248" width="140" height="40" fill="#2a1010" stroke="#b04040" stroke-width="1" opacity="0.75"/>
+  <text x="300" y="274" text-anchor="middle" fill="#e0e0e0" font-size="14" font-family="sans-serif">Pos 78: W2 Drains</text>
+
+  <text x="402" y="274" text-anchor="middle" fill="#787878" font-size="18" font-family="sans-serif">...</text>
+
+  <!-- Pos 91: W4 Drains -->
+  <rect x="430" y="248" width="140" height="40" fill="#2a1010" stroke="#b04040" stroke-width="1" opacity="0.75"/>
+  <text x="500" y="274" text-anchor="middle" fill="#e0e0e0" font-size="14" font-family="sans-serif">Pos 91: W4 Drains</text>
+
+  <text x="600" y="274" text-anchor="middle" fill="#787878" font-size="18" font-family="sans-serif">...</text>
+
+  <!-- Pos 127 -->
+  <rect x="620" y="248" width="65" height="40" fill="#1a1a1a" stroke="#636363" stroke-width="1" opacity="0.75"/>
+  <text x="652" y="274" text-anchor="middle" fill="#e0e0e0" font-size="14" font-family="sans-serif">Pos 127</text>
+
+  <!-- ==================== LOOKBACK: Container edge -> Pos 65 (right-angle path) ==================== -->
+
+  <path d="M 645 115 L 645 185 L 125 185 L 125 204" stroke="#e0e0e0" stroke-width="1" stroke-dasharray="4 3" fill="none"/>
+  <polygon points="125,212 120,202 130,202" fill="#e0e0e0"/>
+  <text x="390" y="178" text-anchor="middle" fill="#c0c0c0" font-size="14" font-style="italic" font-family="sans-serif">Lookback</text>
+
+  <!-- ==================== RESUME (up arrow) ==================== -->
+
+  <path d="M 685 212 L 685 122" stroke="#e0e0e0" stroke-width="1" stroke-dasharray="4 3" fill="none"/>
+  <polygon points="685,115 680,125 690,125" fill="#e0e0e0"/>
+  <text x="710" y="175" fill="#c0c0c0" font-size="14" font-style="italic" font-family="sans-serif">Resume Jumping</text>
+
+<!-- INJ:LEGEND --><g transform="translate(588,-42)"><text x="8" y="22" fill="#e0e0e0" font-size="13" font-family="Helvetica, Arial, sans-serif">Traversal</text><line x1="88" y1="18" x2="128" y2="18" stroke="#e0e0e0" stroke-width="2" stroke-dasharray="3,4"/><polygon points="132,14 132,22 138,18" fill="#e0e0e0"/></g><!-- /INJ:LEGEND --></svg>

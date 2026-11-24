@@ -1,0 +1,199 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Building from Source
+sidebar-title: Building from Source
+description: Build Dynamo from source for development and contributions
+---
+
+Build Dynamo from source when you want to contribute code, test features on the development branch, or customize the build. If you just want to run Dynamo, the [Local Installation](../../cli/installation/install-dynamo.mdx) guide is faster.
+
+This guide covers Ubuntu and macOS. For a containerized dev environment that handles all of this automatically, see [DevContainer](#devcontainer).
+
+## 1. Install System Libraries
+
+**Ubuntu:**
+
+```bash
+sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
+```
+
+Dynamo needs `protoc` 3.15 or newer:
+
+- **Ubuntu 24.04:** the `protobuf-compiler` package above is enough.
+- **Ubuntu 22.04:** also install protoc 30.2 from the protobuf releases:
+
+```bash
+sudo apt install -y unzip
+PROTOC_ZIP="protoc-30.2-linux-$(uname -m | sed s/aarch64/aarch_64/).zip"
+curl -fsSLO "https://github.com/protocolbuffers/protobuf/releases/download/v30.2/${PROTOC_ZIP}"
+unzip -o "${PROTOC_ZIP}" -d "$HOME/.local"
+rm "${PROTOC_ZIP}"
+export PATH="$HOME/.local/bin:$PATH"
+protoc --version
+```
+
+**macOS:**
+
+```bash
+# Install Homebrew if needed
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+brew install cmake protobuf
+```
+
+## 2. Install Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+## 3. Create a Python Virtual Environment
+
+Install [uv](https://docs.astral.sh/uv/#installation) if you don't have it:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Create and activate a Python 3.12 virtual environment. If Python 3.12 is not installed, uv downloads it.
+
+```bash
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+```
+
+## 4. Install Build Tools
+
+```bash
+uv pip install pip 'maturin[patchelf]'
+```
+
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
+
+## 5. Build the Rust Bindings
+
+Run one of these builds:
+
+```bash
+cd lib/bindings/python
+
+# Minimal build
+maturin develop --uv
+
+# Build with the release wheel features, except media-ffmpeg
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx
+```
+
+The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/v1.7.0/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model, S3 request traces, and the NVTX ranges for Nsight Systems profiles. The NVTX ranges stay off until you set `DYN_NVTX`; see [NVTX Profiling](../../reference/observability/nvtx-profiling.md).
+
+The main Linux release wheel also enables `media-ffmpeg`. The command above leaves it out because it needs the FFmpeg development libraries; add it to the feature list if you have them installed.
+
+## 6. Install GPU Memory Service
+
+```bash
+# Return to project root
+cd "$(git rev-parse --show-toplevel)"
+uv pip install -e lib/gpu_memory_service
+```
+
+## 7. Install the Wheel
+
+Install Dynamo with a backend extra to pull the inference engine and its CUDA dependencies. Choose the backend you intend to run:
+
+```bash
+# Use .[vllm] or .[sglang] instead to install the relevant framework dependencies
+uv pip install -e .
+```
+
+<Note>
+The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker. For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](../../cli/installation/install-dynamo.mdx) for more details.
+</Note>
+
+## 8. Verify the Build
+
+```bash
+python3 -m dynamo.frontend --help
+```
+
+You should see the frontend command help output.
+
+## DevContainer
+
+VSCode and Cursor users can skip manual setup using pre-configured development containers. The DevContainer installs all toolchains, builds the project, and sets up the Python environment automatically.
+
+Framework-specific containers are available for vLLM, SGLang, and TensorRT-LLM. See the [DevContainer README](https://github.com/ai-dynamo/dynamo/tree/v1.7.0/.devcontainer) for setup instructions.
+
+## Set Up Pre-commit Hooks
+
+Before submitting PRs, install the pre-commit hooks to ensure your code passes CI checks:
+
+```bash
+uv pip install pre-commit
+pre-commit install
+```
+
+Run checks manually on all files:
+
+```bash
+pre-commit run --all-files
+```
+
+## Troubleshooting
+
+**Missing system packages**
+
+If `maturin develop` fails with linker errors, verify all system dependencies are installed. On Ubuntu:
+
+```bash
+sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
+```
+
+**`protoc failed: relay.proto: This file contains proto3 optional fields`**
+
+Install protoc 30.2 as shown in step 1, then check that `protoc --version` prints `libprotoc 30.2`.
+
+**`dynamo.indexer is not available in this build`**
+
+Rebuild the bindings with the release-wheel `--features` list from step 5.
+
+**Virtual environment not activated**
+
+Maturin builds against the active Python interpreter. If you see errors about Python or site-packages, ensure your virtual environment is activated:
+
+```bash
+source .venv/bin/activate
+```
+
+**Disk space**
+
+The Rust `target/` directory can grow to 10+ GB during development. If builds fail with disk space errors, clean the build cache:
+
+```bash
+cargo clean
+```
+
+**vLLM worker fails to start: FlashInfer sampler JIT and CUDA 13 wheels**
+
+When you run a vLLM worker from a CUDA 13 source install, the worker can abort during startup with a FlashInfer JIT error:
+
+```text
+RuntimeError: Engine core initialization failed.
+...
+cuda/std/__cccl/cuda_toolkit.h:41: error: "CUDA compiler and CUDA toolkit headers are incompatible"
+```
+
+The CUDA wheels resolved for a CUDA 13 install can be version-skewed: `torch` pins the runtime headers to 13.0, while vLLM's `tilelang` dependency pulls `nvidia-cuda-nvcc` 13.2. FlashInfer compiles its sampler kernel with `nvcc` against those headers, and the version mismatch fails the build. This is tracked upstream at [flashinfer#3493](https://github.com/flashinfer-ai/flashinfer/issues/3493).
+
+Set `VLLM_USE_FLASHINFER_SAMPLER=0` so vLLM falls back to its native sampler:
+
+```bash
+export VLLM_USE_FLASHINFER_SAMPLER=0
+```
+
+## Next Steps
+
+- [Contribution Guide](../../community/contributing/overview.md) -- Workflow for contributing code
+- [Examples](https://github.com/ai-dynamo/dynamo/tree/v1.7.0/examples) -- Explore the codebase
+- [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) -- Find a task to work on
