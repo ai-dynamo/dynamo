@@ -369,27 +369,31 @@ RUN if [ ! -d /opt/dynamo/venv ]; then \
 # in the parent runtime image — re-resolving them here would risk version drift.
 # SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
 ARG FRAMEWORK
-RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+RUN --mount=type=bind,source=./container/deps,target=/tmp/deps \
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     # Git LFS init (needed for requirements with lfs=true); folded in to save a layer.
     git lfs install && \
+    # Same per-framework test constraints as container/Dockerfile.test.
+    CONSTRAINT_ARGS="" && \
+    if [ -f "/tmp/deps/${FRAMEWORK}/test-constraints.txt" ]; then \
+        CONSTRAINT_ARGS="--constraint /tmp/deps/${FRAMEWORK}/test-constraints.txt"; \
+    fi && \
 {% if device == "xpu" and framework == "sglang" %}
-    uv pip install \
+    uv pip install ${CONSTRAINT_ARGS} \
         --python ${VIRTUAL_ENV}/bin/python \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/xpu \
-        --requirement /tmp/requirements.dev.txt \
-        --requirement /tmp/requirements.test.txt && \
+        --requirement /tmp/deps/requirements.dev.txt \
+        --requirement /tmp/deps/requirements.test.txt && \
     uv pip install --python ${VIRTUAL_ENV}/bin/python --force-reinstall --no-deps pytest
 {% else %}
-    uv pip install \
+    uv pip install ${CONSTRAINT_ARGS} \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.dev.txt \
-        --requirement /tmp/requirements.test.txt && \
+        --requirement /tmp/deps/requirements.dev.txt \
+        --requirement /tmp/deps/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
     fi

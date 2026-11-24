@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Test-install constraints for the TensorRT-LLM test and dev images.
+# Test dependencies install into /opt/dynamo/venv, which shadows the system site, where
+# transformers and other packages require huggingface-hub<2.0 and tensorrt_llm requires protobuf<7.
+huggingface-hub<2.0
+protobuf<7

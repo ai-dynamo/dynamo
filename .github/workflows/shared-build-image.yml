@@ -650,6 +650,7 @@ jobs:
           # shell metacharacters can't be interpreted as script rather than data.
           IMAGE_URI: ${{ steps.calculate-target-tag.outputs.image_uri }}
           TEST_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
+          FRAMEWORK: ${{ inputs.framework }}
         run: |
           set -euo pipefail
           PUSH_ARGS=""
@@ -700,6 +701,7 @@ jobs:
             --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE="${IMAGE_URI}" \
+            --build-arg FRAMEWORK="${FRAMEWORK}" \
             "${TEST_TAG_ARGS[@]}" .
       - name: Show summary
         shell: bash

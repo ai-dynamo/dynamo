@@ -149,7 +149,6 @@ ignore:
   # Removed by trtllm upstream-base migration; claim here so changed-files
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
-  - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
@@ -454,6 +453,7 @@ sglang:
 
 trtllm:
   - 'container/deps/requirements.trtllm.txt'
+  - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
