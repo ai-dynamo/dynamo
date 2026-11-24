@@ -15876,6 +15876,21 @@ mod tests {
     }
 
     #[test]
+    fn metadata_upload_content_options_reach_backend_unchanged() {
+        let upload = serde_json::json!({
+            "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "inline_base64",
+            "content_options": {"hidden_states": {"token_start": 7}}
+        });
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"metadata_upload": upload}
+        }))
+        .unwrap();
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false, None).unwrap();
+        assert_eq!(extra_args["nvext"]["metadata_upload"], upload);
+    }
+
+    #[test]
     fn capture_prompt_token_ids_is_exact_and_opt_in() {
         let requested: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",

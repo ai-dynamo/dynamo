@@ -29,6 +29,7 @@ from dynamo.artifacts.vllm.format import (
     encode_generation_artifact,
 )
 from dynamo.artifacts.vllm.hidden_states import (
+    DTYPE_BYTES,
     HiddenStateFileError,
     HiddenStateProfile,
     discard_hidden_state_file,
@@ -40,6 +41,27 @@ from dynamo.common.metadata_upload import _backend_metadata_upload_settings
 _CONTENTS = frozenset(
     {"hidden_states", "moe_routes", "selected_logprobs", "topk_logprobs"}
 )
+
+
+def _validated_content_options(options, contents, prompt_token_count):
+    """Return the hidden-state row start; reject options no content defines."""
+    if options is None:
+        return 0
+    if not isinstance(options, dict) or set(options) - set(contents):
+        raise ValueError("invalid artifact content_options")
+    if set(options) - {"hidden_states"}:
+        raise ValueError("artifact content_options are not defined for this content")
+    hidden = options.get("hidden_states", {})
+    if not isinstance(hidden, dict) or set(hidden) - {"token_start"}:
+        raise ValueError("invalid hidden_states content_options")
+    start = hidden.get("token_start", 0)
+    if (
+        type(start) is not int
+        or type(prompt_token_count) is not int
+        or not 0 <= start <= prompt_token_count
+    ):
+        raise ValueError("invalid hidden_states token_start")
+    return start
 
 
 class CaptureCapacityError(ValueError):
@@ -171,6 +193,7 @@ class VllmArtifactSession:
     hidden_profile: HiddenStateProfile | None
     hidden_path: str | None
     hidden_states: HiddenStates | None
+    hidden_token_start: int
     error: bool
     _closed: bool
     budget: CaptureBudget
@@ -199,7 +222,13 @@ class VllmArtifactSession:
             raise ValueError("unsupported metadata_upload.kind")
         if (request.get("stop_conditions") or {}).get("stop"):
             raise ValueError("artifact capture does not support frontend string stops")
-        if settings.keys() - {"kind", "contents", "mode", "destination"}:
+        if settings.keys() - {
+            "kind",
+            "contents",
+            "mode",
+            "destination",
+            "content_options",
+        }:
             raise ValueError("invalid artifact request fields")
         contents = settings.get("contents")
         if (
@@ -232,6 +261,9 @@ class VllmArtifactSession:
             raise ValueError("invalid artifact token limits")
         if type(token_start) is not int or not 0 <= token_start <= prompt_token_count:
             raise ValueError("invalid artifact token_start")
+        hidden_token_start = _validated_content_options(
+            settings.get("content_options"), contents, prompt_token_count
+        )
         profile = _validated_router_profile(router_profile)
         if "moe_routes" in contents and (
             not route_capture_enabled or not router_profile
@@ -271,6 +303,7 @@ class VllmArtifactSession:
         )
         session.hidden_path = None
         session.hidden_states = None
+        session.hidden_token_start = hidden_token_start
         session.error = False
         session._closed = False
         session.budget = budget or process_capture_budget()
@@ -286,7 +319,7 @@ class VllmArtifactSession:
             + 12 * logprob_width * ("topk_logprobs" in contents)
         )
         hidden_bytes = (
-            extent * session.hidden_profile.row_bytes
+            (extent - hidden_token_start) * session.hidden_profile.row_bytes
             if session.hidden_profile is not None
             else 0
         )
@@ -418,11 +451,22 @@ class VllmArtifactSession:
             raise ValueError("hidden-state geometry differs from profile")
         if loaded.token_ids != sequence[:extent]:
             raise ValueError("hidden-state tokens differ from observed sequence")
+        start = self.hidden_token_start
+        if start > len(self.prompt):
+            raise ValueError("hidden-state token_start exceeds observed prompt")
+        # Keep rows [start, extent): a client that already holds a shared
+        # prompt's rows (for example, from one sample of a GRPO group) can skip
+        # resending them for every other sample.
+        row_bytes = layers * hidden_size * DTYPE_BYTES[loaded.dtype]
         self.hidden_states = HiddenStates(
-            0,
+            start,
             profile.layer_ids,
             profile.hidden_size,
-            Tensor(loaded.dtype, (rows, layers * hidden_size), loaded.data),
+            Tensor(
+                loaded.dtype,
+                (rows - start, layers * hidden_size),
+                loaded.data[start * row_bytes :],
+            ),
         )
 
     def _view(self):

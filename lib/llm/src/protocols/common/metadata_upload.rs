@@ -211,7 +211,14 @@ pub struct GenerationArtifactUpload {
     pub mode: ArtifactMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<ArtifactDestination>,
+    /// Opaque per-content options, keyed by a requested content name. Like the
+    /// names themselves, the backend adapter defines and validates each value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_options: Option<serde_json::Map<String, Value>>,
 }
+
+/// Bound on the serialized `content_options` object; options are small scalars.
+const MAX_CONTENT_OPTIONS_BYTES: usize = 4096;
 
 impl GenerationArtifactUpload {
     fn validate(&self, destination_present: bool) -> Result<(), &'static str> {
@@ -222,6 +229,18 @@ impl GenerationArtifactUpload {
             })
         {
             return Err("artifact contents must contain at most 64 unique nonempty names");
+        }
+        if let Some(options) = &self.content_options {
+            if options
+                .iter()
+                .any(|(name, value)| !contents.contains(name) || !value.is_object())
+            {
+                return Err("artifact content_options must map requested contents to objects");
+            }
+            let size = serde_json::to_vec(options).map(|bytes| bytes.len());
+            if !matches!(size, Ok(size) if size <= MAX_CONTENT_OPTIONS_BYTES) {
+                return Err("artifact content_options exceed the size limit");
+            }
         }
         match (&self.mode, &self.destination) {
             (ArtifactMode::InlineBase64, None) if !destination_present => Ok(()),

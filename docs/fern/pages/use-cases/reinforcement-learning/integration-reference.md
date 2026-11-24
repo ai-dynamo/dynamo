@@ -112,7 +112,21 @@ Request the content through `nvext.metadata_upload`:
 }
 ```
 
-The artifact's `hidden_states` component holds one row per position that was a forward-pass input, starting at the first prompt token. The completion's last token is never fed back, so it has no row. Each row concatenates the activations of `layer_ids` in order, `len(layer_ids) * hidden_size` values in the model dtype. Objects that carry hidden states use artifact format version 1.1; objects without them stay at version 1.0.
+The artifact's `hidden_states` component holds one row per position that was a forward-pass input, starting at the component's `token_start` (the first prompt token by default). The completion's last token is never fed back, so it has no row. Each row concatenates the activations of `layer_ids` in order, `len(layer_ids) * hidden_size` values in the model dtype. Objects that carry hidden states use artifact format version 1.1; objects without them stay at version 1.0.
+
+To skip rows the trainer already holds, set `token_start` in `content_options`. For a GRPO group that shares one prompt, request the prompt rows once and skip them for the other samples:
+
+```json
+{
+  "kind": "generation_artifact",
+  "contents": ["hidden_states"],
+  "mode": "object_store",
+  "destination": {"...": "..."},
+  "content_options": {"hidden_states": {"token_start": 512}}
+}
+```
+
+`token_start` must be between 0 and the prompt length. A larger value fails the request before inference, and a value past the observed prompt returns `capture_invalid`; it is never clamped. The option reduces delivered bytes and capture memory, not the worker's own extraction work.
 
 Limits of the current implementation:
 

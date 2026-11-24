@@ -609,3 +609,98 @@ def test_transfer_is_ignored_when_hidden_states_were_not_requested(tmp_path):
     capture.observe_transfer({"hidden_states_path": str(path)})
     capture.close()
     assert path.exists()
+
+
+def _hidden_request(options):
+    req = request(("hidden_states",))
+    req["extra_args"]["nvext"]["metadata_upload"]["content_options"] = options
+    return req
+
+
+@pytest.mark.asyncio
+async def test_hidden_state_token_start_skips_shared_prompt_rows(tmp_path):
+    torch = pytest.importorskip("torch")
+    capture = session(
+        _hidden_request({"hidden_states": {"token_start": 2}}),
+        hidden_state_profile=_hidden_profile(tmp_path),
+    )
+    path = tmp_path / "req.safetensors"
+    hidden = _write_hidden(path, 3, [10, 11, 12])
+    capture.observe(SimpleNamespace(index=0, token_ids=[12, 13]), [10, 11])
+    capture.observe_transfer({"hidden_states_path": str(path)})
+    result = await capture.finalize()
+
+    (component,) = (
+        decode_generation_artifact(base64.b64decode(result["data_base64"]))
+        .choices[0]
+        .components
+    )
+    assert component.token_start == 2
+    assert component.hidden_states.shape == (1, 8)
+    assert (
+        component.hidden_states.data
+        == hidden.to(torch.float16).reshape(3, 8)[2:].numpy().tobytes()
+    )
+
+
+def test_hidden_state_token_start_reduces_reservation(tmp_path):
+    budget = CaptureBudget(1 << 30)
+    profile = _hidden_profile(tmp_path, hidden_size=4096)
+    full = session(_hidden_request({}), budget, hidden_state_profile=profile)
+    skipped = session(
+        _hidden_request({"hidden_states": {"token_start": 2}}),
+        budget,
+        hidden_state_profile=profile,
+    )
+    assert full.reserved_bytes - skipped.reserved_bytes == 4 * 2 * profile.row_bytes
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"hidden_states": {"token_start": 3}},
+        {"hidden_states": {"token_start": -1}},
+        {"hidden_states": {"token_start": True}},
+        {"hidden_states": {"token_start": "2"}},
+        {"hidden_states": {"layers": [2]}},
+        {"hidden_states": 2},
+        {"moe_routes": {"token_start": 1}},
+        [],
+    ],
+)
+def test_invalid_content_options_fail_before_admission(tmp_path, options):
+    budget = CaptureBudget(1 << 20)
+    with pytest.raises(ValueError):
+        session(
+            _hidden_request(options),
+            budget,
+            hidden_state_profile=_hidden_profile(tmp_path),
+        )
+    assert budget.used == 0
+
+
+def test_options_for_contents_without_options_are_rejected(tmp_path):
+    req = request(("selected_logprobs",))
+    req["extra_args"]["nvext"]["metadata_upload"]["content_options"] = {
+        "selected_logprobs": {}
+    }
+    with pytest.raises(ValueError, match="not defined"):
+        session(req)
+
+
+@pytest.mark.asyncio
+async def test_token_start_beyond_observed_prompt_is_capture_invalid(tmp_path):
+    capture = VllmArtifactSession.from_request(
+        _hidden_request({"hidden_states": {"token_start": 3}}),
+        prompt_token_count=3,
+        max_tokens=2,
+        budget=CaptureBudget(1 << 20),
+        hidden_state_profile=_hidden_profile(tmp_path),
+    )
+    path = tmp_path / "req.safetensors"
+    _write_hidden(path, 2, [10, 11])
+    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe_transfer({"hidden_states_path": str(path)})
+    result = await capture.finalize()
+    assert result["error_code"] == "capture_invalid"
+    assert not path.exists()

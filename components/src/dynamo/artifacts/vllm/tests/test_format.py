@@ -538,3 +538,10 @@ def test_nonfinite_bfloat16_hidden_states_rejected(bits):
     hidden = HiddenStates(0, (7,), 2, Tensor("bf16", (3, 2), data))
     with pytest.raises(GenerationArtifactFormatError, match="hidden-state value"):
         encode_generation_artifact(_view(hidden))
+
+
+def test_hidden_states_with_nonzero_start_roundtrip():
+    hidden = _hidden(rows=2, start=1)
+    assert decode_generation_artifact(
+        encode_generation_artifact(_view(hidden)).data
+    ) == _view(hidden)

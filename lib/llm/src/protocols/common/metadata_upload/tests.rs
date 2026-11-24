@@ -160,3 +160,39 @@ fn rejects_traversal_and_invalid_mooncake_retention() {
     let input = json!({"kind": "generation_artifact", "contents": [], "mode": "relay_store", "destination": {"kind": "mooncake_store", "profile": "test", "consumer_group": "trainers", "retention_seconds": 0}});
     assert!(serde_json::from_value::<MetadataUpload>(input).is_err());
 }
+
+fn inline_with_options(options: Value) -> Value {
+    json!({
+        "kind": "generation_artifact",
+        "contents": ["hidden_states", "selected_logprobs"],
+        "mode": "inline_base64",
+        "content_options": options,
+    })
+}
+
+#[test]
+fn content_options_round_trip_for_requested_contents() {
+    let input = inline_with_options(json!({"hidden_states": {"token_start": 12}}));
+    let upload: MetadataUpload = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), input);
+
+    let without = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "inline_base64"
+    });
+    let upload: MetadataUpload = serde_json::from_value(without.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), without);
+}
+
+#[test]
+fn content_options_reject_unrequested_contents_non_objects_and_oversize() {
+    for options in [
+        json!({"moe_routes": {"token_start": 1}}),
+        json!({"hidden_states": 12}),
+        json!({"hidden_states": [12]}),
+        json!({"hidden_states": {"pad": "x".repeat(5000)}}),
+        json!([{"hidden_states": {}}]),
+    ] {
+        let result = serde_json::from_value::<MetadataUpload>(inline_with_options(options));
+        assert!(result.is_err());
+    }
+}
