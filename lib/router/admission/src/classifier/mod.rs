@@ -181,7 +181,8 @@ impl ClassifyRequest {
 
     /// Live context high-water mark, initialized from `input_tokens()` and raised
     /// by host observations of prompt plus generated tokens. This is not physical
-    /// KV occupancy. The host alone updates this request's counter.
+    /// KV occupancy. The host alone updates this request's counter. The same handle later
+    /// reports how the reply ended ([`RequestProgress::reply_tool_call`]).
     pub fn progress(&self) -> &RequestProgress {
         &self.progress
     }

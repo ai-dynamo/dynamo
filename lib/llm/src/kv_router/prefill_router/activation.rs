@@ -320,7 +320,8 @@ impl PrefillRouter {
                 session_affinity_ttl: context.session_affinity_ttl,
                 session_affinity_mode: context.session_affinity_mode,
             },
-        );
+        )
+        .map_err(anyhow::Error::msg)?;
         let prefill_router_mode = routing.router_mode;
 
         // A block size of 0 means the card never declared one, so it cannot be
@@ -900,9 +901,10 @@ mod tests {
             .iter()
             .map(|worker| worker.instance().id())
             .collect();
+        // What a prefill worker started with `--router-track-output-blocks` advertises.
         let kv_config = KvRouterConfig {
             use_kv_events: false,
-            router_track_active_blocks: false,
+            router_track_output_blocks: true,
             ..Default::default()
         };
         let group_id = endpoint.id().to_string();
@@ -1198,13 +1200,24 @@ mod tests {
             .start_with_registration()
             .await
             .unwrap();
-        let kv_config = KvRouterConfig {
+        // The prefill pool advertises nothing, so the hop inherits the frontend's
+        // config: its policy file turns block tracking on, and the frontend hands
+        // the config down with active blocks off.
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_active_blocks: true\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        let mut kv_config = KvRouterConfig {
             use_kv_events: false,
-            router_track_active_blocks: false,
+            router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
-        let mut advertised = card(Some(RouterConfig::new(RouterMode::KV, kv_config)));
-        advertised.kv_cache_block_size = 64;
+        kv_config.apply_policy_config().unwrap();
+        kv_config.router_track_active_blocks = false;
+        let mut silent = card(None);
+        silent.kv_cache_block_size = 64;
         worker_runtime
             .discovery()
             .register(
@@ -1212,7 +1225,7 @@ mod tests {
                     namespace.clone(),
                     "workers".into(),
                     "prefill".into(),
-                    &advertised,
+                    &silent,
                 )
                 .unwrap(),
             )
@@ -1231,7 +1244,7 @@ mod tests {
             RouterMode::KV,
             false,
             64,
-            None,
+            Some(kv_config),
             SelectionPolicySource::Registry,
             None,
             None,
@@ -1247,7 +1260,7 @@ mod tests {
             group: endpoint.id().to_string(),
             endpoint,
             generation: 1,
-            card: Arc::new(advertised),
+            card: Arc::new(silent),
             admitted_ids,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1257,6 +1270,16 @@ mod tests {
         })
         .await
         .expect("prefill target must activate");
+        let binding = router.binding.load_full().unwrap();
+        let hop_config = binding
+            .router
+            .kv_router_if_enabled()
+            .expect("the hop inherits KV mode")
+            .kv_router_config();
+        assert!(
+            !hop_config.router_track_active_blocks && !hop_config.router_track_output_blocks,
+            "the policy file must not turn block tracking back on for the prefill hop"
+        );
 
         // Exercise the production generate path, discovery, TCP dispatch, and
         // cancellation propagation for all output modes and both refusal paths.
@@ -1429,7 +1452,7 @@ mod tests {
             1,
             None,
             "test-model".into(),
-            Arc::new(crate::http::service::metrics::Metrics::new()),
+            Arc::new(dynamo_http_server::metrics::Metrics::new()),
         );
         let next: dynamo_runtime::pipeline::ServerStreamingEngine<
             PreprocessedRequest,

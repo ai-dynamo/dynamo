@@ -310,7 +310,7 @@ pub mod llm {
     /// through 999 are accepted; an informational value from 100 through 199,
     /// an unparseable value, or an out-of-range value falls back to 529. The
     /// value is read and cached on first use.
-    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = dynamo_error::DYN_HTTP_OVERLOAD_STATUS_CODE;
 
     /// Emit an SSE comment at this interval while a streaming response has no
     /// data. Unset, `0`, invalid, or unrepresentable values keep SSE comments
@@ -870,8 +870,9 @@ pub mod response_plane {
     /// Response transport used by every runtime in this process: "tcp", "quic"
     /// or "velo". Defaults to "tcp".
     ///
-    /// Velo has no TLS, so a velo runtime refuses to start while any
-    /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
+    /// Velo has no TLS, so a process that selects velo uses tcp instead
+    /// while any `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is
+    /// truthy.
     ///
     /// On a graceful Stop, velo still delivers what the worker's engine
     /// yields, final chunk included; tcp and quic end the stream at the worker.

@@ -102,6 +102,7 @@ where
         self.inner.poll_ready(cx)
     }
 
+    #[inline]
     fn call(&mut self, mut request: axum::http::Request<B>) -> Self::Future {
         request.extensions_mut().insert(self.deadline.clone());
         self.inner.call(request)
@@ -208,7 +209,10 @@ impl<I: AsyncRead + Unpin> AsyncRead for WriteTimeoutIo<I> {
     }
 }
 
+// `#[inline]` on the per-write methods: the listeners are instantiated in more than
+// one crate, and without it hyper calls these out of line on every socket write.
 impl<I: AsyncWrite + Unpin> AsyncWrite for WriteTimeoutIo<I> {
+    #[inline]
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -220,6 +224,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for WriteTimeoutIo<I> {
         result
     }
 
+    #[inline]
     fn poll_write_vectored(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -235,6 +240,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for WriteTimeoutIo<I> {
         self.inner.is_write_vectored()
     }
 
+    #[inline]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.check_timeout(cx)?;
         let result = Pin::new(&mut self.inner).poll_flush(cx);

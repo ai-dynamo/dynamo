@@ -13,7 +13,11 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import WorkerType
-from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import (
+    kvcr_host_capacity_blocks,
+    kvcr_inventory_is_process_local,
+    publish_kv_hint_capabilities,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -390,3 +394,25 @@ def test_kvcr_host_capacity_blocks(extra_config, expected):
     )
 
     assert kvcr_host_capacity_blocks(engine_args, 16, 16) == expected
+
+
+_KVCR_SERVICE_TIER = {**_KVCR_TIER, "kvcr_service_socket_path": "/run/kvcr.sock"}
+
+
+@pytest.mark.parametrize(
+    ("secondary_tiers", "expected"),
+    [
+        ([_KVCR_TIER], True),
+        ([_KVCR_SERVICE_TIER], False),
+        ([_KVCR_TIER, _KVCR_SERVICE_TIER], False),
+        ([{**_KVCR_TIER, "type": "custom"}], False),
+    ],
+)
+def test_kvcr_inventory_is_process_local(secondary_tiers, expected):
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={"secondary_tiers": secondary_tiers}
+        )
+    )
+
+    assert kvcr_inventory_is_process_local(engine_args) is expected
