@@ -21,6 +21,7 @@ from enum import IntEnum
 import pytest
 import xgrammar as xgr
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
+from _routed_engine_fakes import reported_tokens as _reported_tokens
 from _thinking_parity import RESOLVED_DISABLED, RESOLVED_ENABLED, THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
@@ -109,6 +110,19 @@ pytestmark = [
 
 MODEL = "Qwen/Qwen3-0.6B"
 BYTE_FALLBACK_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+
+def _delta_steps(items, *, keep_events=False):
+    """The parsed steps that carry a delta, as the processor yielded them.
+
+    Dynamo builds the response chunks: it names the finish reason for the
+    client (``tool_calls`` after a tool call) and adds IDs, usage and metrics.
+    """
+    return [
+        item
+        for item in items
+        if "delta" in item or (keep_events and not item.get("_dynamo_parsed"))
+    ]
 
 
 class FakeContext:
@@ -1686,16 +1700,15 @@ def test_glm_tool_decoder_only_receives_answer(
 
     output = asyncio.run(collect())
     assert not any(item.get("event") == "error" for item in output), output
-    choices = [
-        choice for item in output for choice in item.get("data", {}).get("choices", [])
-    ]
+    choices = _delta_steps(output)
     deltas = [choice["delta"] for choice in choices]
     calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
     assert len(calls) == int(expect_call)
     if expect_call:
         assert calls[0]["function"]["name"] == "get_weather"
         assert json.loads(calls[0]["function"]["arguments"]) == arguments
-    assert choices[-1]["finish_reason"] == ("tool_calls" if expect_call else "stop")
+    # The engine's reason; Dynamo reports `tool_calls` for a choice that called a tool.
+    assert choices[-1]["finish_reason"] in ("eos", "stop")
     visible_reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
     content = "".join(delta.get("content", "") for delta in deltas)
     assert visible_reasoning == (reasoning if separate_reasoning else "")
@@ -1810,9 +1823,7 @@ def test_structured_response_content_and_reasoning_gate(
     async def collect():
         return [item async for item in processor.generator(request)]
 
-    choices = [
-        choice for item in asyncio.run(collect()) for choice in item["data"]["choices"]
-    ]
+    choices = _delta_steps(asyncio.run(collect()))
     deltas = [choice["delta"] for choice in choices]
     assert "".join(delta.get("content", "") for delta in deltas) == (
         answer if separate_reasoning else text
@@ -1989,10 +2000,8 @@ def test_gpt_oss_structured_response_preserves_harmony_reasoning(
         return [item async for item in processor.generator(request)]
 
     items = asyncio.run(collect())
-    assert all("data" in item or item.get("event") == "llm_metrics" for item in items)
-    choices = [
-        choice for item in items if "data" in item for choice in item["data"]["choices"]
-    ]
+    assert all(item.get("_dynamo_parsed") for item in items)
+    choices = _delta_steps(items)
     deltas = [choice["delta"] for choice in choices]
     assert "".join(delta.get("reasoning_content", "") for delta in deltas) == "Plan."
     assert "".join(delta.get("content", "") for delta in deltas) == answer
@@ -2250,7 +2259,7 @@ def test_forced_structural_tag_returns_tool_call(
 
     # Check the actual installed guidance, not just the requested policy.
     assert "structural_tag" in engine.requests[0]["sampling_options"]["guided_decoding"]
-    choices = [choice for item in output for choice in item["data"]["choices"]]
+    choices = _delta_steps(output)
     calls = [
         call for choice in choices for call in choice["delta"].get("tool_calls", [])
     ]
@@ -2263,7 +2272,8 @@ def test_forced_structural_tag_returns_tool_call(
         "".join(call["function"].get("arguments", "") for call in calls)
     ) == {"city": "Paris"}
     assert not any(choice["delta"].get("content") for choice in choices)
-    assert choices[-1]["finish_reason"] == "tool_calls"
+    # The engine's reason; Dynamo reports `tool_calls` for a choice that called a tool.
+    assert choices[-1]["finish_reason"] in ("eos", "stop")
 
 
 @pytest.mark.core
@@ -5427,9 +5437,7 @@ def test_generator_preserves_decode_options(requested, use_pool, monkeypatch):
         output = asyncio.run(collect())
 
     content = "".join(
-        choice["delta"].get("content", "")
-        for item in output
-        for choice in item.get("data", {}).get("choices", [])
+        chunk["delta"].get("content", "") for chunk in _delta_steps(output)
     )
     assert content == ("<special>A" if requested is False else "A")
     assert engine.requests[0]["output_options"]["skip_special_tokens"] is (
@@ -5620,9 +5628,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             }
         ]
 
-    @pytest.mark.parametrize("count", [None, 0])
-    @pytest.mark.parametrize("include_nvext", [False, True])
-    def test_prompt_logprobs_survive_batched_output(self, count, include_nvext):
+    def test_prompt_logprobs_survive_batched_output(self):
         payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
         processor = SglangProcessor(
             tokenizer=self.ByteTokenizer(),
@@ -5646,32 +5652,23 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             tool_call_parser=None,
             reasoning_parser=None,
         )
-        request = {"model": MODEL, "nvext": {"extra_fields": ["stop_reason"]}}
-        if count is not None:
-            request["prompt_logprobs"] = count
-        if include_nvext:
-            request["nvext"]["extra_fields"].append("prompt_logprobs")
+        request = {"model": MODEL, "prompt_logprobs": 0}
 
         async def collect():
             return [
-                item["data"]
+                item
                 async for item in processor._generate_and_stream(
-                    "prompt-logprobs", request, {}, [], post
+                    "prompt-logprobs", request, {}, post
                 )
-                if "data" in item
             ]
 
-        chunks = asyncio.run(collect())
+        # The engine data waits with the batched tokens and reaches Dynamo on
+        # the step that ends the choice.
+        chunks = _delta_steps(asyncio.run(collect()))
         assert len(chunks) == 2
-        assert "prompt_logprobs" not in chunks[0]
-        assert chunks[1].get("prompt_logprobs") == (
-            payload if count is not None else None
-        )
-        assert chunks[1]["nvext"].get("prompt_logprobs") == (
-            payload if include_nvext else None
-        )
-        assert chunks[1]["nvext"]["stop_reason"] == "END"
-        assert "prompt_logprobs" not in chunks[1]["choices"][0]
+        assert "engine_data" not in chunks[0]
+        assert chunks[1]["engine_data"] == {"prompt_logprobs": payload}
+        assert chunks[1]["stop_reason"] == "END"
 
     def _run_logprob_stream(
         self, items, request=None, eos_token_ids=None, prompt_ids=()
@@ -5695,14 +5692,13 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         async def collect():
             return [
-                item["data"]
+                item
                 async for item in processor._generate_and_stream(
-                    "req-logprobs", request, {}, list(prompt_ids), post
+                    "req-logprobs", request, {}, post
                 )
-                if "data" in item
             ]
 
-        return asyncio.run(collect())
+        return _delta_steps(asyncio.run(collect()))
 
     def test_hidden_eos_keeps_score_and_requested_ids(self):
         """All 48 generated tokens keep a score and ID; only EOS text stays hidden."""
@@ -5726,7 +5722,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             prompt_ids=[1, 2, 3],
         )
 
-        choices = [chunk["choices"][0] for chunk in chunks]
+        choices = chunks
         content = "".join(choice["delta"].get("content", "") for choice in choices)
         assert content == "x" * 47
         assert choices[-1]["finish_reason"] == "stop"
@@ -5737,13 +5733,9 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         ]
         assert scores == logprobs
         completion_ids = [
-            token_id
-            for chunk in chunks
-            for token_id in chunk["nvext"]["completion_token_ids"]
+            token_id for chunk in chunks for token_id in chunk["completion_token_ids"]
         ]
         assert completion_ids == generated
-        prompt_ids = [chunk["nvext"].get("prompt_token_ids") for chunk in chunks]
-        assert prompt_ids == [None] * (len(chunks) - 1) + [[1, 2, 3]]
 
     @pytest.mark.parametrize(
         "prompt_count,logprobs,top_logprobs,expected_top_count",
@@ -5811,12 +5803,8 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             },
         ]
         assert len(chunks) == 1
-        assert chunks[0]["nvext"]["prompt_logprobs"] == expected_prompt
-        if stream:
-            assert "prompt_logprobs" not in chunks[0]
-        else:
-            assert chunks[0]["prompt_logprobs"] == expected_prompt
-        completion_logprobs = chunks[0]["choices"][0]["logprobs"]
+        assert chunks[0]["engine_data"]["prompt_logprobs"] == expected_prompt
+        completion_logprobs = chunks[0]["logprobs"]
         if expected_top_count is None:
             assert completion_logprobs is None
         else:
@@ -5839,7 +5827,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             ]
         )
 
-        choices = [chunk["choices"][0] for chunk in chunks]
+        choices = chunks
         assert [choice["delta"]["content"] for choice in choices] == [
             "A",
             "B",
@@ -5869,7 +5857,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             ]
         )
 
-        choices = [chunk["choices"][0] for chunk in chunks]
+        choices = chunks
         assert [choice["delta"]["content"] for choice in choices] == ["A", "BCD"]
         assert [entry["logprob"] for entry in choices[1]["logprobs"]["content"]] == [
             -0.2,
@@ -5970,17 +5958,16 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         async def collect():
             return [
-                item["data"]
+                item
                 async for item in processor._generate_and_stream(
-                    "req-stop", {"model": "test-model"}, {}, [], post
+                    "req-stop", {"model": "test-model"}, {}, post
                 )
-                if "data" in item
             ]
 
-        chunks = asyncio.run(collect())
+        chunks = _delta_steps(asyncio.run(collect()))
 
-        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
-        assert chunks[0]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[0]["delta"]["content"] == "A"
+        assert chunks[0]["finish_reason"] == "stop"
 
     @pytest.mark.parametrize("with_tool_parser", [False, True])
     @pytest.mark.parametrize(
@@ -5993,6 +5980,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "error",
             "error-finish",
             "cancelled",
+            "usage-then-eof",
         ],
     )
     @pytest.mark.parametrize("usage_mode", ["stream", "unary"])
@@ -6020,6 +6008,12 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             }
         elif backend_end == "cancelled":
             terminal["finish_reason"] = "cancelled"
+        elif backend_end == "usage-then-eof":
+            # A usage report without the prompt logprobs, then the stream ends.
+            terminal = {
+                "token_ids": list(b"late"),
+                "completion_usage": {"prompt_tokens": 7, "completion_tokens": 11},
+            }
         routed_engine = FakeRoutedEngine(
             items=[
                 {
@@ -6066,7 +6060,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         async def collect():
             return [
-                item.get("data", item)
+                item
                 async for item in processor._generate_and_stream(
                     "req-stop",
                     {
@@ -6084,21 +6078,17 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                         ),
                     },
                     {},
-                    [1, 2],
                     post,
                     context,
                 )
-                if "data" in item or item.get("event") == "error"
             ]
 
-        chunks = asyncio.run(collect())
+        items = asyncio.run(collect())
+        chunks = _delta_steps(items, keep_events=True)
 
-        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
-        assert chunks[0]["choices"][0]["finish_reason"] is None
-        assert [
-            entry["token"] for entry in chunks[0]["choices"][0]["logprobs"]["content"]
-        ] == ["A"]
-        assert "usage" not in chunks[0]
+        assert chunks[0]["delta"]["content"] == "A"
+        assert chunks[0].get("finish_reason") is None
+        assert [entry["token"] for entry in chunks[0]["logprobs"]["content"]] == ["A"]
         assert not context.stopped
         assert routed_engine.yielded == (
             2 if backend_end in {"unrequested", "eof"} else 3
@@ -6109,27 +6099,20 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             assert chunks[1]["event"] == "error"
             assert "backend disconnected" in chunks[1]["comment"][0]
             return
-        assert chunks[1]["choices"][0]["delta"] == {}
-        assert chunks[1]["choices"][0]["finish_reason"] == "stop"
-        assert chunks[1]["choices"][0]["logprobs"] is None
-        expected_usage = {
-            "prompt_tokens": 7 if backend_end == "metadata" else 2,
-            "completion_tokens": 11,
-            "total_tokens": 18 if backend_end == "metadata" else 13,
-        }
-        if backend_end == "metadata":
-            expected_usage["prompt_tokens_details"] = {"cached_tokens": 0}
-        assert chunks[1]["usage"] == expected_usage
-        if backend_end == "metadata":
-            assert chunks[1]["llm_metrics"]["cached_tokens"] == 0
-            assert chunks[1]["llm_metrics"]["input_tokens"] == 2
-            assert chunks[1]["llm_metrics"]["output_tokens"] == 11
-        projected_logprobs = (
-            chunks[1].get("nvext", {}).get("prompt_logprobs")
-            if usage_mode == "stream"
-            else chunks[1].get("prompt_logprobs")
+        assert chunks[1]["delta"] == {}
+        assert chunks[1]["finish_reason"] == "stop"
+        assert chunks[1]["logprobs"] is None
+        # Only the tokens before the stop are reported, and the worker's late
+        # report reaches Dynamo as it sent it.
+        assert _reported_tokens(items) == 11
+        assert chunks[1].get("completion_usage") == (
+            terminal["completion_usage"]
+            if backend_end in {"metadata", "usage-then-eof"}
+            else None
         )
-        assert projected_logprobs == (payload if backend_end == "metadata" else None)
+        assert chunks[1].get("engine_data") == (
+            {"prompt_logprobs": payload} if backend_end == "metadata" else None
+        )
 
     @pytest.mark.parametrize("include_prompt_logprobs", [False, True])
     def test_logprob_shape_flush_finishes_without_stopping_parent_context(
@@ -6177,7 +6160,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         async def collect():
             return [
-                item["data"]
+                item
                 async for item in processor._generate_and_stream(
                     "req-stop",
                     {
@@ -6192,29 +6175,24 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                         "stream_options": {"include_usage": True},
                     },
                     {},
-                    [1, 2],
                     post,
                     context,
                 )
-                if "data" in item
             ]
 
-        chunks = asyncio.run(collect())
+        items = asyncio.run(collect())
+        chunks = _delta_steps(items)
 
-        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
-        assert chunks[1]["choices"][0]["delta"] == {}
-        assert chunks[1]["choices"][0]["finish_reason"] == "stop"
-        assert chunks[1]["usage"] == {
-            "prompt_tokens": 2,
-            "completion_tokens": 4,
-            "total_tokens": 6,
-        }
+        assert chunks[0]["delta"]["content"] == "A"
+        assert chunks[1]["delta"] == {}
+        assert chunks[1]["finish_reason"] == "stop"
+        assert _reported_tokens(items) == 4
         assert not context.stopped
         assert routed_engine.yielded == (4 if include_prompt_logprobs else 3)
         assert routed_engine.stream_released
         assert len(chunks) == 2
-        assert chunks[1].get("nvext", {}).get("prompt_logprobs") == (
-            payload if include_prompt_logprobs else None
+        assert chunks[1].get("engine_data") == (
+            {"prompt_logprobs": payload} if include_prompt_logprobs else None
         )
 
     def test_split_stop_string_suffix_is_not_emitted(self, tokenizer):
@@ -6386,54 +6364,15 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item
                 async for item in processor._generate_and_stream(
-                    "req-stop", request, {}, [], post
+                    "req-stop", request, {}, post
                 )
             ]
 
         items = asyncio.run(collect())
 
         assert len(items) == 1
-        chunk = items[0]["data"]
-        assert chunk["nvext"]["stop_reason"] == "END"
-        assert "stop_reason" not in chunk["choices"][0]
-
-    @pytest.mark.parametrize("context_id", ["ctx-123", None])
-    def test_stream_keeps_caller_request_id(self, tokenizer, context_id):
-        async def collect():
-            processor = SglangProcessor(
-                tokenizer=tokenizer,
-                routed_engine=FakeRoutedEngine(
-                    items=[
-                        {"token_ids": [101], "finish_reason": None},
-                        {"token_ids": [], "finish_reason": "stop"},
-                    ]
-                ),
-                tool_call_parser_name=None,
-                reasoning_parser_name=None,
-                eos_token_ids=None,
-            )
-            post = SglangStreamingPostProcessor(
-                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
-            )
-            return [
-                item
-                async for item in processor._generate_and_stream(
-                    "local-req",
-                    {"model": "test-model"},
-                    {},
-                    [],
-                    post,
-                    context=FakeContext(context_id),
-                )
-            ]
-
-        items = asyncio.run(collect())
-
-        data_frames = [
-            item for item in items if item.get("_dynamo_annotated") and "data" in item
-        ]
-        assert data_frames
-        assert all(item["data"]["id"] == "chatcmpl-local-req" for item in data_frames)
+        assert items[0]["stop_reason"] == "END"
+        assert "stop_reason" not in items[0]["delta"]
 
     def _run_stream(self, tokenizer, items, engine=None):
         processor = SglangProcessor(
@@ -6451,15 +6390,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             raw_items = [
                 item
                 async for item in processor._generate_and_stream(
-                    "req-err", {"model": "test-model"}, {}, [], post
+                    "req-err", {"model": "test-model"}, {}, post
                 )
             ]
-            return [
-                item["data"]
-                if item.get("_dynamo_annotated") and "data" in item
-                else item
-                for item in raw_items
-            ]
+            return _delta_steps(raw_items, keep_events=True)
 
         return asyncio.run(collect())
 
@@ -6477,8 +6411,8 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         )
         assert len(items) == len(prefix) + 1
         if after_output:
-            assert items[0]["choices"][0]["delta"]["content"] == "A"
-            assert items[0]["choices"][0]["finish_reason"] is None
+            assert items[0]["delta"]["content"] == "A"
+            assert items[0].get("finish_reason") is None
         assert items[-1] == {
             "_dynamo_annotated": True,
             "event": "error",
@@ -6505,8 +6439,8 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         items = self._run_stream(self.ByteTokenizer(), [], engine=engine)
         assert len(items) == len(prefix) + 1
         if after_output:
-            assert items[0]["choices"][0]["delta"]["content"] == "A"
-            assert items[0]["choices"][0]["finish_reason"] is None
+            assert items[0]["delta"]["content"] == "A"
+            assert items[0].get("finish_reason") is None
         assert items[-1] == {
             "_dynamo_annotated": True,
             "event": "error",
@@ -6549,12 +6483,12 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                 tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
             )
             stream = processor._generate_and_stream(
-                "req-invalid", {"model": "test-model"}, {}, [], post
+                "req-invalid", {"model": "test-model"}, {}, post
             )
             if after_output:
                 first = await anext(stream)
-                assert first["data"]["choices"][0]["delta"]["content"] == "A"
-                assert first["data"]["choices"][0]["finish_reason"] is None
+                assert first["delta"]["content"] == "A"
+                assert "finish_reason" not in first
             with pytest.raises(InvalidArgument) as error:
                 await anext(stream)
             assert str(error.value) == message
@@ -6574,7 +6508,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         )
         # Only the real chunk is yielded; the None-data item is dropped silently.
         assert len(items) == 1
-        assert items[0]["choices"][0]["finish_reason"] == "stop"
+        assert items[0]["finish_reason"] == "stop"
 
     def test_malformed_engine_response_yields_engine_error(self, tokenizer):
         """A response dict missing token_ids goes through handle_engine_error."""
@@ -6794,21 +6728,19 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         async def collect():
             return [
-                item["data"]
+                item
                 async for item in processor._generate_and_stream(
                     "req-length",
                     {"model": "test-model", "logprobs": True},
                     {},
-                    [],
                     post,
                 )
-                if "data" in item
             ]
 
-        chunks = asyncio.run(collect())
+        chunks = _delta_steps(asyncio.run(collect()))
 
         assert len(chunks) == 1
-        choice = chunks[0]["choices"][0]
+        choice = chunks[0]
         assert choice["delta"]["content"] == "A"
         assert choice["finish_reason"] == "length"
         assert choice["logprobs"]["content"] == [
@@ -6897,9 +6829,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         items = asyncio.run(collect())
         content = "".join(
-            item["data"]["choices"][0]["delta"].get("content", "")
-            for item in items
-            if "data" in item
+            chunk["delta"].get("content", "") for chunk in _delta_steps(items)
         )
 
         assert routed_engine.requests[0]["stop_conditions"]["stop_token_ids"] == [

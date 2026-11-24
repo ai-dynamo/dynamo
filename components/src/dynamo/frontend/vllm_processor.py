@@ -7,7 +7,6 @@
 
 import asyncio
 import inspect
-import json
 import logging
 import os
 import time
@@ -59,7 +58,6 @@ from .structural_tag_policy import (
     runtime_structural_tag_options,
 )
 from .thinking import runtime_default_thinking_mode
-from .usage import response_usage, update_usage_metadata
 from .utils import (
     PromptLogprobsAccumulator,
     as_error_envelope,
@@ -68,6 +66,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
+    parsed_finish_reason,
     request_id_from_context,
     resolve_chat_template,
 )
@@ -369,52 +368,31 @@ def _apply_choice_logprobs(
     )
 
 
-class _ReasoningUsageAnnotator:
-    """Report reasoning-token usage on the PYTHON chat-processor path.
+def _parsed_step(
+    choice: dict[str, Any],
+    post: StreamingPostProcessor,
+    raw_finish_reason: Any,
+    stop_reason: Any,
+) -> dict[str, Any]:
+    """One step of a choice for Dynamo to build a response chunk from.
 
-    NVBug 6678449b. dynamo #12181 added this, but only to the RUST OpenAIPreprocessor
-    (lib/llm/src/preprocessor.rs). `--dyn-chat-processor vllm` selects this Python path,
-    which bypasses that code entirely -- and the worker's _build_completion_usage()
-    emits no `completion_tokens_details` key at all, so `reasoning_tokens` is ABSENT
-    (not null) from usage.
-
-    The count is NOT derived here. Each StreamingPostProcessor accumulates
-    `reasoning_token_total` where the reasoning parser CLASSIFIES its output; this
-    class only sums those totals and annotates usage. Deriving it here -- from the
-    choices this path emits -- is what reported zero whenever the response projection
-    dropped or deferred the reasoning (include_reasoning=false, and the non-streaming
-    tool path's terminal-delta buffering).
-
-    Streaming classification stays chunk-granular, matching the Rust: a chunk carrying
-    both reasoning and visible content counts entirely as reasoning. The non-streaming
-    tool path has no per-chunk classification, so it counts the parsed reasoning text
-    exactly; that is more precise than the Rust rather than divergent from it.
-    A positive backend-supplied count stays authoritative.
+    ``choice`` is what the post-processor parsed. The step that ends the choice
+    carries its reasoning-token count: the parser recounts every token the
+    choice generated, so it is asked once.
     """
-
-    __slots__ = ("_post_processors",)
-
-    def __init__(self, post_processors: dict[int, StreamingPostProcessor]) -> None:
-        self._post_processors = post_processors
-
-    @property
-    def total(self) -> int:
-        return sum(
-            post.reasoning_token_total for post in self._post_processors.values()
-        )
-
-    def annotate(self, usage: dict[str, Any]) -> dict[str, Any]:
-        """Return a COPY of usage carrying reasoning_tokens; never mutates the input."""
-        annotated = dict(usage)
-        details = dict(annotated.get("completion_tokens_details") or {})
-        # Only a POSITIVE backend count is authoritative. Missing, zero and
-        # negative all fall back to our own tally -- a negative would otherwise
-        # survive, since -1 is truthy.
-        backend = details.get("reasoning_tokens")
-        if not isinstance(backend, int) or backend <= 0:
-            details["reasoning_tokens"] = self.total
-        annotated["completion_tokens_details"] = details
-        return annotated
+    step = {
+        "_dynamo_parsed": True,
+        "index": choice["index"],
+        "delta": choice["delta"],
+        "logprobs": choice.get("logprobs"),
+    }
+    finish_reason = parsed_finish_reason(choice.get("finish_reason"), raw_finish_reason)
+    if finish_reason is not None:
+        step["finish_reason"] = finish_reason
+        step["reasoning_tokens"] = post.reasoning_token_total
+        if stop_reason is not None:
+            step["stop_reason"] = stop_reason
+    return step
 
 
 def _finish_reason_error_message(
@@ -1275,7 +1253,6 @@ class VllmProcessor:
                 request_id,
                 request,
                 dynamo_preproc,
-                tokens,
                 vllm_preproc,
                 post_processors,
                 mm_routing_info=mm_routing_info,
@@ -1291,7 +1268,6 @@ class VllmProcessor:
         request_id: str,
         request: dict[str, Any],
         dynamo_preproc: dict[str, Any],
-        tokens: list[int],
         vllm_preproc: EngineCoreRequest,
         post_processors: dict[int, StreamingPostProcessor],
         mm_routing_info: dict[str, Any] | None = None,
@@ -1344,21 +1320,7 @@ class VllmProcessor:
                 output_request_ids[output_idx] = child_request_id
                 registered_request_ids.append(child_request_id)
 
-        # Rust postprocessor is bypassed on this path, so emit the multimodal
-        # content-part counts here too (else frontend metrics report zero media).
-        input_tokens = len(tokens)
-        cumulative_output_tokens = 0
-        usage_metadata: dict[str, Any] = {}
         locally_finished = False
-        # Per-request reasoning-token usage (NVBug 6678449b); see
-        # _ReasoningUsageAnnotator. Must be per-request, never module-level.
-        # The counts live on the post-processors, which are per-request too.
-        reasoning_usage = _ReasoningUsageAnnotator(post_processors)
-        _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
-        _mm_counts = _mm_counts or {}
-        image_count = len(_mm_counts.get("image_url", []))
-        video_count = len(_mm_counts.get("video_url", []))
-        audio_count = len(_mm_counts.get("audio_url", []))
         pending_choice_logprobs: dict[int, list[dict[str, Any]]] = {}
         emitted_choice_tokens: dict[int, list[int]] = {}
         choice_top_logprobs = _choice_top_logprobs(request)
@@ -1366,22 +1328,6 @@ class VllmProcessor:
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}
         locally_stopped_requests: set[str] = set()
-
-        def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
-            # Local completion may precede every backend usage report. Preserve
-            # sparse metadata when available, and use the same usage projection
-            # for synthesized terminal counts and normal backend reports.
-            metadata = usage_metadata
-            if locally_finished and not metadata:
-                metadata = {"prompt_tokens": input_tokens}
-            if usage := response_usage(
-                request,
-                metadata,
-                prompt_tokens=input_tokens,
-                completion_tokens=cumulative_output_tokens,
-                finished=finished,
-            ):
-                output["usage"] = reasoning_usage.annotate(usage)
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -1436,9 +1382,11 @@ class VllmProcessor:
                     break
 
                 prompt_logprobs.update(engine_response)
-                # Keep sparse metadata even when a choice is suppressed locally.
-                if backend_usage := engine_response.get("completion_usage"):
-                    update_usage_metadata(usage_metadata, backend_usage)
+                engine_report = {
+                    key: engine_response[key]
+                    for key in ("completion_usage", "engine_data")
+                    if engine_response.get(key) is not None
+                }
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -1474,23 +1422,33 @@ class VllmProcessor:
                         if prompt_logprobs.needs_payload and pending_idx != output_idx:
                             continue
                         terminal = pending_terminals.pop(pending_idx)
-                        attach_usage(terminal, finished=True)
-                        prompt_logprobs.attach(terminal)
-                        yield {"_dynamo_annotated": True, "data": terminal}
+                        # Another choice's report leaves below, on its own index.
+                        if pending_idx == output_idx:
+                            terminal.update(engine_report)
+                            engine_report = {}
+                        yield terminal
 
                 if output_request_id in locally_stopped_requests:
                     if locally_finished and not pending_terminals:
                         break
+                    # The choice ended here, but the worker's late usage still counts.
+                    if engine_report:
+                        yield {
+                            "_dynamo_parsed": True,
+                            "index": output_idx,
+                            **engine_report,
+                        }
                     continue
 
                 # Count active choices before processing: tool/reasoning
                 # parsers may consume tokens without emitting a visible delta.
-                chunk_tokens = (
-                    len(engine_response.get("token_ids") or [])
+                # vLLM trims this list in place when it matches a stop string, so
+                # tokens after the stop are neither counted nor returned.
+                token_ids = (
+                    engine_response.get("token_ids") or []
                     if output_request_id in self.output_processor.request_states
-                    else 0
+                    else []
                 )
-                cumulative_output_tokens += chunk_tokens
 
                 if choice_top_logprobs is not None:
                     _append_worker_logprobs(
@@ -1529,7 +1487,7 @@ class VllmProcessor:
                     for child_id in registered_request_ids
                 )
 
-                choices = []
+                steps: dict[int, dict[str, Any]] = {}
                 postprocess_error = False
                 if vllm_out.request_outputs:
                     for output in vllm_out.request_outputs[0].outputs:
@@ -1565,65 +1523,46 @@ class VllmProcessor:
                             elif choice is not None:
                                 choice["logprobs"] = None
                         if choice:
-                            choices.append(choice)
+                            steps[output.index] = _parsed_step(
+                                choice,
+                                post,
+                                raw_finish_reason,
+                                stop_reason
+                                if stop_reason is not None
+                                else getattr(output, "stop_reason", None),
+                            )
 
                 if postprocess_error:
                     # Stop: the error frame is terminal, so do not read more.
                     break
 
-                # One envelope per iteration carries both data and metrics so
-                # client cancellation can't drop the annotation between yields.
-                envelope: dict[str, Any] = {"_dynamo_annotated": True}
-                if choices:
-                    dynamo_out = {
-                        "id": f"chatcmpl-{request_id}",
-                        "choices": choices,
-                        "created": int(time.time()),
-                        "model": request["model"],
-                        "object": "chat.completion.chunk",
-                    }
-                    attach_usage(
-                        dynamo_out,
-                        finished=bool(raw_finish_reason)
-                        or output_request_id in locally_stopped_requests,
-                    )
-                    prompt_logprobs.attach(dynamo_out)
+                # The engine's tokens and report count now, for its own choice,
+                # whether or not the parsers released anything for it.
+                accounting: dict[str, Any] | None = None
+                if token_ids or engine_report:
+                    accounting = {"token_ids": token_ids, **engine_report}
+
+                for step_idx, step in steps.items():
                     if (
-                        output_request_id in locally_stopped_requests
+                        output_request_ids.get(step_idx) in locally_stopped_requests
                         and prompt_logprobs.needs_payload
                     ):
                         # vLLM removed this choice's state at the local stop.
-                        # Keep its DELTA response until worker metadata arrives.
-                        pending_terminals[output_idx] = dynamo_out
-                    else:
-                        envelope["data"] = dynamo_out
+                        # Keep its last step until the worker's metadata arrives.
+                        pending_terminals[step_idx] = step
+                        continue
+                    if step_idx == output_idx and accounting is not None:
+                        step.update(accounting)
+                        accounting = None
+                    yield step
+                if accounting is not None:
+                    yield {"_dynamo_parsed": True, "index": output_idx, **accounting}
 
-                metrics = {
-                    "input_tokens": input_tokens,
-                    "output_tokens": cumulative_output_tokens,
-                    "chunk_tokens": chunk_tokens,
-                }
-                # Include nonzero counts on every frame (text-only carries nothing).
-                if image_count:
-                    metrics["image_count"] = image_count
-                if video_count:
-                    metrics["video_count"] = video_count
-                if audio_count:
-                    metrics["audio_count"] = audio_count
-                # Attach metrics to data when available; otherwise use an annotation.
-                if data := envelope.get("data"):
-                    data["llm_metrics"] = metrics
-                else:
-                    envelope["event"] = "llm_metrics"
-                    envelope["comment"] = [json.dumps(metrics)]
-
-                yield envelope
                 if locally_finished and not pending_terminals:
                     break
             else:
                 for terminal in pending_terminals.values():
-                    attach_usage(terminal, finished=True)
-                    yield {"_dynamo_annotated": True, "data": terminal}
+                    yield terminal
             _nvtx.end_range(rng_stream)
         except VLLMClientError:
             # Preserve request-side 400/404/422 errors for generator(), which

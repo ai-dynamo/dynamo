@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+pub mod chat_processor_output;
 mod edit;
 pub mod media;
 pub(crate) mod mistral_grammar;
@@ -1583,6 +1584,24 @@ pub struct MultimodalCounts {
 }
 
 impl MultimodalCounts {
+    /// Count the `image_url` / `video_url` / `audio_url` parts of a chat request's messages.
+    pub fn from_messages(messages: &[ChatCompletionRequestMessage]) -> Self {
+        let mut counts = Self::default();
+        for part in messages
+            .iter()
+            .filter_map(multimodal_content_parts)
+            .flatten()
+        {
+            match part.media_content_type() {
+                Some("image_url") => counts.image += 1,
+                Some("video_url") => counts.video += 1,
+                Some("audio_url") => counts.audio += 1,
+                _ => {}
+            }
+        }
+        counts
+    }
+
     /// Count `image_url` / `video_url` / `audio_url` parts (vec length per modality).
     fn from_preprocessed(request: &PreprocessedRequest) -> Self {
         let count = |key: &str| {

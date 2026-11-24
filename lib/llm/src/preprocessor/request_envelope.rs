@@ -8,6 +8,7 @@
 //! request's context instead, so every processor's requests get them from this one place.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_runtime::pipeline::Context;
@@ -93,6 +94,10 @@ impl RequestEnvelope {
                 })
                 .filter(|args| !args.is_empty()),
             sampling_args: sampling_passthrough_args(chat),
+            wants_prompt_token_ids: chat
+                .nvext()
+                .and_then(|nvext| nvext.extra_fields.as_ref())
+                .is_some_and(|fields| fields.iter().any(|field| field == "prompt_token_ids")),
         }));
         scope
     }
@@ -212,6 +217,7 @@ struct RequestFacts {
     sampling_options: Option<SamplingOptions>,
     nvext_args: Option<JsonObject>,
     sampling_args: Option<JsonObject>,
+    wants_prompt_token_ids: bool,
 }
 
 /// One request's engine-agnostic facts, read when the request arrives.
@@ -224,6 +230,10 @@ pub struct RequestScope {
     /// Set by [`RequestEnvelope::begin_chat`]. Dynamo's preprocessor writes these fields on
     /// the request builder itself.
     request: Option<Arc<RequestFacts>>,
+    /// The tracker the response is built from, for the routed request to share.
+    tracker: Option<Arc<RequestTracker>>,
+    /// Length of the prompt the processor rendered; zero until it routes a request.
+    prompt_tokens: Arc<AtomicU32>,
 }
 
 fn fill<T: Clone>(slot: &mut Option<T>, value: &Option<T>) {
@@ -260,6 +270,38 @@ impl RequestScope {
                 .map(|elapsed| *elapsed),
             lora_name: context.get_optional(LORA_NAME_CONTEXT_KEY).ok().flatten(),
             request: None,
+            tracker: None,
+            prompt_tokens: Arc::default(),
+        }
+    }
+
+    /// Have the routed request record its timing and worker on `tracker`, the one the
+    /// response reads them from.
+    pub fn share_tracker(&mut self, tracker: Arc<RequestTracker>) {
+        self.apply_upstream_elapsed(Some(&tracker));
+        self.tracker = Some(tracker);
+    }
+
+    /// Length of the prompt the processor routed, once it has.
+    pub fn prompt_tokens(&self) -> Option<u32> {
+        match self.prompt_tokens.load(Ordering::Relaxed) {
+            0 => None,
+            prompt_tokens => Some(prompt_tokens),
+        }
+    }
+
+    /// Note the prompt the processor rendered, for the response's usage and, when the client
+    /// asked for them, its `prompt_token_ids`.
+    pub fn record_prompt(&self, request: &PreprocessedRequest) {
+        let prompt_tokens = u32::try_from(request.token_ids.len()).unwrap_or(u32::MAX);
+        self.prompt_tokens.store(prompt_tokens, Ordering::Relaxed);
+        if let Some(tracker) = &self.tracker
+            && self
+                .request
+                .as_deref()
+                .is_some_and(|facts| facts.wants_prompt_token_ids)
+        {
+            tracker.set_prompt_token_ids(request.token_ids.to_vec());
         }
     }
 
@@ -289,6 +331,7 @@ impl RequestScope {
             routing,
             router,
             request_timestamp_ms,
+            tracker,
             // Filled field by field, below.
             stop_conditions,
             sampling_options,
@@ -320,13 +363,13 @@ impl RequestScope {
             bootstrap_info: _,
             kv_hint: _,
             elapsed_since_arrival_ms: _,
-            tracker: _,
             is_probe: _,
         } = request;
 
         if agent_context.is_none() {
             *agent_context = self.agent_context.as_deref().cloned();
         }
+        fill(tracker, &self.tracker);
         // Workers key their image caches by the session the request is routed under.
         if image_cache_scope.is_none() {
             *image_cache_scope = self

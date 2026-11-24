@@ -29,10 +29,30 @@ impl NvCreateChatCompletionRequest {
     }
 
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
+        self.generator_with(self.inner.stream_options.as_ref(), request_id)
+    }
+
+    /// The generator for a request left as the client sent it. [`Self::response_generator`]
+    /// expects [`Self::enable_usage_for_nonstreaming`] to have rewritten the request first;
+    /// this applies the same rule without changing the request.
+    pub fn response_generator_for_client_request(&self, request_id: String) -> DeltaGenerator {
+        let mut stream_options = self.inner.stream_options;
+        delta_common::enable_usage_for_nonstreaming(
+            &mut stream_options,
+            self.inner.stream.unwrap_or(false),
+        );
+        self.generator_with(stream_options.as_ref(), request_id)
+    }
+
+    fn generator_with(
+        &self,
+        stream_options: Option<&dynamo_protocols::types::ChatCompletionStreamOptions>,
+        request_id: String,
+    ) -> DeltaGenerator {
         let enable_logprobs =
             self.inner.logprobs.unwrap_or(false) || self.inner.top_logprobs.unwrap_or(0) > 0;
         let options = DeltaGeneratorOptions::new(
-            self.inner.stream_options.as_ref(),
+            stream_options,
             self.return_tokens_as_token_ids,
             enable_logprobs,
             self.nvext(),

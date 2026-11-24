@@ -523,6 +523,9 @@ def test_vllm_chat_processor_local_stop_preserves_stream_terminal(
         assert usages, "Local stop must preserve the terminal usage chunk"
         captured = _read_captured_request(capture_path)
         assert usages[-1]["prompt_tokens"] == len(captured["token_ids"])
-        assert usages[-1]["completion_tokens"] == sum(
-            len(output.token_ids) for output in OUTPUTS_INTERVAL_20[:2]
+        # "James Joyce" ends 14 tokens into the second frame. vLLM drops the six
+        # tokens after it, so they are not counted, as on Dynamo's own path.
+        assert (
+            usages[-1]["completion_tokens"]
+            == len(OUTPUTS_INTERVAL_20[0].token_ids) + 14
         )

@@ -223,7 +223,7 @@ def _load_processor_module(
     return importlib.import_module("dynamo.frontend.sglang_processor")
 
 
-def test_stream_embeds_typed_llm_metrics(module_stubs):
+def test_step_carries_tokens_and_the_engine_usage_report(module_stubs):
     module = _load_processor_module(module_stubs)
     completion_usage = {
         "prompt_tokens": 10,
@@ -254,101 +254,25 @@ def test_stream_embeds_typed_llm_metrics(module_stubs):
                 "req-metrics",
                 {"model": "test-model"},
                 {},
-                list(range(10)),
                 _PostProcessor(),
             )
         ]
 
+    # Dynamo builds usage and llm_metrics from the step's tokens and the
+    # engine's report; the step itself carries neither.
     items = asyncio.run(collect())
     assert len(items) == 1
-    envelope = items[0]
-    assert envelope["_dynamo_annotated"] is True
-    assert envelope["data"]["usage"] == completion_usage
-    assert "event" not in envelope
-    assert "comment" not in envelope
-    # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
-    assert envelope["data"]["llm_metrics"] == {
-        "input_tokens": 10,
-        "output_tokens": 3,
-        "chunk_tokens": 3,
-        "cached_tokens": 4,
-    }
-
-
-def test_stream_emits_multimodal_counts(module_stubs):
-    # Mixed-media request: assert the SGLang extraction branch reports nonzero
-    # counts (2 images + 1 video), mirroring the vLLM processor test so the
-    # extract_mm_urls wiring cannot silently regress to zero.
-    module = _load_processor_module(module_stubs)
-    processor = module.SglangProcessor(
-        tokenizer=None,
-        routed_engine=FakeRoutedEngine(
-            items=[
-                {
-                    "token_ids": [101, 102, 103],
-                    "finish_reason": "stop",
-                    "completion_usage": {
-                        "prompt_tokens": 10,
-                        "completion_tokens": 3,
-                        "total_tokens": 13,
-                    },
-                }
-            ]
-        ),
-        tool_call_parser_name=None,
-        reasoning_parser_name=None,
-        eos_token_ids=None,
-    )
-
-    request = {
-        "model": "test-model",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "compare"},
-                    {"type": "image_url", "image_url": {"url": "http://x/a.png"}},
-                    {"type": "image_url", "image_url": {"url": "http://x/b.png"}},
-                    {"type": "video_url", "video_url": {"url": "http://x/c.mp4"}},
-                ],
-            }
-        ],
-    }
-
-    async def collect():
-        return [
-            item
-            async for item in processor._generate_and_stream(
-                "req-mm-counts",
-                request,
-                {},
-                list(range(10)),
-                _PostProcessor(),
-            )
-        ]
-
-    items = asyncio.run(collect())
-    assert len(items) == 1
-    metrics = items[0]["data"]["llm_metrics"]
-    assert metrics["image_count"] == 2
-    assert metrics["video_count"] == 1
-    # audio has zero parts, so the key is omitted from the emitted metrics.
-    assert metrics.get("audio_count") is None
+    step = items[0]
+    assert step["_dynamo_parsed"] is True
+    assert step["token_ids"] == [101, 102, 103]
+    assert step["completion_usage"] == completion_usage
+    assert step["finish_reason"] == "stop"
+    assert "usage" not in step
+    assert "llm_metrics" not in step
 
 
 @pytest.mark.parametrize("stream_interval", [1, 2])
-@pytest.mark.parametrize(
-    "stream_options,intermediate_usage",
-    [
-        (None, False),
-        ({"include_usage": True, "continuous_usage_stats": False}, False),
-        ({"include_usage": False, "continuous_usage_stats": True}, False),
-        ({"include_usage": True, "continuous_usage_stats": True}, True),
-    ],
-)
-def test_sparse_usage_survives_flushes(
-    module_stubs, stream_interval, stream_options, intermediate_usage
-):
+def test_engine_usage_reports_survive_flushes(module_stubs, stream_interval):
     module = _load_processor_module(module_stubs)
     processor = module.SglangProcessor(
         tokenizer=None,
@@ -372,7 +296,14 @@ def test_sparse_usage_survives_flushes(
                         "prompt_tokens_details": {"cached_tokens": 2},
                     },
                 },
-                {"token_ids": [103]},
+                {
+                    "token_ids": [103],
+                    "completion_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 3,
+                        "total_tokens": 6,
+                    },
+                },
                 {"token_ids": [], "finish_reason": "stop"},
             ]
         ),
@@ -386,36 +317,24 @@ def test_sparse_usage_survives_flushes(
         return [
             item
             async for item in processor._generate_and_stream(
-                "req-sparse",
-                {
-                    "model": "test-model",
-                    "stream": True,
-                    "stream_options": stream_options,
-                },
-                {},
-                [1, 2, 3],
-                _PostProcessor(),
+                "req-sparse", {"model": "test-model"}, {}, _PostProcessor()
             )
         ]
 
+    # A report that arrives while tokens are batched goes out with their step.
     items = asyncio.run(collect())
-    expected_counts = [1, 2, 3, 3] if stream_interval == 1 else [1, 3, 3]
-    assert len(items) == len(expected_counts)
-    for index, (item, count) in enumerate(zip(items, expected_counts)):
-        expected_cache = 0 if index == 0 else 2
-        assert item["data"]["llm_metrics"]["cached_tokens"] == expected_cache
-        assert ("usage" in item["data"]) == (
-            intermediate_usage
-            or (
-                index == len(items) - 1
-                and bool((stream_options or {}).get("include_usage"))
-            )
-        )
-        if "usage" in item["data"]:
-            usage = item["data"]["usage"]
-            assert usage["completion_tokens"] == count
-            assert usage["total_tokens"] == 3 + count
-            assert usage["prompt_tokens_details"] == {"cached_tokens": expected_cache}
+    batches = (
+        [[101], [102], [103], []] if stream_interval == 1 else [[101], [102, 103], []]
+    )
+    assert [item["token_ids"] for item in items] == batches
+    usages = [item.get("completion_usage") or {} for item in items]
+    cached = [usage.get("prompt_tokens_details") for usage in usages]
+    assert cached[:2] == [{"cached_tokens": 0}, {"cached_tokens": 2}]
+    assert not any(cached[2:])
+    if stream_interval == 2:
+        # Two reports in one batch: the later totals, with the cache count only
+        # the earlier one had.
+        assert usages[1]["completion_tokens"] == 3
 
 
 @pytest.mark.parametrize(

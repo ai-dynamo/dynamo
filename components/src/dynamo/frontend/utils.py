@@ -129,7 +129,11 @@ def nvext_extra_field_requested(request: dict[str, Any], field: str) -> bool:
 
 
 class PromptLogprobsAccumulator:
-    """Carry requested prompt logprobs through buffered chat postprocessing."""
+    """Track whether the worker still owes the prompt logprobs a client asked for.
+
+    Dynamo returns them from the engine data a parsed step carries. A processor
+    that ends a choice itself uses this to hold the last step until they arrive.
+    """
 
     def __init__(self, request: dict[str, Any]):
         self._include_root = (
@@ -137,83 +141,21 @@ class PromptLogprobsAccumulator:
             and request.get("stream") is not True
         )
         self._include_nvext = nvext_extra_field_requested(request, "prompt_logprobs")
-        self._payload: list[Any] | None = None
-        self._emitted = False
+        self._received = False
 
     @property
     def needs_payload(self) -> bool:
-        return (
-            (self._include_root or self._include_nvext)
-            and self._payload is None
-            and not self._emitted
-        )
+        return (self._include_root or self._include_nvext) and not self._received
 
     def update(self, engine_response: dict[str, Any]) -> None:
-        if not self.needs_payload:
-            return
         engine_data = engine_response.get("engine_data")
         if not isinstance(engine_data, dict) or "prompt_logprobs" not in engine_data:
             return
-        payload = engine_data["prompt_logprobs"]
-        if not isinstance(payload, list):
-            raise ValueError("invalid prompt_logprobs payload: expected a list")
-        # The root field is validated by Rust; nvext otherwise stays untyped JSON.
-        if not self._include_root:
-            self._validate_nvext_payload(payload)
-        self._payload = payload
-
-    @staticmethod
-    def _validate_nvext_payload(payload: list[Any]) -> None:
-        for position in payload:
-            if position is None:
-                continue
-            if not isinstance(position, dict):
-                raise ValueError(
-                    "invalid prompt_logprobs payload: expected a token map"
-                )
-            for token_id, entry in position.items():
-                if (
-                    not isinstance(token_id, str)
-                    or not token_id.isascii()
-                    or not token_id.removeprefix("+").isdecimal()
-                    or int(token_id) > 2**32 - 1
-                ):
-                    raise ValueError(
-                        "invalid prompt_logprobs payload: invalid token ID"
-                    )
-                if not isinstance(entry, dict):
-                    raise ValueError(
-                        "invalid prompt_logprobs payload: expected an entry"
-                    )
-                logprob = entry.get("logprob")
-                if not isinstance(logprob, (int, float)) or isinstance(logprob, bool):
-                    raise ValueError("invalid prompt_logprobs payload: invalid logprob")
-                rank = entry.get("rank")
-                if rank is not None and (
-                    not isinstance(rank, int)
-                    or isinstance(rank, bool)
-                    or not 0 <= rank <= 2**32 - 1
-                ):
-                    raise ValueError("invalid prompt_logprobs payload: invalid rank")
-                decoded_token = entry.get("decoded_token")
-                if decoded_token is not None and not isinstance(decoded_token, str):
-                    raise ValueError(
-                        "invalid prompt_logprobs payload: invalid decoded token"
-                    )
-
-    def attach(self, chunk: dict[str, Any]) -> None:
-        if self._emitted or self._payload is None:
-            return
-        if not any(
-            choice.get("finish_reason") is not None for choice in chunk["choices"]
-        ):
-            return
-        if self._include_root:
-            chunk["prompt_logprobs"] = self._payload
-        if self._include_nvext:
-            chunk.setdefault("nvext", {})["prompt_logprobs"] = self._payload
-        self._emitted = True
-        self._payload = None
+        if self._received:
+            # A worker repeats them on each choice's last frame. Dynamo returns
+            # the copy it has already been given.
+            del engine_data["prompt_logprobs"]
+        self._received = True
 
 
 def worker_warmup() -> bool:
@@ -318,6 +260,26 @@ def make_internal_error(request_id: str, detail: str | None = None) -> dict[str,
             "type": "internal_error",
         }
     }
+
+
+def parsed_finish_reason(choice_finish: str | None, engine_finish: Any) -> Any:
+    """The finish reason to report for a choice this processor finished.
+
+    Dynamo maps the engine's reason to the OpenAI one. A choice the processor
+    ended at a stop it matched itself reports ``stop``, whatever the engine
+    said in the same step.
+    """
+    if choice_finish is None:
+        return None
+    if choice_finish in ("stop", "tool_calls") and engine_finish not in (
+        "eos",
+        "stop",
+        "content_filter",
+        "cancelled",
+        "abort",
+    ):
+        return "stop"
+    return engine_finish if engine_finish is not None else choice_finish
 
 
 def as_error_envelope(error_payload: dict[str, Any]) -> dict[str, Any]:
