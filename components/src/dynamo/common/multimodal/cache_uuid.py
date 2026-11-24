@@ -3,17 +3,14 @@
 
 """Policy and backend capability guard for client-provided multimodal cache UUIDs."""
 
-import os
 from collections.abc import Mapping, Sequence
 
-# Keep the name and message in sync with the Rust frontend
-# (lib/llm/src/preprocessor/media/loader.rs::client_cache_uuids_allowed).
-ALLOW_CLIENT_CACHE_UUIDS_ENV = "DYN_MM_ALLOW_CLIENT_CACHE_UUIDS"
-UUID_ONLY_IMAGE_REJECTED_MESSAGE = (
-    "Image parts that carry only a `uuid` are not accepted. Send the image URL "
-    "or inline image data. To let clients reuse cached images by `uuid`, set "
-    f"{ALLOW_CLIENT_CACHE_UUIDS_ENV}=1 on the frontend and the vLLM workers."
+from dynamo._internal import (
+    UUID_ONLY_IMAGE_REJECTED_MESSAGE as UUID_ONLY_IMAGE_REJECTED_MESSAGE,
 )
+from dynamo.common.utils.env import env_bool
+
+ALLOW_CLIENT_CACHE_UUIDS_ENV = "DYN_MM_ALLOW_CLIENT_CACHE_UUIDS"
 
 
 def client_cache_uuids_allowed() -> bool:
@@ -21,10 +18,9 @@ def client_cache_uuids_allowed() -> bool:
 
     Off by default: the engine cache identity is then derived from the media
     content, and image parts that carry only a `uuid` are rejected. Read per
-    call so both processes follow the current environment. As in Rust, any
-    value other than ``1`` leaves it off, so a bad value never fails a request.
+    call so both processes follow the current environment.
     """
-    return os.environ.get(ALLOW_CLIENT_CACHE_UUIDS_ENV) == "1"
+    return env_bool(ALLOW_CLIENT_CACHE_UUIDS_ENV)
 
 
 def reject_unsupported_multimodal_uuids(multi_modal_uuids: object) -> None:

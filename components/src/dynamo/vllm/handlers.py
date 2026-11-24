@@ -4913,20 +4913,6 @@ _CHAT_EMBEDDING_REQUEST_FIELDS = (
 )
 
 
-# Keys that hold the media of a chat content part, as vLLM's chat parser reads
-# them. vLLM uses a part's ``uuid`` as the cache identity of that media.
-_CHAT_MEDIA_PART_KEYS = (
-    "image_url",
-    "image_pil",
-    "image_embeds",
-    "audio_embeds",
-    "video_embeds",
-    "audio_url",
-    "input_audio",
-    "video_url",
-)
-
-
 def _drop_client_cache_uuids(messages: Any) -> Any:
     """Return chat ``messages`` without the ``uuid`` of any content part.
 
@@ -4940,8 +4926,8 @@ def _drop_client_cache_uuids(messages: Any) -> Any:
     def strip_part(part: Any) -> Any:
         if not isinstance(part, dict) or part.get("uuid") is None:
             return part
-        media_key = next((key for key in _CHAT_MEDIA_PART_KEYS if key in part), None)
-        if media_key is not None:
+        media_key = part.get("type")
+        if isinstance(media_key, str) and media_key in part:
             media = part[media_key]
             if isinstance(media, dict) and "url" in media:
                 media = media["url"]

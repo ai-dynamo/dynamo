@@ -442,6 +442,10 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add(
+        "UUID_ONLY_IMAGE_REJECTED_MESSAGE",
+        dynamo_llm::preprocessor::media::UUID_ONLY_IMAGE_REJECTED_MESSAGE,
+    )?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
     m.add_class::<planner::VirtualConnectorClient>()?;
     m.add_class::<planner::PlannerDecision>()?;

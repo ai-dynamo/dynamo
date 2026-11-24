@@ -77,7 +77,7 @@ use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact}
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
 use crate::preprocessor::media::{
-    ALLOW_CLIENT_CACHE_UUIDS_ENV, MediaDecoder, MediaLoader, client_cache_uuids_allowed,
+    MediaDecoder, MediaLoader, UUID_ONLY_IMAGE_REJECTED_MESSAGE, client_cache_uuids_allowed,
     max_data_url_bytes,
 };
 use crate::protocols::common::preprocessor::{
@@ -4493,6 +4493,19 @@ impl OpenAIPreprocessor {
                     )));
                 }
 
+                if type_str == "image_url" && url.is_none() && uuid.is_some() && !allow_client_uuids
+                {
+                    return Err(crate::protocols::common::invalid_argument_error(
+                        UUID_ONLY_IMAGE_REJECTED_MESSAGE,
+                    ));
+                }
+                // Ignore client keys before deciding whether exact routing is available.
+                let uuid = if url.is_some() && !allow_client_uuids {
+                    None
+                } else {
+                    uuid
+                };
+
                 let slots = media_map.entry(type_str.to_string()).or_default();
                 let slot_idx = slots.len();
                 media_order.push(MultimodalItemRef {
@@ -4539,16 +4552,6 @@ impl OpenAIPreprocessor {
                             }
                         }
                         slots.push(MultimodalData::Url(url));
-                    }
-                    // A UUID-only image has no content to key the cache by, so it
-                    // needs the opt-in. URL-backed uuids pass through to the backend.
-                    (None, Some(_)) if type_str == "image_url" && !allow_client_uuids => {
-                        // Fixed text, so the 400 body can carry it.
-                        return Err(crate::protocols::common::invalid_argument_error(format!(
-                            "Image parts that carry only a `uuid` are not accepted. Send the image URL \
-                             or inline image data. To let clients reuse cached images by `uuid`, set \
-                             {ALLOW_CLIENT_CACHE_UUIDS_ENV}=1 on the frontend and the vLLM workers."
-                        )));
                     }
                     (None, Some(uuid)) if type_str == "image_url" => {
                         slots.push(MultimodalData::UuidOnly(uuid));

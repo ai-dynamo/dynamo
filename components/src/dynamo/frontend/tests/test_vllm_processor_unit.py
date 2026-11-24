@@ -1550,7 +1550,8 @@ async def test_generator_does_not_forward_client_uuid_as_mm_hash(
     )
 
     async def preprocess(request, **kwargs):
-        # vLLM's renderer reads the part `uuid` into multi_modal_uuids.
+        part = request["messages"][0]["content"][0]
+        assert "uuid" not in part
         return SimpleNamespace(
             request_for_sampling=prepost_module.ChatCompletionRequest.model_construct(
                 **request
@@ -1560,7 +1561,7 @@ async def test_generator_does_not_forward_client_uuid_as_mm_hash(
             engine_prompt={
                 "prompt": "Hello",
                 "multi_modal_data": {"image": [object()]},
-                "multi_modal_uuids": {"image": ["shared-image-id"]},
+                "multi_modal_uuids": {"image": [part.get("uuid")]},
             },
             prompt_token_ids=[1, 2, 3],
             guided_decoding=None,
@@ -1573,7 +1574,7 @@ async def test_generator_does_not_forward_client_uuid_as_mm_hash(
         mm_features = [
             SimpleNamespace(
                 modality="image",
-                mm_hash=uuid,
+                mm_hash=uuid or "content-image-hash",
                 data=object(),
                 mm_position=SimpleNamespace(offset=0, length=3),
             )
@@ -1602,8 +1603,10 @@ async def test_generator_does_not_forward_client_uuid_as_mm_hash(
     }
     assert [chunk async for chunk in processor._generator_inner(request)] == []
 
+    assert image_part["uuid"] == "shared-image-id"
     extra_args = routed_engine.requests[0].get("extra_args") or {}
-    assert "shared-image-id" not in extra_args.get("mm_hashes", [])
+    assert "multi_modal_uuids" not in routed_engine.requests[0]
+    assert extra_args.get("mm_hashes") == ["content-image-hash"]
 
     uuid_only = {"type": "image_url", "image_url": None, "uuid": "shared-image-id"}
     request["messages"] = [{"role": "user", "content": [uuid_only]}]

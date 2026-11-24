@@ -908,6 +908,24 @@ def test_build_tokens_prompt_forwards_hashes_kwargs_and_vision_chunk():
     assert prompt["mm_processor_kwargs"] == {"num_crops": 4}
 
 
+def test_build_tokens_prompt_uses_image_content_with_repeated_client_uuid(monkeypatch):
+    monkeypatch.delenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", raising=False)
+    processor = _processor()
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "multi_modal_uuids": {"image_url": ["shared-image-id"]},
+    }
+    identities = []
+    for color in [(255, 0, 0), (0, 0, 255), (255, 0, 0)]:
+        image = Image.new("RGB", (8, 8), color=color)
+        prompt = processor.build_tokens_prompt(request, {"image": image}, None)
+        identities.append(prompt["multi_modal_uuids"]["image"][0])
+    assert identities[0] != identities[1]
+    assert identities[0] == identities[2]
+    assert "shared-image-id" not in identities
+
+
 def test_build_tokens_prompt_prefers_opaque_user_uuids_without_padding(monkeypatch):
     monkeypatch.setenv("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", "1")
     processor = _processor()

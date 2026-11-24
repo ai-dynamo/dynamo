@@ -810,6 +810,33 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
+    async fn drops_url_backed_client_uuid_by_default() {
+        let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1EAAAAASUVORK5CYII=";
+        let messages = serde_json::json!([{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": image_url}, "uuid": "client-image"}]
+        }]).to_string();
+        let request = Request::from(&messages, None, None, "test-model".to_string());
+        let preprocessor = make_preprocessor();
+        temp_env::async_with_vars(
+            [("DYN_MM_ALLOW_CLIENT_CACHE_UUIDS", None::<&str>)],
+            async {
+                let (preprocessed, _, _) = preprocessor.preprocess_request(&request, None).await.unwrap();
+                assert!(preprocessed.multi_modal_uuids.is_none());
+                let media = preprocessed.multi_modal_data.as_ref().unwrap();
+                assert!(matches!(&media["image_url"][0], MultimodalData::Url(url) if url.as_str() == image_url));
+                #[cfg(feature = "mm-routing")]
+                {
+                    let mut builder = dynamo_llm::preprocessor::PreprocessedRequest::builder();
+                    let entries = preprocessor.gather_multi_modal_data(&request, &mut builder, None, &[]).await.unwrap();
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!((entries[0].width, entries[0].height), (1, 1));
+                }
+            },
+        ).await;
+    }
+
+    #[tokio::test]
     async fn rejects_uuid_only_image_by_default() {
         let messages = r#"[{
             "role": "user",

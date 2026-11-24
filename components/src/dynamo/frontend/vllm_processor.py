@@ -1033,16 +1033,32 @@ class VllmProcessor:
 
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
-        # Keep user cache UUIDs; the worker ignores them and keys by content
-        # unless DYN_MM_ALLOW_CLIENT_CACHE_UUIDS=1.
         try:
             mm_data, mm_uuids = extract_mm_urls(messages)
         except ValueError as exc:
             raise InvalidArgument(str(exc)) from exc
-        if not client_cache_uuids_allowed() and any(
-            "UuidOnly" in item for item in (mm_data or {}).get("image_url", [])
-        ):
-            raise InvalidArgument(UUID_ONLY_IMAGE_REJECTED_MESSAGE)
+        if not client_cache_uuids_allowed():
+            if any("UuidOnly" in item for item in (mm_data or {}).get("image_url", [])):
+                raise InvalidArgument(UUID_ONLY_IMAGE_REJECTED_MESSAGE)
+            if mm_uuids is not None:
+                # The renderer must see the same keys as the routing path.
+                messages = [
+                    {
+                        **message,
+                        "content": [
+                            {key: value for key, value in part.items() if key != "uuid"}
+                            if isinstance(part, dict) and "uuid" in part
+                            else part
+                            for part in message["content"]
+                        ],
+                    }
+                    if isinstance(message, dict)
+                    and isinstance(message.get("content"), list)
+                    else message
+                    for message in messages
+                ]
+                request = {**request, "messages": messages}
+            mm_uuids = None
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
