@@ -566,7 +566,9 @@ One change can affect existing workflows. See **Dependency Changes**.
 - **Runtime OS Package Refresh:** Upgraded `libgnutls30t64` in the Frontend, vLLM, and sidecar images ([#18064](https://github.com/ai-dynamo/dynamo/pull/18064)) and `libbrotli1` in the Frontend, SGLang, TensorRT-LLM, and vLLM images ([#17913](https://github.com/ai-dynamo/dynamo/pull/17913)) to the current Ubuntu patch releases.
 - **SGLang Image CPython 3.12.16:** Moved the SGLang runtime image from Ubuntu's Python 3.12.3 to a uv-installed CPython 3.12.16, which bundles OpenSSL 3.5.9 ([#18081](https://github.com/ai-dynamo/dynamo/pull/18081)). The Intel XPU image is unchanged.
 
-> **Note:** `cuda-gdb` in the SGLang image no longer supports Python scripting, because its Python front end links the Ubuntu `libpython3.12` that this change removes.
+<Note>
+`cuda-gdb` in the SGLang image no longer supports Python scripting, because its Python front end links the Ubuntu `libpython3.12` that this change removes.
+</Note>
 
 - **Planner Python 3.13.18:** Moved the Planner image to `python:3.13.18-slim` for the build and the distroless Python `3.13-v4.1.10` base for the runtime ([#17915](https://github.com/ai-dynamo/dynamo/pull/17915)). The build now fails if the runtime base bundles an older pip.
 - **Mooncake 0.3.14:** Raised the Mooncake transfer engine floor from `0.3.13.post1` to `0.3.14` in the SGLang and vLLM images ([#18091](https://github.com/ai-dynamo/dynamo/pull/18091)). The TensorRT-LLM image does not ship Mooncake.
@@ -606,7 +608,9 @@ One change can affect existing deployments. See **Security**.
 
 - **emSign ECC Root Removal:** Updated the system CA bundles in every container image and the Rust TLS roots compiled into the `ai-dynamo-runtime` and `kvbm` wheels, which now use `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 ([#17108](https://github.com/ai-dynamo/dynamo/pull/17108)). gRPC clients in the images now verify against the refreshed system CA bundle instead of the roots bundled with grpcio.
 
-> **Breaking:** The updated bundles drop the emSign ECC Root CA - G3 root, so a TLS connection to an endpoint whose certificate chains to that root now fails verification.
+<Warning>
+The updated bundles drop the emSign ECC Root CA - G3 root, so a TLS connection to an endpoint whose certificate chains to that root now fails verification.
+</Warning>
 
 #### Dependency Changes
 

@@ -332,7 +332,7 @@ Current stable release: v1.7.0 (container tag `1.7.0`, wheel version `1.7.0`).
 | Disaggregated Serving | Supported | Supported | Supported (Prefill/decode separation with NIXL KV transfer) |
 | KV-Aware Routing | Supported | Supported | Supported |
 | SLA-Based Planner | Supported | Supported | Supported |
-| Multimodal (Image) | Supported (KV-aware routing supported on Dynamo's SGLang image for aggregated workers; a custom build without the hash-forwarding patch falls back to text-prefix routing. Separately, multimodal serving supports EPD, E/PD and E/P/D disaggregation (not traditional EP/D)) | Supported (Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)) | Supported (With KV-aware routing, image-aware routing on documented paths) |
+| Multimodal (Image) | Supported (On SGLang 0.5.23, multimodal KV-aware routing matches only the text before the first image or video block (sgl-project/sglang#43043); requests still serve. Separately, multimodal serving supports EPD, E/PD and E/P/D disaggregation (not traditional EP/D)) | Supported (Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)) | Supported (With KV-aware routing, image-aware routing on documented paths) |
 | Multimodal (Video) | Supported | Not supported | Supported (Video input with frame sampling) |
 | Multimodal (Audio) | Not supported | Not supported | Experimental (Qwen2-Audio, experimental) |
 | Request Migration | Supported | Supported (Work in progress with multimodal) | Supported |
