@@ -174,16 +174,12 @@ targets:
   techniques:
   - tp8
   workload:
-    type: agentic-trace-replay
-    traffic: AgentX (semianalysis_cc_traces_weka_062126), 1200 s, concurrency 32
+    type: functional-validation
+    traffic: Experimental, functional-only
   deploy:
     asset: recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300.yaml
-  benchmark:
-    tool: aiperf
-    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
   expected_performance:
-    available: true
-    summary: 33.9 output tok/s/GPU, 66.9 user tok/s P50, TTFT P50 380 ms at concurrency 32
+    available: false
 - id: vllm-disagg-b300
   recommended: false
   hardware:
@@ -199,7 +195,7 @@ targets:
   - nixl
   workload:
     type: functional-validation
-    traffic: Functional, not tuned (prefill and transport bound at concurrency 48)
+    traffic: Experimental, functional-only
   deploy:
     asset: recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300.yaml
   expected_performance:
@@ -217,7 +213,7 @@ targets:
   - multimodal
   workload:
     type: functional-validation
-    traffic: Validation pending
+    traffic: Experimental, functional-only
   deploy:
     asset: recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300-multimodal.yaml
   expected_performance:
@@ -236,7 +232,7 @@ targets:
   - multimodal
   workload:
     type: functional-validation
-    traffic: Validation pending
+    traffic: Experimental, functional-only
   deploy:
     asset: recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300-multimodal.yaml
   expected_performance:

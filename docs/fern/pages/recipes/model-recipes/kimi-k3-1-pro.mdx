@@ -408,7 +408,7 @@ The synthetic acceptance length of 3.84 was measured offline on the SpeedBench (
 Set these values in the Job `env` section for your target:
 
 - `ENDPOINT`: the frontend Service of the DynamoGraphDeployment, `${DGD}-frontend:8000` (substitute the selected deployment name).
-- `CONCURRENCY`: GB300 and B300 use 32 for vLLM aggregated and 48 for disaggregated. Reported VR200 points use 180 for aggregated and 174 for disaggregated; B200 uses 48.
+- `CONCURRENCY`: GB300 uses 32 for vLLM aggregated and 48 for disaggregated. Reported VR200 points use 180 for aggregated and 174 for disaggregated; B200 uses 48.
 
 The benchmark Job uses the same `shared-model-cache` PVC and tokenizer files as the deployment.
 
@@ -429,7 +429,7 @@ The AgentX benchmark targets use the following interactivity goals:
 
 ### Performance Results
 
-All results below measure text-only traffic; the selected target is highlighted. B200 and VR200 use synthetic draft acceptance (AL 3.84); GB300 and B300 have speculative decoding disabled.
+All results below measure text-only traffic; the selected target is highlighted. B200 and VR200 use synthetic draft acceptance (AL 3.84); GB300 has speculative decoding disabled.
 
 <div className="dynamo-variant-table-wrap">
 <table className="dynamo-variant-table dynamo-kimi-comparison">
@@ -438,7 +438,6 @@ All results below measure text-only traffic; the selected target is highlighted.
 <tr data-highlight-target="vllm-vr200-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated, 2 replicas</td><td>vLLM</td><td>VR200</td><td>180</td><td>153.01</td><td>57.71</td><td>1,534</td></tr>
 <tr data-highlight-target="vllm-vr200-disagg"><td>AgentX (inferencex-agentx-mvp)</td><td>disaggregated 2P1D</td><td>vLLM</td><td>VR200</td><td>174</td><td>122.19</td><td>73.93</td><td>1,761</td></tr>
 <tr data-highlight-target="vllm-b200-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated, 1 replica</td><td>vLLM</td><td>B200</td><td>48</td><td>≈26.41</td><td>64.02</td><td>550.45</td></tr>
-<tr data-highlight-target="vllm-b300-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated TP8, 1 replica</td><td>vLLM</td><td>B300</td><td>32</td><td>33.9</td><td>66.9</td><td>380</td></tr>
 <tr data-highlight-target="vllm-gb300-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated TP8, 1 replica</td><td>vLLM</td><td>GB300</td><td>32</td><td>39.89</td><td>76.7</td><td>428</td></tr>
 <tr data-highlight-target="vllm-gb300-disagg"><td>AgentX (inferencex-agentx-mvp)</td><td>disaggregated 2P1D</td><td>vLLM</td><td>GB300</td><td>48</td><td>23.08</td><td>87.1</td><td>656</td></tr>
 <tr data-highlight-target="vllm-gb300-agg"><td>AgentX (inferencex-agentx-mvp)</td><td>aggregated multimodal overlay, 1 replica (pre-release)</td><td>vLLM</td><td>GB300</td><td>32</td><td>39.56</td><td>70.9</td><td>440</td></tr>
@@ -461,10 +460,10 @@ All results below measure text-only traffic; the selected target is highlighted.
 | [GB300 SGLang aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/deploy-gb300.yaml) | 8 | TP8 per worker | Functional only; no performance claim |
 | [GB300 SGLang disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/sglang/disagg-gb300-agentic/deploy-gb300.yaml) | 16 | TP8 per worker | Functional only; no performance claim |
 | [B200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml) | 16 | TP8 × PP2 | Text-only benchmark |
-| [B300 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300.yaml) | 8 | TP8 per worker | Text-only benchmark; functional gate passed |
-| [B300 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300.yaml) | 16 | TP8 per worker | Functional only; prefill and transport bound at concurrency 48, not tuned |
-| [B300 vLLM aggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300-multimodal.yaml) | 8 | TP8 per worker | Validation pending |
-| [B300 vLLM disaggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300-multimodal.yaml) | 16 | TP8 per worker | Validation pending |
+| [B300 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300.yaml) | 8 | TP8 per worker | Experimental; functional only; no performance claim |
+| [B300 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300.yaml) | 16 | TP8 per worker | Experimental; functional only; no performance claim |
+| [B300 vLLM aggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b300-agentic/deploy-b300-multimodal.yaml) | 8 | TP8 per worker | Experimental; functional only; no performance claim |
+| [B300 vLLM disaggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-b300-agentic/deploy-b300-multimodal.yaml) | 16 | TP8 per worker | Experimental; functional only; no performance claim |
 | [VR200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml) | 16 | TP8 per worker | Text-only benchmark |
 | [VR200 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml) | 24 | TP8 per worker | Text-only benchmark |
 
@@ -492,7 +491,7 @@ GPU counts below describe the checked-in manifests. P counts prefill workers; D 
 - SGLang targets are experimental, text-only, and functional-only. No SGLang performance claims are made. Use the vLLM multimodal overlays for image and video input.
 - Synthetic draft acceptance is for benchmarking. Keep the natural-acceptance configuration active for normal serving.
 - Disaggregated performance depends on your fabric; RDMA tuning is cluster-specific.
-- The B300 vLLM disaggregated recipe (1P1D) is functional, not tuned. At concurrency 48 it is prefill and transport bound, so no performance result is published for it.
+- B300 targets are experimental and functional-only. They are not performance-tuned for B300, and no B300 performance claims are made.
 - B300 targets are single-node TP8 workers and set `NCCL_MNNVL_ENABLE` to `0`. They need no ComputeDomain.
 - On B300 (148 SMs), the `latency_specialized` decode backend cannot be combined with DSpark speculative decoding, because its MoE kernel needs 152 co-resident CTAs. The B300 recipes do not use speculative decoding.
 
