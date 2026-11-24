@@ -462,15 +462,25 @@ jobs:
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       shell: bash
+      env:
+        # Enable libtest JSON output on the pinned stable compiler.
+        RUSTC_BOOTSTRAP: '1'
       run: |
         cargo doc --no-deps
-        cargo test --locked --doc 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/doctests.log"
+        cargo test --locked --doc -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/doctests.jsonl"
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests
+      # Benchmarks use custom harnesses that reject libtest JSON flags.
+      shell: bash
+      env:
+        RUSTC_BOOTSTRAP: '1'
+      run: |
+        cargo test --locked --tests --examples -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/unit.jsonl"
+    - name: Run benchmark test targets
+      if: matrix.dir == '.'
       shell: bash
       run: |
-        cargo test --locked --all-targets 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/unit.log"
+        cargo test --locked --bench '*' 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/benchmarks.log"
     - name: Generate frontend OpenAPI specification
       if: matrix.dir == '.'
       # The preceding integration-test build also builds the normal binary.
@@ -499,10 +509,12 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       shell: bash
+      env:
+        RUSTC_BOOTSTRAP: '1'
       run: |
-        cargo test --locked --features ais-forward-pass -- --nocapture 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/ais-forward-pass.log"
+        cargo test --locked --features ais-forward-pass -- -Z unstable-options --format json --report-time --show-output | tee "$GITHUB_WORKSPACE/rust-test-results/ais-forward-pass.jsonl"
 
-    - name: Convert completed Rust test logs
+    - name: Convert completed Rust JSON reports
       id: rust_report
       if: always()
       shell: bash
@@ -510,9 +522,26 @@ jobs:
         REPORT_WORKSPACE: ${{ matrix.dir }}
         HAS_DD_API_KEY: ${{ secrets.DD_API_KEY != '' }}
       run: |
-        python3 .github/scripts/rust_test_report.py --log-dir rust-test-results --workspace "$REPORT_WORKSPACE"
+        shopt -s nullglob
+        reports=(rust-test-results/*.jsonl)
+        if (( ${#reports[@]} )); then
+          cargo install cargo2junit --version '=0.1.15' --locked --root "$RUNNER_TEMP/cargo2junit"
+        fi
+        for report in "${reports[@]}"; do
+          xml="${report%.jsonl}.xml"
+          rm -f "$xml"
+          # cargo2junit returns nonzero for failed tests, even with valid XML.
+          TEST_SUITE_NAME_PREFIX="$REPORT_WORKSPACE/$(basename "$report" .jsonl)" \
+            "$RUNNER_TEMP/cargo2junit/bin/cargo2junit" < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
+          if python3 -c 'import sys, xml.etree.ElementTree as ET; sys.exit(not ET.parse(sys.argv[1]).findall("testsuite/testcase"))' "$xml.tmp"; then
+            mv "$xml.tmp" "$xml"
+          else
+            rm -f "$xml.tmp"
+            echo "::warning::No valid, nonempty JUnit report for $report; retained the JSON log."
+          fi
+        done
         echo "has-api-key=$HAS_DD_API_KEY" >> "$GITHUB_OUTPUT"
-    - name: Archive Rust test reports and console logs
+    - name: Archive Rust test reports and logs
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
@@ -533,7 +562,7 @@ jobs:
         DATADOG_API_KEY: ${{ secrets.DD_API_KEY }}
         DATADOG_SITE: datadoghq.com
         DD_ENV: ci
-        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:console
+        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:json
       run: |
         # source_ref callers can test a different SHA from github.sha.
         DD_GIT_COMMIT_SHA="$(git rev-parse HEAD)"
@@ -564,8 +593,10 @@ jobs:
     - name: Run kv-router adapter feature tests
       # No workspace member enables the http adapter, so these tests run only here.
       shell: bash
+      env:
+        RUSTC_BOOTSTRAP: '1'
       run: |
-        cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/router-adapters.log"
+        cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/router-adapters.jsonl"
     - name: Run canonical replay feature tests
       shell: bash
       run: |
@@ -576,6 +607,8 @@ jobs:
           --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl" 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/canonical-replay.log"
     - name: Compile feature-gated benchmark entrypoints
       shell: bash
+      env:
+        RUSTC_BOOTSTRAP: '1'
       run: |
         compile_bench() {
           feature="$1"
@@ -595,9 +628,9 @@ jobs:
         compile_bench selection-replay --bench selection_replay_bench
 
         cargo test --locked --no-default-features -p dynamo-bench \
-          --features request-trace-to-mooncake --test request_trace_to_mooncake 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/request-trace-to-mooncake.log"
+          --features request-trace-to-mooncake --test request_trace_to_mooncake -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/request-trace-to-mooncake.jsonl"
         cargo test --locked --no-default-features -p dynamo-bench \
-          --features selection-replay --test selection_replay 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/selection-replay.log"
+          --features selection-replay --test selection_replay -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/selection-replay.jsonl"
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
@@ -607,10 +640,12 @@ jobs:
       # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs
       # and lib/runtime/tests/nvtx_payload.rs, which records what reaches NVTX.
       shell: bash
+      env:
+        RUSTC_BOOTSTRAP: '1'
       run: |
-        cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx:: 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-unit.log"
-        cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-payload.log"
-    - name: Convert completed Rust test logs
+        cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx:: -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-unit.jsonl"
+        cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/nvtx-payload.jsonl"
+    - name: Convert completed Rust JSON reports
       id: rust_report
       if: always()
       shell: bash
@@ -618,9 +653,26 @@ jobs:
         REPORT_WORKSPACE: root
         HAS_DD_API_KEY: ${{ secrets.DD_API_KEY != '' }}
       run: |
-        python3 .github/scripts/rust_test_report.py --log-dir rust-test-results --workspace "$REPORT_WORKSPACE"
+        shopt -s nullglob
+        reports=(rust-test-results/*.jsonl)
+        if (( ${#reports[@]} )); then
+          cargo install cargo2junit --version '=0.1.15' --locked --root "$RUNNER_TEMP/cargo2junit"
+        fi
+        for report in "${reports[@]}"; do
+          xml="${report%.jsonl}.xml"
+          rm -f "$xml"
+          # cargo2junit returns nonzero for failed tests, even with valid XML.
+          TEST_SUITE_NAME_PREFIX="$REPORT_WORKSPACE/$(basename "$report" .jsonl)" \
+            "$RUNNER_TEMP/cargo2junit/bin/cargo2junit" < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
+          if python3 -c 'import sys, xml.etree.ElementTree as ET; sys.exit(not ET.parse(sys.argv[1]).findall("testsuite/testcase"))' "$xml.tmp"; then
+            mv "$xml.tmp" "$xml"
+          else
+            rm -f "$xml.tmp"
+            echo "::warning::No valid, nonempty JUnit report for $report; retained the JSON log."
+          fi
+        done
         echo "has-api-key=$HAS_DD_API_KEY" >> "$GITHUB_OUTPUT"
-    - name: Archive Rust test reports and console logs
+    - name: Archive Rust test reports and logs
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
@@ -641,7 +693,7 @@ jobs:
         DATADOG_API_KEY: ${{ secrets.DD_API_KEY }}
         DATADOG_SITE: datadoghq.com
         DD_ENV: ci
-        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:console
+        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:json
       run: |
         # source_ref callers can test a different SHA from github.sha.
         DD_GIT_COMMIT_SHA="$(git rev-parse HEAD)"

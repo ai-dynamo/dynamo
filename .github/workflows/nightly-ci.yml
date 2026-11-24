@@ -1539,12 +1539,21 @@ jobs:
       run: cargo test --locked --no-run
     - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests.
-      # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
-      # so we can generate multiple formats without re-running the tests.
+      # Defer coverage reports until custom benchmark harnesses also finish.
+      shell: bash
+      env:
+        RUSTC_BOOTSTRAP: '1'
+      run: |
+        cargo llvm-cov --locked --tests --examples --no-report -- -Z unstable-options --format json --report-time | tee "$GITHUB_WORKSPACE/rust-test-results/coverage.jsonl"
+    - name: Run benchmark test targets with Coverage
+      if: matrix.dir == '.'
       shell: bash
       run: |
-        cargo llvm-cov --locked --all-targets --no-report 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/coverage.log"
+        cargo llvm-cov --locked --bench '*' --no-report 2>&1 | tee "$GITHUB_WORKSPACE/rust-test-results/benchmarks.log"
+    - name: Generate Rust Coverage Reports
+      working-directory: ${{ matrix.dir }}
+      shell: bash
+      run: |
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
@@ -1561,7 +1570,7 @@ jobs:
           ${{ matrix.dir }}/coverage-rust.lcov
         retention-days: 7
 
-    - name: Convert completed Rust test logs
+    - name: Convert completed Rust JSON reports
       id: rust_report
       if: always()
       shell: bash
@@ -1569,9 +1578,26 @@ jobs:
         REPORT_WORKSPACE: ${{ matrix.dir }}
         HAS_DD_API_KEY: ${{ secrets.DD_API_KEY != '' }}
       run: |
-        python3 .github/scripts/rust_test_report.py --log-dir rust-test-results --workspace "$REPORT_WORKSPACE"
+        shopt -s nullglob
+        reports=(rust-test-results/*.jsonl)
+        if (( ${#reports[@]} )); then
+          cargo install cargo2junit --version '=0.1.15' --locked --root "$RUNNER_TEMP/cargo2junit"
+        fi
+        for report in "${reports[@]}"; do
+          xml="${report%.jsonl}.xml"
+          rm -f "$xml"
+          # cargo2junit returns nonzero for failed tests, even with valid XML.
+          TEST_SUITE_NAME_PREFIX="$REPORT_WORKSPACE/$(basename "$report" .jsonl)" \
+            "$RUNNER_TEMP/cargo2junit/bin/cargo2junit" < "$report" > "$xml.tmp" || echo "::notice::cargo2junit returned nonzero for $report"
+          if python3 -c 'import sys, xml.etree.ElementTree as ET; sys.exit(not ET.parse(sys.argv[1]).findall("testsuite/testcase"))' "$xml.tmp"; then
+            mv "$xml.tmp" "$xml"
+          else
+            rm -f "$xml.tmp"
+            echo "::warning::No valid, nonempty JUnit report for $report; retained the JSON log."
+          fi
+        done
         echo "has-api-key=$HAS_DD_API_KEY" >> "$GITHUB_OUTPUT"
-    - name: Archive Rust test reports and console logs
+    - name: Archive Rust test reports and logs
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
@@ -1592,7 +1618,7 @@ jobs:
         DATADOG_API_KEY: ${{ secrets.DD_API_KEY }}
         DATADOG_SITE: datadoghq.com
         DD_ENV: nightly
-        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:console
+        DD_TAGS: team:dynamo,test.language:rust,test.framework:libtest,rust_report_format:json
       run: |
         # source_ref callers can test a different SHA from github.sha.
         DD_GIT_COMMIT_SHA="$(git rev-parse HEAD)"

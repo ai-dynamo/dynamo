@@ -513,7 +513,6 @@ frontend:
 
 rust:
   - '.github/workflows/pre-merge.yml'
-  - '.github/scripts/rust_test_report.py'
   - '.github/actions/setup-rust-ci/**'
   - '**/*.rs'
   - '**/Cargo.toml'
