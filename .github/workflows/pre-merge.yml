@@ -463,6 +463,18 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run runtime health-check integration tests
+      if: matrix.dir == '.'
+      timeout-minutes: 15
+      env:
+        DYN_RESPONSE_PLANE: quic
+      run: |
+        nats_id=$(docker run -d --rm -p 127.0.0.1::4222 nats:2.11.4)
+        trap 'docker rm -f "$nats_id" >/dev/null' EXIT
+        nats_addr=$(docker port "$nats_id" 4222/tcp)
+        export NATS_SERVER="nats://$nats_addr"
+        timeout 15 bash -c 'until (echo > /dev/tcp/127.0.0.1/"$1") 2>/dev/null; do sleep 0.1; done' -- "${nats_addr##*:}"
+        cargo test --locked -p dynamo-runtime --lib --features integration health_check:: -- --test-threads=1
     - name: Generate frontend OpenAPI specification
       if: matrix.dir == '.'
       # The preceding integration-test build also builds the normal binary.
