@@ -8,8 +8,7 @@ Defines the router configuration parameters once so that both
 Active field names on ``RouterConfigBase`` match the ``RouterConfig`` Python
 constructor kwargs 1:1 (for the non-positional args), so ``router_kwargs()``
 returns a dict that can be unpacked into
-``RouterConfig(mode, kv_config, **config.router_kwargs())``. Deprecated fields
-remain parseable but are not forwarded.
+``RouterConfig(mode, kv_config, **config.router_kwargs())``.
 """
 
 import argparse
@@ -21,14 +20,16 @@ from typing import TYPE_CHECKING, Optional, Protocol, Sequence
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.groups.kv_router_args import (
+    REMOVED_KV_ROUTER_ENV_VARS,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
 from dynamo.common.configuration.utils import (
     ArgEnv,
     add_argument,
+    add_removed_flags,
     nullable_float,
-    nullable_int,
+    reject_removed_env_vars,
 )
 
 if TYPE_CHECKING:
@@ -39,7 +40,6 @@ logger = logging.getLogger(__name__)
 # Fields forwarded verbatim as kwargs to RouterConfig.__init__.
 _ROUTER_FIELDS: tuple[str, ...] = (
     "active_decode_blocks_threshold",
-    "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
     "session_affinity_ttl_secs",
     "session_affinity_mode",
@@ -48,11 +48,18 @@ _ROUTER_FIELDS: tuple[str, ...] = (
 # Matches MAX_SESSION_AFFINITY_ENTRIES in lib/router/session-affinity.
 DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
 
-# TODO(v1.7): Remove --active-prefill-tokens-threshold.
-_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
-    "--active-prefill-tokens-threshold is deprecated and will be removed in v1.7; "
-    "use --active-prefill-tokens-threshold-frac"
-)
+# Removed in v1.8. The flag fails when parsed. The variable fails startup when
+# it is still set: in the frontend's validation, and when a worker parses its
+# arguments or builds its advertisement.
+# TODO(v1.9): Remove the variable's check. Keep the flag's entry while
+# --active-prefill-tokens-threshold-frac exists: without it argparse reads
+# the removed flag as an abbreviation of that one.
+REMOVED_ROUTER_FLAGS: dict[str, str] = {
+    "--active-prefill-tokens-threshold": "--active-prefill-tokens-threshold-frac",
+}
+REMOVED_ROUTER_ENV_VARS: dict[str, str] = {
+    "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD": "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
+}
 
 _ENFORCE_DISAGG_DEPRECATION = (
     "%s is deprecated and ignored; disaggregated routing topology and readiness "
@@ -61,14 +68,14 @@ _ENFORCE_DISAGG_DEPRECATION = (
 
 _ADMISSION_CONTROL_REMOVAL_WARNING = (
     "DYN_ADMISSION_CONTROL is no longer supported and is ignored; configure "
-    "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD, "
-    "and DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC directly"
+    "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD and "
+    "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC directly"
 )
 
 _ADMISSION_CONTROL_FLAG_REMOVAL_WARNING = (
     "--admission-control is no longer supported and is ignored; configure "
-    "--active-decode-blocks-threshold, --active-prefill-tokens-threshold, "
-    "and --active-prefill-tokens-threshold-frac directly"
+    "--active-decode-blocks-threshold and "
+    "--active-prefill-tokens-threshold-frac directly"
 )
 
 
@@ -102,15 +109,16 @@ class RouterConfigBase(ConfigBase):
     session_affinity_mode: str
     session_affinity_max_entries: int
     active_decode_blocks_threshold: Optional[float]
-    active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
+        reject_removed_env_vars(REMOVED_ROUTER_ENV_VARS, removed_in="v1.8")
         return {f: getattr(self, f) for f in _ROUTER_FIELDS}
 
     def validate_rejection_thresholds(self) -> None:
         """Validate independently configured busy-worker rejection thresholds."""
+        reject_removed_env_vars(REMOVED_ROUTER_ENV_VARS, removed_in="v1.8")
         decode_threshold = self.active_decode_blocks_threshold
         if decode_threshold is not None and not (
             math.isfinite(decode_threshold) and 0.0 <= decode_threshold <= 1.0
@@ -118,10 +126,6 @@ class RouterConfigBase(ConfigBase):
             raise ValueError(
                 "--active-decode-blocks-threshold must be between 0.0 and 1.0"
             )
-
-        prefill_threshold = self.active_prefill_tokens_threshold
-        if prefill_threshold is not None and prefill_threshold < 0:
-            raise ValueError("--active-prefill-tokens-threshold must be >= 0")
 
         prefill_threshold_frac = self.active_prefill_tokens_threshold_frac
         if prefill_threshold_frac is not None and not (
@@ -139,10 +143,6 @@ class RouterConfigBase(ConfigBase):
                 (
                     "--active-decode-blocks-threshold",
                     self.active_decode_blocks_threshold,
-                ),
-                (
-                    "--active-prefill-tokens-threshold",
-                    self.active_prefill_tokens_threshold,
                 ),
                 (
                     "--active-prefill-tokens-threshold-frac",
@@ -205,6 +205,7 @@ class RouterArgGroup(ArgGroup):
                 logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
 
         g = parser.add_argument_group("Router Options")
+        add_removed_flags(g, REMOVED_ROUTER_FLAGS, removed_in="v1.8")
 
         if self.include_frontend_only:
             # Arguments the frontend alone consumes. None of them are carried on
@@ -354,30 +355,13 @@ class RouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--active-prefill-tokens-threshold",
-            env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=None,
-            help=(
-                "Deprecated; will be removed in v1.7. Use --active-prefill-tokens-threshold-frac. "
-                "Literal token count threshold for determining when a worker is considered busy "
-                "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. Setting a numeric value enables this "
-                "rejection check. Unset by default; pass 'None' to disable it. Uses OR logic "
-                "with --active-prefill-tokens-threshold-frac."
-            ),
-            arg_type=nullable_int,
-            env=self.env,
-        )
-        add_argument(
-            g,
             flag_name="--active-prefill-tokens-threshold-frac",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
             default=None,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
                 "active_prefill_tokens > frac * max_num_batched_tokens. Setting a numeric value "
-                "enables this rejection check. Unset by default; pass 'None' to disable it. Uses "
-                "OR logic with --active-prefill-tokens-threshold."
+                "enables this rejection check. Unset by default; pass 'None' to disable it."
             ),
             arg_type=nullable_float,
             env=self.env,
@@ -464,7 +448,15 @@ def parse_worker_router_config(
     parser = argparse.ArgumentParser(add_help=False)
     add_worker_router_arguments(parser)
     namespace, remainder = parser.parse_known_args(list(argv))
-    return WorkerRouterConfig.from_cli_args(namespace), remainder
+    config = WorkerRouterConfig.from_cli_args(namespace)
+    # The variables build_router_config rejects, checked here as well: a
+    # backend builds its advertisement only after its engine has loaded.
+    if config.router_mode is not None:
+        removed = dict(REMOVED_ROUTER_ENV_VARS)
+        if config.router_mode == "kv":
+            removed.update(REMOVED_KV_ROUTER_ENV_VARS)
+        reject_removed_env_vars(removed, removed_in="v1.8")
+    return config, remainder
 
 
 def register_worker_router_help(parser: argparse.ArgumentParser) -> None:
@@ -520,13 +512,6 @@ def build_router_config(
         return None
 
     router_kwargs = config.router_kwargs()
-    # TODO(v1.7): Remove with --active-prefill-tokens-threshold.
-    # Warned here rather than in frontend validation: every advertisement, the
-    # frontend's and each worker's (vLLM, SGLang, TRT-LLM, mocker), is built
-    # here, so the notice reaches each process exactly once and only when the
-    # deprecated value is actually forwarded.
-    if router_kwargs["active_prefill_tokens_threshold"] is not None:
-        logger.warning(_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION)
 
     # Imported lazily so that importing a backend's argument definitions does
     # not pull in the compiled bindings.

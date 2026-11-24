@@ -509,13 +509,6 @@ def test_zero_credit_links_cache_weights():
     assert agg["disk_cache_hit_weight"] == 0.0
 
 
-def test_load_aware_implies_kv_mode():
-    startup = parse(with_frontend(args=("-m", "dynamo.frontend", "--load-aware")))
-    assert startup.router_mode == "kv_router"
-    assert startup.router_config["use_kv_events"] is False
-    assert startup.router_config["overlap_score_credit"] == 0.0
-
-
 def test_fingerprint_ignores_replicas_but_not_router_config():
     base = parse(dgd(frontend(replicas=1), worker()))
     scaled = parse(dgd(frontend(replicas=3), worker()))
@@ -818,12 +811,6 @@ GOLDEN_CASES = [
         (*KV_ARGS, "--router-kv-overlap-score-credit", "0"),
         {"DYN_ROUTER_TEMPERATURE": "0.1"},
     ),
-    (("-m", "dynamo.frontend", "--load-aware"), {}),
-    ((*KV_ARGS,), {"DYN_OVERLAP_SCORE_WEIGHT": "2"}),
-    (
-        (*KV_ARGS,),
-        {"DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT": "0", "DYN_OVERLAP_SCORE_WEIGHT": "2"},
-    ),
     ((*KV_ARGS, "--router-temp", "0.25", "--router-event-threads", "8"), {}),
     (
         (*KV_ARGS, "--router-tracking-hash", "keyed-xxh3-v1"),
@@ -847,9 +834,6 @@ def test_matches_real_frontend_parser(monkeypatch, args, env):
         FrontendArgGroup().add_arguments(parser)
         namespace, _ = parser.parse_known_args(list(args[2:]))
     config = FrontendConfig.from_cli_args(namespace)
-    if config.load_aware:
-        config.router_mode = "kv"
-    config.apply_load_aware_preset()
     config.apply_conditional_disagg_config()
     expected = json.loads(
         KvRouterConfig(**{f: getattr(config, f) for f in _KV_ROUTER_FIELDS}).to_json()
@@ -874,9 +858,7 @@ def test_router_fields_are_all_covered():
                 router_tracking_hash="keyed-xxh3-v1",
                 router_tracking_key_file="/k",
                 router_tracking_key_id="e",
-                decode_active_request_weight=1.0,
                 enable_session_prefix_index=True,
-                shared_cache_multiplier=0.5,
                 conditional_disagg_enabled=True,
                 conditional_disagg_policy="isl_or_load",
                 conditional_disagg_eff_isl_threshold=1,
@@ -886,7 +868,7 @@ def test_router_fields_are_all_covered():
             ).to_json()
         )
     )
-    covered = serialized | set(fc._SERDE_SKIPPED_DEFAULTS) | {"overlap_score_weight"}
+    covered = serialized | set(fc._SERDE_SKIPPED_DEFAULTS)
     assert set(_KV_ROUTER_FIELDS) <= covered
 
 
@@ -926,20 +908,35 @@ def test_parse_error_fails_p4_only():
             {},
             "host_cache_hit_weight=0.5",
         ),
+        # Removed in v1.8: the frontend itself does not start.
         (
             (*KV_ARGS, "--router-queue-threshold", "0.5"),
             {},
-            "router_queue_threshold=0.5",
+            "--router-queue-threshold was removed in v1.8",
         ),
         (
-            (*KV_ARGS, "--router-kv-overlap-score-credit-decay", "1"),
+            (*KV_ARGS, "--active-prefill-tokens-threshold", "100"),
             {},
-            "overlap_score_credit_decay",
+            "--active-prefill-tokens-threshold was removed in v1.8",
         ),
         (
-            (*KV_ARGS, "--router-decode-active-request-weight", "1"),
-            {},
-            "decode_active_request_weight",
+            ("-m", "dynamo.frontend"),
+            {"DYN_ROUTER_LOAD_AWARE": "1"},
+            "removed in v1.8 are still set: DYN_ROUTER_LOAD_AWARE",
+        ),
+        (
+            (*KV_ARGS,),
+            {"DYN_OVERLAP_SCORE_WEIGHT": "2"},
+            "removed in v1.8 are still set: DYN_OVERLAP_SCORE_WEIGHT",
+        ),
+        (
+            (*KV_ARGS,),
+            {
+                "DYN_SHARED_CACHE_MULTIPLIER": {
+                    "valueFrom": {"configMapKeyRef": {"name": "c", "key": "m"}}
+                }
+            },
+            "removed in v1.8 are still set: DYN_SHARED_CACHE_MULTIPLIER",
         ),
         (
             (*KV_ARGS, "--router-prefill-load-model", "ais"),
@@ -961,14 +958,6 @@ def test_parse_error_fails_p4_only():
             {},
             "router_approximate_cache_policy='lru'",
         ),
-        ((*KV_ARGS, "--router-prefill-policy", "default"), {}, "router_prefill_policy"),
-        ((*KV_ARGS, "--router-decode-policy", "default"), {}, "router_decode_policy"),
-        ((*KV_ARGS,), {"DYN_OVERLAP_SCORE_WEIGHT": "2"}, "overlap_score_weight"),
-        (
-            ("-m", "dynamo.frontend"),
-            {"DYN_ROUTER_LOAD_AWARE": "1"},
-            "load-aware preset",
-        ),
         (
             (*KV_ARGS,),
             {"DYN_ROUTER_WORKER_SELECTION_POLICY": "mine"},
@@ -988,11 +977,6 @@ def test_parse_error_fails_p4_only():
             (*KV_ARGS, "--active-decode-blocks-threshold", "0.9"),
             {},
             "active_decode_blocks_threshold",
-        ),
-        (
-            (*KV_ARGS, "--active-prefill-tokens-threshold", "100"),
-            {},
-            "active_prefill_tokens_threshold",
         ),
     ],
 )

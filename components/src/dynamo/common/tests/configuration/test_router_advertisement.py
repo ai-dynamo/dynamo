@@ -7,7 +7,9 @@ import argparse
 
 import pytest
 
+from dynamo.common.configuration.groups.kv_router_args import REMOVED_KV_ROUTER_FLAGS
 from dynamo.common.configuration.groups.router_args import (
+    REMOVED_ROUTER_FLAGS,
     RouterArgGroup,
     add_worker_router_arguments,
     build_router_config,
@@ -87,56 +89,77 @@ def test_router_arg_group_refuses_to_guess_its_caller():
         RouterArgGroup()  # type: ignore[call-arg]
 
 
-_ABSOLUTE_PREFILL_DEPRECATION = "--active-prefill-tokens-threshold is deprecated"
+# The removed spellings, written out and not read from the tables: a
+# spelling dropped from a table would drop out of these tests with it.
+_REMOVED_FLAGS = (
+    "--active-prefill-tokens-threshold",
+    "--kv-overlap-score-weight",
+    "--load-aware",
+    "--no-load-aware",
+    "--router-decode-active-request-weight",
+    "--router-decode-policy",
+    "--router-kv-overlap-score-credit-decay",
+    "--router-kv-overlap-score-weight",
+    "--router-prefill-policy",
+    "--router-queue-policy",
+    "--router-queue-threshold",
+    "--shared-cache-multiplier",
+)
 
 
-@pytest.mark.parametrize("source", ["cli", "env"])
-def test_deprecated_absolute_prefill_threshold_warns_when_advertised(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    source: str,
+def test_every_removed_flag_is_listed() -> None:
+    assert set(_REMOVED_FLAGS) == {*REMOVED_KV_ROUTER_FLAGS, *REMOVED_ROUTER_FLAGS}
+
+
+@pytest.mark.parametrize("flag", _REMOVED_FLAGS)
+def test_worker_passing_a_removed_flag_fails_at_startup(
+    capsys: pytest.CaptureFixture[str], flag: str
 ):
-    """A worker forwarding the deprecated threshold must see the migration notice.
+    """A removed flag must not reach the engine's parser or drop out of the card."""
+    with pytest.raises(SystemExit):
+        parse_worker_router_config(["--router-mode", "kv", flag, "1"])
 
-    Workers never run the frontend's validation, so the warning has to come
-    from the shared path that builds the advertisement, for the CLI flag and
-    the environment variable alike.
-    """
-    monkeypatch.delenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", raising=False)
-    argv = ["--router-mode", "kv"]
-    if source == "cli":
-        argv += ["--active-prefill-tokens-threshold", "123"]
-    else:
-        monkeypatch.setenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", "123")
-    caplog.set_level("WARNING")
-
-    config, _ = parse_worker_router_config(argv)
-    assert config.active_prefill_tokens_threshold == 123
-    assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
-
-    assert build_router_config(config) is not None
-    assert caplog.text.count(_ABSOLUTE_PREFILL_DEPRECATION) == 1
+    assert f"{flag} was removed in v1.8; use " in capsys.readouterr().err
 
 
-def test_absolute_prefill_threshold_unset_or_unadvertised_stays_quiet(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize(
+    ("router_mode", "name"),
+    [
+        ("kv", "DYN_ROUTER_QUEUE_THRESHOLD"),
+        ("round-robin", "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD"),
+    ],
+)
+def test_worker_advertising_with_a_removed_variable_set_fails(
+    monkeypatch: pytest.MonkeyPatch, router_mode: str, name: str
 ):
-    """No notice without a value, and none when the value is never forwarded.
+    """The card must not silently lose a value the variable used to put on it.
 
-    A worker that omits --router-mode advertises nothing, so the threshold is
-    dropped along with every other router flag rather than forwarded.
+    The worker fails when it parses its arguments: a backend builds its
+    advertisement only after its engine has loaded.
     """
-    monkeypatch.delenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", raising=False)
-    caplog.set_level("WARNING")
+    monkeypatch.delenv(name, raising=False)
+    advertising, _ = parse_worker_router_config(["--router-mode", router_mode])
+    monkeypatch.setenv(name, "1")
 
-    config, _ = parse_worker_router_config(["--router-mode", "kv"])
-    assert build_router_config(config) is not None
-
-    config, _ = parse_worker_router_config(["--active-prefill-tokens-threshold", "123"])
+    # A worker that advertises nothing never read the variable.
+    config, _ = parse_worker_router_config([])
     assert build_router_config(config) is None
 
-    assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
+    with pytest.raises(ValueError, match=f"removed in v1.8 are still set: {name}"):
+        parse_worker_router_config(["--router-mode", router_mode])
+    # The mocker builds its advertisement without parse_worker_router_config.
+    with pytest.raises(ValueError, match=f"removed in v1.8 are still set: {name}"):
+        build_router_config(advertising)
+
+
+def test_worker_off_the_kv_path_ignores_a_removed_kv_variable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Only a worker that advertises kv read the KV router's variables."""
+    monkeypatch.setenv("DYN_ROUTER_QUEUE_THRESHOLD", "0.5")
+
+    config, _ = parse_worker_router_config(["--router-mode", "round-robin"])
+    assert build_router_config(config) is not None
 
 
 def test_unknown_mode_is_rejected():

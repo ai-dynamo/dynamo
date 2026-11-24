@@ -57,7 +57,7 @@ For decode load, the router tracks active KV blocks and active-request count for
 
 When `--router-track-output-blocks` is enabled, the router also adds placeholder output blocks as generation crosses block boundaries. If the request includes `nvext.agent_hints.osl`, those output blocks and the structurally exclusive prompt suffix receive a fractional weight based on progress toward the expected output length. Shared prompt blocks retain full weight. This expected OSL proxy lets requests near completion contribute less future decode load. Without an expected OSL, tracked output blocks count at full weight until the request finishes.
 
-When `--router-decode-active-request-weight` is positive, every active request also adds the configured block-equivalent cost. This can improve data-parallel batch balance when decode latency is sensitive to request count, but it can reduce cache locality or over-penalize batches when KV-memory traffic remains the dominant cost. The default is `0`.
+When the policy parameter `decode_active_request_weight` is positive, every active request also adds the configured block-equivalent cost. This can improve data-parallel batch balance when decode latency is sensitive to request count, but it can reduce cache locality or over-penalize batches when KV-memory traffic remains the dominant cost. The default is `0`.
 
 For the flags that enable these models, see [Configuration and Tuning](configuration-and-tuning.md).
 

@@ -53,6 +53,81 @@ class Deprecated:
         warnings.warn(self.message(names), FutureWarning, stacklevel=stacklevel + 1)
 
 
+class _RemovedFlagAction(argparse.Action):
+    """Fail on a removed flag and name its replacement."""
+
+    def __init__(
+        self,
+        option_strings: Sequence[str],
+        dest: str,
+        *,
+        replacement: str,
+        removed_in: str,
+    ) -> None:
+        super().__init__(
+            option_strings,
+            dest,
+            nargs="?",
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
+        self.replacement = replacement
+        self.removed_in = removed_in
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error(
+            f"{option_string} was removed in {self.removed_in}; use {self.replacement}"
+        )
+
+
+def add_removed_flags(
+    parser: argparse.ArgumentParser | argparse._ArgumentGroup,
+    removed: Mapping[str, str],
+    *,
+    removed_in: str,
+) -> None:
+    """Make each removed flag fail with its replacement.
+
+    ``removed`` maps each removed flag to its replacement. Without this a
+    removed flag is an unknown argument, which a worker hands to its engine's
+    parser, or an abbreviation of a flag that remains. The flags stay out of
+    ``--help``.
+    """
+    for flag, replacement in removed.items():
+        parser.add_argument(
+            flag,
+            action=_RemovedFlagAction,
+            replacement=replacement,
+            removed_in=removed_in,
+        )
+
+
+def reject_removed_env_vars(
+    removed: Mapping[str, str],
+    *,
+    removed_in: str,
+    environ: Optional[Mapping[str, str]] = None,
+) -> None:
+    """Fail when a removed environment variable is still set.
+
+    ``removed`` maps each removed name to its replacement. A removed variable
+    that was only ignored would stop applying without a signal. Any value
+    counts as set, an empty one included, as with a removed flag.
+    ``environ`` defaults to this process's environment.
+    """
+    environ = os.environ if environ is None else environ
+    found = [
+        f"{name} (use {replacement})"
+        for name, replacement in removed.items()
+        if name in environ
+    ]
+    if found:
+        raise ValueError(
+            f"environment variables removed in {removed_in} are still set: "
+            + "; ".join(found)
+        )
+
+
 @dataclass
 class ArgEnv:
     """The env of another process, for registering that process's arguments.
@@ -152,13 +227,6 @@ def nullable_float(value: str) -> Optional[float]:
     if value is None or value == "" or value == "None":
         return None
     return float(value)
-
-
-def nullable_int(value: str) -> Optional[int]:
-    """Parse an int, or return None for empty/'None' values."""
-    if value is None or value == "" or value == "None":
-        return None
-    return int(value)
 
 
 def add_argument(

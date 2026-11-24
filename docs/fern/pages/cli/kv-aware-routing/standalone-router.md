@@ -40,7 +40,7 @@ Standalone-specific options:
 - `--router-block-size`: KV block size used for routing decisions. Set this explicitly so it matches the backend worker block size.
 - `--no-router-track-active-blocks`: Disables decode active-block tracking. This is commonly useful for prefill-only routing because decode load is not relevant.
 
-Most KV tuning options use the `--router-*` prefix, but shared options such as `--load-aware`, `--serve-indexer`, `--use-remote-indexer`, and `--shared-cache-*` do not. Legacy names such as `--block-size` and `--kv-events` are still accepted but deprecated. Run `python -m dynamo.router --help` for the current command surface.
+Most KV tuning options use the `--router-*` prefix, but shared options such as `--serve-indexer`, `--use-remote-indexer`, and `--shared-cache-type` do not. Legacy names such as `--block-size` and `--kv-events` are still accepted but deprecated. Run `python -m dynamo.router --help` for the current command surface.
 
 ## Runtime endpoints
 
