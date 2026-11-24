@@ -157,7 +157,7 @@ func isSystemOneSerialOptIn(container *corev1.Container) bool {
 		}
 	}
 	env := findEnvVar(container.Env, systemOneSerialEnvVar)
-	return env != nil && env.ValueFrom == nil && isTruthyEnvValue(env.Value)
+	return env != nil && isTruthyEnvValue(env.Value)
 }
 
 // isTruthyEnvValue matches the truthy values of dynamo's Python parse_bool.

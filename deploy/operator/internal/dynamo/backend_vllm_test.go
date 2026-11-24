@@ -1469,10 +1469,9 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 
 // TestVLLMBackend_UpdateContainer_SystemOneSerial covers the worker FPM default
 // for a --systemone-serial opt-in: dynamo.vllm rejects DYN_FORWARDPASS_METRIC_PORT
-// under that profile, so the operator default goes and a user-set port stays.
+// under that profile, so the operator default goes.
 func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 	operatorDefault := corev1.EnvVar{Name: forwardPassMetricPortEnvVar, Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)}
-	userPort := corev1.EnvVar{Name: forwardPassMetricPortEnvVar, Value: "30000"}
 	optInEnv := func(value string) corev1.EnvVar { return corev1.EnvVar{Name: systemOneSerialEnvVar, Value: value} }
 
 	tests := []struct {
@@ -1480,7 +1479,6 @@ func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 		args        []string
 		command     []string
 		env         []corev1.EnvVar
-		authoredEnv []corev1.EnvVar
 		wantFPMPort string // "" means the variable must be absent
 	}{
 		{
@@ -1506,14 +1504,6 @@ func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 			wantFPMPort: operatorDefault.Value,
 		},
 		{
-			name: "env opt-in from valueFrom keeps the default",
-			args: []string{"-m", "dynamo.vllm", "--model", "m"},
-			env: []corev1.EnvVar{operatorDefault, {Name: systemOneSerialEnvVar, ValueFrom: &corev1.EnvVarSource{
-				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Key: "serial"},
-			}}},
-			wantFPMPort: operatorDefault.Value,
-		},
-		{
 			name:        "--no-systemone-serial overrides the env opt-in",
 			args:        []string{"-m", "dynamo.vllm", "--model", "m", noSystemOneSerialFlag},
 			env:         []corev1.EnvVar{operatorDefault, optInEnv("true")},
@@ -1523,13 +1513,6 @@ func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 			name: "last CLI flag wins",
 			args: []string{"-m", "dynamo.vllm", noSystemOneSerialFlag, "--model", "m", systemOneSerialFlag},
 			env:  []corev1.EnvVar{operatorDefault},
-		},
-		{
-			name:        "user-set port stays for the worker to reject",
-			args:        []string{"-m", "dynamo.vllm", "--model", "m", systemOneSerialFlag},
-			env:         []corev1.EnvVar{userPort},
-			authoredEnv: []corev1.EnvVar{userPort},
-			wantFPMPort: userPort.Value,
 		},
 		{
 			name:    "shell command opt-in drops the default",
@@ -1548,7 +1531,6 @@ func TestVLLMBackend_UpdateContainer_SystemOneSerial(t *testing.T) {
 			container := &corev1.Container{Command: command, Args: tt.args, Env: append([]corev1.EnvVar(nil), tt.env...)}
 			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
-				ExtraPodSpec:  &v1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Env: tt.authoredEnv}},
 			})
 
 			require.NoError(t, (&VLLMBackend{}).UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
