@@ -306,8 +306,86 @@ fn endpoint_slug(model: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_slug, is_decoupled, serves_model};
+    use super::{discover_models, endpoint_slug, is_decoupled, serves_model};
+    use crate::args::Args;
+    use crate::client::TritonClient;
+    use crate::http::tests::{Reply, triton};
+    use clap::Parser;
     use dynamo_llm::grpc::service::kserve::inference;
+    use serde_json::json;
+
+    fn args(models: &[&str]) -> Args {
+        Args::try_parse_from(
+            ["dynamo-triton-sidecar", "--grpc", "localhost:8001"]
+                .iter()
+                .chain(models),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn named_models_skip_the_repository_index() {
+        // A client without transports panics if discovery reaches Triton.
+        let client = TritonClient::for_tests();
+        let models = discover_models(
+            &args(&[
+                "--export",
+                "b",
+                "--export",
+                "a",
+                "--classify",
+                "c",
+                "--embeddings",
+                "a",
+            ]),
+            &client,
+        )
+        .await
+        .unwrap();
+        assert_eq!(models, ["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn discovers_ready_models_and_checks_text_models() {
+        let index = || {
+            Reply::json(
+                "200 OK",
+                json!([
+                    {"name": "tokenizer", "state": "READY"},
+                    {"name": "classifier", "state": "READY"},
+                    {"name": "encoder", "state": "READY"},
+                    {"name": "missing", "state": "UNAVAILABLE"},
+                ]),
+            )
+        };
+        let (client, server) = triton(vec![index(), index(), index(), index()]).await;
+
+        // Without named models, every ready model is registered.
+        let models = discover_models(&args(&[]), &client).await.unwrap();
+        assert_eq!(models, ["classifier", "encoder", "tokenizer"]);
+
+        // Naming a text model registers only it, so ensemble steps are not exposed as tensor models.
+        let models = discover_models(&args(&["--classify", "classifier"]), &client)
+            .await
+            .unwrap();
+        assert_eq!(models, ["classifier"]);
+
+        for flag in ["--classify", "--embeddings"] {
+            let error = discover_models(&args(&[flag, "missing"]), &client)
+                .await
+                .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains(&format!("'missing' passed to {flag} is not ready")),
+                "{error}"
+            );
+            assert!(
+                error.contains(r#"["classifier", "encoder", "tokenizer"]"#),
+                "{error}"
+            );
+        }
+        server.await.unwrap();
+    }
 
     #[test]
     fn decoupled_models_are_skipped_or_rejected() {

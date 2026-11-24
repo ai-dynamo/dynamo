@@ -359,4 +359,89 @@ mod tests {
             ]
         );
     }
+
+    /// A labelled classifier over a fake Triton that answers the readiness probe, then `replies`.
+    async fn labelled_model(
+        replies: Vec<crate::http::tests::Reply>,
+    ) -> (
+        super::super::TextModel,
+        tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>,
+    ) {
+        let (client, server) = crate::http::tests::triton(replies).await;
+        let mut model_config = config(
+            4,
+            &[tensor("TEXT", TypeString, &[1])],
+            &[tensor("probs", TypeFp32, &[-1])],
+        );
+        model_config.output[0].label_filename = "labels.txt".to_string();
+        let model =
+            super::super::TextModel::new::<Classify>("model", &model_config, client).unwrap();
+        (model, server)
+    }
+
+    fn label_reply(classes: &[&str]) -> crate::http::tests::Reply {
+        crate::http::tests::infer_reply(
+            "probs",
+            "BYTES",
+            &[1, classes.len() as i64],
+            super::super::bytes_tensor(classes.iter().copied()),
+        )
+    }
+
+    /// The label of the single prompt classified with `probs`.
+    async fn label(
+        task: &Classify,
+        model: &super::super::TextModel,
+        probs: Vec<f32>,
+    ) -> serde_json::Value {
+        let (request, prompts) = task
+            .parse(model, json!({"model": "model", "input": "text"}))
+            .unwrap();
+        let width = probs.len() as i64;
+        let rows = Rows::new(probs, &[1, width], true).unwrap();
+        let response = task
+            .respond(model, request, &prompts, rows, "ctx")
+            .await
+            .unwrap();
+        response["data"][0]["label"].clone()
+    }
+
+    #[tokio::test]
+    async fn serves_without_labels_after_a_failed_fetch() {
+        let (model, server) = labelled_model(vec![
+            crate::http::tests::Reply::json(
+                "500 Internal Server Error",
+                json!({"error": "classification extension failed"}),
+            ),
+            // Fetching again before the retry delay would read this reply and label the response.
+            label_reply(&["0.9:0:cat", "0.1:1:dog"]),
+        ])
+        .await;
+        let task = Classify::default();
+
+        assert_eq!(label(&task, &model, vec![0.9, 0.1]).await, json!(null));
+        assert_eq!(label(&task, &model, vec![0.9, 0.1]).await, json!(null));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn caches_labels_until_a_response_has_more_classes() {
+        let (model, server) = labelled_model(vec![
+            label_reply(&["0.9:1:dog", "0.1:0:cat"]),
+            label_reply(&["0.5:2:bird", "0.3:0:cat", "0.2:1:dog"]),
+        ])
+        .await;
+        let task = Classify::default();
+
+        assert_eq!(label(&task, &model, vec![0.1, 0.9]).await, "dog");
+        // Two cached labels cannot name a third class, so the labels are fetched again.
+        assert_eq!(label(&task, &model, vec![0.0, 0.0, 1.0]).await, "bird");
+        // Three cached labels cover two classes, so no request is made.
+        assert_eq!(label(&task, &model, vec![0.9, 0.1]).await, "cat");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        let header = String::from_utf8_lossy(&requests[2].1);
+        assert!(header.contains(r#""classification":3"#), "{header}");
+    }
 }

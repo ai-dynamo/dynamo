@@ -391,6 +391,50 @@ pub(crate) mod tests {
         (endpoint, task)
     }
 
+    /// Binary KServe HTTP infer response with one output.
+    pub(crate) fn infer_reply(name: &str, datatype: &str, shape: &[i64], raw: Vec<u8>) -> Reply {
+        let mut body = serde_json::to_vec(&serde_json::json!({
+            "model_name": "model",
+            "outputs": [{
+                "name": name,
+                "datatype": datatype,
+                "shape": shape,
+                "parameters": {"binary_data_size": raw.len()},
+            }],
+        }))
+        .unwrap();
+        let header_length = body.len();
+        body.extend_from_slice(&raw);
+        Reply {
+            status: "200 OK",
+            headers: vec![("Inference-Header-Content-Length", header_length.to_string())],
+            body,
+        }
+    }
+
+    /// A Triton client over one fake HTTP server that first answers the startup readiness probe, then `replies`.
+    pub(crate) async fn triton(
+        replies: Vec<Reply>,
+    ) -> (
+        crate::client::TritonClient,
+        tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>,
+    ) {
+        let (client, server) = http_client(replies).await;
+        (crate::client::TritonClient::from_http(client), server)
+    }
+
+    /// An HTTP client over one fake HTTP server that first answers the startup readiness probe, then `replies`.
+    pub(crate) async fn http_client(
+        replies: Vec<Reply>,
+    ) -> (HttpClient, tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>) {
+        let mut all = vec![Reply::json("200 OK", serde_json::json!({}))];
+        all.extend(replies);
+        let (endpoint, server) = serve(all).await;
+        let endpoint = HttpEndpoint::parse(&endpoint, "test").unwrap();
+        let client = HttpClient::connect(&endpoint, transport()).await.unwrap();
+        (client, server)
+    }
+
     pub(crate) fn transport() -> GrpcTransportConfig {
         GrpcTransportConfig {
             retry_interval: Duration::from_millis(10),

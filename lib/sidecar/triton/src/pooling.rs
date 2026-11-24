@@ -266,7 +266,15 @@ impl TextModel {
             },
         );
         let response = self.client.infer(request).await?;
-        let index = self.output_index(&response)?;
+        self.classes(&response)
+    }
+
+    /// Read the classification strings from `response`'s raw contents, or from its typed contents when Triton sent no raw buffer.
+    fn classes(
+        &self,
+        response: &inference::ModelInferResponse,
+    ) -> Result<Vec<String>, DynamoError> {
+        let index = self.output_index(response)?;
         let raw = response
             .raw_output_contents
             .get(index)
@@ -567,6 +575,7 @@ impl<T: TextTask> RawEngine for TextEngine<T> {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_backend_common::{BackendError, ErrorType, HEALTH_CHECK_KEY};
     use dynamo_llm::grpc::service::kserve::inference;
 
     use super::{
@@ -820,32 +829,6 @@ mod tests {
         assert!(parse_bytes_tensor(&[1, 0, 0]).is_none());
     }
 
-    /// Binary KServe HTTP infer response with one output.
-    fn infer_reply(
-        name: &str,
-        datatype: &str,
-        shape: &[i64],
-        raw: Vec<u8>,
-    ) -> crate::http::tests::Reply {
-        let mut body = serde_json::to_vec(&serde_json::json!({
-            "model_name": "model",
-            "outputs": [{
-                "name": name,
-                "datatype": datatype,
-                "shape": shape,
-                "parameters": {"binary_data_size": raw.len()},
-            }],
-        }))
-        .unwrap();
-        let header_length = body.len();
-        body.extend_from_slice(&raw);
-        crate::http::tests::Reply {
-            status: "200 OK",
-            headers: vec![("Inference-Header-Content-Length", header_length.to_string())],
-            body,
-        }
-    }
-
     fn fp32(values: &[f32]) -> Vec<u8> {
         values
             .iter()
@@ -871,7 +854,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_labelled_classification_through_triton() {
-        use crate::http::tests::{Reply, serve, transport};
+        use crate::http::tests::{Reply, infer_reply, serve, transport};
         use inference::DataType::{TypeFp32, TypeString};
 
         let (endpoint, server) = serve(vec![
@@ -951,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_embeddings_through_triton() {
-        use crate::http::tests::{Reply, serve, transport};
+        use crate::http::tests::{Reply, infer_reply, serve, transport};
         use inference::DataType::{TypeFp32, TypeString};
 
         let (endpoint, server) = serve(vec![
@@ -996,5 +979,198 @@ mod tests {
         let header = String::from_utf8_lossy(&requests[1].1);
         assert!(header.contains(r#""shape":[1]"#), "{header}");
         assert!(header.contains(r#""name":"embedding""#), "{header}");
+    }
+
+    fn probs_model(client: crate::client::TritonClient) -> TextModel {
+        use inference::DataType::{TypeFp32, TypeString};
+        TextModel::new::<Classify>(
+            "model",
+            &config(
+                4,
+                &[tensor("TEXT", TypeString, &[1])],
+                &[tensor("probs", TypeFp32, &[3])],
+            ),
+            client,
+        )
+        .unwrap()
+    }
+
+    fn response(
+        datatype: &str,
+        shape: &[i64],
+        contents: Option<inference::InferTensorContents>,
+        raw: Option<Vec<u8>>,
+    ) -> inference::ModelInferResponse {
+        inference::ModelInferResponse {
+            outputs: vec![
+                inference::model_infer_response::InferOutputTensor {
+                    name: "other".to_string(),
+                    datatype: "FP32".to_string(),
+                    ..Default::default()
+                },
+                inference::model_infer_response::InferOutputTensor {
+                    name: "probs".to_string(),
+                    datatype: datatype.to_string(),
+                    shape: shape.to_vec(),
+                    contents,
+                    ..Default::default()
+                },
+            ],
+            raw_output_contents: raw.map(|raw| vec![Vec::new(), raw]).unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reads_fp32_outputs_by_name() {
+        let model = probs_model(crate::client::TritonClient::for_tests());
+
+        let (shape, values) = model
+            .fp32_output(response("FP32", &[1, 2], None, Some(fp32(&[1.0, 2.0]))))
+            .unwrap();
+        assert_eq!((shape, values), (vec![1, 2], vec![1.0, 2.0]));
+
+        // Without raw buffers, as gRPC can return them, the typed contents are read.
+        let contents = inference::InferTensorContents {
+            fp32_contents: vec![3.0, 4.0],
+            ..Default::default()
+        };
+        let (_, values) = model
+            .fp32_output(response("FP32", &[1, 2], Some(contents), None))
+            .unwrap();
+        assert_eq!(values, [3.0, 4.0]);
+
+        let mut missing = response("FP32", &[1], None, None);
+        missing.outputs.pop();
+        for (response, expected) in [
+            (missing, "returned no output 'probs'"),
+            (
+                response("INT32", &[1], None, Some(vec![0; 4])),
+                "has datatype INT32; expected FP32",
+            ),
+            (
+                response("FP32", &[1], None, Some(vec![0; 5])),
+                "5 raw bytes, which is not a whole number of FP32 values",
+            ),
+        ] {
+            let error = model.fp32_output(response).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn reads_classifications_from_raw_or_typed_contents() {
+        let model = probs_model(crate::client::TritonClient::for_tests());
+        let raw = bytes_tensor(["0.7:1:dog"].into_iter());
+        assert_eq!(
+            model
+                .classes(&response("BYTES", &[1, 1], None, Some(raw)))
+                .unwrap(),
+            ["0.7:1:dog"]
+        );
+
+        let contents = inference::InferTensorContents {
+            bytes_contents: vec![b"0.6:0:cat".to_vec()],
+            ..Default::default()
+        };
+        assert_eq!(
+            model
+                .classes(&response("BYTES", &[1, 1], Some(contents), None))
+                .unwrap(),
+            ["0.6:0:cat"]
+        );
+        assert!(
+            model
+                .classes(&response("BYTES", &[1, 0], None, Some(Vec::new())))
+                .unwrap()
+                .is_empty()
+        );
+
+        let error = model
+            .classes(&response(
+                "BYTES",
+                &[1, 1],
+                None,
+                Some(vec![9, 0, 0, 0, b'x']),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("malformed classification"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn infer_rows_requires_one_row_per_prompt() {
+        use crate::http::tests::{Reply, infer_reply, triton};
+        let (client, server) = triton(vec![
+            infer_reply("probs", "FP32", &[1, 3], fp32(&[0.1, 0.2, 0.7])),
+            infer_reply("probs", "FP32", &[6], fp32(&[0.0; 6])),
+            Reply::json(
+                "503 Service Unavailable",
+                serde_json::json!({"error": "overloaded"}),
+            ),
+        ])
+        .await;
+        let model = probs_model(client);
+        let prompts = ["a".to_string(), "b".to_string()];
+
+        for expected in [
+            "returned 1 row(s) for 2 input(s)",
+            "declares batching but returned shape [6]; expected a leading batch axis",
+        ] {
+            let error = match model.infer_rows(&prompts).await {
+                Ok(_) => panic!("accepted a malformed output"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        // A Triton failure keeps its mapped error type.
+        let error = match model.infer_rows(&prompts).await {
+            Ok(_) => panic!("Triton failure ignored"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::CannotConnect)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_and_health_probe_require_a_ready_model() {
+        use crate::http::tests::{Reply, triton};
+        use dynamo_backend_common::RawEngine;
+        let not_ready = || Reply::json("400 Bad Request", serde_json::json!({"error": "loading"}));
+        let (client, server) = triton(vec![not_ready(), not_ready()]).await;
+        let engine = super::TextEngine::new(Classify::default(), probs_model(client));
+
+        let error = engine.start(0).await.unwrap_err().to_string();
+        assert!(
+            error.contains("Triton model 'model' is not ready"),
+            "{error}"
+        );
+
+        let context = dynamo_backend_common::GenerateContext::new(
+            dynamo_backend_common::testing::mock_context(),
+            None,
+        );
+        let probe = serde_json::json!({"model": "model", HEALTH_CHECK_KEY: true});
+        let error = match engine.generate(probe, context).await {
+            Ok(_) => panic!("health probe passed for a model that is not ready"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::CannotConnect)
+        );
+        server.await.unwrap();
     }
 }

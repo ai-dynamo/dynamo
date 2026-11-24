@@ -200,3 +200,154 @@ where
         sleep_until(retry_at.min(deadline)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use dynamo_backend_common::{BackendError, ErrorType};
+    use dynamo_llm::grpc::service::kserve::inference;
+    use dynamo_sidecar_common::GrpcTransportConfig;
+    use serde_json::json;
+
+    use super::{Transport, TritonClient, wait_until_ready};
+    use crate::http::tests::{Reply, http_client, infer_reply, transport};
+
+    /// A client that alternates between two HTTP transports, as with `--grpc` and `--http`.
+    fn two_transports(
+        first: crate::http::HttpClient,
+        second: crate::http::HttpClient,
+    ) -> TritonClient {
+        TritonClient {
+            transports: vec![Transport::Http(first), Transport::Http(second)].into(),
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn short_deadline() -> GrpcTransportConfig {
+        GrpcTransportConfig {
+            retry_interval: Duration::from_millis(5),
+            startup_deadline: Duration::from_millis(50),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_requires_a_transport() {
+        let error = match TritonClient::connect(None, None, transport()).await {
+            Ok(_) => panic!("connected without a transport"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("at least one of `--grpc` and `--http`"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn waits_until_the_probe_reports_ready() {
+        let calls = AtomicUsize::new(0);
+        wait_until_ready("HTTP", transport(), || {
+            let call = calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                match call {
+                    0 => Err("connection refused".to_string()),
+                    1 => Ok(false),
+                    _ => Ok(true),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn readiness_timeout_reports_the_last_failure() {
+        // Each probe yields once, as a network round trip does: `timeout_at` checks the deadline only after its future returns pending.
+        let error = wait_until_ready("HTTP", short_deadline(), || async {
+            tokio::task::yield_now().await;
+            Err::<bool, _>("connection refused".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::ConnectionTimeout)
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("Triton HTTP endpoint did not become ready"),
+            "{message}"
+        );
+        assert!(
+            message.contains("last error: connection refused"),
+            "{message}"
+        );
+
+        let error = wait_until_ready("gRPC", short_deadline(), || async {
+            tokio::task::yield_now().await;
+            Ok(false)
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Triton gRPC endpoint"), "{error}");
+        assert!(error.contains("ready=false"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn model_must_be_ready_on_every_transport() {
+        let (first, first_server) = http_client(vec![
+            Reply::json("200 OK", json!({})),
+            Reply::json("400 Bad Request", json!({"error": "loading"})),
+        ])
+        .await;
+        let (second, second_server) = http_client(vec![Reply::json(
+            "400 Bad Request",
+            json!({"error": "loading"}),
+        )])
+        .await;
+        let client = two_transports(first, second);
+        assert_eq!(client.protocols(), ["http", "http"]);
+
+        // Ready on the first transport but not the second.
+        assert!(!client.model_ready("model").await.unwrap());
+        // Not ready on the first transport: the second is not asked, since its fake server has no reply left.
+        assert!(!client.model_ready("model").await.unwrap());
+
+        assert_eq!(first_server.await.unwrap().len(), 3);
+        assert_eq!(second_server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn inference_alternates_between_transports() {
+        let reply =
+            |value: i32| infer_reply("OUTPUT0", "INT32", &[1], value.to_le_bytes().to_vec());
+        let (first, first_server) = http_client(vec![reply(1), reply(3)]).await;
+        let (second, second_server) = http_client(vec![reply(2)]).await;
+        let client = two_transports(first, second);
+
+        let request = inference::ModelInferRequest {
+            model_name: "model".to_string(),
+            ..Default::default()
+        };
+        let mut values = Vec::new();
+        for _ in 0..3 {
+            let response = client.infer(request.clone()).await.unwrap();
+            values.push(i32::from_le_bytes(
+                response.raw_output_contents[0]
+                    .as_slice()
+                    .try_into()
+                    .unwrap(),
+            ));
+        }
+        assert_eq!(values, [1, 2, 3]);
+        assert_eq!(first_server.await.unwrap().len(), 3);
+        assert_eq!(second_server.await.unwrap().len(), 2);
+    }
+}
