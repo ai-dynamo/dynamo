@@ -349,10 +349,6 @@ enum BookingReleaseVisibility {
 
 /// Observes request attempts mirrored from another router so their local
 /// scheduler state can share the router's request-liveness reaper.
-///
-/// `progressed` runs for every prefill-completed event from the router a booking
-/// mirrors, including one that changes nothing: that router re-sends the event as
-/// a keepalive, and this call is what keeps the mirrored lease alive.
 pub trait ReplicaRequestLeaseObserver: Send + Sync {
     fn admitted(&self, booking: SchedulerBookingDescriptor);
     fn progressed(&self, booking: &SchedulerBookingDescriptor);
@@ -588,8 +584,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
         // FIFO begins at this enqueue boundary. Local mutation completes first, so overlapping
         // lifecycle calls can enqueue in a different order from their local mutations; replica
-        // sync is best-effort. A peer drops a stale mirror when this router books the same
-        // request again, or by its own expiry once this router's keepalives stop.
+        // sync is best-effort and peer expiry reconciles stale state.
         let request_id = event.request_id.clone();
         let worker = event.worker;
         if let Err(error) = self.publisher.enqueue_event(event) {

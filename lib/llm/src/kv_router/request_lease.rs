@@ -198,9 +198,8 @@ impl RequestLeaseManagerInner {
 
     fn enqueue_expiry(&self, record: &RequestLeaseRecord) {
         // NOTE: Request-liveness expiry is deliberately isolated to this router.
-        // It publishes nothing: only an explicit lifecycle completion sends `Free`
-        // to peer routers. A peer's mirrored copy of a request expired here is
-        // reclaimed by that peer's own reaper once this router's keepalives stop.
+        // Local and mirrored scheduler copies expire independently, and only an
+        // explicit lifecycle completion publishes `Free` to peer routers.
         if let Some(scheduler) = self.scheduler("expired", &record.booking) {
             scheduler.enqueue_expired(record.booking.clone());
         }
