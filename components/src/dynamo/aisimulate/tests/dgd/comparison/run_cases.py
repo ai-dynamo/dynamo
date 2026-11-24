@@ -64,6 +64,10 @@ _LOCAL_MODEL_INPUTS = {
     "deepseek-r1-vllm-disagg": "deepseek-r1-56d4cbbb",
     "nemotron-3-super-fp8-vllm-agg": "nemotron-3-super-fp8-744b1880",
 }
+_BACKEND_VERSION_OVERRIDES = {
+    "deepseek-r1-sglang-disagg-16gpu": "previous",
+    "deepseek-r1-sglang-disagg-8gpu": "previous",
+}
 _PARALLELISM_PRESETS = {
     "deepseek-r1-sglang-disagg-8gpu": {
         "prefill": {
@@ -441,9 +445,10 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
         ),
         "hardware": search_space["hardware_sku"],
         "backend": backend,
-        "backend_version": _backend_version_for_case(case, backend),
         "workers": workers,
     }
+    if case.name in _BACKEND_VERSION_OVERRIDES:
+        engine["backend_version"] = _BACKEND_VERSION_OVERRIDES[case.name]
     if "context_length" in search_space:
         engine["context_length"] = search_space["context_length"]
 
@@ -480,16 +485,6 @@ def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
     if sla is not None:
         config["evaluation"] = {"sla": copy.deepcopy(sla)}
     return config
-
-
-def _backend_version_for_case(case: ComparisonCase, backend: str) -> str:
-    """Keep recommendation evaluation aligned with the generated runtime image."""
-    from aisim.generator.utils import resolve_backend_version_for_dynamo
-
-    return resolve_backend_version_for_dynamo(
-        case.generation_options.dynamo_runtime_version,
-        backend,
-    )
 
 
 def _derive_runtime_image(profiler_image: str, backend: str) -> str:
