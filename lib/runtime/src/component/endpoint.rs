@@ -104,6 +104,11 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,
+
+    /// Whether successful responses prove health and defer canary probes.
+    /// Disable when responses may be local acknowledgements or protocol errors.
+    #[builder(default = "true")]
+    health_check_from_responses: bool,
 }
 
 impl EndpointConfigBuilder {
@@ -133,8 +138,14 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
-        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+            health_check_from_responses,
+        ) = self.build_internal()?.dissolve();
         if endpoint.track_response_completion
             && endpoint.drt().response_plane() != ResponsePlaneMode::Tcp
         {
@@ -200,7 +211,9 @@ impl EndpointConfigBuilder {
                 instance,
                 health_check_payload.clone(),
             );
-            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
+            if health_check_from_responses
+                && let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name)
+            {
                 handler.set_endpoint_health_check_notifier(notifier)?;
             }
         }
