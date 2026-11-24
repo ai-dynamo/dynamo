@@ -151,7 +151,19 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 // a control operator glued to the flag ("--systemone-serial;") is not part of it.
 func isSystemOneSerialOptIn(container *corev1.Container) bool {
 	shellRun := len(container.Command) > 0 && isShellCommand(container.Command[0])
-	for _, arg := range slices.Backward(getExpandedCommandLine(container)) {
+
+	// Remove comments from a private copy so they cannot override a real flag.
+	launch := *container
+	if shellRun {
+		launch.Command = nil
+		launch.Args = slices.Concat(container.Command, container.Args)
+		for i, arg := range launch.Args {
+			launch.Args[i] = stripShellComments(arg)
+		}
+	}
+
+	// Keep the worker's last-flag precedence after filtering shell comments.
+	for _, arg := range slices.Backward(getExpandedCommandLine(&launch)) {
 		if shellRun {
 			arg = trimShellTerminator(arg)
 		}
@@ -164,6 +176,54 @@ func isSystemOneSerialOptIn(container *corev1.Container) bool {
 	}
 	env := findEnvVar(container.Env, systemOneSerialEnvVar)
 	return env != nil && isTruthyEnvValue(env.Value)
+}
+
+// stripShellComments removes unquoted comments while preserving newlines and literal hashes.
+func stripShellComments(script string) string {
+	var result strings.Builder
+	var quote rune
+	escaped, comment, wordStart := false, false, true
+
+	// Track quoting and escapes so only a hash at the start of a shell word comments out a line.
+	for _, char := range script {
+		if comment {
+			if char != '\n' {
+				continue
+			}
+			comment = false
+		}
+		if escaped {
+			if char != '\n' {
+				wordStart = false
+			}
+			escaped = false
+			result.WriteRune(char)
+			continue
+		}
+		if char == '\\' && quote != '\'' {
+			escaped = true
+			result.WriteRune(char)
+			continue
+		}
+		if quote != 0 {
+			if char == quote {
+				quote = 0
+			}
+		} else {
+			switch char {
+			case '\'', '"':
+				quote = char
+			case '#':
+				if wordStart {
+					comment = true
+					continue
+				}
+			}
+			wordStart = strings.ContainsRune(" \t\n;&|()<>", char)
+		}
+		result.WriteRune(char)
+	}
+	return result.String()
 }
 
 // isTruthyEnvValue matches the truthy values of dynamo's Python parse_bool.
