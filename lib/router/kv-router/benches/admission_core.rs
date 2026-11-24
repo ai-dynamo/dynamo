@@ -30,9 +30,11 @@
 //! - `gate_held`: as `session_lanes`, with a dispatch gate that holds `backlog` further lanes
 //!   for good. A worker that frees must not re-ask them, so this should cost what
 //!   `session_lanes` does.
-//! - `gate_wake`: as `gate_held`, but the gate wakes the queue on every completion, as
-//!   ThunderAgent does when its ledger changes. Each wake re-asks every held lane and every
-//!   waiting lane, so this is the cost that grows with the backlog.
+//! - `gate_wake`: as `gate_held`, but the gate wakes the queue on every completion. Each wake
+//!   re-asks every held lane and every waiting lane, so this is the cost that grows with the
+//!   backlog. ThunderAgent wakes the queue whenever its ledger changes, which one request can
+//!   cause three times: at its dispatch, when it is sent, and when it completes or aborts.
+//!   This case issues one wake per request, so it is a lower bound for that plugin.
 //!
 //! Run with: `cargo bench -p dynamo-kv-router --bench admission_core --features bench`
 
