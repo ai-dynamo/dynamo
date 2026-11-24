@@ -28,16 +28,16 @@ refused by default. See [Media URL Policy](#media-url-policy).
 
 ## Images Sent to Text-Only Deployments
 
-When the selected worker set and its committed prefill and encoder targets
-explicitly exclude image input and media rejection is disabled, Dynamo replaces
-each image block with `[image omitted]` before loading it. This applies to any
-backend advertising `supported_input_modalities`, including the TensorRT-LLM
-sidecar. Unknown or mixed image capabilities retain the image path.
+If a request with images reaches a deployment that doesn't accept images, Dynamo
+replaces each image with `[image omitted]` instead of failing, and the client isn't
+told. Currently this applies only to TensorRT-LLM workers served through the Dynamo
+sidecar. The decision is made per request, so if a model name is served by both a
+text-only and an image-capable deployment, only requests routed to the text-only
+one lose their images.
 
-To refuse media instead, set the frontend's `--reject-media` option. Rejection
-checks the original request before image omission. See
+To refuse image requests instead, set the frontend's `--reject-media` option. See
 [Media refusal for text-only models](../../reference/components/frontend-configuration.mdx#media-refusal-for-text-only-models)
-for endpoint coverage and metadata rules.
+for the rules and endpoint coverage.
 
 ## Set up the backend
 

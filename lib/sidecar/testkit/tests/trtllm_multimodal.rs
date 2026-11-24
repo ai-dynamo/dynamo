@@ -9,6 +9,7 @@ use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
     FinishReason, GenerateContext, LLMEngine, MultimodalData, PreprocessedRequest,
 };
+use dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
 use dynamo_sidecar_common::EngineBootstrapResult;
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{Controller, RequestPlan};
@@ -106,7 +107,11 @@ async fn images_preserve_order_uuids_and_engine_expanded_usage() {
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
     advertise_media(&fixture, &["image"]);
     let engine = fixture.engine().await;
-    engine.start(0).await.unwrap();
+    let config = engine.start(0).await.unwrap();
+    assert_eq!(
+        config.runtime_data.get(SUPPORTED_INPUT_MODALITIES),
+        Some(&serde_json::json!(["text", "image"]))
+    );
     let ctx = mock_context();
     let handle = control.request(ctx.id(), RequestPlan::default());
     fixture.respond(ctx.id(), vec![finished()]);
@@ -254,7 +259,13 @@ async fn both_media_capability_signals_are_required() {
                 .unwrap()
                 .supports_multimodal = Some(portable);
             let engine = fixture.engine().await;
-            engine.start(0).await.unwrap();
+            let config = engine.start(0).await.unwrap();
+            if !portable {
+                assert_eq!(
+                    config.runtime_data.get(SUPPORTED_INPUT_MODALITIES),
+                    Some(&serde_json::json!(["text"]))
+                );
+            }
             let ctx = mock_context();
             let handle = control.request(ctx.id(), RequestPlan::default());
             assert!(
@@ -279,8 +290,6 @@ async fn both_media_capability_signals_are_required() {
 
 #[tokio::test]
 async fn malformed_advertisement_keeps_explicitly_supported_images() {
-    use dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
-
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
     advertise_media(&fixture, &["image"]);

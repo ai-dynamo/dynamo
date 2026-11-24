@@ -4357,13 +4357,17 @@ async fn chat_completions(
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
     // Custom content requires explicit support on the same deployment used for omission.
     let engine_selection = if crate::preprocessor::has_custom_content(request.content()) {
-        super::image_omission::select_chat_engine_for_capability(
-            &state,
-            &model,
-            crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
-        )
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing_for_capability(
+                &model,
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            )
     } else {
-        super::image_omission::select_chat_engine(&state, &model).map(Some)
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing(&model)
+            .map(Some)
     }
     .map_err(|e| ErrorMessage::from_model_error(&e))
     .and_then(|selected| {
@@ -4378,13 +4382,18 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(err_response));
     })?;
     drop(nvtx_lookup);
-    if engine_selection.2 {
-        super::image_omission::omit_chat_images(&mut request.inner.messages);
+    if engine_selection.omit_images {
+        let replaced_images = super::image_omission::omit_chat_images(&mut request.inner.messages);
+        super::image_omission::log_image_omission(&model, replaced_images);
     }
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options, _) = engine_selection;
+    let crate::discovery::ChatEngineSelection {
+        engine,
+        parsing_options,
+        ..
+    } = engine_selection;
 
     // Beam route, before generic validation (which rejects what this normalizes): a
     // legacy `builtin_tools` declaration is promoted into `tools` (see
@@ -5102,9 +5111,15 @@ async fn responses(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
-    let engine_selection = super::image_omission::select_chat_engine(&state, &model);
-    if engine_selection.as_ref().is_ok_and(|(_, _, omit)| *omit) {
-        super::image_omission::omit_response_images(&mut request.inner.input);
+    let engine_selection = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model);
+    if engine_selection
+        .as_ref()
+        .is_ok_and(|selected| selected.omit_images)
+    {
+        let replaced_images = super::image_omission::omit_response_images(&mut request.inner.input);
+        super::image_omission::log_image_omission(&model, replaced_images);
     }
 
     // Extract request parameters before into_parts() consumes the request.
@@ -5219,7 +5234,11 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options, _) = engine_selection.map_err(|e| {
+    let crate::discovery::ChatEngineSelection {
+        engine,
+        parsing_options,
+        ..
+    } = engine_selection.map_err(|e| {
         let err_response = ErrorMessage::from_model_error(&e);
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response

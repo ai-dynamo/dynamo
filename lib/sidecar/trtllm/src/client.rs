@@ -253,7 +253,7 @@ impl TrtllmClient {
             .and_then(|value| value.kind.as_ref());
         let (supported_media, has_complete_media_capability) =
             match (info.supports_multimodal, advertised) {
-                (Some(false), _) => (Some(SupportedMedia::default()), true),
+                (Some(false), _) => (SupportedMedia::default(), true),
                 (Some(true), Some(Kind::ListValue(modalities))) => {
                     let mut media = SupportedMedia::default();
                     let mut complete = !modalities.values.is_empty();
@@ -269,9 +269,9 @@ impl TrtllmClient {
                             _ => complete = false,
                         }
                     }
-                    (Some(media), complete)
+                    (media, complete)
                 }
-                _ => (None, false),
+                _ => (SupportedMedia::default(), false),
             };
         Ok(ModelInfo {
             limits: ModelLimits {
@@ -279,9 +279,8 @@ impl TrtllmClient {
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supported_inputs,
-                supported_media,
-                supports_image_routing: supported_media.is_some_and(|media| media.image)
-                    && has_image_routing_v1(&info),
+                supported_media: Some(supported_media),
+                supports_image_routing: supported_media.image && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
             has_complete_media_capability,

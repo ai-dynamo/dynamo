@@ -1147,27 +1147,47 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
 
 A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
 
-When rejection is disabled, the frontend automatically replaces each image block
-with the literal text `[image omitted]` only when **the selected worker set and
-its committed prefill and encoder targets explicitly exclude images** through
-`supported_input_modalities` runtime metadata. This contract applies to any
-backend that advertises it; the TensorRT-LLM sidecar derives the metadata from
-`Control.GetModelInfo`. An image-capable peer, missing metadata, or malformed
-metadata preserves the image path. Capabilities in other deployment namespaces
-do not affect the decision.
+When `--reject-media` is off, the frontend replaces each image with the text
+`[image omitted]` if the deployment handling the request doesn't accept images.
+A deployment doesn't accept images when its workers, and its prefill and encoder
+workers if it has them, all publish a `supported_input_modalities` list that is
+non-empty and contains only `text`, `audio`, or `video`. If any of them accepts
+images, or doesn't publish a valid list, the image is sent unchanged. Today, only
+TensorRT-LLM workers served through the Dynamo sidecar publish this list; built-in
+vLLM and SGLang workers always receive images.
 
-Omission applies to Chat Completions, Responses, and Anthropic Messages. It
-preserves surrounding text, message order, and tool-result IDs. URL/base64
-images and cached UUID/file references are omitted before media loading.
-Anthropic token counting estimates the original request because generation
-can select a deployment that processes images. Audio/video handling and native
-image-generation endpoints are unchanged.
+The decision is made per request, for the deployment the request is routed to.
+If the same model name is served by a text-only deployment and an image-capable
+one, requests routed to the text-only deployment have their images replaced and
+the others don't. Identical requests can therefore be answered with or without
+their images.
+
+<Warning>
+The frontend doesn't tell the client that an image was replaced: the response
+succeeds normally, with no header or response field indicating replacement.
+If clients need to know, enable `--reject-media` so image requests fail with an
+explicit status.
+</Warning>
+
+At debug log level, the frontend records the model name and number of replaced
+images. Image replacement doesn't emit a dedicated metric.
+
+Replacement applies to:
+
+- `/v1/chat/completions`: image URL parts in user and tool messages, including UUID-only references.
+- `/v1/responses`: `input_image` parts in messages and function-call outputs, including `file_id` references.
+- `/v1/messages`: image blocks, including images inside `tool_result` content.
+
+Surrounding text and message order are unchanged. Replaced images are not downloaded
+or decoded, so an unreachable image URL doesn't cause an error.
+`/v1/messages/count_tokens` counts the original images, so it can report more tokens
+than a text-only deployment uses. Audio and video inputs are not replaced.
+Image-generation endpoints are unchanged.
 To reject images instead of replacing them, enable `--reject-media` below.
 
 <ParamField path="--reject-media" type="boolean" default="false">
-  Refuse media in the original request, including earlier turns, before conversion,
-  deployment selection, or image omission. This applies even when the selected
-  model explicitly excludes images:
+  Refuse media in the original request, including earlier turns, before conversion or
+  deployment selection. Rejection takes precedence over image replacement:
 
   - `/v1/chat/completions`: image, video, and audio URL parts, plus inline `input_audio`.
   - `/v1/responses`: `input_image` parts, including `file_id` references, system/developer messages, assistant history, and function-call outputs. Audio and video input parts are not accepted by the Responses request schema.

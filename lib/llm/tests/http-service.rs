@@ -4716,6 +4716,56 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
             assert!(engine.messages.lock().unwrap().is_none());
         }
     }
+    let invalid_extra = r#"{"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"},"extra":"\uD800"}"#;
+    for model in ["text-only", "vision", "unknown"] {
+        for content in [
+            invalid_extra.to_string(),
+            format!(
+                r#"{{"type":"tool_result","tool_use_id":"call_1","content":[{invalid_extra}]}}"#
+            ),
+        ] {
+            let body = format!(
+                r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":[{content}]}}]}}"#
+            );
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/v1/messages"))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{model}: invalid image field must be validated before omission"
+            );
+            assert!(engine.messages.lock().unwrap().is_none());
+        }
+        for image in [
+            serde_json::json!({"type":"input_image"}),
+            serde_json::json!({"type":"input_image","file_id":""}),
+            serde_json::json!({"type":"input_image","file_id":"  "}),
+        ] {
+            for input in [
+                serde_json::json!([{"role":"user","content":[image]}]),
+                serde_json::json!([{"type":"message","role":"user","content":[image]}]),
+                serde_json::json!([{"type":"function_call_output","call_id":"call_1","output":[image]}]),
+            ] {
+                let response = client
+                    .post(format!("http://127.0.0.1:{port}/v1/responses"))
+                    .json(&serde_json::json!({"model":model,"input":input}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{model}: image must name a source"
+                );
+                assert!(engine.messages.lock().unwrap().is_none());
+            }
+        }
+    }
     for model in ["text-only", "vision", "unknown"] {
         let response = client.post(format!("http://127.0.0.1:{port}/v1/messages/count_tokens"))
             .json(&serde_json::json!({"model":model,"messages":[{"role":"user","content":[url_image]}]}))

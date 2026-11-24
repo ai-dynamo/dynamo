@@ -22,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
-    SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
+    ChatEngineSelection, GenerateEngineSelection, KvSourceMembershipWatch, Model,
+    RuntimeConfigWatch, SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -1608,60 +1608,29 @@ impl ModelManager {
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
-    pub fn get_chat_completions_engine_with_parsing(
+    pub(crate) fn get_chat_completions_engine_with_parsing(
         &self,
         model: &str,
-    ) -> Result<
-        (
-            OpenAIChatCompletionsStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
-        ),
-        ModelManagerError,
-    > {
+    ) -> Result<ChatEngineSelection, ModelManagerError> {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing()
+            .get_chat_engine_with_image_policy()
     }
 
-    pub fn get_chat_completions_engine_with_parsing_for_capability(
+    pub(crate) fn get_chat_completions_engine_with_parsing_for_capability(
         &self,
         model: &str,
         capability: &str,
-    ) -> Result<
-        Option<(
-            OpenAIChatCompletionsStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
-        )>,
-        ModelManagerError,
-    > {
+    ) -> Result<Option<ChatEngineSelection>, ModelManagerError> {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing_for_capability(capability)
-    }
-
-    pub(crate) fn get_chat_completions_engine_with_input_policy(
-        &self,
-        model: &str,
-    ) -> Result<
-        (
-            OpenAIChatCompletionsStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
-            crate::chat_input::ChatInputPolicy,
-        ),
-        ModelManagerError,
-    > {
-        self.catalog
-            .load()
-            .models
-            .get(model)
-            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_input_policy()
+            .get_chat_engine_with_image_policy_for_capability(Some(capability))
     }
 
     pub fn get_completions_engine_with_parsing(

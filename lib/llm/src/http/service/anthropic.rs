@@ -487,19 +487,19 @@ async fn handler_anthropic_messages(
             .into_marked_response(&mut inflight_guard));
         }
     }
-    let engine_selection = super::image_omission::select_chat_engine(&state, &canonical_model);
-    let request = if !state.media_rejection().enabled()
-        && engine_selection.as_ref().is_ok_and(|(_, _, omit)| *omit)
-    {
-        request.omit_images().map_err(|error| {
-            AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
-        })?
-    } else {
-        request
-    };
+    let engine_selection = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&canonical_model);
     let mut request = request.into_request(&headers).map_err(|error| {
         AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
     })?;
+    if engine_selection
+        .as_ref()
+        .is_ok_and(|selected| selected.omit_images)
+    {
+        let replaced_images = super::image_omission::omit_anthropic_images(&mut request.messages);
+        super::image_omission::log_image_omission(&canonical_model, replaced_images);
+    }
 
     validate_anthropic_messages(&request.messages).map_err(|error| {
         AnthropicHandlerError::from_request_validation(error)
@@ -590,7 +590,7 @@ async fn anthropic_messages(
     mut stream_handle: ConnectionHandle,
     mut inflight_guard: InflightGuard,
     engine_selection: Result<
-        super::image_omission::ChatEngineSelection,
+        crate::discovery::ChatEngineSelection,
         crate::discovery::ModelManagerError,
     >,
 ) -> Result<Response, Response> {
@@ -634,7 +634,12 @@ async fn anthropic_messages(
     let model_for_resp = orig_request.model.clone();
 
     // Surface selection errors after media refusal to preserve its configured status.
-    let (engine, parsing_options, _) = engine_selection.map_err(|e| match e {
+    let crate::discovery::ChatEngineSelection {
+        engine,
+        parsing_options,
+        input_policy,
+        ..
+    } = engine_selection.map_err(|e| match e {
         // Registered but not ready to serve yet → retryable 503 (mapped to
         // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
         // canonical, customer-facing message so both APIs report the same

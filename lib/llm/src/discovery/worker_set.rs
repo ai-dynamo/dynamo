@@ -236,6 +236,9 @@ pub struct WorkerSet {
     /// The model deployment card used to build this set's pipeline
     card: ModelDeploymentCard,
 
+    /// Image support belongs to the serving pool, including for adapter views.
+    excludes_image_input: bool,
+
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
@@ -286,12 +289,14 @@ pub struct WorkerSet {
 impl WorkerSet {
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
+        let excludes_image_input = card_excludes_image_input(&card);
         Self {
             namespace,
             endpoint_id: None,
             topology_target: None,
             mdcsum,
             card,
+            excludes_image_input,
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
@@ -352,7 +357,7 @@ impl WorkerSet {
     }
 
     pub(super) fn allows_image_omission(&self) -> bool {
-        card_excludes_image_input(self.card())
+        self.excludes_image_input
             && self
                 .prefill_router
                 .as_ref()
@@ -639,6 +644,7 @@ impl WorkerSet {
             topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
+            excludes_image_input: self.excludes_image_input,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
@@ -809,6 +815,34 @@ mod tests {
         assert!(adapter.card.tokenizer.is_none());
         assert_eq!(base.input_policy(), adapter.input_policy());
         assert_ne!(adapter.input_policy(), ChatInputPolicy::Standard);
+
+        use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        for (modalities, expected) in [
+            (None, false),
+            (Some(serde_json::json!(["text"])), true),
+            (Some(serde_json::json!(["text", "image"])), false),
+        ] {
+            let mut base_card = base.card().clone();
+            base_card
+                .runtime_config
+                .runtime_data
+                .remove(SUPPORTED_INPUT_MODALITIES);
+            if let Some(modalities) = modalities {
+                base_card
+                    .runtime_config
+                    .runtime_data
+                    .insert(SUPPORTED_INPUT_MODALITIES.into(), modalities);
+            }
+            let base = WorkerSet::new("ns1".into(), "abc123".into(), base_card);
+            let mut adapter_card = adapter.card().clone();
+            adapter_card.runtime_config.runtime_data.insert(
+                SUPPORTED_INPUT_MODALITIES.into(),
+                serde_json::json!(["text"]),
+            );
+            let adapter = base.adapter_view(adapter_card);
+            assert_eq!(base.allows_image_omission(), expected);
+            assert_eq!(adapter.allows_image_omission(), expected);
+        }
     }
 
     #[tokio::test]

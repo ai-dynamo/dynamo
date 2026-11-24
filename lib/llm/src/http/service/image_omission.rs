@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::protocols::anthropic::types::{
+    AnthropicContentBlock, AnthropicMessage, AnthropicMessageContent, ToolResultContent,
+    ToolResultContentBlock,
+};
 use dynamo_protocols::types::responses::{
     EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, InputTextContent,
     Item, MessageItem,
@@ -13,36 +17,18 @@ use dynamo_protocols::types::{
 
 pub(super) const OMITTED_IMAGE: &str = "[image omitted]";
 
-pub(super) type ChatEngineSelection = (
-    crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
-    crate::protocols::openai::ParsingOptions,
-    bool,
-);
-
-pub(super) fn select_chat_engine(
-    state: &super::service_v2::State,
-    model: &str,
-) -> Result<ChatEngineSelection, crate::discovery::ModelManagerError> {
-    state
-        .manager()
-        .get_committed_model(model)
-        .ok_or_else(|| crate::discovery::ModelManagerError::ModelNotFound(model.to_owned()))?
-        .get_chat_engine_with_image_policy()
+pub(super) fn log_image_omission(model: &str, replaced_images: usize) {
+    if replaced_images > 0 {
+        tracing::debug!(
+            model,
+            replaced_images,
+            "Replaced images for text-only deployment"
+        );
+    }
 }
 
-pub(super) fn select_chat_engine_for_capability(
-    state: &super::service_v2::State,
-    model: &str,
-    capability: &str,
-) -> Result<Option<ChatEngineSelection>, crate::discovery::ModelManagerError> {
-    state
-        .manager()
-        .get_committed_model(model)
-        .ok_or_else(|| crate::discovery::ModelManagerError::ModelNotFound(model.to_owned()))?
-        .get_chat_engine_with_image_policy_for_capability(Some(capability))
-}
-
-pub(super) fn omit_chat_images(messages: &mut [ChatCompletionRequestMessage]) {
+pub(super) fn omit_chat_images(messages: &mut [ChatCompletionRequestMessage]) -> usize {
+    let mut replaced_images = 0;
     for message in messages {
         match message {
             ChatCompletionRequestMessage::User(message) => {
@@ -51,8 +37,11 @@ pub(super) fn omit_chat_images(messages: &mut [ChatCompletionRequestMessage]) {
                     for part in parts {
                         if matches!(
                             part,
-                            ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                            ChatCompletionRequestUserMessageContentPart::ImageUrl(image)
+                                if (image.image_url.is_some() || image.uuid.is_some())
+                                    && image.uuid.as_deref().is_none_or(|uuid| !uuid.is_empty())
                         ) {
+                            replaced_images += 1;
                             *part = ChatCompletionRequestUserMessageContentPart::Text(
                                 ChatCompletionRequestMessageContentPartText {
                                     text: OMITTED_IMAGE.into(),
@@ -69,8 +58,11 @@ pub(super) fn omit_chat_images(messages: &mut [ChatCompletionRequestMessage]) {
                     for part in parts {
                         if matches!(
                             part,
-                            ChatCompletionRequestToolMessageContentPart::ImageUrl(_)
+                            ChatCompletionRequestToolMessageContentPart::ImageUrl(image)
+                                if (image.image_url.is_some() || image.uuid.is_some())
+                                    && image.uuid.as_deref().is_none_or(|uuid| !uuid.is_empty())
                         ) {
+                            replaced_images += 1;
                             *part = ChatCompletionRequestToolMessageContentPart::Text(
                                 ChatCompletionRequestMessageContentPartText {
                                     text: OMITTED_IMAGE.into(),
@@ -84,12 +76,14 @@ pub(super) fn omit_chat_images(messages: &mut [ChatCompletionRequestMessage]) {
             _ => {}
         }
     }
+    replaced_images
 }
 
-pub(super) fn omit_response_images(input: &mut InputParam) {
+pub(super) fn omit_response_images(input: &mut InputParam) -> usize {
     let InputParam::Items(items) = input else {
-        return;
+        return 0;
     };
+    let mut replaced_images = 0;
     for item in items {
         let parts = match item {
             InputItem::EasyMessage(message) => match &mut message.content {
@@ -104,12 +98,73 @@ pub(super) fn omit_response_images(input: &mut InputParam) {
             _ => continue,
         };
         for part in parts {
-            if matches!(part, InputContent::InputImage(_)) {
+            if matches!(part, InputContent::InputImage(image)
+                if image.image_url.is_some()
+                    || image.file_id.as_deref().is_some_and(|id| !id.trim().is_empty()))
+            {
+                replaced_images += 1;
                 *part = InputContent::InputText(InputTextContent {
                     text: OMITTED_IMAGE.into(),
                     prompt_cache_breakpoint: None,
                 });
             }
         }
+    }
+    replaced_images
+}
+
+pub(super) fn omit_anthropic_images(messages: &mut [AnthropicMessage]) -> usize {
+    let mut replaced_images = 0;
+    for message in messages {
+        let AnthropicMessageContent::Blocks { content } = &mut message.content else {
+            continue;
+        };
+        for block in content {
+            match block {
+                AnthropicContentBlock::Image { .. } => {
+                    *block = AnthropicContentBlock::Text {
+                        text: OMITTED_IMAGE.into(),
+                        citations: None,
+                        cache_control: None,
+                    };
+                    replaced_images += 1;
+                }
+                AnthropicContentBlock::ToolResult {
+                    content: Some(ToolResultContent::Blocks(blocks)),
+                    ..
+                } => {
+                    for block in blocks {
+                        if matches!(block, ToolResultContentBlock::Image { .. }) {
+                            *block = ToolResultContentBlock::Text {
+                                text: OMITTED_IMAGE.into(),
+                            };
+                            replaced_images += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    replaced_images
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn source_less_chat_images_reach_validation_unchanged() {
+        let mut messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"image_url"}]},
+            {"role":"tool","tool_call_id":"call_1","content":[{"type":"image_url"}]},
+            {"role":"user","content":[{"type":"image_url","uuid":""}]},
+            {"role":"tool","tool_call_id":"call_2","content":[{"type":"image_url","uuid":"","image_url":{"url":"https://example.com/image.png"}}]}
+        ]))
+        .unwrap();
+        let original = serde_json::to_value(&messages).unwrap();
+        assert_eq!(omit_chat_images(&mut messages), 0);
+        assert_eq!(serde_json::to_value(&messages).unwrap(), original);
     }
 }
