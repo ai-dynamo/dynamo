@@ -82,6 +82,7 @@ VIDEOS = ["data:video/mp4;base64,AA==", "data:video/mp4;base64,AQ=="]
 
 AUDIOS = ["data:audio/wav;base64,AA==", "data:audio/mpeg;base64,AQ=="]
 AUDIO_MODEL_TYPE = "qwen3_omni_moe"
+LAYOUT_ID = "ab" * 32
 
 
 class Encoder(StagedEncoderFixture):
@@ -92,14 +93,19 @@ class Encoder(StagedEncoderFixture):
         self.sends = []
         self.releases = []
         self.release_rpcs = []
+        self.revoked_parts = set()
+        self.deliver_rpcs = []
         self.fail = False
         self.stage_failure = None
         self.stage_calls = 0
+        self.corrupt_stage = None
         super().__init__(
             encoder_pb2.GetEncoderInfoResponse(
                 model_path=model,
                 served_model_name="vision",
                 supports_staged_video=True,
+                staged_transfer_backend="zmq_to_scheduler",
+                staged_layout_id=LAYOUT_ID,
                 staged_audio_model_type=AUDIO_MODEL_TYPE,
             ),
             backend="zmq_to_scheduler",
@@ -125,10 +131,25 @@ class Encoder(StagedEncoderFixture):
             await asyncio.Future()
         if self.stage_failure is not None:
             await context.abort(self.stage_failure, "private injected Stage error")
-        return await super().Stage(request, context)
+        response = await super().Stage(request, context)
+        if self.corrupt_stage == "request_id":
+            response.transfer.request_id = "wrong-request-id"
+        elif self.corrupt_stage == "image_count":
+            response.transfer.image_count += 1
+        if self.corrupt_stage:
+            response.handoff_mac = self._handoff_signer.sign(
+                response.transfer, response.instance_id
+            )
+        return response
+
+    async def Deliver(self, request, context):
+        self.deliver_rpcs.append(request.transfer.transfer_id)
+        return await super().Deliver(request, context)
 
     async def Release(self, request, context):
+        released_before = len(self.releases)
         response = await super().Release(request, context)
+        self.revoked_parts.update(self.releases[released_before:])
         self.release_rpcs.append(request.transfer_id)
         return response
 
@@ -266,6 +287,10 @@ async def run(args, tmp, stack):
                 incremental_streaming_output=True,
                 disaggregation_mode=self.role,
                 accepts_encoder_handoff=True,
+                staged_transfer_backend=(
+                    "zmq_to_scheduler" if self.role != "decode" else ""
+                ),
+                staged_layout_id=LAYOUT_ID,
                 encoder_handoff_key_id=handoff_key_id(handoff_key),
                 staged_audio_model_type=AUDIO_MODEL_TYPE,
                 supports_staged_video=True,
@@ -300,8 +325,16 @@ async def run(args, tmp, stack):
                 assert port == languages[0].receiver_port
                 assert host == "127.0.0.1"
             transfer = None
-            if images or videos or audios:
-                transfer = EncoderHandoff.parse(handoff, images, videos, audios)
+            if handoff is not None:
+                try:
+                    transfer = EncoderHandoff.parse(handoff, images, videos, audios)
+                except ValueError:
+                    # Capture the ticket that reached admission while preserving
+                    # the production parser's refusal for the public HTTP caller.
+                    receipt = EncoderHandoff.parse(handoff, None, None, None)
+                    verify_handoff(receipt, handoff_key)
+                    refused.append(receipt)
+                    raise
                 verify_handoff(transfer, handoff_key)
                 assert transfer.version == (4 if audios else 2 if videos else 1)
                 if self.role != "decode":
@@ -317,7 +350,7 @@ async def run(args, tmp, stack):
                     ]
                     self.receives.append(transfer.part_id)
             else:
-                assert handoff is None
+                assert not (images or videos or audios)
             requests.append((self.role, room, transfer, ids))
 
         async def Generate(self, req, ctx):
@@ -369,22 +402,27 @@ async def run(args, tmp, stack):
                 body = await request.json()
                 assert not {"image_data", "video_data", "audio_data"}.intersection(body)
                 assert body["stream"]
+                ids = body["input_ids"]
+                try:
+                    await self.consume(
+                        ids,
+                        json.dumps(body["encoder_handoff"]),
+                        body.get("bootstrap_room"),
+                        body.get("bootstrap_host"),
+                        body.get("bootstrap_port"),
+                    )
+                except ValueError as exc:
+                    return web.json_response(
+                        {"error": {"message": str(exc)}}, status=400
+                    )
                 assert body["mm_hashes"] == (
                     ["0xd1", "0xa1", "0xc1", "0xd2"]
-                    if audio_token in body["input_ids"]
+                    if audio_token in ids
                     else (
                         ["0xc1", "0xa1", "0xc2"]
-                        if video_token in body["input_ids"]
+                        if video_token in ids
                         else ["0xa1", "0xb2"]
                     )
-                )
-                ids = body["input_ids"]
-                await self.consume(
-                    ids,
-                    json.dumps(body["encoder_handoff"]),
-                    body.get("bootstrap_room"),
-                    body.get("bootstrap_host"),
-                    body.get("bootstrap_port"),
                 )
                 item = {
                     "output_ids": [16],
@@ -457,6 +495,11 @@ async def run(args, tmp, stack):
         stack.push_async_callback(stop, proc)
         return proc
 
+    sidecar = (
+        [args.sidecar]
+        if args.sidecar
+        else [args.frontend_python, "-m", "dynamo.sglang.sidecar"]
+    )
     encoders = [Encoder(model, sockets) for _ in range(2)]
     endpoints = [EncoderEndpoint(encoder) for encoder in encoders]
     encoder_workers = []
@@ -470,7 +513,7 @@ async def run(args, tmp, stack):
         encoder_workers.append(
             await start(
                 f"encode-{i}",
-                args.sidecar,
+                *sidecar,
                 "--grpc-endpoint",
                 f"127.0.0.1:{port}",
                 "--encoder-stage-timeout-secs",
@@ -490,7 +533,7 @@ async def run(args, tmp, stack):
         if service.role == "prefill":
             opts.extend(["--bootstrap-host", "127.0.0.1"])
         await start(
-            f"language-{i}", args.sidecar, "--grpc-endpoint", f"127.0.0.1:{port}", *opts
+            f"language-{i}", *sidecar, "--grpc-endpoint", f"127.0.0.1:{port}", *opts
         )
 
     with socket.socket() as reservation:
@@ -584,20 +627,79 @@ async def run(args, tmp, stack):
     else:
         raise AssertionError("language admission refusal should fail the request")
     refuse_handoff = False
+
+    async def assert_released(transfer_id, part_id):
+        (issuer,) = [e for e in encoders if part_id in e.encodes]
+
+        async def wait_for_release():
+            while transfer_id not in issuer.release_rpcs:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_release(), 5)
+        assert sum(e.release_rpcs.count(transfer_id) for e in encoders) == 1
+        assert part_id in issuer.revoked_parts
+        assert part_id not in issuer.encoder.req_states and part_id not in issuer.parts
+        assert all(transfer_id not in e.deliver_rpcs for e in encoders)
+
     assert refused and all(r == refused[0] for r in refused)
     receipt = refused[0]
-    (issuer,) = [e for e in encoders if receipt.part_id in e.encodes]
+    await assert_released(receipt.transfer_id, receipt.part_id)
+    rejected_parts = {receipt.part_id}
+    print("PASS Chat admission refusal released the issuing E before Deliver and TTL")
 
-    async def wait_for_release():
-        while receipt.transfer_id not in issuer.release_rpcs:
-            await asyncio.sleep(0.01)
+    if args.native_generate:
+        # A valid image and a prompt with zero image placeholders: E succeeds
+        # and the native SGLang handoff parser rejects it at P/PD admission.
+        refused.clear()
+        stage_calls = sum(e.stage_calls for e in encoders)
+        try:
+            await exchange("/generate", {"input_ids": [1], "image_data": IMAGES[0]})
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400, (exc.code, exc.read())
+        else:
+            raise AssertionError("missing image placeholder passed native admission")
+        assert sum(e.stage_calls for e in encoders) == stage_calls + 1
+        assert refused and all(r == refused[0] for r in refused)
+        receipt = refused[0]
+        await assert_released(receipt.transfer_id, receipt.part_id)
+        rejected_parts.add(receipt.part_id)
+        print(
+            "PASS /generate input_ids=[1] + image: HTTP 400, issuing E released before Deliver and TTL"
+        )
 
-    await asyncio.wait_for(wait_for_release(), 5)
-    assert [e for e in encoders if receipt.transfer_id in e.release_rpcs] == [issuer]
-    assert receipt.part_id not in issuer.parts and receipt.part_id in issuer.releases
-    assert all(part != receipt.part_id for e in encoders for part, _ in e.sends)
+    # A successful Stage RPC carrying an invalid response is an upstream fault.
+    chat_request = ("/v1/chat/completions", payload(IMAGES))
+    count_request = (
+        ("/generate", {"input_ids": [image_token], "image_data": IMAGES[0]})
+        if args.native_generate
+        else chat_request
+    )
+    for field, request in (
+        ("request_id", chat_request),
+        ("image_count", count_request),
+    ):
+        for encoder in encoders:
+            encoder.corrupt_stage = field
+        parts = {p for e in encoders for p in e.encodes}
+        language_calls = sum(s.grpc_requests + s.http_requests for s in languages)
+        try:
+            await exchange(*request)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read()
+            assert exc.code == 502, (request[0], field, exc.code, detail)
+            assert b"wrong-request-id" not in detail
+        else:
+            raise AssertionError("malformed Stage response reached language admission")
+        assert (
+            sum(s.grpc_requests + s.http_requests for s in languages) == language_calls
+        )
+        (part,) = {p for e in encoders for p in e.encodes} - parts
+        await assert_released(part.removesuffix("_local_part_0"), part)
+        rejected_parts.add(part)
+    for encoder in encoders:
+        encoder.corrupt_stage = None
     print(
-        "PASS language refusal after Stage released the issuing E before Deliver and TTL"
+        "PASS wrong Stage request ID and image count each returned HTTP 502 and released the issuing E before admission"
     )
 
     await stop(encoder_workers[0])
@@ -642,8 +744,10 @@ async def run(args, tmp, stack):
         else:
             raise AssertionError("public /generate accepted private encoder_handoff")
         assert len(requests) == before
-        assert sum(len(e.encodes) for e in encoders) == media_requests + 1
-        assert all(language.http_requests == 0 for language in languages)
+        assert sum(len(e.encodes) for e in encoders) == media_requests + len(
+            rejected_parts
+        )
+        http_calls = sum(language.http_requests for language in languages)
 
         result = await exchange("/generate", body)
         assert result["meta_info"]["id"] == body["rid"], result
@@ -651,7 +755,9 @@ async def run(args, tmp, stack):
         assert result["output_ids"], result
         hops = requests[before:]
         assert len(hops) == (2 if args.split else 1)
-        assert sum(language.http_requests for language in languages) == len(hops)
+        assert sum(
+            language.http_requests for language in languages
+        ) == http_calls + len(hops)
         assert all(hop[3] == native_ids for hop in hops)
         assert hops[0][2].part_id == encoders[1].encodes[-1]
         if args.split:
@@ -704,15 +810,15 @@ async def run(args, tmp, stack):
             "PASS public /generate routed images, video and interleaved audio, and rejected private encoder_handoff"
         )
 
-    assert sum(len(e.encodes) for e in encoders) == media_requests + 1
+    assert sum(len(e.encodes) for e in encoders) == media_requests + len(rejected_parts)
     assert sum(len(language.receives) for language in languages) == media_requests
     if args.split:
         assert not languages[1].receives
     for e in encoders:
         assert sorted(e.encodes) == sorted(e.releases)
-        assert sorted(part for part in e.encodes if part != receipt.part_id) == sorted(
-            part for part, _ in e.sends
-        )
+        assert sorted(
+            part for part in e.encodes if part not in rejected_parts
+        ) == sorted(part for part, _ in e.sends)
         assert not e.parts
     encoder = encoders[1]
     failure_routes = [("/v1/chat/completions", payload(IMAGES))]
@@ -761,7 +867,10 @@ async def run(args, tmp, stack):
     else:
         raise AssertionError("injected Stage failure should fail the image request")
     assert len(requests) == before, "native Generate ran after Stage failed"
-    assert sum(len(e.encodes) for e in encoders) == media_requests + 2
+    assert (
+        sum(len(e.encodes) for e in encoders)
+        == media_requests + len(rejected_parts) + 1
+    )
     assert len(encoders[1].encodes) == len(encoders[1].releases)
     print(
         f"PASS ({roles}): {media_requests} media requests, {media_requests} transfers, "
@@ -792,14 +901,17 @@ async def run(args, tmp, stack):
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--sidecar", type=Path, required=True)
+    parser.add_argument(
+        "--sidecar", type=Path, help="default: python -m dynamo.sglang.sidecar"
+    )
     parser.add_argument("--frontend-python", type=Path, required=True)
     parser.add_argument("--logs", type=Path, required=True)
     parser.add_argument("--split", action="store_true")
     parser.add_argument("--native-generate", action="store_true")
     args = parser.parse_args()
     # Child processes run under tmp. Keep venv interpreter symlinks intact.
-    args.sidecar = args.sidecar.absolute()
+    if args.sidecar is not None:
+        args.sidecar = args.sidecar.absolute()
     args.frontend_python = args.frontend_python.absolute()
     with tempfile.TemporaryDirectory() as tmp:
         async with AsyncExitStack() as stack:
