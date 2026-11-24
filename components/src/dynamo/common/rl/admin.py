@@ -81,6 +81,9 @@ def require_lora_load_request(request: Mapping[str, Any] | None) -> tuple[str, s
     if not isinstance(lora_uri, str) or not lora_uri:
         raise RLAdminValidationError("'source.uri' is required and must be a string")
 
+    if not isinstance(request.get("load_inplace", False), bool):
+        raise RLAdminValidationError("'load_inplace' must be a boolean")
+
     return lora_name, lora_uri
 
 

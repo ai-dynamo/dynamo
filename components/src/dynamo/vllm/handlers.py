@@ -2569,7 +2569,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     in_place = (
                         is_hot_swap
                         and old_engine_loaded
-                        and request.get("load_inplace") is True
+                        and request.get("load_inplace", False)
                     )
 
                     if old_info is not None and not hot_swap_enabled:
