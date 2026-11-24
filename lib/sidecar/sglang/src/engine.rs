@@ -370,12 +370,13 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
             // What the frontend's format needs to continue migrated requests.
-            let info = |key| discovery.server_info.get(key).cloned().unwrap_or_default();
+            let engine = started.first().map(|(_, info)| info);
             config.runtime_data.insert(
                 dynamo_llm::generate_format::ENGINE_INFO_KEY.into(),
                 serde_json::json!({
-                    "preferred_sampling_params": info("preferred_sampling_params"),
-                    "skip_tokenizer_init": info("skip_tokenizer_init"),
+                    "preferred_sampling_params":
+                        engine.and_then(|info| info.preferred_sampling_params.clone()),
+                    "skip_tokenizer_init": engine.map(|info| info.skip_tokenizer_init),
                 }),
             );
         }
