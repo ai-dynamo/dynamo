@@ -27,6 +27,7 @@ use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::indexer::server::{AppState, create_router};
 use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -537,28 +538,31 @@ async fn duplicate_store_warning_is_exported() {
 // =============================================================================
 
 /// A model name or routing group may itself contain `:`. The peer's blocks must land in
-/// the partition they were dumped from, not in one split at the first `:`.
+/// the partition they were dumped from, also when two partitions join to one dump key.
 #[cfg(feature = "peer-recovery")]
 #[rstest::rstest]
-#[case::plain("llama", "default")]
-#[case::colon_in_model("llama3:8b", "default")]
-#[case::colon_in_routing_group("llama", "team:a")]
-#[case::colon_in_both("llama3:8b", "team:a")]
+#[case::plain(&[("llama", "default")])]
+#[case::colon_in_model(&[("llama3:8b", "default")])]
+#[case::colon_in_routing_group(&[("llama", "team:a")])]
+#[case::same_dump_key(&[("llama3:8b", "default"), ("llama3", "8b:default")])]
 #[tokio::test]
-async fn peer_recovery_restores_the_dumped_partition(
-    #[case] model: &str,
-    #[case] routing_group: &str,
-) {
+async fn peer_recovery_restores_the_dumped_partitions(#[case] partitions: &[(&str, &str)]) {
     use dynamo_kv_router::services::indexer::recovery::recover_from_peers;
 
     const BLOCK_SIZE: u32 = 4;
-    let peer = registry_with_events(
-        model,
-        routing_group,
-        BLOCK_SIZE,
-        vec![store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device)],
-    )
-    .await;
+    let peer = Arc::new(WorkerRegistry::new(1));
+    peer.signal_ready();
+    for (worker_id, (model, routing_group)) in (7..).zip(partitions) {
+        let events = vec![store_event(
+            worker_id,
+            0,
+            1,
+            &[],
+            &[11, 12],
+            StorageTier::Device,
+        )];
+        add_group_events(&peer, model, routing_group, BLOCK_SIZE, events).await;
+    }
     let (base_url, cancel, task) = spawn_indexer_http(make_app_state(peer)).await;
 
     let recovered = WorkerRegistry::new(1);
@@ -568,15 +572,26 @@ async fn peer_recovery_restores_the_dumped_partition(
             .expect("recover from peer")
     );
 
-    let partitions = recovered
-        .all_indexers_with_block_size()
-        .into_iter()
-        .map(|(key, _, block_size)| (key, block_size))
-        .collect::<Vec<_>>();
     assert_eq!(
-        partitions,
-        vec![(RoutingPartitionId::new(model, routing_group), BLOCK_SIZE)]
+        recovered.all_indexers_with_block_size().len(),
+        partitions.len()
     );
+    for (worker_id, (model, routing_group)) in (7..).zip(partitions) {
+        let entry = recovered
+            .get_indexer(&RoutingPartitionId::new(*model, *routing_group))
+            .expect("recovered partition");
+        assert_eq!(entry.block_size, BLOCK_SIZE);
+        drop(entry.indexer.dump_events().await.expect("flush indexer"));
+        let matches = entry
+            .indexer
+            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(12)])
+            .await
+            .expect("find matches");
+        assert_eq!(
+            matches.scores.into_iter().collect::<Vec<_>>(),
+            vec![(WorkerWithDpRank::new(worker_id, 0), 2)]
+        );
+    }
 
     cancel.cancel();
     task.await.expect("server task join");

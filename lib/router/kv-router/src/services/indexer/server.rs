@@ -505,26 +505,27 @@ pub(crate) async fn dump_registry(registry: &IndexRegistry) -> serde_json::Value
 
     let mut result: HashMap<String, serde_json::Value> = HashMap::new();
     for handle in handles {
-        match handle.await {
+        let (key, entry) = match handle.await {
             Ok((key, Ok(events), block_size)) => {
-                let map_key = format!("{}:{}", key.model_name, key.routing_group);
-                result.insert(
-                    map_key,
-                    serde_json::json!({
-                        "partition": key,
-                        "block_size": block_size,
-                        "events": events,
-                    }),
-                );
+                let entry = serde_json::json!({
+                    "partition": key,
+                    "block_size": block_size,
+                    "events": events,
+                });
+                (key, entry)
             }
-            Ok((key, Err(e), _)) => {
-                let map_key = format!("{}:{}", key.model_name, key.routing_group);
-                result.insert(map_key, serde_json::json!({"error": e.to_string()}));
-            }
+            Ok((key, Err(e), _)) => (key, serde_json::json!({"error": e.to_string()})),
             Err(e) => {
                 tracing::warn!("dump task join error: {e}");
+                continue;
             }
+        };
+        let mut map_key = format!("{}:{}", key.model_name, key.routing_group);
+        // Two partitions can join to one key when a name contains ':'.
+        while result.contains_key(&map_key) {
+            map_key.push(':');
         }
+        result.insert(map_key, entry);
     }
     serde_json::json!(result)
 }
