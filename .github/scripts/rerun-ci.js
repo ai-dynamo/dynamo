@@ -18,7 +18,8 @@ module.exports = async function rerunFailedCI({ github, context, core, glamrCiRe
 
   const { issue, comment, action } = context.payload;
   if (context.eventName !== 'issue_comment' || action !== 'created' || !issue.pull_request) return;
-  if (!/^\/rerun ci$/i.test(comment.body.trim())) return;
+  const glamrRequest = /^(?:\S+:[ \t]+)?@dynamo-ops please rerun failed CI for ([0-9a-f]{40})$/.exec(comment.body.trim());
+  if (!/^\/rerun ci$/i.test(comment.body.trim()) && !glamrRequest) return;
 
   const repo = context.repo;
   const issueArgs = { ...repo, issue_number: issue.number };
@@ -33,9 +34,10 @@ module.exports = async function rerunFailedCI({ github, context, core, glamrCiRe
   const pullArgs = { ...repo, pull_number: issue.number };
   const { data: pull } = await github.rest.pulls.get(pullArgs);
   let allowed;
-  if (comment.user.id === GLAMR_USER_ID) {
+  if (glamrRequest) {
     // Match the existing glamr-agent full-CI request policy.
-    allowed = !glamrCiRequestsDisabled && pull.state === 'open' &&
+    allowed = comment.user.id === GLAMR_USER_ID && !glamrCiRequestsDisabled &&
+      pull.state === 'open' && glamrRequest[1] === pull.head.sha &&
       pull.user.id === GLAMR_USER_ID && pull.head.repo?.fork === true &&
       pull.head.repo.owner.id === GLAMR_USER_ID;
   } else {
@@ -46,7 +48,7 @@ module.exports = async function rerunFailedCI({ github, context, core, glamrCiRe
     allowed = ['write', 'maintain', 'admin'].includes(access.permission);
   }
   if (!allowed) {
-    await respond('The `/rerun ci` command requires repository write access or an enabled glamr-agent request on its own fork PR.');
+    await respond('CI retries require repository write access or an enabled glamr-agent request for its own current fork PR commit.');
     return;
   }
 
