@@ -108,9 +108,9 @@ impl HttpService {
             ));
         }
 
-        let service = self.inner.clone();
+        let service = self.inner.clone().with_runtime_shutdown(runtime.inner());
         // Only create token if we passed the check above
-        let token = runtime.inner().child_token();
+        let token = runtime.inner().primary_token().child_token();
 
         // Store the token for shutdown - should always succeed after the check above
         self.cancel_token

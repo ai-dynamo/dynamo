@@ -242,12 +242,29 @@ impl HttpServer {
         state_cancel: CancellationToken,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        let observer = cancel_token.child_token();
+        self.serve_until(
+            state,
+            state_cancel,
+            cancel_token.cancelled(),
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Start draining when `drain` resolves. A force signal interrupts any
+    /// remaining wait and closes the server's active connections.
+    pub async fn serve_until(
+        self,
+        state: Arc<ServiceObserver>,
+        state_cancel: CancellationToken,
+        drain: impl Future<Output = ()>,
+        force: &CancellationToken,
+    ) -> Result<()> {
         let protocol = self.protocol;
         // The server keeps accepting while inflight requests drain, then gives open
         // connections what is left of the shutdown budget.
         let shutdown = async {
-            observer.cancelled().await;
+            drain.await;
             state.start_draining();
             tracing::info!("{protocol} server shutdown requested");
             let shutdown_timeout = Duration::from_secs(get_graceful_shutdown_timeout() as u64);
@@ -260,14 +277,18 @@ impl HttpServer {
             }
             shutdown_timeout.saturating_sub(drain_started.elapsed())
         };
-        serve(
+        let serving = serve(
             self.listener,
             self.tls,
             self.router,
             write_idle_timeout(),
             shutdown,
-        )
-        .await;
+        );
+        tokio::select! {
+            biased;
+            _ = force.cancelled() => tracing::warn!(protocol, "forcing HTTP shutdown"),
+            _ = serving => {}
+        }
         state.start_stopping();
         state_cancel.cancel();
         Ok(())

@@ -117,6 +117,14 @@ class DistributedRuntime:
         """
         ...
 
+    def force_shutdown(self) -> None:
+        """
+        Force the shutdown started by ``shutdown()`` (starting it first if needed):
+        drained work is aborted rather than waited on. A frontend skips its
+        propagation window and drain and ends in-flight exchanges.
+        """
+        ...
+
     @property
     def response_plane(self) -> str:
         """

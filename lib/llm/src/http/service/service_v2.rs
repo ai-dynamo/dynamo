@@ -167,14 +167,15 @@ async fn track_inflight_inference(
     let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
-    if !state.is_ready() {
+    // Requests may still arrive while upstream endpoints are being removed.
+    if !state.accepts_inference() {
         return readiness.rejection(&request);
     }
 
     let permit = state.acquire_inflight();
     // Close the race where shutdown starts after the readiness check but
     // before this request is counted as inflight.
-    if !state.is_ready() {
+    if !state.accepts_inference() {
         drop(permit);
         return readiness.rejection(&request);
     }
@@ -595,6 +596,14 @@ impl State {
         self.service_observer.is_ready()
     }
 
+    pub fn accepts_inference(&self) -> bool {
+        self.service_observer.accepts_inference()
+    }
+
+    pub fn start_propagating(&self) {
+        self.service_observer.start_propagating();
+    }
+
     /// Check the model's local HTTP routes independently of process readiness.
     /// Tensor-only models have no HTTP inference route. Every HTTP engine
     /// registered for this model must have its corresponding route enabled.
@@ -764,6 +773,12 @@ pub struct HttpService {
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
+    /// Runtime phase-one notification, before graceful tasks release their guards.
+    shutdown_token: Option<CancellationToken>,
+    /// Repeated process-shutdown signal that skips graceful waiting.
+    force_shutdown_token: CancellationToken,
+    /// Time to keep serving after readiness fails so upstream endpoints converge.
+    propagation_delay: Duration,
     /// Admin routes, served on their own listener when enabled.
     admin: Option<AdminListener>,
     frontend_load_target: Option<FrontendLoadTarget>,
@@ -863,6 +878,19 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     cancel_token: Option<CancellationToken>,
+
+    /// Start propagation separately from a direct service stop or transport teardown.
+    #[builder(default = "None")]
+    shutdown_token: Option<CancellationToken>,
+
+    /// Optional force-shutdown signal. Once cancelled, propagation and inflight
+    /// waits are skipped and open connections receive no remaining grace period.
+    #[builder(default = "CancellationToken::new()")]
+    force_shutdown_token: CancellationToken,
+
+    /// Delay between failing readiness and rejecting new inference requests.
+    #[builder(default)]
+    propagation_delay: Duration,
 
     /// When set, the `/metrics` endpoint will also expose metrics from the
     /// DRT's registry tree (anything created via `metrics().create*()`).
@@ -975,6 +1003,15 @@ impl HttpService {
         self.generate_engine_capabilities.clone()
     }
 
+    /// Observe the runtime's phase-one signal while its transport is still available.
+    /// The token passed to run() remains an independent service stop or teardown signal.
+    pub fn with_runtime_shutdown(mut self, runtime: &DistributedRuntime) -> Self {
+        self.shutdown_token = Some(runtime.child_token());
+        self.force_shutdown_token = runtime.force_shutdown_token();
+        self.propagation_delay = propagation_delay_from_env();
+        self
+    }
+
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
         let this = self.clone();
         tokio::spawn(async move { this.run(cancel_token).await })
@@ -1043,13 +1080,33 @@ impl HttpService {
         self.start_frontend_load_publisher(&publisher_cancel);
 
         server
-            .serve(
+            .serve_until(
                 self.state.service_observer(),
                 self.state.cancel_token().clone(),
-                cancel_token,
+                self.wait_to_drain(&cancel_token),
+                &self.force_shutdown_token,
             )
             .await?;
+        cancel_token.cancel();
         Ok(())
+    }
+
+    async fn wait_to_drain(&self, stop: &CancellationToken) {
+        if let Some(start) = &self.shutdown_token {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => {}
+                _ = start.cancelled() => {
+                    if !self.propagation_delay.is_zero() {
+                        self.state.start_propagating();
+                        tracing::info!(delay = ?self.propagation_delay, "waiting for endpoint propagation");
+                        stop.run_until_cancelled(tokio::time::sleep(self.propagation_delay)).await;
+                    }
+                }
+            }
+        } else {
+            stop.cancelled().await;
+        }
     }
 
     fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
@@ -1163,6 +1220,19 @@ impl HttpService {
     pub(crate) fn model_endpoint_enabled(&self, endpoint_type: EndpointType) -> bool {
         self.state.flags.get(&endpoint_type)
     }
+}
+
+fn propagation_delay_from_env() -> Duration {
+    const DEFAULT_SECS: u64 = 5;
+    let secs = std::env::var(env_llm::DYN_FRONTEND_PROPAGATION_DELAY_SECS)
+        .ok()
+        .map_or(DEFAULT_SECS, |value| {
+            value.parse().unwrap_or_else(|_| {
+                tracing::warn!(%value, "Invalid frontend propagation delay; using 5 seconds");
+                DEFAULT_SECS
+            })
+        });
+    Duration::from_secs(secs)
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -1624,6 +1694,9 @@ impl HttpServiceConfigBuilder {
             generate_engine_capabilities,
             rl_router,
             rl_port: config.rl_port,
+            shutdown_token: config.shutdown_token,
+            force_shutdown_token: config.force_shutdown_token,
+            propagation_delay: config.propagation_delay,
             admin,
             frontend_load_target: config.runtime.map(|runtime| FrontendLoadTarget {
                 runtime,
@@ -2783,6 +2856,266 @@ mod tests {
         drop(permit);
         assert!(waiter.await.unwrap());
         assert_eq!(observer.inflight_count(), 0);
+    }
+
+    #[test]
+    fn propagation_delay_defaults_to_five_seconds_and_accepts_zero() {
+        let name = env_llm::DYN_FRONTEND_PROPAGATION_DELAY_SECS;
+        for (value, seconds) in [(None, 5), (Some("0"), 0), (Some("12"), 12), (Some("-1"), 5)] {
+            temp_env::with_var(name, value, || {
+                assert_eq!(propagation_delay_from_env(), Duration::from_secs(seconds));
+            });
+        }
+    }
+
+    #[test]
+    fn test_propagating_fails_readiness_but_keeps_inference_admission_open() {
+        let observer = ServiceObserver::default();
+        assert!(observer.is_ready());
+        assert!(observer.accepts_inference());
+
+        observer.start_propagating();
+        observer.start_propagating();
+        assert_eq!(observer.stage(), ServiceStage::Propagating);
+        assert!(!observer.is_ready());
+        assert!(observer.accepts_inference());
+
+        observer.start_draining();
+        observer.start_propagating();
+        assert_eq!(observer.stage(), ServiceStage::Draining);
+        assert!(!observer.is_ready());
+        assert!(!observer.accepts_inference());
+
+        observer.start_stopping();
+        observer.start_draining();
+        assert_eq!(observer.stage(), ServiceStage::Stopping);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn runtime_shutdown_serves_inference_during_propagation() {
+        let runtime = DistributedRuntime::new(
+            dynamo_runtime::Runtime::from_current().unwrap(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let primary = runtime.primary_token();
+        let service = temp_env::with_var(
+            env_llm::DYN_FRONTEND_PROPAGATION_DELAY_SECS,
+            Some("30"),
+            || {
+                HttpService::builder()
+                    .cancel_token(Some(primary.clone()))
+                    .build()
+                    .unwrap()
+                    .with_runtime_shutdown(&runtime)
+            },
+        );
+        service
+            .model_manager()
+            .add_chat_completions_model("echo", "echo", make_chat_engine())
+            .unwrap();
+        service
+            .enable_model_endpoint(EndpointType::Chat, true)
+            .unwrap();
+        let state = service.state_clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let guard = runtime.register_graceful_task();
+        let stop = primary.child_token();
+        let server = tokio::spawn(async move {
+            let _guard = guard;
+            service.run_with_listener(stop, listener).await.unwrap();
+        });
+
+        runtime.shutdown();
+        wait_for_service_stage(&state, ServiceStage::Propagating).await;
+        assert!(!primary.is_cancelled());
+        let client = reqwest::Client::new();
+        let health = client
+            .get(format!("http://{addr}/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            health.json::<serde_json::Value>().await.unwrap()["stage"],
+            "propagating"
+        );
+        assert_eq!(
+            get_status(addr.port(), "/live").await,
+            reqwest::StatusCode::OK
+        );
+        let response = client
+            .post(format!("http://{addr}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "echo",
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert!(response["choices"][0]["message"]["content"].is_string());
+
+        runtime.force_shutdown();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("force must interrupt propagation")
+            .unwrap();
+        assert_eq!(state.service_stage(), ServiceStage::Stopping);
+        tokio::time::timeout(Duration::from_secs(2), primary.cancelled())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_propagation_window_expires_before_inflight_drain() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                let runtime_token = CancellationToken::new();
+                let shutdown_token = CancellationToken::new();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder()
+                    .port(port)
+                    .cancel_token(Some(runtime_token.clone()))
+                    .shutdown_token(Some(shutdown_token.clone()))
+                    .propagation_delay(Duration::from_millis(100))
+                    .build()
+                    .unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
+                let service_runtime_token = runtime_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener(service_runtime_token, listener)
+                        .await
+                        .unwrap();
+                });
+
+                shutdown_token.cancel();
+                wait_for_service_stage(&state, ServiceStage::Propagating).await;
+
+                assert!(!state.is_ready());
+                assert!(state.accepts_inference());
+                assert!(!runtime_token.is_cancelled());
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
+                assert!(!state.accepts_inference());
+                assert!(!runtime_token.is_cancelled());
+
+                drop(inflight);
+                tokio::time::timeout(Duration::from_secs(1), handle)
+                    .await
+                    .expect("HTTP service did not stop")
+                    .unwrap();
+                assert!(runtime_token.is_cancelled());
+                assert_eq!(state.service_stage(), ServiceStage::Stopping);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_force_shutdown_skips_inflight_drain() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("30"))],
+            async {
+                let runtime_token = CancellationToken::new();
+                let shutdown_token = CancellationToken::new();
+                let force_shutdown_token = CancellationToken::new();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let service = HttpService::builder()
+                    .cancel_token(Some(runtime_token.clone()))
+                    .shutdown_token(Some(shutdown_token.clone()))
+                    .force_shutdown_token(force_shutdown_token.clone())
+                    .propagation_delay(Duration::ZERO)
+                    .build()
+                    .unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
+                let service_runtime_token = runtime_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener(service_runtime_token, listener)
+                        .await
+                        .unwrap();
+                });
+
+                shutdown_token.cancel();
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
+                force_shutdown_token.cancel();
+
+                tokio::time::timeout(Duration::from_secs(1), handle)
+                    .await
+                    .expect("force shutdown did not skip inflight draining")
+                    .unwrap();
+                assert!(runtime_token.is_cancelled());
+                assert_eq!(state.service_stage(), ServiceStage::Stopping);
+                assert_eq!(state.inflight_count(), 1);
+                drop(inflight);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_explicit_shutdown_stops_after_drain_timeout() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))],
+            async {
+                let runtime_token = CancellationToken::new();
+                let shutdown_token = CancellationToken::new();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let service = HttpService::builder()
+                    .cancel_token(Some(runtime_token.clone()))
+                    .shutdown_token(Some(shutdown_token.clone()))
+                    .propagation_delay(Duration::ZERO)
+                    .build()
+                    .unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
+                let service_runtime_token = runtime_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener(service_runtime_token, listener)
+                        .await
+                        .unwrap();
+                });
+
+                shutdown_token.cancel();
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    wait_for_service_stage(&state, ServiceStage::Stopping),
+                )
+                .await
+                .expect("frontend did not stop after the drain timeout");
+
+                assert!(runtime_token.is_cancelled());
+                assert_eq!(state.inflight_count(), 1);
+                drop(inflight);
+                tokio::time::timeout(Duration::from_secs(1), handle)
+                    .await
+                    .expect("HTTP service did not stop")
+                    .unwrap();
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

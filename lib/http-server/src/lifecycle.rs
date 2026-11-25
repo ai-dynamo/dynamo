@@ -33,10 +33,13 @@ pub async fn echo_request_id_header(
 pub enum ServiceStage {
     /// The frontend is ready to admit new inference requests.
     Ready = 0,
+    /// Readiness is disabled while inference traffic is still admitted, giving
+    /// upstream endpoint propagation time to remove this frontend.
+    Propagating = 1,
     /// The frontend is rejecting new requests while admitted responses drain.
-    Draining = 1,
+    Draining = 2,
     /// The frontend is cancelling runtime state and shutting down.
-    Stopping = 2,
+    Stopping = 3,
 }
 
 impl ServiceStage {
@@ -47,7 +50,8 @@ impl ServiceStage {
     fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::Ready,
-            1 => Self::Draining,
+            1 => Self::Propagating,
+            2 => Self::Draining,
             _ => Self::Stopping,
         }
     }
@@ -57,6 +61,7 @@ impl std::fmt::Display for ServiceStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => f.write_str("ready"),
+            Self::Propagating => f.write_str("propagating"),
             Self::Draining => f.write_str("draining"),
             Self::Stopping => f.write_str("stopping"),
         }
@@ -92,9 +97,45 @@ impl ServiceObserver {
         ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
     }
 
-    /// Return true when the frontend should admit new inference requests.
+    /// Return true when the frontend should report readiness.
     pub fn is_ready(&self) -> bool {
         self.stage() == ServiceStage::Ready
+    }
+
+    /// Return true while new inference requests may still be admitted.
+    pub fn accepts_inference(&self) -> bool {
+        matches!(
+            self.stage(),
+            ServiceStage::Ready | ServiceStage::Propagating
+        )
+    }
+
+    fn advance_to(&self, next: ServiceStage) -> bool {
+        let mut current = self.stage.load(Ordering::Acquire);
+        loop {
+            if current >= next.as_u8() {
+                return false;
+            }
+            match self.stage.compare_exchange_weak(
+                current,
+                next.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Fail readiness while continuing to admit traffic during endpoint removal.
+    pub fn start_propagating(&self) {
+        if self.advance_to(ServiceStage::Propagating) {
+            tracing::info!(
+                inflight_requests = self.inflight_count(),
+                "frontend service entering propagating stage"
+            );
+        }
     }
 
     /// Mark the frontend as draining.
@@ -102,13 +143,12 @@ impl ServiceObserver {
     /// Draining makes readiness fail and causes request admission checks to
     /// reject new inference requests while existing response bodies continue.
     pub fn start_draining(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering draining stage"
-        );
-        self.stage
-            .store(ServiceStage::Draining.as_u8(), Ordering::Release);
+        if self.advance_to(ServiceStage::Draining) {
+            tracing::info!(
+                inflight_requests = self.inflight_count(),
+                "frontend service entering draining stage"
+            );
+        }
     }
 
     /// Mark the frontend as stopping.
@@ -116,13 +156,12 @@ impl ServiceObserver {
     /// Stopping is entered after inflight requests drain or the graceful
     /// shutdown timeout expires.
     pub fn start_stopping(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering stopping stage"
-        );
-        self.stage
-            .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
+        if self.advance_to(ServiceStage::Stopping) {
+            tracing::info!(
+                inflight_requests = self.inflight_count(),
+                "frontend service entering stopping stage"
+            );
+        }
     }
 
     /// Track one admitted inference response body.

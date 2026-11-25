@@ -21,7 +21,6 @@ import asyncio
 import importlib.metadata
 import logging
 import os
-import signal
 import sys
 from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -43,6 +42,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import BUILTIN_CHAT_PROCESSORS, FrontendArgGroup, FrontendConfig
+from .shutdown import install_signal_handlers
 
 if TYPE_CHECKING:
     from .vllm_processor import EngineFactory
@@ -468,11 +468,7 @@ async def async_main():
         response_plane=config.response_plane,
     )
 
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
+    install_signal_handlers(loop, runtime)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
@@ -564,15 +560,8 @@ async def async_main():
             await run_input(runtime, "http", engine, frontend_route_extensions)
     except asyncio.exceptions.CancelledError:
         pass
-
-
-async def graceful_shutdown(runtime: DistributedRuntime) -> None:
-    """Handle graceful shutdown of the distributed runtime.
-
-    Args:
-        runtime: The DistributedRuntime instance to shut down.
-    """
-    runtime.shutdown()
+    finally:
+        runtime.shutdown()
 
 
 def main() -> None:

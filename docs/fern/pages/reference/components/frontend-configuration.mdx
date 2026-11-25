@@ -82,6 +82,11 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 
+<ParamField path="DYN_FRONTEND_PROPAGATION_DELAY_SECS" type="integer" default="5">
+  Seconds the HTTP Frontend continues serving new inference requests after readiness fails
+  during runtime shutdown. Set to zero to start draining immediately.
+</ParamField>
+
 <ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="45">
   Maximum HTTP request body size in MB. This is the client-facing ingress cap.
   After preprocessing, the frontend sends the worker-bound frame over the request
