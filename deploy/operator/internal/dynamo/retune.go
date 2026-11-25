@@ -133,6 +133,15 @@ func applyDGDComponentRetune(component *v1beta1.DynamoComponentDeploymentSharedS
 	if !isFrontend && component.ComponentName != plannerName {
 		return nil
 	}
+
+	// Later cache lowering must not hide any part of the shared trace tree.
+	if cache := component.CompilationCache; cache != nil {
+		mountPath := path.Clean(cache.MountPath)
+		if mountPath == configuration.TraceStorage.MountPath || strings.HasPrefix(mountPath, configuration.TraceStorage.MountPath+"/") {
+			return fmt.Errorf("component %q: compilationCache.mountPath %q obscures Retune trace directory %q", component.ComponentName, cache.MountPath, configuration.TraceStorage.MountPath)
+		}
+	}
+
 	capability, err := json.Marshal(configuration)
 	if err != nil {
 		return fmt.Errorf("encode Retune launch contract: %w", err)

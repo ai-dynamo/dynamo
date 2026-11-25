@@ -1470,6 +1470,7 @@ async def test_fingerprint_change_resets_with_a_two_phase_rollback() -> None:
     world.spec.variant = "b"
     world.frontend.restart(VARIANTS["b"])
     world.frontend.manual_patch(TEMP, 0.9)
+    world.kube.add_pod(FRONTEND_POD, dgd=DGD_NAME)
     second = await leading(world, "p2")
     state = world.shared_state()
     assert state.rollback_pending and state.by_wt == VARIANTS["b"]
@@ -1520,6 +1521,53 @@ async def test_applied_during_a_pending_rollback_wins() -> None:
     assert rollback_complete(state, expected_deploy_seq=stale_seq) is None
 
 
+@pytest.mark.parametrize(
+    "reply_error", [KubeError("reply lost"), KubeConflict("stale rv")]
+)
+async def test_rollback_complete_lost_reply_hands_off_the_binding_once(reply_error):
+    world = World()
+    process = await leading(world)
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    process.controller.restore_desired(chosen)
+    enqueue(process, make_decision(K0 + 1, "applied", chosen=chosen))
+    await process.sup.outbox_round()
+    await process.sup.control_round()
+    replacement = dataclasses.replace(PROCESS_CAPABILITY, config_hash="replacement")
+    world.spec.capability = replacement
+    await process.sup.control_round()
+    assert world.shared_state().rollback_pending
+    world.kube.fail(
+        "replace_lease",
+        reply_error,
+        landed=True,
+        match=lambda target: target[0] == STATE_NAME
+        and not RetuneState.from_annotations(
+            target[1]["metadata"]["annotations"]
+        ).rollback_pending,
+    )
+    await settle([process], world, rounds=2)
+    world.clock.advance(20)
+    await process.sup.lease_round()
+    await process.sup.control_round()
+    assert not world.shared_state().rollback_pending
+    assert world.shared_state().capability == replacement
+    assert process.sup._reinit_requested
+    assert process.metrics.of("failure") == []
+    await process.sup.lease_round()
+    assert process.sup.initialized
+    assert process.sup._actuator_capability == replacement
+    assert (
+        len(
+            [
+                item
+                for item in world.shared_state().history
+                if item["outcome"] == "rolled_back"
+            ]
+        )
+        == 1
+    )
+
+
 @pytest.mark.parametrize("racing", ["deploy", "rollback_start"])
 async def test_a_stale_rollback_complete_is_discarded(racing: str) -> None:
     """Right before the rollback-complete write of deploy_seq S, a write of
@@ -1537,6 +1585,7 @@ async def test_a_stale_rollback_complete_is_discarded(racing: str) -> None:
     await first.sup.stop()
     world.spec.variant = "b"
     world.frontend.restart(VARIANTS["b"])
+    world.kube.add_pod(FRONTEND_POD, dgd=DGD_NAME)
     second = await leading(world, "p2")
     sup = second.sup
     seq = world.shared_state().deploy_seq
@@ -1625,6 +1674,7 @@ async def test_advisory_rollback_leaves_unlatched_routers_alone() -> None:
     # planner latched it.
     world.frontend.restart(VARIANTS["a"])
     world.frontend.manual_patch(TEMP, 0.7)
+    world.kube.add_pod(FRONTEND_POD, dgd=DGD_NAME)
     (manual,) = world.frontend.routers.values()
     second = await leading(world, "p2", advisory=True)
     target = second.sup.target()
@@ -1808,6 +1858,47 @@ async def test_historical_cleanup_cannot_establish_current_profile_readiness() -
     assert not sup._p12_ok() and not sup.ready()
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+async def test_pending_publication_fences_an_inflight_actuator_result(rollback):
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    if rollback:
+        world.spec.capability = dataclasses.replace(
+            PROCESS_CAPABILITY, config_hash="replacement"
+        )
+        await sup.control_round()
+    state = world.shared_state()
+    rv = world.kube.leases[STATE_NAME]["metadata"]["resourceVersion"]
+
+    class OvertakenActuator(RouterActuator):
+        async def reconcile(
+            self, target, *, initials, expected_frontends, router_hosts=None
+        ):
+            await sup.apply_evaluation(
+                dataclasses.replace(sup.evaluation, target_pending=True)
+            )
+            return ActuationReport(
+                converged=True,
+                new_initials={"stale-router": dict(VARIANTS["a"]["aggregated"])},
+                seen_router_ids=frozenset({"stale-router"}),
+                parity_ok=False,
+            )
+
+    sup._actuator = OvertakenActuator(
+        world.kube,
+        FrontendPolicyClient(world, "p1", False),
+        sup.dgd,
+        VARIANTS["a"],
+        NullMetrics(),
+    )
+    await sup.control_round()
+    assert sup.evaluation.target_pending and sup.last_report is None
+    assert world.shared_state() == state
+    assert world.kube.leases[STATE_NAME]["metadata"]["resourceVersion"] == rv
+    assert sup.target() is None
+
+
 async def test_namespace_change_swaps_the_actuator_only() -> None:
     world = World()
     process = await leading(world)
@@ -1872,6 +1963,9 @@ async def test_initials_are_persisted_and_pruned() -> None:
     first_ids = set(world.frontend.routers)
     assert set(world.shared_state().initials) == first_ids
     world.frontend.restart(VARIANTS["a"])
+    await process.sup.control_round()
+    assert set(world.shared_state().initials) == first_ids | set(world.frontend.routers)
+    world.kube.add_pod(FRONTEND_POD, dgd=DGD_NAME)
     await process.sup.control_round()
     assert set(world.shared_state().initials) == set(world.frontend.routers)
     assert not first_ids & set(world.shared_state().initials)
@@ -2567,11 +2661,13 @@ async def test_hooks_are_the_adapter_hooks() -> None:
     assert hooks.sweep_fn == process.sup.sweep_fn and hooks.phase_s == 0.0
 
 
-def decommission_supervisor(world: World) -> LiveRetuneSupervisor:
+def decommission_supervisor(
+    world: World, *, config: Optional[PlannerConfig] = None
+) -> LiveRetuneSupervisor:
     """The clean-up supervisor of a planner whose retune was removed."""
 
     return bootstrap.build_decommission_supervisor(
-        live_config(),
+        config or live_config(),
         kube=world.kube,
         dgd=world.kube.get_dgd(DGD_NAME),
         dynamo_namespace="dyn",
@@ -2609,6 +2705,39 @@ async def test_decommission_rolls_back_then_deletes_everything() -> None:
     assert world.kube.requests == {} and world.kube.leases == {}
     assert sup.launch_gate(K0 + 1, window(K0 + 1)).reason == "not_leader"
     await sup.stop()
+
+
+async def test_missing_publication_does_not_pause_new_process_legacy_cleanup(
+    monkeypatch,
+):
+    world = World()
+    first = await leading(world)
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    first.controller.restore_desired(chosen)
+    enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
+    await first.sup.outbox_round()
+    await first.sup.control_round()
+    await first.sup.stop()
+    deployment = dgd_object(replicas=2)
+    deployment["status"]["components"]["Planner"].pop("retune")
+    world.kube.put_dgd(deployment)
+    monkeypatch.delenv("DYN_PLANNER_RETUNE_CAPABILITY", raising=False)
+    sup = decommission_supervisor(
+        world, config=controller_config().model_copy(update={"retune": None})
+    )
+    await sup.start(SimpleNamespace(), background=False)
+    try:
+        assert not sup.evaluation.target_pending
+        for _ in range(6):
+            await sup.lease_round()
+            await sup.control_round()
+            if sup.decommissioned:
+                break
+            world.clock.advance(20)
+        assert sup.decommissioned and not world.kube.leases
+        assert frontend_configs(world) == [VARIANTS["a"]["aggregated"]]
+    finally:
+        await sup.stop()
 
 
 async def decommissioning(world: World) -> LiveRetuneSupervisor:
@@ -2668,6 +2797,74 @@ async def test_decommission_deletes_only_the_leases_it_last_saw() -> None:
 # -------------------------------------------------------------- bootstrap
 
 
+async def test_replica_only_status_lag_pauses_without_rolling_back_deployed_policy():
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    deployment = dgd_object(replicas=2)
+    world.kube.put_dgd(deployment)
+    sup._premise_evaluator = lambda obj: bootstrap.evaluate_spec(
+        obj,
+        config=live_config(),
+        k8s_namespace="test-ns",
+        dynamo_namespace="dyn",
+        frontend=FakeFrontendModule(Spec().startup()),
+        process_capability=PROCESS_CAPABILITY,
+    )
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    process.controller.restore_desired(chosen)
+    enqueue(process, make_decision(K0 + 1, "applied", chosen=chosen))
+    await sup.outbox_round()
+    await sup.control_round()
+    before = world.shared_state()
+    writes = list(world.frontend.writes)
+    deployment["metadata"]["generation"] = 4
+    deployment["spec"]["components"][-1]["replicas"] = 3
+    world.kube.put_dgd(deployment)
+    await sup.control_round()
+    assert not sup.ready() and sup.target() is None
+    assert world.shared_state() == before
+    assert world.frontend.writes == writes
+    deployment["status"]["observedGeneration"] = 4
+    world.kube.put_dgd(deployment)
+    await sup.control_round()
+    assert sup.ready() and sup.generation == 0
+    assert world.shared_state().by_wt == before.by_wt
+    assert not world.shared_state().rollback_pending
+    assert sup.evaluation.spec_replicas == {"aggregated": 3}
+
+
+async def test_first_enable_waits_in_claim_only_state_for_target_publication():
+    world = World()
+    deployment = dgd_object(replicas=2)
+    deployment["status"].pop("observedGeneration")
+    world.kube.put_dgd(deployment)
+    sup = await bootstrap.build_supervisor(
+        live_config(),
+        kube=world.kube,
+        dgd_name=DGD_NAME,
+        namespace_fn=lambda: "dyn",
+        frontend=FakeFrontendModule(Spec().startup()),
+        process_capability=PROCESS_CAPABILITY,
+        actuator_factory=real_actuators(world, "first"),
+        blocking=inline,
+    )
+    await sup.start(SimpleNamespace(), background=False)
+    try:
+        await sup.lease_round()
+        assert not sup.initialized
+        assert not world.shared_state().has_deployment
+        assert world.shared_state().by_wt == {}
+        deployment["status"]["observedGeneration"] = 3
+        world.kube.put_dgd(deployment)
+        await sup.control_round()
+        await sup.lease_round()
+        assert sup.initialized
+        assert world.shared_state().capability == PROCESS_CAPABILITY
+    finally:
+        await sup.stop()
+
+
 @pytest.mark.parametrize("scaling", [False, True])
 @pytest.mark.parametrize("missing", ["status", "generation", "capability", "binding"])
 def test_unavailable_capability_disables_only_retune(scaling, missing):
@@ -2694,7 +2891,8 @@ def test_unavailable_capability_disables_only_retune(scaling, missing):
         process_capability=PROCESS_CAPABILITY,
     )
     assert result.capability is None and result.inputs is None
-    assert not result.report.spec_ok
+    assert result.target_pending is (missing != "binding")
+    assert result.report.spec_ok is (missing != "binding")
     assert result.spec_replicas == {"aggregated": 2}
     assert config.scaling_enabled() is scaling
 
@@ -2769,7 +2967,8 @@ async def test_launch_binding_is_captured_once_and_registry_survives_status_gaps
     assert sup.retune_inputs() is not None and sup.registry is registry
     deployment["status"]["observedGeneration"] = 2
     await sup.apply_evaluation(sup._premise_evaluator(deployment))
-    assert sup.retune_inputs() is None and sup.registry is registry
+    assert sup.retune_inputs() is not None and sup.registry is registry
+    assert sup.evaluation.target_pending and sup.target() is None
     deployment["status"]["observedGeneration"] = 3
     await sup.apply_evaluation(sup._premise_evaluator(deployment))
     assert sup.retune_inputs() is not None and sup.registry is registry
@@ -2809,7 +3008,7 @@ async def test_removed_capability_restart_cleanup_uses_persisted_process_ownersh
         await sup.lease_round()
         await sup.control_round()
         world.clock.advance(20)
-    if retirement == "terminating":
+    if retirement in ("terminating", "restart"):
         assert not sup.decommissioned and world.shared_state().rollback_pending
         world.kube.pods[FRONTEND_POD] = dataclasses.replace(old, uid="replacement")
         for _ in range(6):
@@ -3088,9 +3287,9 @@ def test_evaluate_spec_uses_launch_contract_and_target_hash_without_role_status(
         dynamo_namespace="dyn",
         process_capability=PROCESS_CAPABILITY,
     )
-    assert not pending.report.spec_ok and pending.inputs is None
+    assert pending.report.spec_ok and pending.target_pending and pending.inputs is None
     assert any(
-        "current Planner Retune target" in reason for reason in pending.report.reasons
+        "current Planner Retune target" in reason for reason in pending.report.warnings
     )
 
     # The new semantic binding is accepted only by its replacement process.

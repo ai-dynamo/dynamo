@@ -207,6 +207,57 @@ func TestRetuneMountOwnership(t *testing.T) {
 	}
 }
 
+func TestRetuneCompilationCacheMountOwnership(t *testing.T) {
+	for _, componentName := range []string{"gateway", "optimizer"} {
+		for _, test := range []struct {
+			name      string
+			mountPath string
+			conflicts bool
+		}{
+			{name: "trace root", mountPath: "/trace", conflicts: true},
+			{name: "trace segments", mountPath: "/trace/segments", conflicts: true},
+			{name: "normalized nested trace path", mountPath: "/trace/segments/../windows/replay", conflicts: true},
+			{name: "separate cache", mountPath: "/cache"},
+			{name: "unrelated prefix", mountPath: "/trace-cache"},
+		} {
+			t.Run(componentName+"/"+test.name, func(t *testing.T) {
+				t.Log("Compilation-cache intent cannot introduce a mount inside the owned trace tree")
+				dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+						{ComponentName: "gateway", ComponentType: v1beta1.ComponentTypeFrontend},
+						{ComponentName: "optimizer", ComponentType: v1beta1.ComponentTypePlanner,
+							Retune: &v1beta1.RetuneSpec{Enabled: true, TraceStorage: &v1beta1.RetuneTraceStorageSpec{ClaimName: "traces"}}},
+					},
+				}}
+				dgd.GetComponentByName(componentName).CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compile-cache", MountPath: test.mountPath}
+				original := dgd.DeepCopy()
+
+				t.Run("generated DCD normalization", func(t *testing.T) {
+					t.Log("Reject conflicting intent before it is persisted into a child DCD")
+					_, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+					if test.conflicts {
+						require.ErrorContains(t, err, "compilationCache.mountPath")
+					} else {
+						require.NoError(t, err)
+					}
+				})
+
+				t.Run("direct Grove rendering", func(t *testing.T) {
+					t.Log("Apply the same ownership rule when rendering Pods directly")
+					_, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+					if test.conflicts {
+						require.ErrorContains(t, err, "compilationCache.mountPath")
+					} else {
+						require.NoError(t, err)
+					}
+				})
+				require.Equal(t, original, dgd)
+			})
+		}
+	}
+}
+
 func TestRetuneRejectsNestedMountAfterReusableMount(t *testing.T) {
 	for _, test := range []struct {
 		name   string

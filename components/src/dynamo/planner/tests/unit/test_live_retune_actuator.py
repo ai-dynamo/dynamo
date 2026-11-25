@@ -346,7 +346,7 @@ async def test_apply_checkpoints_process_identity_before_changing_policy():
     "change,retired",
     [
         ({"uid": "new-uid"}, True),
-        ({"restarts": 1}, True),
+        ({"restarts": 1}, False),
         ({"terminating": True}, False),
         ({"restarts": None}, False),
     ],
@@ -366,6 +366,47 @@ async def test_checkpointed_process_retirement_is_not_inferred_from_listener_fai
         )
         assert report.converged is retired
         assert not report.admin_api_disabled
+
+
+async def test_status_restart_count_lag_does_not_retire_an_omitted_owned_router():
+    old = pod("fe-0", restarts=0)
+    actuator, kube, client, _ = make_actuator([old])
+    frontend = client.frontend(old.name)
+    owned = frontend.add(FakeRouter("owned", STARTUP, revision=1, current=dict(CHOSEN)))
+    initials = {owned.router_id: dict(STARTUP)}
+    observed = await actuator.reconcile(
+        OBSERVE, initials=initials, expected_frontends=1
+    )
+    kube.pods = [replace(old, restarts=1)]
+    frontend.timed_out.add(owned.router_id)
+    report = await actuator.reconcile(
+        ROLLBACK,
+        initials=initials,
+        router_hosts=observed.router_hosts,
+        expected_frontends=1,
+    )
+    assert not report.converged and owned.router_id in report.seen_router_ids
+    assert client.writes() == []
+    frontend.timed_out.clear()
+    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
+    assert report.converged and owned.current == STARTUP
+
+
+@pytest.mark.parametrize("listing_fails", [False, True])
+async def test_cleanup_with_no_owned_routers_requires_only_a_successful_pod_listing(
+    listing_fails,
+):
+    actuator, kube, client, _ = make_actuator([pod("replacement")])
+    if listing_fails:
+        kube.fail = KubeError("unavailable")
+    report = await actuator.reconcile(
+        ActuationTarget(mode="rollback", include_not_ready=True, learn_unknown=False),
+        initials={},
+        router_hosts={},
+        expected_frontends=1,
+    )
+    assert report.converged is not listing_fails
+    assert client.writes() == []
 
 
 async def test_apply_holds_a_router_until_its_initial_is_persisted() -> None:
@@ -561,7 +602,7 @@ async def test_rollback_tracks_owned_routers_across_runtime_namespace_changes(
     assert client.writes() == [("reset", old_process.name, owned.router_id, 3)]
 
     if completion == "retire":
-        kube.pods = [replace(old_process, restarts=1)]
+        kube.pods = [replace(old_process, uid="replacement-uid")]
         del frontend.routers[owned.router_id]
     report = await actuator.reconcile(
         ROLLBACK, initials=initials, router_hosts=hosts, expected_frontends=1
@@ -773,6 +814,10 @@ async def test_seen_router_ids_drop_only_routers_that_are_provably_gone() -> Non
     client.calls.clear()
     report = await actuator.reconcile(OBSERVE, initials=initials, expected_frontends=1)
     assert ("get", "fe-1") not in client.calls
+    assert report.seen_router_ids == frozenset({"a", "a2"})
+    initials.pop("b")
+    kube.pods[0] = replace(kube.pods[0], uid="replacement-uid")
+    report = await actuator.reconcile(OBSERVE, initials=initials, expected_frontends=1)
     assert report.seen_router_ids == frozenset({"a2"})
 
 

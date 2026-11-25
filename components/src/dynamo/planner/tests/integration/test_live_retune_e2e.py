@@ -382,9 +382,16 @@ class FakeFrontends:
         self.kube = kube
         self.routers: dict[str, list[FakeRouter]] = {}
         self.writes: list[PolicyWrite] = []
+        self.probes: list[str] = []
 
-    def start(self, pod: str) -> None:
-        self.kube.add_pod(pod, dgd=DGD_NAME, component_type="frontend", ready=True)
+    def start(self, pod: str, component: str = "Frontend") -> None:
+        self.kube.add_pod(
+            pod,
+            dgd=DGD_NAME,
+            component_type="frontend",
+            ready=True,
+            labels={"nvidia.com/dynamo-component": component},
+        )
         self._register(pod)
 
     def restart(self, pod: str) -> None:
@@ -432,6 +439,7 @@ class FakeRouterPolicyClient:
 
     async def get(self, pod: PodInfo) -> PolicyCallResult:
         self.gets += 1
+        self.frontends.probes.append(pod.name)
         routers = self.frontends.routers.get(pod.name)
         if routers is None:
             return PolicyCallResult(status=0, error="connection refused")
@@ -642,6 +650,9 @@ class Planner:
                 dgd,
                 maps,
                 self.metrics,
+                frontend_component_name=(
+                    None if capability is None else capability.frontend_component_name
+                ),
             ),
             reconciler=reconciler,
             context_factory=context_factory,
@@ -989,6 +1000,8 @@ async def test_advisory_records_recommendations_and_never_writes(make_world):
 @pytest.mark.timeout(180)
 async def test_apply_restart_handover_and_advisory_rollback(make_world):
     world = make_world()
+    unrelated = "unrelated-frontend"
+    world.frontends.start(unrelated, component="unrelated")
     applied_1 = {CREDIT: 0.5, LOAD: 1.0, TEMP: 0.0}
     applied_3 = {CREDIT: 0.5, LOAD: 1.0, TEMP: 0.2}
     world.prefer(1, applied_1)
@@ -1051,12 +1064,14 @@ async def test_apply_restart_handover_and_advisory_rollback(make_world):
     } == {"grid-0", "probe"}
     assert sorted(world.created()) == sorted(window_1_requests)
 
-    # A frontend restarts: its new router (revision 0, startup values) is
+    # A frontend Pod is replaced: its new router (revision 0, startup values) is
     # latched and re-applied with explicit values; the persisted initials
     # follow the new router id (the final rollback depends on them).
     restarted = FRONTENDS[1]
     gone = world.frontends.router(restarted).router_id
     world.frontends.restart(restarted)
+    replacement = world.kube.pods[restarted]
+    world.kube.pods[restarted] = dataclasses.replace(replacement, uid=str(uuid.uuid4()))
     writes_before = len(world.frontends.writes)
     await world.run_until(launch_s(1) + SCALE_INTERVAL + 4 * STEP)
     reapplied = world.frontends.writes[writes_before:]
@@ -1223,5 +1238,7 @@ async def test_apply_restart_handover_and_advisory_rollback(make_world):
             "req.000003.jsonl.gz",
             "req.000004.jsonl.gz",
         ]
+    assert unrelated not in world.frontends.probes
+    assert all(write.pod != unrelated for write in world.frontends.writes)
     for planner in (p1, p2, p3, p4):
         assert planner.metrics.of("patch_error") == []

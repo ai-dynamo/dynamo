@@ -230,8 +230,12 @@ def evaluate_spec(
         dgd, planner_config=config, capability=process_capability
     )
     startup = report.startup
+    target_pending = False
     try:
         capability = frontend_config.retune_capability(dgd, process_capability)
+    except frontend_config.RetuneTargetPending:
+        capability = None
+        target_pending = report.spec_ok
     except ValueError as error:
         capability = None
         reason = f"P10: {error}"
@@ -268,6 +272,7 @@ def evaluate_spec(
         dgd=ref,
         generation=generation if isinstance(generation, int) else None,
         capability=capability,
+        target_pending=target_pending,
     )
 
 

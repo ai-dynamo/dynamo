@@ -1026,7 +1026,7 @@ class DgdrExecutorConfig(BaseModel):
     claim_name: Optional[str] = Field(
         default=None,
         min_length=1,
-        description="Optional legacy claim name; when supplied it must match the operator's Retune status.",
+        description="Optional legacy claim name; when supplied it must match the Planner component's retune.traceStorage.claimName.",
     )
     mount_path: str = Field(
         default="/trace",

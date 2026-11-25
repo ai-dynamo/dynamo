@@ -134,6 +134,16 @@ def test_public_graph_and_search_constraints_remain():
     )
 
 
+def test_unknown_worker_model_status_remains_optional():
+    graph = deployment()
+    graph["status"]["components"].pop("worker")
+    report = fc.evaluate_premises(
+        graph, planner_config=live_config(), capability=capability()
+    )
+    assert report.spec_ok and report.p4_ok
+    assert any("cannot determine the served model" in item for item in report.warnings)
+
+
 def test_missing_launch_disables_only_retune():
     report = fc.evaluate_premises(deployment(), planner_config=live_config())
     assert not report.p4_ok and not report.spec_ok

@@ -171,6 +171,7 @@ class SpecEvaluation:
     dgd: DgdRef
     generation: Optional[int] = None
     capability: Optional[RetuneCapability] = None
+    target_pending: bool = False
 
 
 # DGD object -> evaluation; may raise (the round is then skipped).
@@ -806,6 +807,8 @@ class LiveRetuneSupervisor:
         """The launch conditions that fail now; ``ready()`` when none."""
 
         reasons: list[str] = []
+        if self._evaluation.target_pending:
+            reasons.append("operator target publication pending")
         if self._capability_pending():
             reasons.append("previous Retune binding is still rolling back")
         if not self._spec_ok:
@@ -844,7 +847,7 @@ class LiveRetuneSupervisor:
         """What the actuator converges to now (``None``: nothing)."""
 
         state = self.state
-        if not self._initialized or state is None:
+        if not self._initialized or state is None or self._evaluation.target_pending:
             return None
         if state.rollback_pending:
             # Only an active planner resets a router it never latched
@@ -914,6 +917,7 @@ class LiveRetuneSupervisor:
         return (
             self.is_leader()
             and self._initialized
+            and not self._evaluation.target_pending
             and int(generation) == self._generation
         )
 
@@ -1098,6 +1102,8 @@ class LiveRetuneSupervisor:
         """Write the queued decisions in order; stop at the first failure."""
 
         while self._outbox and not self._stopping:
+            if self._evaluation.target_pending:
+                return
             entry = self._outbox[0]
             if not self._entry_current(entry):
                 self._outbox.popleft()
@@ -1152,6 +1158,16 @@ class LiveRetuneSupervisor:
         the DGD identity changed."""
 
         old = self._evaluation
+        if evaluation.target_pending and old.dgd == evaluation.dgd:
+            self._evaluation = dataclasses.replace(
+                old, target_pending=True, generation=evaluation.generation
+            )
+            if not old.target_pending:
+                self._epoch += 1
+                self._rollback_since = None
+                self._last_report = None
+                await self._cancel(self._round_task)
+            return
         startup_changed = _startup_key(old.startup) != _startup_key(evaluation.startup)
         p14 = None if startup_changed else self._p14_ok
         spec_ok = bool(evaluation.report.spec_ok) and p14 is not False
@@ -1305,6 +1321,11 @@ class LiveRetuneSupervisor:
                 self._metrics.failure("state_write")
                 return False
             assert snapshot.state is not None
+            if self._evaluation.target_pending or (
+                not snapshot.state.has_deployment and desired is None
+            ):
+                self._snapshot = snapshot
+                return False
             if self._actuator_capability != snapshot.state.capability:
                 await self._swap_actuator(
                     self._evaluation, capability=snapshot.state.capability
@@ -1548,6 +1569,8 @@ class LiveRetuneSupervisor:
                 except (KubeError, asyncio.TimeoutError) as error:
                     logger.warning("retune state write (%s) failed: %s", what, error)
                     snapshot = await self._reread()
+                    if epoch != self._epoch:
+                        return "discarded"
                     if (
                         snapshot is not None
                         and snapshot.state is not None
@@ -1739,7 +1762,7 @@ class LiveRetuneSupervisor:
             expected_frontends=max(1, startup.replicas if startup is not None else 1),
             router_hosts=state.router_hosts,
         )
-        if epoch != self._epoch:
+        if epoch != self._epoch or self._evaluation.target_pending:
             return None
         self._last_report = report
         p12 = (self._p12_ok(), bool(report.admin_api_disabled))
@@ -1812,6 +1835,7 @@ class LiveRetuneSupervisor:
         if now - since[1] < self._settings.lease_duration_s:
             return
         expected = since[0]
+        capability = self._evaluation.capability or state.capability
         entry = {
             "decision_id": f"rolled_back-{expected}",
             "outcome": "rolled_back",
@@ -1821,18 +1845,22 @@ class LiveRetuneSupervisor:
         }
 
         def mutate(current: RetuneState) -> Union[RetuneState, None, object]:
+            if (
+                not current.rollback_pending
+                and current.deploy_seq == expected
+                and current.capability == capability
+            ):
+                return _ALREADY
             completed = rollback_complete(
                 current, expected_deploy_seq=expected, entry=entry
             )
-            if completed is not None and self._evaluation.capability is not None:
-                completed = dataclasses.replace(
-                    completed, capability=self._evaluation.capability
-                )
+            if completed is not None:
+                completed = dataclasses.replace(completed, capability=capability)
             return completed
 
         outcome = await self._write_state(mutate, "rollback complete")
         self._rollback_since = None
-        if outcome == "ok":
+        if outcome in ("ok", "already"):
             logger.info("retune: rollback complete (deploy_seq %d)", expected)
             if (
                 self._actuator_capability != self._evaluation.capability

@@ -35,6 +35,10 @@ PLANNER_TYPE = "planner"
 WORKER_TYPES = frozenset({"worker", "prefill", "decode", ""})
 
 
+class RetuneTargetPending(ValueError):
+    """The operator has not published a target for the current generation."""
+
+
 def worker_types(planner_mode: str) -> tuple[str, ...]:
     return ("prefill", "decode") if planner_mode == "disagg" else ("aggregated",)
 
@@ -103,6 +107,10 @@ def retune_capability(
         and isinstance(status := projected.get(name), Mapping)
         and status.get("retune") is not None
     ]
+    if not published:
+        raise RetuneTargetPending(
+            "the current Planner Retune target has not been acknowledged"
+        )
     if len(published) != 1 or not isinstance(published[0], Mapping):
         raise ValueError(
             "exactly one current Planner Retune target must be acknowledged"
@@ -253,6 +261,8 @@ def evaluate_premises(
     try:
         accepted = retune_capability(dgd, capability)
         resolve_executor_config(retune.dgdr, accepted)
+    except RetuneTargetPending as error:
+        warnings.append(f"P10: {error}")
     except ValueError as error:
         others.append(f"P10: {error}")
     reasons = tuple(_unique([*p4, *others]))

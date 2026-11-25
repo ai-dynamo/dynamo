@@ -490,7 +490,7 @@ class RouterActuator:
 
         self._track_admin_api(live, outcomes)
         seen = self._seen_router_ids(state, pods, outcomes)
-        if target.mode == "rollback" and initials:
+        if target.mode == "rollback" and (initials or not target.learn_unknown):
             # Historical ownership survives namespace/type changes. A new
             # router cannot prove that an older owned process was restored.
             restored = {
@@ -873,9 +873,9 @@ class RouterActuator:
         A GET answers without the routers whose control call timed out or
         failed (``router_policy.rs``), so a router missing from its pod's
         answer may still be there. A known router is gone only once every
-        pod instance it may run on is gone: no longer listed, finished
-        (Succeeded/Failed), or restarted (a restarted frontend registers new
-        routers).
+        pod it may run on is gone: no longer listed or finished
+        (Succeeded/Failed). A restart count can lag the GET that observed a
+        router, so a different count does not prove that router retired.
         """
 
         observed = {
@@ -892,14 +892,7 @@ class RouterActuator:
             # router runs on a frontend listed now (a pod never comes back),
             # or on none.
             hosts = self._router_hosts.setdefault(router_id, present)
-            if any(
-                uid == other_uid
-                and (
-                    restart is None or other_restart is None or restart == other_restart
-                )
-                for uid, restart in hosts
-                for other_uid, other_restart in present
-            ):
+            if any(uid == other_uid for uid, _ in hosts for other_uid, _ in present):
                 seen.add(router_id)
         return seen
 

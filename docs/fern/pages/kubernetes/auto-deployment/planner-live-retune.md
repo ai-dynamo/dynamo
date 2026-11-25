@@ -174,6 +174,8 @@ bindings while enabled:
 These feature-owned bindings replace same-named authored values; this does not reserve all
 operator environment names. Existing direct read-write mounts of the same claim at `/trace`
 can be reused. Conflicting paths, another claim, read-only mounts, and subpaths fail rendering.
+Compilation-cache mounts at `/trace` or below it also fail rendering, because they would obscure
+the shared trace storage.
 The trace writer and Planner create their required subdirectories; the claim must be writable.
 
 The operator supplies a versioned JSON launch contract through `DYN_PLANNER_RETUNE_CAPABILITY`
@@ -197,6 +199,12 @@ status and a frontend runtime hash acknowledgment are not required. During a sto
 an old Planner still mounted to PVC A must not create replay
 requests referring to PVC B. Cleanup uses the historical binding checkpointed with the previous
 router process identities. Replica-only edits do not change this hash or roll the Planner.
+
+While target publication is pending, Retune pauses new sweeps and policy writes without resetting
+the deployed policy. A confirmed binding change still requires rollback and cleanup before the
+new binding is used. An old Planner keeps its immutable launch binding until replacement; missing
+target status alone does not update that binding. Finish rollback before removing the wiring,
+as described in [Roll out](#roll-out).
 
 The admin listener is unauthenticated: admit only the Planner to port `8002` before enabling the
 feature ([Security](#security) has a NetworkPolicy). No NetworkPolicy is created automatically.
@@ -376,10 +384,10 @@ retries:
 | Rule | Requirement |
 |---|---|
 | P4 | The supported versioned launch contract resolves the three startup router values using existing SDK defaults |
-| P7 | The DGD serves one model; the frontend is not an EPP or a `frontendSidecar` |
+| P7 | Known served-model projections do not disagree; the frontend is not an EPP or a `frontendSidecar` |
 | P8 | Effective router configuration satisfies frontend replica-synchronization requirements |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
-| P10 | The immutable launch hash matches current `status.components.<planner>.retune.configHash`; explicitly configured legacy trace-storage values agree with the launch contract |
+| P10 | A published target hash matches the immutable launch hash; pending publication pauses without rollback. Explicitly configured legacy trace-storage values agree with the launch contract |
 | P14 | Every router's startup policy parameters match the values resolved from the semantic launch contract |
 
 **Health**, checked every round. While one fails, windows do not launch; nothing is reset:
@@ -390,6 +398,9 @@ retries:
 | P12 | At least `max(1, replicas)` frontends are Ready, each with a router per worker type, and `/router_policy` answers on each one's admin listener |
 
 The Planner only warns when AISimulate does not list the model among its default models (P6).
+Missing served-model status also produces a warning, not a failed deployment premise: this
+projection is optional. Configure `retune.dgdr.model` to match the deployed model; incomplete
+status does not establish that all workers serve the same model.
 
 ## Roll out
 
@@ -447,6 +458,10 @@ that cleanup is blocked rather than guessing that the current frontend is the ol
 
 Before downgrading to an older Planner that cannot read v2, complete
 the rollback and cleanup above with the newer Planner, including removal of its Retune Leases.
+
+Cleanup retains an owned router when its Pod still exists but a policy query omits it. A changed
+container restart count alone does not prove that the router stopped. If the router cannot answer
+again, cleanup waits for the Pod to be replaced or enter `Succeeded` or `Failed`.
 
 ## Security
 
@@ -559,10 +574,8 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 | Restoring applied Planner parameters after a Planner restart | They live in the Planner process, and a load predictor needs a history warm-up; the next window starts from the configured values |
 | Load-predictor history beyond 1024 buckets of the shortest throughput interval | The warm-up travels inside every Request and Candidate |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
-| Workers that set their own router mode (`--router-mode` or `DYN_ROUTER_MODE`) | A worker's advertised router configuration replaces the frontend's for its workers, and the Run replays only the frontend's |
-| Missing/stale target roles or a target container without a declared command | The Planner waits for current operator facts; it does not infer an image entrypoint or reconstruct defaults from the authored spec |
-| Worker arguments that put an unknown status value where an option could stand, including an unquoted `$VAR` of one in a worker shell script or one that `eval` or a shell given `-c` parses again (P4 fails) | The Planner cannot read the value, so it cannot rule out a router mode the worker would advertise. No injected name or raw source kind makes an unknown value automatically safe |
-| Router flags that a worker produces through shell command substitution, backticks, script variables, positional parameters, literal text that `eval` or a nested shell parses again, or a script file, and unknown values in text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or that `su -c` runs (P4 does not see them) | The Planner reads the declared target command and does not run its script |
+| Workers advertising router settings that differ from the supplied startup configuration | Live policy-parameter comparison is not a full compatibility check; other settings must retain ordinary SDK defaults |
+| Missing or unsupported Planner launch binding | P4/P10 cannot resolve the operator-provided settings; the Planner does not inspect role Pod templates, commands, shell values, or image entrypoints |
 | Raising `overlap_score_credit` on a frontend that starts it at 0: an omitted credit then searches only 0, and a written positive value fails P4 | A live router rejects a positive credit after starting at 0 |
 | Private, fine-tuned or local-path models | The Run Job has no Hugging Face credentials or model mount |
 | Several frontends without router replica sync | AISimulate simulates one router |
