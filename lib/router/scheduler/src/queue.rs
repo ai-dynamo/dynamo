@@ -3275,6 +3275,34 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn keyed_exclusive_affinity_head_falls_back_from_a_target_past_reject_thresholds() {
+        let a = WorkerWithDpRank::new(0, 0);
+        let b = WorkerWithDpRank::new(1, 0);
+        // A rank past 32 tokens, half its prefill budget, is over the class limit and over
+        // the host's reject threshold.
+        let (queue, _slots, _configs) = make_queue_with_profile_sender_and_reject(
+            2,
+            16,
+            64,
+            PolicyProfile::synthetic(Some(0.5), RouterQueuePolicy::Fcfs),
+            Some(Arc::new(half_budget_reject)),
+        );
+        let (mut held, held_rx) = make_request("held-a", 48);
+        held.pinned_worker = Some(a);
+        queue.enqueue(held).await;
+        assert_eq!(held_rx.await.unwrap().unwrap().best_worker, a);
+
+        // The classifier's lane key takes the head out of the affinity lanes. Its target
+        // is host-full, so it may go to the idle worker.
+        let (mut keyed, mut keyed_rx) = make_request("keyed", 16);
+        keyed.affinity_target = Some(a.into());
+        in_session(&mut keyed, "session");
+        queue.enqueue_keyed_by_session_for_test(keyed).await;
+        assert_eq!(keyed_rx.try_recv().unwrap().unwrap().best_worker, b);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
     /// A gate that holds every head without a deadline and counts how often it is asked.
     struct CountingHoldGate {
         checks: AtomicUsize,
