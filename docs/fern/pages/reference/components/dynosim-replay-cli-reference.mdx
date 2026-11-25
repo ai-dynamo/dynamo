@@ -503,8 +503,22 @@ hardware offload recipe.
   chooses, so it pulls the prompt prefix it lacks from the named peer's G2 (see
   [KV Cache Runner (KVCR) peer fetch](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-cache.md#kvcr-peer-fetch)).
   As in production, the router sends that hint only when the role's hint policies include
-  `kv_fetch`: select the `kvcr` worker-selection policy, or list `kv_fetch` under the role's `hints`
-  in `router.policy_config`. The default policy sends none, and the workers then pull nothing.
+  `kv_fetch`. The default policy sends none, and the workers then pull nothing. To get hints, point
+  `router.policy_config` at a policy file that selects the `kvcr` worker-selection policy, which
+  runs `kv_fetch` by default:
+
+  ```yaml
+  worker_selection:
+    aggregated:
+      type: kvcr
+      parameters:
+        shared_cache_multiplier: 0.5
+  ```
+
+  To keep the default cost function, list `kv_fetch` under the role's `hints` in that file (see
+  [Hint Policies](../../developer-guide/knowledge-base/modular-components/router/hint-policies.md)).
+  Without a policy file, the environment variable `DYN_ROUTER_WORKER_SELECTION_POLICY=kvcr` selects
+  `kvcr` for every role, as it does for the frontend.
   Replay models the built-in `kv_fetch` policy only: it sends a hint for every copy source the
   router books, does not apply the `min_additional_blocks` parameter, and does not run a custom
   hint policy. Decode workers of a disaggregated deployment get no hints, because replay feeds the

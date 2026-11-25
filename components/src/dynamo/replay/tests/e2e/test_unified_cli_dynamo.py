@@ -95,7 +95,7 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         "12-trace-applied-compute-agentic.yaml": 3,
         "13-trace-dynamo-agentic.yaml": 4,
         "14-trace-dynamo-kvcr.yaml": 2,
-        "15-trace-dynamo-kvcr-g3.yaml": 2,
+        "15-trace-dynamo-kvcr-g3.yaml": 7,
     }
     if config_path.name in expected_trace_requests:
         assert (
@@ -106,7 +106,9 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         assert "kvcr" in report["summary"]
 
     if config_path.name == "15-trace-dynamo-kvcr-g3.yaml":
-        assert "g3" in report["summary"]["kvcr"]
+        kvcr = report["summary"]["kvcr"]
+        assert kvcr["g3"]["stored_blocks"] > 0
+        assert kvcr["pulls"]["success"] > 0
 
     if config_path.name == "08-synthetic-throughput-planner.yaml":
         assert report["planner"]["metadata"]["bootstrap"]["status"] == "installed"

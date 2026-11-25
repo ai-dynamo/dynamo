@@ -5,8 +5,8 @@ traffic:
   source:
     type: trace
     format: dynamo
-    paths: [components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/traces/dynamo-standard.jsonl]
-  load: {type: trace_timestamps, speedup: 2.0}
+    paths: [components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/traces/dynamo-kvcr-g3.jsonl]
+  load: {type: trace_timestamps, speedup: 1.0}
 engine:
   mode: aggregated
   model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
@@ -20,11 +20,12 @@ engine:
       kv_cache:
         block_size: 64
         prefix_caching: true
-        capacity: {type: fixed, blocks: 256}
-        host_offload: {num_host_blocks: 256}
+        capacity: {type: fixed, blocks: 40}
+        host_offload: {num_host_blocks: 16}
         kvcr:
-          local_g2: {num_blocks: 64}
+          local_g2: {num_blocks: 16}
           g3: {num_blocks: 256}
-      timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
+      timing: {type: fixed, prefill_ms: 50, decode_ms: 1}
 router:
   policy: kv_router
+  policy_config: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/router-policy-kvcr.yaml
