@@ -167,6 +167,16 @@ def validate_cmaf_frames(frames) -> None:
         raise ValueError(f"CMAF encoder expects dtype uint8; got {frames.dtype}")
 
 
+def _discard_outcome(future: asyncio.Future) -> None:
+    """Mark a future's exception as seen, so it is not logged as never retrieved.
+
+    For the wait on ffmpeg's stdin closing: a pipe that broke because ffmpeg
+    died is reported through the exit status, not through this wait.
+    """
+    if not future.cancelled():
+        future.exception()
+
+
 # ---------------------------------------------------------------------------
 # MP4 box reading
 # ---------------------------------------------------------------------------
@@ -288,6 +298,8 @@ class FragmentedMp4Cutter:
         self._pos = 0  # offset of the next unparsed box header
         self._init_done = False
         self._in_fragment = False
+        # Set by flush(): bytes of a box or fragment the stream ended inside.
+        self.incomplete_bytes = 0
 
     def feed(self, data: bytes) -> List[Tuple[str, bytes]]:
         """Add bytes and return whatever segments they completed."""
@@ -295,21 +307,27 @@ class FragmentedMp4Cutter:
         return self._cut()
 
     def flush(self) -> List[Tuple[str, bytes]]:
-        """Emit what remains at end of stream.
+        """End the stream and return the one segment only its end can close.
 
-        A trailing ``mdat`` whose size was declared as "to end of stream" can
-        only be closed here.
+        That is a final ``mdat`` whose size field is 0, "to end of stream".
+        Anything else still buffered is a box or a fragment the stream was cut
+        off inside. It is dropped rather than emitted -- a client cannot use a
+        partial fragment -- and counted in :attr:`incomplete_bytes`, so the
+        caller can report an output that ended early.
         """
         out = self._cut()
-        if self._in_fragment and self._buf:
-            out.append(("segment", bytes(self._buf)))
-            self._reset_fragment()
-        elif self._buf:
-            logger.debug(
-                "Discarding %d trailing byte(s) after the last fragment", len(self._buf)
-            )
+        if self._buf:
+            if self._in_fragment and self._at_open_ended_mdat():
+                out.append(("segment", bytes(self._buf)))
+            else:
+                self.incomplete_bytes = len(self._buf)
             self._reset_fragment()
         return out
+
+    def _at_open_ended_mdat(self) -> bool:
+        """Whether the box being waited for is an ``mdat`` of size 0."""
+        header = bytes(self._buf[self._pos : self._pos + MP4_BOX_HEADER_SIZE])
+        return header == b"\x00\x00\x00\x00mdat"
 
     def _reset_fragment(self) -> None:
         """Drop the buffered bytes and leave fragment state."""
@@ -344,11 +362,14 @@ class FragmentedMp4Cutter:
                 continue
 
             if btype == b"moof":
-                if self._pos:
-                    # A previous fragment never saw its mdat; close it so the
-                    # stream stays in step rather than merging two fragments.
-                    out.append(self._take(self._pos, "segment"))
-                    end = box_size  # the moof now sits at offset 0
+                if self._in_fragment:
+                    # The previous fragment never got its mdat. Emitting its
+                    # moof alone would hand the client a fragment with no
+                    # media in it, which the next fragment cannot repair.
+                    raise ValueError(
+                        "invalid CMAF stream: a moof follows a moof with no mdat "
+                        "in between"
+                    )
                 self._pos = end
                 self._in_fragment = True
                 continue
@@ -388,7 +409,8 @@ class StreamingCmafEncoder:
 
     ffmpeg runs in its own process group and teardown kills the group, so a
     ``DYN_FFMPEG_PATH`` that is a wrapper script does not leave the real
-    encoder behind. No wait on the process is unbounded.
+    encoder behind, even if the wrapper exits first. No wait on the process is
+    unbounded.
 
     Usage::
 
@@ -429,6 +451,9 @@ class StreamingCmafEncoder:
         self._stderr_task: Optional[asyncio.Task] = None
         self._stderr = bytearray()
         self._stdout_eof = False
+        # Set when the stdout reader stopped on an error instead of at end of
+        # stream; the queue's end marker alone cannot tell the two apart.
+        self._stdout_error: Optional[BaseException] = None
         self._stdin_closed = False
         self._segments = 0
         self._frames_in = 0
@@ -534,7 +559,8 @@ class StreamingCmafEncoder:
         """Close the input and yield the fragments that remain, as they complete.
 
         Raises:
-            RuntimeError: If ffmpeg exits non-zero. Its stderr is included.
+            RuntimeError: If ffmpeg exits non-zero, or exits zero without having
+                written the whole stream. Its stderr is included.
         """
         proc = self._require_started()
         await self._close_stdin()
@@ -556,6 +582,10 @@ class StreamingCmafEncoder:
             for kind, payload in self._cutter.feed(item):
                 yield self._tag(kind, payload)
 
+        if self._stdout_error is not None:
+            # Not end of stream: what ffmpeg wrote after the read error is lost.
+            raise await self._failure()
+
         for kind, payload in self._cutter.flush():
             yield self._tag(kind, payload)
 
@@ -571,6 +601,14 @@ class StreamingCmafEncoder:
         if returncode != 0:
             raise RuntimeError(
                 f"ffmpeg {CMAF_VIDEO_ENCODER} CMAF encode failed (exit {returncode}): "
+                f"{self._stderr_text()}"
+            )
+        missing = self._missing_output()
+        if missing:
+            # A zero exit status is not enough: the client would be told the
+            # stream is complete.
+            raise RuntimeError(
+                f"ffmpeg {CMAF_VIDEO_ENCODER} CMAF encode exited 0 but {missing}: "
                 f"{self._stderr_text()}"
             )
         logger.info(
@@ -615,6 +653,21 @@ class StreamingCmafEncoder:
         self._segments += 1
         return segment_tag(self._segments), payload
 
+    def _missing_output(self) -> Optional[str]:
+        """What a finished stream lacks, or ``None`` if it is whole."""
+        if self._cutter.incomplete_bytes:
+            return (
+                f"its output ends inside a box, {self._cutter.incomplete_bytes} "
+                "byte(s) short of a complete fragment"
+            )
+        if not self._frames_in:
+            return None
+        if self._init_segment is None:
+            return "wrote no init segment"
+        if not self._segments:
+            return f"wrote no media segment for {self._frames_in} frame(s)"
+        return None
+
     def _drain_ready(self) -> List[Tuple[str, bytes]]:
         """Cut whatever stdout bytes have already arrived, without waiting."""
         data = bytearray()
@@ -643,7 +696,8 @@ class StreamingCmafEncoder:
                 await self._out_q.put(data)
         except asyncio.CancelledError:
             raise
-        except Exception as err:  # noqa: BLE001 - reported through the queue's EOF
+        except Exception as err:  # noqa: BLE001 - raised by push() and finish()
+            self._stdout_error = err
             logger.warning("CMAF stdout reader failed: %s", err)
         finally:
             self._out_q.put_nowait(None)
@@ -672,18 +726,20 @@ class StreamingCmafEncoder:
         if self._stdin_closed or proc.stdin is None:
             return
         self._stdin_closed = True
-        try:
-            proc.stdin.close()
-            # Closing flushes what is still buffered, so this waits on ffmpeg.
-            await asyncio.wait_for(proc.stdin.wait_closed(), timeout=self._io_timeout_s)
-        except asyncio.TimeoutError:
+        proc.stdin.close()
+        # Closing flushes what is still buffered, so this waits on ffmpeg. The
+        # wait is bounded with asyncio.wait(), which leaves the waiter running
+        # on timeout: wait_for() would cancel the future asyncio completes when
+        # the pipe closes, and the event loop then fails completing it.
+        closed = asyncio.ensure_future(proc.stdin.wait_closed())
+        closed.add_done_callback(_discard_outcome)
+        done, _ = await asyncio.wait({closed}, timeout=self._io_timeout_s)
+        if not done:
             await self.aclose()
             raise RuntimeError(
                 f"ffmpeg {CMAF_VIDEO_ENCODER} accepted no input for "
                 f"{self._io_timeout_s:.0f}s while ending the CMAF stream"
-            ) from None
-        except Exception:  # noqa: BLE001 - a dead ffmpeg is reported by its exit status
-            pass
+            )
 
     async def _reap(self) -> None:
         """Kill what is left of the session and wait for it, never indefinitely."""
@@ -695,11 +751,7 @@ class StreamingCmafEncoder:
         if stdin is not None and not stdin.transport.is_closing():
             with contextlib.suppress(Exception):
                 stdin.transport.abort()
-        if proc.returncode is None:
-            # The group, not just the pid: a wrapper script's child would
-            # otherwise outlive it, still encoding and still holding the pipes.
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, signal.SIGKILL)
+        self._kill_group(proc)
         try:
             # asyncio's Process.wait() returns once the process has exited *and*
             # its pipes have closed, so a process that escaped the kill and
@@ -715,6 +767,30 @@ class StreamingCmafEncoder:
         except Exception:  # noqa: BLE001 - teardown must not raise
             pass
 
+    @staticmethod
+    def _kill_group(proc: asyncio.subprocess.Process) -> None:
+        """SIGKILL whatever is left of the session's process group.
+
+        The group, not just the pid: a wrapper script's child would otherwise
+        outlive it, still encoding and still holding the pipes. That includes
+        a wrapper that has already exited and left its child behind.
+        """
+        if proc.returncode is not None:
+            # The leader has been reaped. The kernel keeps its pid reserved
+            # while the group still has a member, so a group by that id is
+            # still this session's -- unless the group emptied and the number
+            # was handed to a new process, which is not ours to signal.
+            try:
+                os.kill(proc.pid, 0)
+            except ProcessLookupError:
+                pass  # no process holds the number: the group id is still ours
+            except OSError:
+                return  # a process we may not signal holds it
+            else:
+                return  # a new process holds it
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
     async def _collect_stderr(self) -> None:
         """Let the stderr reader finish, so an error report carries ffmpeg's last lines."""
         task = self._stderr_task
@@ -729,8 +805,11 @@ class StreamingCmafEncoder:
         proc = self._require_started()
         await self._reap()
         await self._collect_stderr()
+        status = f"exit {proc.returncode}"
+        if self._stdout_error is not None:
+            status += f", reading its output failed: {self._stdout_error!r}"
         return RuntimeError(
-            f"ffmpeg {CMAF_VIDEO_ENCODER} CMAF encode failed (exit {proc.returncode}) "
+            f"ffmpeg {CMAF_VIDEO_ENCODER} CMAF encode failed ({status}) "
             f"after {self._frames_in} frame(s) and {self._segments} segment(s): "
             f"{self._stderr_text()}"
         )

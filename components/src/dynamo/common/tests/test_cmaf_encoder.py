@@ -80,6 +80,15 @@ def _executable_stub(tmp_path, body: str = "exit 0") -> str:
     return str(path)
 
 
+def _replaying_stub(tmp_path, output: bytes, status: int = 0) -> str:
+    """A stand-in ffmpeg that reads all its input, writes ``output``, and exits."""
+    recorded = tmp_path / "output.bin"
+    recorded.write_bytes(output)
+    return _executable_stub(
+        tmp_path, f'cat > /dev/null\ncat "{recorded}"\nexit {status}'
+    )
+
+
 # ---------------------------------------------------------------------------
 # No process started
 # ---------------------------------------------------------------------------
@@ -145,17 +154,38 @@ class TestFragmentedMp4Cutter:
 
         assert [kind for kind, _ in out] == ["init", "segment"]
 
-    def test_flush_emits_the_trailing_fragment(self):
-        """A last mdat that never completes is only closed by flush()."""
-        init, body = _init_segment(b"vp09", b"vpcC", _VPCC), _fragments(1)
+    def test_flush_closes_an_mdat_that_runs_to_end_of_stream(self):
+        """A final mdat of size 0 has no end until the stream does."""
+        init = _init_segment(b"vp09", b"vpcC", _VPCC)
+        tail = _box(b"moof", b"moof-0") + b"\x00\x00\x00\x00mdat" + b"\x07" * 16
         cutter = cmaf_encoder.FragmentedMp4Cutter()
 
-        partial = cutter.feed(init + body[:-4])
-        assert [kind for kind, _ in partial] == ["init"]
+        assert [kind for kind, _ in cutter.feed(init + tail)] == ["init"]
+        assert cutter.flush() == [("segment", tail)]
+        assert cutter.incomplete_bytes == 0
 
-        rest = cutter.flush()
-        assert [kind for kind, _ in rest] == ["segment"]
-        assert rest[0][1] == body[:-4]
+    @pytest.mark.parametrize(
+        "lost",
+        [4, 24, 34],
+        ids=["mdat cut short", "moof with no mdat", "moof cut short"],
+    )
+    def test_flush_drops_a_fragment_the_stream_ended_inside(self, lost):
+        """A truncated fragment is counted, never emitted as a segment."""
+        init, body = _init_segment(b"vp09", b"vpcC", _VPCC), _fragments(2)
+        fragment = len(body) // 2
+        cutter = cmaf_encoder.FragmentedMp4Cutter()
+
+        whole = cutter.feed(init + body[:-lost])
+        assert [kind for kind, _ in whole] == ["init", "segment"]
+
+        assert cutter.flush() == []
+        assert cutter.incomplete_bytes == fragment - lost
+
+    def test_rejects_a_moof_that_follows_a_moof(self):
+        """A fragment with no mdat is a framing error, not a segment."""
+        init, moof = _init_segment(b"vp09", b"vpcC", _VPCC), _box(b"moof", b"moof-0")
+        with pytest.raises(ValueError, match="no mdat"):
+            cmaf_encoder.FragmentedMp4Cutter().feed(init + moof + moof)
 
     def test_rejects_an_impossible_box_size(self):
         """A box size smaller than its header is a ValueError."""
@@ -324,21 +354,31 @@ class TestEncoderFailure:
     async def test_an_ffmpeg_that_stalls_at_end_of_input_times_out(
         self, monkeypatch, tmp_path
     ):
-        """Input still buffered when the stream ends is not waited on forever."""
+        """Input still buffered when the stream ends is not waited on forever.
+
+        Nor does the timeout leave the event loop an error to log: the pipe
+        closing afterwards must find its waiter intact.
+        """
         exe = _executable_stub(tmp_path, "exec sleep 60")
         monkeypatch.setenv(cmaf_encoder.ENV_FFMPEG_PATH, exe)
+        loop_errors = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _, context: loop_errors.append(context))
         enc = StreamingCmafEncoder(16, 64, 64, io_timeout_s=0.5)
         await enc.start()
         try:
             # 98 kB: more than a pipe holds, little enough that the rest sits in
             # the writer's buffer without blocking push().
-            with pytest.raises(RuntimeError, match="accepted no input"):
-                async for _ in enc.push(np.zeros((8, 64, 64, 3), dtype=np.uint8)):
-                    pass
+            async for _ in enc.push(np.zeros((8, 64, 64, 3), dtype=np.uint8)):
+                pass
+            with pytest.raises(RuntimeError, match="while ending the CMAF stream"):
                 async for _ in enc.finish():
                     pass
             assert enc._proc.returncode is not None
+            await asyncio.sleep(0)  # one loop turn: callbacks of the teardown run
+            assert loop_errors == []
         finally:
+            loop.set_exception_handler(None)
             await enc.aclose()
 
     async def test_a_chunk_with_the_wrong_geometry_is_refused(
@@ -351,6 +391,102 @@ class TestEncoderFailure:
             with pytest.raises(ValueError, match="does not match the CMAF session"):
                 async for _ in enc.push(np.zeros((8, 32, 64, 3), dtype=np.uint8)):
                     pass
+
+
+@pytest.mark.timeout(60)
+class TestIncompleteOutput:
+    """Exit status 0 is not enough: the stream has to be whole."""
+
+    @staticmethod
+    async def _session(exe, monkeypatch, *, push: bool = True):
+        """Run one session against ``exe``; return the tags it yielded and its error."""
+        monkeypatch.setenv(cmaf_encoder.ENV_FFMPEG_PATH, exe)
+        enc = StreamingCmafEncoder(16, 64, 64)
+        tags, error = [], None
+        await enc.start()
+        try:
+            if push:
+                async for tag, _ in enc.push(np.zeros((8, 64, 64, 3), dtype=np.uint8)):
+                    tags.append(tag)
+            async for tag, _ in enc.finish():
+                tags.append(tag)
+        except RuntimeError as err:
+            error = str(err)
+        finally:
+            await enc.aclose()
+        return tags, error
+
+    async def test_a_whole_stream_ends_cleanly(self, monkeypatch, tmp_path):
+        """The control: init plus complete fragments, exit 0, no error."""
+        output = _init_segment(b"vp09", b"vpcC", _VPCC) + _fragments(2)
+        tags, error = await self._session(
+            _replaying_stub(tmp_path, output), monkeypatch
+        )
+
+        assert error is None
+        assert tags == [CMAF_INIT_TAG, "cmaf:segment:1", "cmaf:segment:2"]
+
+    async def test_no_output_at_all_is_a_failure(self, monkeypatch, tmp_path):
+        """Frames went in and nothing came out."""
+        tags, error = await self._session(_replaying_stub(tmp_path, b""), monkeypatch)
+
+        assert tags == []
+        assert "exited 0 but wrote no init segment" in error
+
+    async def test_an_init_segment_alone_is_a_failure(self, monkeypatch, tmp_path):
+        """The client must not be told that a stream with no media is complete."""
+        output = _init_segment(b"vp09", b"vpcC", _VPCC)
+        tags, error = await self._session(
+            _replaying_stub(tmp_path, output), monkeypatch
+        )
+
+        assert tags == [CMAF_INIT_TAG]
+        assert "exited 0 but wrote no media segment for 8 frame(s)" in error
+
+    async def test_a_truncated_final_fragment_is_a_failure_and_is_not_delivered(
+        self, monkeypatch, tmp_path
+    ):
+        """The complete fragments go out; the partial one does not."""
+        output = _init_segment(b"vp09", b"vpcC", _VPCC) + _fragments(2)[:-4]
+        tags, error = await self._session(
+            _replaying_stub(tmp_path, output), monkeypatch
+        )
+
+        assert tags == [CMAF_INIT_TAG, "cmaf:segment:1"]
+        assert "exited 0 but its output ends inside a box" in error
+
+    async def test_a_non_zero_exit_is_reported_ahead_of_a_truncated_stream(
+        self, monkeypatch, tmp_path
+    ):
+        """ffmpeg's own status and stderr say more than "the output is short"."""
+        output = _init_segment(b"vp09", b"vpcC", _VPCC) + _fragments(2)[:-4]
+        tags, error = await self._session(
+            _replaying_stub(tmp_path, output, status=3), monkeypatch
+        )
+
+        assert tags == [CMAF_INIT_TAG, "cmaf:segment:1"]
+        assert "(exit 3)" in error
+
+    @pytest.mark.parametrize("push", [True, False], ids=["in push", "in finish"])
+    async def test_a_stdout_read_error_is_not_an_end_of_stream(
+        self, monkeypatch, tmp_path, push
+    ):
+        """A reader that stopped on an error must not pass for a finished stream."""
+        output = _init_segment(b"vp09", b"vpcC", _VPCC) + _fragments(1)
+        real_start = StreamingCmafEncoder.start
+
+        async def start_with_a_broken_stdout(self):
+            await real_start(self)
+            self._proc.stdout.set_exception(OSError("pipe went away"))
+            await asyncio.sleep(0)  # one loop turn: the reader hits the error
+
+        monkeypatch.setattr(StreamingCmafEncoder, "start", start_with_a_broken_stdout)
+        _, error = await self._session(
+            _replaying_stub(tmp_path, output), monkeypatch, push=push
+        )
+
+        assert "reading its output failed" in error
+        assert "pipe went away" in error
 
 
 @pytest.mark.timeout(60)
@@ -425,6 +561,60 @@ class TestEncoderCancellation:
             assert not _alive(child)
         finally:
             await enc.aclose()
+
+    async def test_aclose_reaps_the_child_of_a_wrapper_that_already_exited(
+        self, monkeypatch, tmp_path
+    ):
+        """A wrapper that exits first leaves its child in the session's group.
+
+        The wrapper's exit status says nothing about the child, which still
+        holds the pipes: the group has to be killed all the same.
+        """
+        pid_file = tmp_path / "child.pid"
+        exe = _executable_stub(tmp_path, f'sleep 60 &\necho $! > "{pid_file}"\nexit 0')
+        monkeypatch.setenv(cmaf_encoder.ENV_FFMPEG_PATH, exe)
+        enc = StreamingCmafEncoder(16, 64, 64)
+        await enc.start()
+        try:
+            child = await _read_pid(pid_file)
+            assert await _until(lambda: enc._proc.returncode is not None)
+            assert _alive(child)
+
+            await asyncio.wait_for(enc.aclose(), timeout=30)
+
+            assert await _until(lambda: not _alive(child))
+            await enc.aclose()  # second call is a no-op
+        finally:
+            await enc.aclose()
+
+    async def test_a_recycled_leader_pid_is_not_signalled(self, monkeypatch, tmp_path):
+        """Once the group is empty its id can be reused, by a process that is not ours."""
+        monkeypatch.setenv(cmaf_encoder.ENV_FFMPEG_PATH, _executable_stub(tmp_path))
+        enc = StreamingCmafEncoder(16, 64, 64)
+        await enc.start()
+        try:
+            assert await _until(lambda: enc._proc.returncode is not None)
+            signalled = []
+            # A process answers at the leader's old pid: the number was reused.
+            monkeypatch.setattr(cmaf_encoder.os, "kill", lambda pid, sig: None)
+            monkeypatch.setattr(
+                cmaf_encoder.os, "killpg", lambda pgid, sig: signalled.append(pgid)
+            )
+
+            await enc.aclose()
+
+            assert signalled == []
+        finally:
+            await enc.aclose()
+
+
+async def _until(condition, *, tries: int = 200) -> bool:
+    """Poll ``condition`` until it holds; False if it never does."""
+    for _ in range(tries):
+        if condition():
+            return True
+        await asyncio.sleep(0.05)
+    return False
 
 
 async def _read_pid(pid_file) -> int:
