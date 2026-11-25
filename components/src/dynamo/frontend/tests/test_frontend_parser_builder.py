@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from dynamo.common.configuration.utils import env_or_default
-from dynamo.frontend.frontend_args import build_frontend_parser
+from dynamo.frontend.frontend_args import FrontendConfig, build_frontend_parser
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -105,3 +105,73 @@ def test_parses_without_notices_or_local_files(
     assert unknown == ["--ais-perf-config", "/not/a/local/file.yaml"]
     assert not caplog.records
     assert not recwarn
+
+
+def _clear_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the process's plane and TCP TLS settings out of a test."""
+    for name in ("DYN_REQUEST_PLANE", "DYN_RESPONSE_PLANE"):
+        monkeypatch.delenv(name, raising=False)
+    for name in list(os.environ):
+        if name.startswith("DYN_TCP_TLS_"):
+            monkeypatch.delenv(name)
+
+
+def _frontend_config(argv: list[str]) -> FrontendConfig:
+    parser, _ = build_frontend_parser({})
+    return FrontendConfig.from_cli_args(parser.parse_args(argv))
+
+
+def test_request_plane_velo_requires_velo_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_plane_env(monkeypatch)
+
+    with pytest.raises(ValueError, match="DYN_RESPONSE_PLANE"):
+        _frontend_config(["--request-plane", "velo"]).validate()
+
+
+def test_request_plane_velo_accepts_velo_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_plane_env(monkeypatch)
+
+    config = _frontend_config(["--request-plane", "velo", "--response-plane", "velo"])
+    config.validate()
+
+    assert config.request_plane == "velo"
+    assert config.response_plane == "velo"
+
+
+def test_request_plane_velo_accepts_velo_response_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_plane_env(monkeypatch)
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "velo")
+
+    config = _frontend_config(["--request-plane", "velo"])
+    config.validate()
+
+    # The parser builder ignores os.environ, so validate() supplied the fallback.
+    assert config.response_plane is None
+
+
+@pytest.mark.parametrize("request_plane", ["tcp", "nats"])
+def test_non_velo_request_plane_accepts_velo_response(
+    monkeypatch: pytest.MonkeyPatch, request_plane: str
+) -> None:
+    _clear_plane_env(monkeypatch)
+
+    config = _frontend_config(
+        ["--request-plane", request_plane, "--response-plane", "velo"]
+    )
+    config.validate()
+
+    assert config.request_plane == request_plane
+
+
+def test_request_plane_help_documents_velo_requirement() -> None:
+    parser, _ = build_frontend_parser({})
+
+    assert "velo requires --response-plane velo" in " ".join(
+        parser.format_help().split()
+    )

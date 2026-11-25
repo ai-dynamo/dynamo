@@ -108,6 +108,61 @@ def test_response_plane_rejects_invalid_value():
         _parse_runtime_args(["--response-plane", "invalid"])
 
 
+def _clear_plane_env(monkeypatch):
+    """Keep the process's plane and TCP TLS settings out of a test."""
+    for name in ("DYN_REQUEST_PLANE", "DYN_RESPONSE_PLANE"):
+        monkeypatch.delenv(name, raising=False)
+    for name in list(os.environ):
+        if name.startswith("DYN_TCP_TLS_"):
+            monkeypatch.delenv(name)
+
+
+def test_request_plane_velo_requires_velo_response(monkeypatch):
+    _clear_plane_env(monkeypatch)
+
+    with pytest.raises(ValueError, match="DYN_RESPONSE_PLANE"):
+        _parse_runtime_args(["--request-plane", "velo"])
+
+
+def test_request_plane_velo_accepts_velo_response(monkeypatch):
+    _clear_plane_env(monkeypatch)
+
+    config, _ = _parse_runtime_args(
+        ["--request-plane", "velo", "--response-plane", "velo"]
+    )
+
+    assert config.request_plane == "velo"
+    assert config.response_plane == "velo"
+
+
+def test_request_plane_velo_accepts_velo_response_from_env(monkeypatch):
+    _clear_plane_env(monkeypatch)
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "velo")
+
+    config, _ = _parse_runtime_args(["--request-plane", "velo"])
+
+    assert config.response_plane == "velo"
+
+
+@pytest.mark.parametrize("request_plane", ["tcp", "nats"])
+def test_non_velo_request_plane_accepts_velo_response(monkeypatch, request_plane):
+    _clear_plane_env(monkeypatch)
+
+    config, _ = _parse_runtime_args(
+        ["--request-plane", request_plane, "--response-plane", "velo"]
+    )
+
+    assert config.request_plane == request_plane
+
+
+def test_request_plane_help_documents_velo_requirement(monkeypatch):
+    _clear_plane_env(monkeypatch)
+
+    _, help_text = _parse_runtime_args([])
+
+    assert "velo requires --response-plane velo" in " ".join(help_text.split())
+
+
 def test_fpm_trace_env_enables_and_is_canonicalized(monkeypatch):
     monkeypatch.setenv("DYN_FPM_TRACE", "on")
 

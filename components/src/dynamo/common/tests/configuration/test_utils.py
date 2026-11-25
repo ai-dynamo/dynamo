@@ -4,6 +4,7 @@
 """Tests for configuration utility functions."""
 
 import argparse
+import os
 
 import pytest
 
@@ -15,6 +16,7 @@ from dynamo.common.configuration.utils import (
     env_or_default,
     nullable_float,
     parse_bool,
+    validate_request_plane,
 )
 
 pytestmark = [
@@ -484,3 +486,57 @@ def test_deprecated_warn_stacklevel_counts_callers():
     assert warning_line[0].lineno == _warn.__code__.co_firstlineno + 1
     assert default[0].lineno == _call_warn.__code__.co_firstlineno + 1
     assert default[0].filename == __file__
+
+
+def _clear_plane_env(monkeypatch):
+    """Keep the process's plane and TCP TLS settings out of a test."""
+    for name in ("DYN_REQUEST_PLANE", "DYN_RESPONSE_PLANE"):
+        monkeypatch.delenv(name, raising=False)
+    for name in list(os.environ):
+        if name.startswith("DYN_TCP_TLS_"):
+            monkeypatch.delenv(name)
+
+
+class TestValidateRequestPlane:
+    """Test validate_request_plane function."""
+
+    def test_velo_request_alone_is_rejected(self, monkeypatch):
+        _clear_plane_env(monkeypatch)
+
+        with pytest.raises(ValueError) as error:
+            validate_request_plane("velo", None)
+
+        message = str(error.value)
+        for setting in (
+            "--request-plane",
+            "DYN_REQUEST_PLANE",
+            "--response-plane",
+            "DYN_RESPONSE_PLANE",
+        ):
+            assert setting in message
+
+    def test_velo_request_with_velo_response_is_valid(self, monkeypatch):
+        _clear_plane_env(monkeypatch)
+
+        validate_request_plane("velo", "velo")
+
+    def test_velo_request_reads_response_plane_from_environment(self, monkeypatch):
+        _clear_plane_env(monkeypatch)
+        monkeypatch.setenv("DYN_RESPONSE_PLANE", "velo")
+
+        validate_request_plane("velo", None)
+
+    def test_explicit_response_plane_outranks_environment(self, monkeypatch):
+        _clear_plane_env(monkeypatch)
+        monkeypatch.setenv("DYN_RESPONSE_PLANE", "velo")
+
+        with pytest.raises(ValueError, match="DYN_RESPONSE_PLANE"):
+            validate_request_plane("velo", "tcp")
+
+    @pytest.mark.parametrize("request_plane", ["tcp", "nats"])
+    def test_non_velo_request_plane_accepts_velo_response(
+        self, monkeypatch, request_plane
+    ):
+        _clear_plane_env(monkeypatch)
+
+        validate_request_plane(request_plane, "velo")
