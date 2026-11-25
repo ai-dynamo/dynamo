@@ -22,7 +22,7 @@ use super::*;
 /// | Check | The caller read | The actor requires | Otherwise it |
 /// |---|---|---|---|
 /// | `TurnPrepared::drop_judged_load` | reject limits | no await since | builds load |
-/// | `TurnPrepared::take_for` | | same turn, no refreshed overlap | builds rows and load |
+/// | `TurnPrepared::take_for` | exclusive target | same turn, overlap, target | builds both |
 /// | `adopt_prepared_load` | limits, overlap, writes, table version | see there | builds load |
 /// | `adopt_prepared_rows` | generation, availability, overload | those and the configuration unchanged; no full rank that needs fresh rows | builds rows |
 /// | `select_with_policy` | the policy's inputs | same inputs, no filters | builds rows |
@@ -123,14 +123,15 @@ impl TurnPrepared {
         }
     }
 
-    /// The rows for a request leaving the queue, unless it arrived in an earlier turn or a
-    /// refresh replaced the overlap they were built from.
+    /// The rows for a request leaving the queue, unless it arrived in an earlier turn or
+    /// `input_replaced`: a refresh replaced the overlap they were built from, or the dispatch
+    /// gate the exclusive affinity target.
     pub(super) fn take_for(
         &mut self,
         enqueue_turn: u64,
-        refreshed: bool,
+        input_replaced: bool,
     ) -> Option<Box<PreparedAdmission>> {
-        if enqueue_turn == self.turn && !refreshed {
+        if enqueue_turn == self.turn && !input_replaced {
             self.prepared.take()
         } else {
             None

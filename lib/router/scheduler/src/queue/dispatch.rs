@@ -328,6 +328,7 @@ impl<
             let mut queued = candidate.into_payload();
             // The gate's `Go` target replaces the soft affinity target unless the caller
             // pinned a worker; the gate learns the head left the queue once, here.
+            let mut retargeted = false;
             if let Some(gate) = &gate
                 && !released
             {
@@ -335,7 +336,12 @@ impl<
                 if queued.request.pinned_worker.is_none()
                     && let Some(target) = target
                 {
-                    queued.request.affinity_target = Some(target.into());
+                    let target = Some(target.into());
+                    // Under an exclusive selector the caller's rows hold its own target's
+                    // ranks alone.
+                    retargeted =
+                        self.eligibility.exclusive && queued.request.affinity_target != target;
+                    queued.request.affinity_target = target;
                 }
                 let policy_class = &self.profile.class(class_index).name;
                 gate.dispatched(
@@ -343,7 +349,9 @@ impl<
                     queued.request.pinned_worker.or(target),
                 );
             }
-            let prepared = self.turn_prepared.take_for(queued.enqueue_turn, refreshed);
+            let prepared = self
+                .turn_prepared
+                .take_for(queued.enqueue_turn, refreshed || retargeted);
             // The due time can pass during the refresh. Admission checks it again before
             // selection and before booking or delivery.
             let admission = if released {

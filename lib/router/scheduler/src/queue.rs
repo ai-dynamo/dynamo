@@ -3866,6 +3866,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_rows_are_rebuilt_when_the_gate_changes_an_exclusive_affinity_target() {
+        /// A gate that sends every head to one worker.
+        struct TargetGate(WorkerWithDpRank);
+
+        impl DispatchGate for TargetGate {
+            fn check(&self, _head: &DispatchHead<'_>) -> DispatchDecision {
+                DispatchDecision::Go {
+                    target: Some(self.0),
+                }
+            }
+        }
+
+        let prepared_queue = make_prepared_queue_with(2, 1, true, Box::new(LeastLoaded));
+        let queue = &prepared_queue.queue;
+        let gate_target = WorkerWithDpRank::new(1, 0);
+        assert!(queue.install_dispatch_gate(Arc::new(TargetGate(gate_target))));
+
+        // Preparation held only worker 0's rows. Both workers are idle, and the gate sends
+        // the request to worker 1 in the turn it arrives.
+        let (mut request, rx) = make_request("request", 16);
+        request.affinity_target = Some(dynamo_session_affinity::WorkerAffinityTarget::new(0, None));
+        let prepared = queue.prepare_candidates(&request);
+        assert!(prepared.is_some());
+        enqueue_prepared(queue, request, prepared).await;
+        assert_eq!(rx.await.unwrap().unwrap().best_worker, gate_target);
+        assert_eq!(prepared_queue.prepared_selections(), 0);
+    }
+
+    #[tokio::test]
     async fn prepared_rows_recount_the_best_cached_prefix_without_full_workers() {
         let prepared_queue = make_prepared_queue();
         let queue = &prepared_queue.queue;
