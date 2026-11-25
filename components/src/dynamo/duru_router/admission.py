@@ -44,7 +44,12 @@ class Candidate(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class DuruPolicy:
+    alpha: float | None = None
     resume_ceiling: float = 1.0
+
+    def __post_init__(self):
+        if self.alpha is not None and (not isfinite(self.alpha) or self.alpha <= 0):
+            raise ValueError("Admission alpha must be finite and positive")
 
     def order(self, candidates: list[Candidate]) -> list[Candidate]:
         return [
@@ -63,5 +68,9 @@ class DuruPolicy:
         return max(0.0, min(1.0, self.resume_ceiling))
 
     def may_force_admit(self, candidate: Candidate) -> bool:
-        # This policy only admits requests that pass the host capacity check.
-        return False
+        return bool(
+            self.alpha is not None
+            and candidate.pending_request
+            and valid_score(candidate.score)
+            and candidate.score >= self.alpha
+        )

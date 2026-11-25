@@ -3,10 +3,13 @@
 
 """Duru request handling and startup using the ThunderAgent router service."""
 
+import argparse
 import asyncio
 import json
 import logging
+import math
 import os
+import sys
 import time
 import uuid
 import weakref
@@ -375,9 +378,16 @@ async def worker(runtime: DistributedRuntime) -> None:
 
 
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--alpha", type=float, default=1.0)
+    args, remaining = parser.parse_known_args()
+    if not math.isfinite(args.alpha) or args.alpha <= 0:
+        parser.error("--alpha must be finite and positive")
     for name in ("DURU_ACCOUNTING_CONFIG",):
         if not os.environ.get(name):
-            raise ValueError(f"Set {name} before starting the router")
+            parser.error(f"Set {name} before starting the router")
+    os.environ["DURU_ADMISSION_ALPHA"] = str(args.alpha)
+    sys.argv = [sys.argv[0], *remaining]
     uvloop.run(worker())
 
 

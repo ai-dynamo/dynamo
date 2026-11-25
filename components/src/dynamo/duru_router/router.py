@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Highest-U admission with capacity-checked backfill.
+"""Highest-U admission with backfill and a single alpha exception.
 
 Keep ThunderAgent's worker reservations and tool-phase memory-pressure pausing.
 Account for real token counts from request usage, not a character estimate.
@@ -10,6 +10,7 @@ Account for real token counts from request usage, not a character estimate.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -28,6 +29,14 @@ from dynamo.thunderagent_router.program_state import ProgramLifecycle, ProgramSt
 from dynamo.thunderagent_router.program_state import ProgramTable as BaseProgramTable
 from dynamo.thunderagent_router.router import ThunderAgentConfig as ThunderAgentConfig
 from dynamo.thunderagent_router.router import ThunderAgentScheduler as BaseScheduler
+
+
+def admission_alpha():
+    raw = os.environ.get("DURU_ADMISSION_ALPHA")
+    if raw is None:
+        return None
+    value = float(raw)
+    return value
 
 
 @dataclass
@@ -75,7 +84,7 @@ class DuruResumePlan(ResumePlan):
             root=row.get("root"),
             U=candidate.measured_u,
             effective_score=candidate.effective_score,
-            alpha=None,
+            alpha=self.policy.alpha,
             forced=choice.forced,
             worker=choice.replica,
             required=candidate.demand,
@@ -172,6 +181,7 @@ class DuruSchedulingPolicy(ThunderAgentPolicy):
                 )
             )
         policy = DuruPolicy(
+            alpha=admission_alpha(),
             resume_ceiling=config.pause_threshold - config.resume_hysteresis,
         )
         diagnostics = diagnostics_enabled()

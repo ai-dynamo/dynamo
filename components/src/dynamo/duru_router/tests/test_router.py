@@ -132,7 +132,7 @@ async def case(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("diagnostics", [False, True])
-@pytest.mark.parametrize("demand,forced", [(100, False)])
+@pytest.mark.parametrize("demand,forced", [(100, False), (1200, True)])
 async def test_optional_diagnostics_preserve_admission(
     case, monkeypatch, caplog, diagnostics, demand, forced
 ):
@@ -179,7 +179,9 @@ async def test_missing_initial_score_defers_without_leaking_program(case, cancel
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", [False], ids=["capacity-fit"])
+@pytest.mark.parametrize(
+    "override", [False, True], ids=["capacity-fit", "alpha-override"]
+)
 async def test_stale_scores_block_admission_then_fresh_scores_restore_rank(
     case, monkeypatch, override
 ):
@@ -206,7 +208,9 @@ async def test_stale_scores_block_admission_then_fresh_scores_restore_rank(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("demand,scores,forced", [(300, [0.1, 0.01, 0.2], 0)])
+@pytest.mark.parametrize(
+    "demand,scores,forced", [(300, [0.1, 0.01, 0.2], 0), (1100, [0.9, 0.7, 1.3], 3)]
+)
 async def test_fit_and_override_admissions_follow_score_order(
     case, monkeypatch, demand, scores, forced
 ):
@@ -316,6 +320,22 @@ async def test_newcomer_preserves_resume_headroom_for_established_waiters(case):
 
 
 @pytest.mark.asyncio
+async def test_lookahead_crossing_alpha_unblocks_pending_request(case, monkeypatch):
+    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
+    case.router._cfg.resume_timeout_seconds = 0
+    case.score("child", 0.69)
+    case.scores["child"].update(U=None, kind="zero_work_root_next_five")
+    task = await case.start("child", 1100)
+    assert not task.done()
+    assert case.router._stat_forced_resumes == 0
+    case.scores["child"]["score"] = 0.7
+    await case.resume()
+    assert (await asyncio.wait_for(task, 1)).assigned_replica_hint == (1, 0)
+    assert case.router._stat_forced_resumes == 1
+    assert case.events[-1]["forced"]
+
+
+@pytest.mark.asyncio
 async def test_missing_scores_and_nonpending_requests_cannot_force_admission(
     case, monkeypatch
 ):
@@ -328,6 +348,19 @@ async def test_missing_scores_and_nonpending_requests_cannot_force_admission(
     case.put("valid", 100, 0.01)
     await case.resume()
     assert case.admitted == ["valid"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacities", [{}, {(1, 0): 0}])
+async def test_alpha_requires_a_live_positive_capacity_worker(
+    case, monkeypatch, capacities
+):
+    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "0.7")
+    case.capacity.workers = capacities
+    high = case.put("high", 1100, 4)
+    await case.resume()
+    assert high.lifecycle == ProgramLifecycle.PAUSED
+    assert not case.events
 
 
 @pytest.mark.asyncio
@@ -382,7 +415,7 @@ async def test_resume_updates_weighted_reservations_between_policy_choices(case)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", [False], ids=["fit"])
+@pytest.mark.parametrize("override", [False, True], ids=["fit", "alpha"])
 async def test_policy_placement_uses_replica_ties_and_decayed_usage(
     case, monkeypatch, override
 ):
@@ -408,7 +441,26 @@ async def test_policy_placement_uses_replica_ties_and_decayed_usage(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("demand,forced", [(100, False)])
+@pytest.mark.parametrize("high_score", [0.9, 1.0])
+async def test_highest_score_exception_precedes_lower_score_backfill(
+    case, monkeypatch, high_score
+):
+    monkeypatch.setenv("DURU_ADMISSION_ALPHA", "1")
+    resident = case.router._table.begin_request("resident", 600)
+    resident.assigned_replica = (1, 0)
+    case.put("high", 700, high_score)
+    case.put("backfill", 200, 0.1)
+
+    await case.resume()
+
+    # There is no capacity-only pass over the queue. A high-score override
+    # happens before a lower-ranked candidate can consume the remaining 400.
+    assert case.admitted == (["high"] if high_score == 1.0 else ["backfill"])
+    assert case.events[0]["forced"] is (high_score == 1.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("demand,forced", [(100, False), (101, True)])
 async def test_host_checks_fit_before_alpha_and_preserves_replica_ties(
     case, monkeypatch, demand, forced
 ):
@@ -503,3 +555,19 @@ def test_idle_measurement_and_stable_ties():
         "first",
         "second",
     ]
+
+
+@pytest.mark.parametrize(
+    "score,pending,allowed",
+    [
+        (0.69, True, False),
+        (float("nan"), True, False),
+        (float("inf"), True, False),
+        (-1, True, False),
+        (9, False, False),
+        (0.7, True, True),
+    ],
+)
+def test_alpha_requires_pending_request_and_valid_score(score, pending, allowed):
+    candidate = Candidate("request", 200, score=score, pending_request=pending)
+    assert DuruPolicy(alpha=0.7).may_force_admit(candidate) is allowed

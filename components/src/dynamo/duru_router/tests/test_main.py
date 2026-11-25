@@ -5,6 +5,7 @@
 
 import asyncio
 import copy
+import os
 import struct
 import sys
 import time
@@ -161,11 +162,20 @@ async def test_paused_request_never_dispatches_after_termination(
         await asyncio.gather(request, return_exceptions=True)
 
 
-def test_main_forwards_router_arguments(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "alpha_args,expected",
+    [([], "1.0"), (["--alpha", "0.7"], "0.7")],
+    ids=["default", "explicit"],
+)
+def test_main_parses_alpha_and_forwards_router_arguments(
+    monkeypatch, tmp_path, alpha_args, expected
+):
     monkeypatch.setenv("DURU_SCORES", str(tmp_path / "scores.json"))
     monkeypatch.setenv("DURU_ACCOUNTING_CONFIG", str(tmp_path / "scoring.json"))
     monkeypatch.delenv("DURU_ADMISSION_ALPHA", raising=False)
-    monkeypatch.setattr(sys, "argv", ["duru", "--endpoint", "test.vllm.generate"])
+    monkeypatch.setattr(
+        sys, "argv", ["duru", *alpha_args, "--endpoint", "test.vllm.generate"]
+    )
     invocation = object()
     started = []
     monkeypatch.setattr(main_module, "worker", lambda: invocation)
@@ -174,6 +184,7 @@ def test_main_forwards_router_arguments(monkeypatch, tmp_path):
     main_module.main()
 
     assert started == [invocation]
+    assert os.environ["DURU_ADMISSION_ALPHA"] == expected
     assert sys.argv == ["duru", "--endpoint", "test.vllm.generate"]
 
 
