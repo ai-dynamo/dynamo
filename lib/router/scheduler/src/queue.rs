@@ -652,47 +652,6 @@ fn all_eligible_workers_full<C: WorkerConfigLike>(
     checked_any && !has_available
 }
 
-/// Whether `request` may dispatch on capacity: one of its eligible ranks is under `limits`,
-/// read now. A refusal says what the head waits for: room on its eligible ranks, or, its
-/// exclusive target no longer eligible, room anywhere.
-fn capacity_check<P: SequencePublisher + 'static, C: WorkerConfigLike>(
-    slots: &ActorSlots<P>,
-    eligibility: &QueueEligibility,
-    workers: &watch::Receiver<HashMap<WorkerId, C>>,
-    full_ranks: &FullRankCounts,
-    request: &SchedulingRequest,
-    limits: BusyThresholds,
-    decay_now: Instant,
-) -> LaneCheck {
-    eligibility.with(
-        request,
-        workers,
-        full_ranks,
-        false,
-        |configs, routing, _, _, _| {
-            if !all_eligible_workers_full(
-                &slots.worker_load_reader(decay_now),
-                configs,
-                limits,
-                routing,
-            ) {
-                LaneCheck::Dispatch
-            } else if eligibility.exclusive
-                && request.pinned_worker.is_none()
-                && request
-                    .affinity_target
-                    .is_some_and(|target| !routing.affinity_target_is_eligible(configs, target))
-            {
-                // The exclusive target is gone: the head may go anywhere with room, so it
-                // competes on every pass.
-                LaneCheck::Blocked(BlockReason::Fallback)
-            } else {
-                LaneCheck::Blocked(BlockReason::Capacity)
-            }
-        },
-    )
-}
-
 /// One pass over the ready lane heads, asking whether each may dispatch now: the gate
 /// first, then capacity for a class that queues on it.
 ///
@@ -748,14 +707,33 @@ impl<P: SequencePublisher + 'static, C: WorkerConfigLike> DispatchPass<'_, P, C>
             }
             self.full_ranks_fresh = true;
         }
-        let check = capacity_check(
-            self.slots,
-            self.eligibility,
+        let request = &queued.request;
+        let check = self.eligibility.with(
+            request,
             self.workers,
             self.full_ranks,
-            &queued.request,
-            class.busy_thresholds,
-            self.decay_now,
+            false,
+            |configs, routing, _, _, _| {
+                if !all_eligible_workers_full(
+                    &self.slots.worker_load_reader(self.decay_now),
+                    configs,
+                    class.busy_thresholds,
+                    routing,
+                ) {
+                    LaneCheck::Dispatch
+                } else if self.eligibility.exclusive
+                    && request.pinned_worker.is_none()
+                    && request.affinity_target.is_some()
+                    && !routing.has_affinity_target()
+                {
+                    // `QueueEligibility::with` keeps an exclusive target only while it is
+                    // eligible. It is gone: the head may go anywhere with room, so it
+                    // competes on every pass.
+                    LaneCheck::Blocked(BlockReason::Fallback)
+                } else {
+                    LaneCheck::Blocked(BlockReason::Capacity)
+                }
+            },
         );
         if shared_answer {
             self.class_room[class_index] = Some(check == LaneCheck::Dispatch);
@@ -2465,15 +2443,20 @@ impl<
                         self.slots
                             .record_full_worker_ranks_at(decay_now, full_ranks);
                     }
-                    capacity_check(
-                        &self.slots,
-                        &self.eligibility,
+                    self.eligibility.with(
+                        &request,
                         &self.workers_with_configs,
                         &self.gate_full_ranks,
-                        &request,
-                        class.busy_thresholds,
-                        decay_now,
-                    ) != LaneCheck::Dispatch
+                        false,
+                        |configs, eligibility, _, _, _| {
+                            all_eligible_workers_full(
+                                &self.slots.worker_load_reader(decay_now),
+                                configs,
+                                class.busy_thresholds,
+                                eligibility,
+                            )
+                        },
+                    )
                 });
             if !should_queue {
                 return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
