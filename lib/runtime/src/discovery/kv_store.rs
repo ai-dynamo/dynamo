@@ -949,6 +949,61 @@ mod tests {
     }
 
     #[test]
+    fn in_place_request_plane_change_replaces_the_record() {
+        let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
+        let mut known_instances = HashMap::new();
+        let key = || kv::Key::new(format!("ns/component/endpoint/{:x}", 1));
+        let value = |transport: &str| {
+            bytes::Bytes::from(format!(
+                r#"{{"type":"Endpoint","component":"component","endpoint":"endpoint","namespace":"ns","instance_id":1,"transport":{transport}}}"#
+            ))
+        };
+        let mut put = |transport: &str| {
+            KVStoreDiscovery::discovery_events_from_watch_event(
+                kv::WatchEvent::Put(kv::KeyValue::new(key(), value(transport))),
+                &prefix,
+                INSTANCES_BUCKET,
+                &mut known_instances,
+                true,
+            )
+        };
+        let transport = |events: &[DiscoveryEvent]| {
+            let [DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance))] = events else {
+                panic!("expected one Added endpoint event, got {events:?}");
+            };
+            instance.transport.clone()
+        };
+
+        let tcp = TransportType::Tcp("127.0.0.1:1234/AA/1/ns/component/endpoint".to_string());
+        let velo = TransportType::Velo("velo://x".to_string());
+        assert_eq!(
+            transport(&put(
+                r#"{"tcp":"127.0.0.1:1234/AA/1/ns/component/endpoint"}"#
+            )),
+            tcp
+        );
+        // The same instance comes back on another plane: readers see the new record.
+        assert_eq!(transport(&put(r#"{"velo":"velo://x"}"#)), velo);
+        assert!(put(r#"{"velo":"velo://x"}"#).is_empty());
+
+        // A reader that cannot parse the next record keeps the one it has.
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Resync(HashMap::from([(key(), value(r#"{"future_plane":"x"}"#))])),
+            &prefix,
+            INSTANCES_BUCKET,
+            &mut known_instances,
+            true,
+        );
+        let [DiscoveryEvent::Resync(instances)] = &events[..] else {
+            panic!("expected only a resync event, got {events:?}");
+        };
+        let [DiscoveryInstance::Endpoint(instance)] = &instances[..] else {
+            panic!("expected one endpoint, got {instances:?}");
+        };
+        assert_eq!(instance.transport, velo);
+    }
+
+    #[test]
     fn resync_changed_model_taints_emits_scoped_event() {
         let prefix = format!("{}/{}/{}/{}", MODELS_BUCKET, "ns", "worker", "generate");
         let old = model_spec("first").into_instance(7);

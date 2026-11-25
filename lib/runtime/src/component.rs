@@ -666,19 +666,4 @@ mod tests {
         assert_eq!(decoded, TransportType::Velo("velo://x".to_string()));
         assert_eq!(decoded.address(), "velo://x");
     }
-
-    #[test]
-    fn old_enum_rejects_velo() {
-        #[derive(Debug, Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        enum OldTransportType {
-            #[serde(rename = "nats_tcp")]
-            Nats(String),
-            Tcp(String),
-            Direct(String),
-        }
-
-        let encoded = serde_json::to_string(&TransportType::Velo("velo://x".to_string())).unwrap();
-        assert!(serde_json::from_str::<OldTransportType>(&encoded).is_err());
-    }
 }
