@@ -665,6 +665,14 @@ impl<H: MetricsHierarchy> Metrics<H> {
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
 /// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
 /// generating output in Prometheus text format.
+///
+/// # Label contract
+///
+/// [`create_metric`] takes the hierarchy labels from position, not from the implementing type.
+/// It reads the names of [`MetricsHierarchy::parent_hierarchies`] followed by
+/// [`MetricsHierarchy::basename`]: index 0 is the root and sets no label, index 1 is exported as
+/// `dynamo_namespace`, index 2 as `dynamo_component` and index 3 as `dynamo_endpoint`. A type
+/// with exactly one parent therefore has its own basename exported as `dynamo_namespace`.
 pub trait MetricsHierarchy: Send + Sync {
     // ========================================================================
     // Required methods - must be implemented by all types
@@ -676,6 +684,9 @@ pub trait MetricsHierarchy: Send + Sync {
     /// Get the parent hierarchies as actual objects (not strings)
     /// Returns a vector of hierarchy references, ordered from root to immediate parent.
     /// For example, an Endpoint would return [DRT, Namespace, Component].
+    ///
+    /// The number of parents decides which label this hierarchy's own name is exported as; see
+    /// the label contract on [`MetricsHierarchy`].
     fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy>;
 
     /// Get a reference to this hierarchy's metrics registry
