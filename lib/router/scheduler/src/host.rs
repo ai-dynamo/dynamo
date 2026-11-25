@@ -16,7 +16,7 @@ pub use crate::prefill_load::PrefillLoadEstimator;
 pub use crate::protocols::{
     PotentialLoad, RouterEventSink, RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
 };
-pub use crate::queue::{ClassQueueStats, RuntimePolicyControl};
+pub use crate::queue::{ClassQueueStats, RouterQueueWaitObserver, RuntimePolicyControl};
 pub use crate::replication::{
     AffinityBindingEvent, HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver,
     ReplicaSyncConfig, SchedulerLoadSink,
