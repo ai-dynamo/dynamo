@@ -1898,7 +1898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn velo_address_is_worker_unavailable() {
+    async fn velo_address_is_internal_configuration_error() {
         let client = TcpRequestClient::new().unwrap();
         let err = client
             .send_request(
@@ -1910,7 +1910,26 @@ mod tests {
             .expect_err("a velo address must not be parsed as tcp");
         assert!(match_error_chain(
             err.as_ref(),
-            &[ErrorType::WorkerUnavailable],
+            &[ErrorType::Internal],
+            &[ErrorType::WorkerUnavailable]
+        ));
+        assert!(
+            err.to_string()
+                .contains("mixed request planes are unsupported"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn invalid_tcp_address_keeps_its_parse_error() {
+        let err = TcpRequestClient::parse_address("invalid").unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid TCP address 'invalid'"),
+            "{err:#}"
+        );
+        assert!(!match_error_chain(
+            err.as_ref(),
+            &[ErrorType::Internal, ErrorType::WorkerUnavailable],
             &[]
         ));
     }

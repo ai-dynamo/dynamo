@@ -968,6 +968,20 @@ impl Client {
         self.routing_instances.override_routable_ids(ids);
     }
 
+    /// Replace the discovered instance snapshot for testing. The returned
+    /// sender keeps the snapshot's channel open for the caller's lifetime.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn override_instances(
+        &mut self,
+        instances: Vec<Instance>,
+    ) -> tokio::sync::watch::Sender<Vec<Instance>> {
+        let ids = instances.iter().map(Instance::id).collect();
+        let (tx, rx) = tokio::sync::watch::channel(instances);
+        self.instance_source = Arc::new(rx);
+        self.reconcile_discovered_instances(ids);
+        tx
+    }
+
     fn reconcile_discovered_instances(&self, discovered_ids: Vec<u64>) -> Arc<RoutingInstances> {
         self.routing_instances.reconcile_discovered(discovered_ids)
     }

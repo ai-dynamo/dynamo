@@ -2290,6 +2290,7 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::TransportType;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::{
@@ -3618,6 +3619,108 @@ mod tests {
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
             "Expected clear error about missing instance with no fallback, got: {msg}"
+        );
+
+        rt.shutdown();
+    }
+
+    /// A foreign request-plane worker is a local configuration error: the
+    /// request fails typed, the worker stays eligible, and an allowed fallback
+    /// does not migrate the request to the healthy tcp worker.
+    #[tokio::test]
+    async fn mixed_request_plane_fails_internal_without_migrating() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+        const TCP_ID: u64 = 41;
+        const VELO_ID: u64 = 42;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_mixed_request_plane".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let mut client = {
+            let monitor = tokio_util::sync::CancellationToken::new();
+            let client = Client::with_reconcile_interval_and_cancellation(
+                endpoint.clone(),
+                TEST_RECONCILE_INTERVAL,
+                monitor.clone(),
+            )
+            .await
+            .unwrap();
+            monitor.cancel();
+            client
+        };
+
+        let id = endpoint.id();
+        let instance = |instance_id, transport| Instance {
+            namespace: id.namespace.clone(),
+            component: id.component.clone(),
+            endpoint: id.name.clone(),
+            instance_id,
+            transport,
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let _instances = client.override_instances(vec![
+            instance(
+                TCP_ID,
+                TransportType::Tcp("127.0.0.1:9/AA/1/ns/c/e".to_string()),
+            ),
+            instance(
+                VELO_ID,
+                TransportType::Velo(
+                    "velo://3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab/AA/1/ns/c/e".to_string(),
+                ),
+            ),
+        ]);
+
+        let router =
+            PushRouter::<u64, TestResponse>::for_test(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+
+        let (resolved, _, kind, _) = router
+            .resolve_transport(VELO_ID, TransportFallback::Allow)
+            .expect("a live velo worker resolves even when a fallback is allowed");
+        assert_eq!(
+            resolved, VELO_ID,
+            "the request must not migrate to the tcp worker"
+        );
+        assert_eq!(kind, "transport.velo.request");
+
+        let error = router
+            .direct(SingleIn::new(42u64), VELO_ID)
+            .await
+            .expect_err("the tcp request plane cannot reach a velo worker");
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::Internal,
+            "{error}"
+        );
+        assert!(!is_inhibited(error.as_ref()), "{error}");
+        assert!(!match_error_chain(
+            error.as_ref(),
+            &[ErrorType::WorkerUnavailable, ErrorType::CannotConnect],
+            &[]
+        ));
+        assert!(
+            client.instance_ids_avail().contains(&VELO_ID),
+            "a local misconfiguration must not inhibit the velo worker"
+        );
+        assert!(
+            client
+                .available_instance_ids()
+                .is_some_and(|ids| ids.contains(&VELO_ID)),
+            "the velo worker stays in the eligible set"
+        );
+        assert!(
+            client.instance_ids_avail().contains(&TCP_ID),
+            "the healthy tcp worker stays eligible"
         );
 
         rt.shutdown();

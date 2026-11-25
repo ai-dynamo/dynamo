@@ -6,9 +6,10 @@
 //! Wraps the NATS client to implement the unified RequestPlaneClient trait,
 //! providing a consistent interface across all transport types.
 
-use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use super::unified_client::{ClientStats, Headers, RequestPlaneClient, mixed_request_plane_error};
 use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::NATS_ERRORS_TOTAL;
+use crate::pipeline::network::VELO_SCHEME;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -64,6 +65,14 @@ impl RequestPlaneClient for NatsRequestClient {
         payload: Bytes,
         headers: Headers,
     ) -> Result<Bytes> {
+        if address.starts_with(VELO_SCHEME) {
+            tracing::error!(
+                address = %address,
+                "NATS request client received a foreign request-plane address; rejecting before publish"
+            );
+            return Err(mixed_request_plane_error("nats", &address));
+        }
+
         // Best-effort early rejection. This compares the payload body only, not the
         // header/subject framing that also counts toward the server's max_payload for
         // header messages (HPUB). It is therefore a lower bound: it reliably catches
@@ -157,5 +166,63 @@ mod tests {
         assert!(!err.message().contains("max_payload"));
         assert!(!err.message().contains("payload_bytes"));
         assert!(!err.message().contains("nats-server"));
+    }
+
+    #[tokio::test]
+    async fn velo_address_is_rejected_before_publish() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_by_server = received.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                )
+                .await
+                .unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                received_by_server
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&buf[..n]);
+                if buf[..n].windows(6).any(|window| window == b"PING\r\n") {
+                    stream.write_all(b"PONG\r\n").await.unwrap();
+                }
+            }
+        });
+
+        let client = async_nats::connect(format!("nats://{addr}")).await.unwrap();
+        let nats = NatsRequestClient::new(client);
+        let err = nats
+            .send_request(
+                "velo://3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab/AA/1/ns/c/e".to_string(),
+                Bytes::from_static(b"request"),
+                Headers::new(),
+            )
+            .await
+            .expect_err("a velo address must not be published to NATS");
+        assert!(crate::error::match_error_chain(
+            err.as_ref(),
+            &[ErrorType::Internal],
+            &[ErrorType::WorkerUnavailable]
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let published = String::from_utf8_lossy(&received.lock().unwrap()).into_owned();
+        assert!(!published.contains("HPUB"), "{published}");
+        assert!(!published.contains("PUB "), "{published}");
+        assert!(!published.contains("velo://"), "{published}");
+
+        drop(nats);
+        server.abort();
     }
 }

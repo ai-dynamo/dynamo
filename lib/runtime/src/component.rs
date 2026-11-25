@@ -678,6 +678,7 @@ mod tests {
             Direct(String),
         }
 
-        assert!(serde_json::from_str::<OldTransportType>(r#"{"velo":"velo://x"}"#).is_err());
+        let encoded = serde_json::to_string(&TransportType::Velo("velo://x".to_string())).unwrap();
+        assert!(serde_json::from_str::<OldTransportType>(&encoded).is_err());
     }
 }

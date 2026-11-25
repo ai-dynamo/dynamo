@@ -17,14 +17,19 @@ use std::collections::HashMap;
 pub type Headers = HashMap<String, String>;
 
 /// The typed failure for a request-plane address that belongs to another
-/// request plane. A process serves one request plane, so a local `local`
-/// client cannot send to a `velo` request-plane address.
+/// plane. A process serves one request plane, so a local client that reaches
+/// a foreign-plane worker is a configuration error rather than a worker fault.
 pub(crate) fn mixed_request_plane_error(local: &str, address: &str) -> anyhow::Error {
+    let remote = address
+        .split_once("://")
+        .map_or("unknown", |(scheme, _)| scheme);
     anyhow::anyhow!(
         DynamoError::builder()
-            .error_type(ErrorType::WorkerUnavailable)
+            .error_type(ErrorType::Internal)
             .message(format!(
-                "request plane '{local}' received velo request-plane address '{address}': mixed request planes are unsupported"
+                "request plane '{local}' received a '{remote}' request-plane address '{address}': \
+                 mixed request planes are unsupported; align DYN_REQUEST_PLANE/DYN_RESPONSE_PLANE \
+                 or isolate discovery namespaces"
             ))
             .build()
     )
@@ -215,20 +220,32 @@ mod tests {
     }
 
     #[test]
-    fn mixed_request_plane_error_is_worker_unavailable() {
+    fn mixed_request_plane_error_is_internal_configuration_error() {
         let err = mixed_request_plane_error("tcp", "velo://x/AA/1/ns/c/e");
         assert!(crate::error::match_error_chain(
             err.as_ref(),
-            &[crate::error::ErrorType::WorkerUnavailable],
-            &[]
+            &[crate::error::ErrorType::Internal],
+            &[crate::error::ErrorType::WorkerUnavailable]
         ));
 
         let message = format!("{err:#}");
-        assert!(message.contains("tcp"), "{message}");
-        assert!(message.contains("velo"), "{message}");
+        assert!(message.contains("'tcp'"), "{message}");
+        assert!(message.contains("'velo'"), "{message}");
         assert!(
             message.contains("mixed request planes are unsupported"),
             "{message}"
         );
+        assert!(
+            message.contains("DYN_REQUEST_PLANE/DYN_RESPONSE_PLANE"),
+            "{message}"
+        );
+        assert!(
+            message.contains("isolate discovery namespaces"),
+            "{message}"
+        );
+
+        let reverse = format!("{:#}", mixed_request_plane_error("velo", "tcp://host:1234"));
+        assert!(reverse.contains("'velo'"), "{reverse}");
+        assert!(reverse.contains("'tcp'"), "{reverse}");
     }
 }

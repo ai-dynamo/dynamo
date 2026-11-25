@@ -912,14 +912,17 @@ mod tests {
         let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
         let mut known_instances = HashMap::new();
 
-        let future_plane = kv::KeyValue::new(
-            kv::Key::new(format!("ns/component/endpoint/{:x}", 1)),
-            bytes::Bytes::from_static(
-                br#"{"component":"component","endpoint":"endpoint","namespace":"ns","instance_id":1,"transport":{"future_plane":"x"}}"#,
-            ),
-        );
+        let record = |transport: &str| {
+            kv::KeyValue::new(
+                kv::Key::new(format!("ns/component/endpoint/{:x}", 1)),
+                bytes::Bytes::from(format!(
+                    r#"{{"type":"Endpoint","component":"component","endpoint":"endpoint","namespace":"ns","instance_id":1,"transport":{transport}}}"#
+                )),
+            )
+        };
+
         let events = KVStoreDiscovery::discovery_events_from_watch_event(
-            kv::WatchEvent::Put(future_plane),
+            kv::WatchEvent::Put(record(r#"{"future_plane":"x"}"#)),
             &prefix,
             INSTANCES_BUCKET,
             &mut known_instances,
@@ -929,13 +932,20 @@ mod tests {
         assert!(known_instances.is_empty());
 
         let events = KVStoreDiscovery::discovery_events_from_watch_event(
-            kv::WatchEvent::Put(endpoint_kv(1)),
+            kv::WatchEvent::Put(record(
+                r#"{"tcp":"127.0.0.1:1234/AA/1/ns/component/endpoint"}"#,
+            )),
             &prefix,
             INSTANCES_BUCKET,
             &mut known_instances,
             true,
         );
-        assert_eq!(events, vec![DiscoveryEvent::Added(endpoint_instance(1))]);
+        assert_eq!(events.len(), 1);
+        let DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) = &events[0] else {
+            panic!("expected an Added endpoint event, got {:?}", events[0]);
+        };
+        assert_eq!(instance.instance_id, 1);
+        assert!(matches!(instance.transport, TransportType::Tcp(_)));
     }
 
     #[test]
