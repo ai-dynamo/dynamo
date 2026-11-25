@@ -149,18 +149,26 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 // isSystemOneSerialOptIn mirrors dynamo.vllm: the last (--no-)systemone-serial flag wins,
 // else a literal truthy DYN_VLLM_SYSTEMONE_SERIAL; valueFrom does not count.
 func isSystemOneSerialOptIn(container *corev1.Container) bool {
-	commandLine := slices.Concat(container.Command, container.Args)
+	launch := slices.Concat(container.Command, container.Args)
+	commandLine := launch
 
-	// Read shell words as arguments; direct launches already provide exact arguments.
+	// Shell positional arguments belong to the shell; only its -c script launches the worker.
 	if len(container.Command) > 0 && isShellCommand(container.Command[0]) {
-		expanded := make([]string, 0, len(commandLine))
-		for _, script := range commandLine {
-			expanded = append(expanded, shellLaunchWords(script)...)
+		commandLine = nil
+		for i := 1; i+1 < len(launch); i++ {
+			if launch[i] == "-o" || launch[i] == "-O" || launch[i] == "--rcfile" || launch[i] == "--init-file" {
+				i++
+				continue
+			}
+			if launch[i] == "--" || !strings.HasPrefix(launch[i], "-") {
+				break
+			}
+			if strings.HasPrefix(launch[i], "-") && !strings.HasPrefix(launch[i], "--") && strings.ContainsRune(launch[i], 'c') {
+				commandLine = shellVLLMLaunchArgs(shellLaunchCommands(launch[i+1]))
+				break
+			}
 		}
-		commandLine = expanded
 	}
-
-	// Keep the worker's last-flag precedence after reading comments and quotes.
 	for _, arg := range slices.Backward(commandLine) {
 		switch arg {
 		case systemOneSerialFlag:
@@ -173,18 +181,105 @@ func isSystemOneSerialOptIn(container *corev1.Container) bool {
 	return env != nil && isTruthyEnvValue(env.Value)
 }
 
-// shellLaunchWords reads literal shell arguments without evaluating expansions.
-func shellLaunchWords(script string) []string {
+// shellVLLMLaunchArgs finds the final literal Python module launch, excluding other commands.
+func shellVLLMLaunchArgs(commands [][]string) []string {
+	// Prefixes can set the worker environment or replace the shell with the worker.
+	for _, command := range slices.Backward(commands) {
+		i := 0
+		for i < len(command) && (command[i] == "exec" || command[i] == "env" || command[i] == "then" ||
+			command[i] == "do" || command[i] == "else" || command[i] == "if" || command[i] == "!" || strings.Contains(command[i], "=")) {
+			i++
+		}
+		if i+1 < len(command) && command[i] == "uv" && command[i+1] == "run" {
+			i += 2
+			for i < len(command) && (command[i] == "--no-sync" || command[i] == "--") {
+				i++
+			}
+		}
+		if i == len(command) || !isPythonCommand(command[i]) {
+			continue
+		}
+		if args, ok := pythonVLLMModuleArgs(command[i+1:]); ok {
+			return args
+		}
+	}
+	return nil
+}
+
+// pythonVLLMModuleArgs reads Python options until the module, script, or code payload.
+func pythonVLLMModuleArgs(args []string) ([]string, bool) {
+	// -W and -X consume option values; only -m supplies the worker's remaining argv.
+nextOption:
+	for i := 0; i < len(args); i++ {
+		option := args[i]
+		if option == "--" || !strings.HasPrefix(option, "-") {
+			return nil, false
+		}
+		if option == "--check-hash-based-pycs" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(option, "--") {
+			return nil, false
+		}
+		for j := 1; j < len(option); j++ {
+			switch option[j] {
+			case 'm':
+				module, next := option[j+1:], i+1
+				if module == "" {
+					if next == len(args) {
+						return nil, false
+					}
+					module = args[next]
+					next++
+				}
+				return args[next:], module == "dynamo.vllm"
+			case 'c':
+				return nil, false
+			case 'W', 'X':
+				if j+1 == len(option) {
+					i++
+				}
+				continue nextOption
+			}
+		}
+	}
+	return nil, false
+}
+
+// shellLaunchCommands reads literal shell commands without evaluating expansions.
+func shellLaunchCommands(script string) [][]string {
+	var commands [][]string
 	var words []string
 	var word strings.Builder
 	var quote rune
-	started, escaped, comment := false, false, false
+	started, escaped, comment, redirect := false, false, false, false
 
-	// Quotes group a word, escapes preserve literal characters, and comments end at newlines.
-	for _, char := range script {
+	// Redirection targets stay out of argv, and each command gets its own argument slice.
+	flushWord := func() {
+		if started {
+			if !redirect {
+				words = append(words, word.String())
+			}
+			word.Reset()
+			started, redirect = false, false
+		}
+	}
+	flushCommand := func() {
+		flushWord()
+		if len(words) > 0 {
+			commands = append(commands, words)
+			words = nil
+		}
+		redirect = false
+	}
+
+	// Quotes and escapes preserve literal characters; comments end at newlines.
+	for index, char := range script {
 		if comment {
 			if char == '\n' {
 				comment = false
+				flushCommand()
 			}
 			continue
 		}
@@ -210,7 +305,7 @@ func shellLaunchWords(script string) []string {
 			continue
 		}
 
-		// Only unquoted whitespace and shell control operators separate arguments.
+		// Unquoted operators end commands; whitespace and redirections end words.
 		switch char {
 		case '\'', '"':
 			quote = char
@@ -223,23 +318,31 @@ func shellLaunchWords(script string) []string {
 			} else {
 				word.WriteRune(char)
 			}
-		case ' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>':
-			if started {
-				words = append(words, word.String())
+		case ' ', '\t':
+			flushWord()
+		case '\n', ';', '(', ')':
+			flushCommand()
+		case '|', '&':
+			if (redirect && !started) || (char == '&' && index+1 < len(script) && script[index+1] == '>') {
+				flushWord()
+				redirect = true
+			} else {
+				flushCommand()
+			}
+		case '<', '>':
+			if started && strings.Trim(word.String(), "0123456789") == "" {
 				word.Reset()
 				started = false
 			}
+			flushWord()
+			redirect = true
 		default:
 			word.WriteRune(char)
 			started = true
 		}
 	}
-
-	// Retain the final argument even when it was quoted or had no trailing separator.
-	if started {
-		words = append(words, word.String())
-	}
-	return words
+	flushCommand()
+	return commands
 }
 
 // isTruthyEnvValue matches the truthy values of dynamo's Python parse_bool.
