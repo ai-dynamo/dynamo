@@ -509,6 +509,14 @@ fn read_cr_object(
         return Some((cr_name, cached));
     }
 
+    if let Some(cached) = valid_cr_cache.get(&cr_name)
+        && cached.uid == uid
+        && cached.resource_version.is_some()
+        && cached.resource_version == cr.metadata.resource_version
+    {
+        return Some((cr_name, Some(cached.clone())));
+    }
+
     match super::crd::deserialize_metadata(cr.spec.data.clone()) {
         Ok(metadata) => {
             tracing::trace!("Loaded metadata from CR '{cr_name}'");
@@ -516,6 +524,7 @@ fn read_cr_object(
                 metadata: Arc::new(metadata),
                 uid,
                 owner_pod_uid,
+                resource_version: cr.metadata.resource_version.clone(),
             };
             valid_cr_cache.insert(cr_name.clone(), cached.clone());
             Some((cr_name, Some(cached)))
@@ -702,6 +711,7 @@ mod tests {
             metadata: Arc::new(DiscoveryMetadata::new()),
             uid: Some(uid.to_string()),
             owner_pod_uid: Some(TEST_POD_UID.to_string()),
+            resource_version: None,
         }
     }
 
@@ -721,6 +731,7 @@ mod tests {
             metadata: Arc::new(meta),
             uid: Some(uid.to_string()),
             owner_pod_uid: Some(TEST_POD_UID.to_string()),
+            resource_version: None,
         }
     }
 
@@ -881,6 +892,32 @@ mod tests {
         assert_eq!(cr_key, "worker-a");
         assert!(cached.is_none());
         assert!(!cache.contains_key("worker-a"));
+    }
+
+    #[test]
+    fn read_cr_object_reuses_the_parse_until_the_cr_is_written() {
+        let metadata = DiscoveryMetadata::new();
+        let cr = |uid: &str, resource_version: &str| {
+            let mut cr =
+                super::super::crd::build_cr("worker-a", "worker-a", TEST_POD_UID, &metadata)
+                    .unwrap();
+            cr.metadata.uid = Some(uid.to_string());
+            cr.metadata.resource_version = Some(resource_version.to_string());
+            cr
+        };
+        let mut cache = HashMap::new();
+        let mut read =
+            |cr: DynamoWorkerMetadata| read_cr_object(&cr, &mut cache).unwrap().1.unwrap();
+
+        let first = read(cr("uid-1", "1"));
+        assert!(Arc::ptr_eq(
+            &first.metadata,
+            &read(cr("uid-1", "1")).metadata
+        ));
+        let written = read(cr("uid-1", "2"));
+        assert!(!Arc::ptr_eq(&first.metadata, &written.metadata));
+        let recreated = read(cr("uid-2", "2"));
+        assert!(!Arc::ptr_eq(&written.metadata, &recreated.metadata));
     }
 
     #[test]
