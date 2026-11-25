@@ -132,11 +132,15 @@ impl PrefillLoadEstimator for RustAisCallback {
     }
 }
 
+/// Speculation depth used for decode queries.
+///
+/// Returns a plain error string, not a `PyErr`, so unit tests do not link
+/// against the Python C API (this crate builds with `extension-module`).
 #[cfg(feature = "ais-forward-pass")]
 fn speculation_depth(
     speculation: Option<&ForwardPassSpeculationConfig>,
     nextn: u32,
-) -> PyResult<u32> {
+) -> Result<u32, &'static str> {
     match speculation {
         None => Ok(nextn),
         // AISim rejects "none" combined with a nonzero nextn or any params.
@@ -146,14 +150,8 @@ fn speculation_depth(
             .get("num_speculative_tokens")
             .and_then(serde_json::Value::as_u64)
             .and_then(|depth| u32::try_from(depth).ok())
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "ngram num_speculative_tokens must be a nonnegative u32",
-                )
-            }),
-        Some(_) => Err(pyo3::exceptions::PyValueError::new_err(
-            "Router/Mocker supports only none, ngram speculation or legacy nextn",
-        )),
+            .ok_or("ngram num_speculative_tokens must be a nonnegative u32"),
+        Some(_) => Err("Router/Mocker supports only none, ngram speculation or legacy nextn"),
     }
 }
 
@@ -163,7 +161,8 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
         serde_json::from_value(config.clone()).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
         })?;
-    let nextn = speculation_depth(config.speculation.as_ref(), config.nextn)?;
+    let nextn = speculation_depth(config.speculation.as_ref(), config.nextn)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
