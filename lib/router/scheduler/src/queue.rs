@@ -358,23 +358,6 @@ impl TurnPrepared {
     }
 }
 
-impl PreparedAdmission {
-    /// The rows, when built from the inputs the actor selects with.
-    fn into_current(
-        self,
-        workers_generation: u64,
-        available_worker_ids: Option<&Arc<WorkerIdSet>>,
-        overloaded_worker_ids: Option<&Arc<HashSet<WorkerId>>>,
-    ) -> Option<PreparedCandidates> {
-        // Availability and overload are each one shared snapshot until they change,
-        // so these usually compare pointers.
-        (self.workers_generation == workers_generation
-            && self.available_worker_ids.as_ref() == available_worker_ids
-            && self.overloaded_worker_ids.as_ref() == overloaded_worker_ids)
-            .then_some(self.candidates)
-    }
-}
-
 struct SelectedWorkerForRequest {
     selection: WorkerSelectionResult,
     selection_trace: Option<SelectionTrace>,
@@ -3153,10 +3136,9 @@ impl<
             })
     }
 
-    /// The rows the caller prepared, when the actor would build the same ones now: the
-    /// configuration, availability and overload it selects with, read under the selection's
-    /// borrow of `workers`, are the ones the rows were built from. None, and the selector
-    /// builds its rows, otherwise.
+    /// The rows the caller prepared, when the actor would build the same ones now; see
+    /// [`PreparedAdmission`]. None, and the selector builds its rows, otherwise. The
+    /// configuration is judged under the selection's borrow of `workers`.
     fn adopt_prepared_rows(
         &self,
         prepared: Option<Box<PreparedAdmission>>,
@@ -3165,20 +3147,18 @@ impl<
         available_worker_ids: Option<&Arc<WorkerIdSet>>,
         overloaded_worker_ids: Option<&Arc<HashSet<WorkerId>>>,
     ) -> Option<PreparedCandidates> {
-        // Full rows remain usable unless affinity or fetch sources can change
-        // preparation's eligibility when the projection finds full ranks.
-        let prepared_rows_usable = self.full_ranks.is_empty()
+        let full_ranks_keep_rows = self.full_ranks.is_empty()
             || (!(self.eligibility.exclusive && request.affinity_target.is_some())
                 && request.kv_transfer_candidates.is_none());
-        prepared
-            .filter(|_| !workers.has_changed() && prepared_rows_usable)
-            .and_then(|prepared| {
-                prepared.into_current(
-                    self.workers_generation.load(AtomicOrdering::Relaxed),
-                    available_worker_ids,
-                    overloaded_worker_ids,
-                )
-            })
+        let prepared = prepared?;
+        // Availability and overload are each one shared snapshot until they change, so
+        // these usually compare pointers.
+        (!workers.has_changed()
+            && full_ranks_keep_rows
+            && prepared.workers_generation == self.workers_generation.load(AtomicOrdering::Relaxed)
+            && prepared.available_worker_ids.as_ref() == available_worker_ids
+            && prepared.overloaded_worker_ids.as_ref() == overloaded_worker_ids)
+            .then_some(prepared.candidates)
     }
 
     /// `admitted` selections may carry the installed selection trace; advisory
