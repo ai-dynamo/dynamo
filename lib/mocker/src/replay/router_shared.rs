@@ -89,7 +89,6 @@ pub(in crate::replay) fn replay_cache_owner(worker: WorkerWithDpRank) -> CacheOw
     )
 }
 
-/// What a replay cache owner advertises as a KV fetch source.
 pub(super) fn replay_cache_owner_hint_source() -> RouterHintSourceMetadata {
     RouterHintSourceMetadata {
         source_control_endpoint: ROUTER_HINT_ENDPOINT.to_string(),
@@ -268,7 +267,6 @@ pub(super) fn replay_selector_with_seed(
     })
 }
 
-/// The caller's router plugins, or the ones Dynamo ships.
 fn replay_plugins(
     router_plugins: Option<&RouterPluginRegistry>,
 ) -> anyhow::Result<Cow<'_, RouterPluginRegistry>> {

@@ -505,8 +505,10 @@ hardware offload recipe.
   As in production, the router sends that hint only when the role's hint policies include
   `kv_fetch`: select the `kvcr` worker-selection policy, or list `kv_fetch` under the role's `hints`
   in `router.policy_config`. The default policy sends none, and the workers then pull nothing.
-  Replay sends a hint for every copy source the router books; it does not apply the
-  `min_additional_blocks` parameter of `kv_fetch`.
+  Replay models the built-in `kv_fetch` policy only: it sends a hint for every copy source the
+  router books, does not apply the `min_additional_blocks` parameter, and does not run a custom
+  hint policy. Decode workers of a disaggregated deployment get no hints, because replay feeds the
+  router no KV events from the decode pool.
   `round_robin` sends no hints. Replay checks the role as the production router does at startup
   and fails with the same error: a role that lists `kv_fetch` needs an index that keeps the
   request's block chain, which `router.use_kv_events: false` does not, and a `kvcr` selection needs

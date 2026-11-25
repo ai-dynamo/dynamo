@@ -990,7 +990,9 @@ impl OfflineReplayRouter {
         // selection reads to retain the chain.
         let kv_transfer_chain_supported =
             reads_kv_index && config.supports_kv_transfer_chain_retention();
-        let sends_kv_fetch_hints = role.computes_copy_sources;
+        // Replay feeds no decode-pool KV events to the router (see `RouterEventObservation`),
+        // so a decode role has no copy sources to compute.
+        let sends_kv_fetch_hints = role.computes_copy_sources && worker_type != WorkerType::Decode;
         if !config.use_kv_events {
             config.validate().map_err(anyhow::Error::msg)?;
             anyhow::ensure!(
@@ -4369,28 +4371,33 @@ policy_classes:
             "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {shared_cache_multiplier: 0.5}\n    hints: []\n",
         )
         .unwrap();
-        for (case, config) in [
-            with_kv_fetch_hints(KvRouterConfig {
+        use dynamo_kv_router::plugins::PluginConfigError;
+        let no_chain = |config| (with_kv_fetch_hints(config), true);
+        for (case, (config, copy_sources_unavailable)) in [
+            no_chain(KvRouterConfig {
                 use_kv_events: false,
                 ..router_config()
             }),
-            with_kv_fetch_hints(KvRouterConfig {
+            no_chain(KvRouterConfig {
                 use_remote_indexer: true,
                 ..router_config()
             }),
-            with_kv_fetch_hints(KvRouterConfig {
+            no_chain(KvRouterConfig {
                 router_predicted_ttl_secs: Some(1.0),
                 ..router_config()
             }),
-            KvRouterConfig {
-                router_policy_config: Some(unsent_copies.path().display().to_string()),
-                ..router_config()
-            },
+            (
+                KvRouterConfig {
+                    router_policy_config: Some(unsent_copies.path().display().to_string()),
+                    ..router_config()
+                },
+                false,
+            ),
         ]
         .into_iter()
         .enumerate()
         {
-            let placement = KvRouterPlacement::new_with_selector_seed(
+            let Err(error) = KvRouterPlacement::new_with_selector_seed(
                 &replay_args(),
                 Some(config),
                 None,
@@ -4398,8 +4405,15 @@ policy_classes:
                 Some(0),
                 WorkerType::Aggregated,
                 None,
-            );
-            assert!(placement.is_err(), "case {case}");
+            ) else {
+                panic!("case {case} was accepted")
+            };
+            let expected = match error.downcast_ref::<PluginConfigError>() {
+                Some(PluginConfigError::CopySourcesUnavailable { .. }) => copy_sources_unavailable,
+                Some(PluginConfigError::UnsentCopies { .. }) => !copy_sources_unavailable,
+                _ => false,
+            };
+            assert!(expected, "case {case}: {error}");
         }
     }
 

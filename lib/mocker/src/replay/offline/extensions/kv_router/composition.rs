@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn prefill_and_decode_placements_carry_kv_fetch_hints() {
+    fn only_prefill_placements_carry_kv_fetch_hints() {
         use super::super::tests::{
             fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
             with_kv_fetch_hints,
@@ -725,21 +725,17 @@ mod tests {
         let placed = place_now(&mut prefill, &kv_fetch_target(1), 0.0);
         assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
 
-        // The P/D decode router forces overlap credit 0, so its selection reads no KV
-        // index. As in production, the `kv_fetch` listed for the decode role still
-        // starts one. Decode balances the two targets over both workers, and the one
-        // that lands away from worker 1's G2 prefix fetches it.
-        assert!(decode.router.indexer.retain_kv_transfer_chain);
+        // Decode workers accept hints too, but replay feeds no decode-pool KV events to
+        // the decode router, so it computes no copy sources. Decode balances the two
+        // targets over both workers, so one lands away from worker 1's G2 prefix unhinted.
+        assert!(!decode.router.indexer.retain_kv_transfer_chain);
         decode
             .router
             .on_kv_events(vec![target_prefix_in_g2(1, 0)])
             .unwrap();
         let placed = [1, 2].map(|uuid| place_now(&mut decode, &kv_fetch_target(uuid), 0.0));
         assert!(placed.iter().any(|placement| placement.scheduler_id == 0));
-        for placement in placed {
-            let hint = fetch_hint(1).filter(|_| placement.scheduler_id == 0);
-            assert_eq!(placement.kv_hints, hint);
-        }
+        assert!(placed.iter().all(|placement| placement.kv_hints.is_none()));
     }
 
     #[test]
