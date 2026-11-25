@@ -22,7 +22,6 @@ testing = []
 integration = ["dynamo-runtime/integration"]
 
 [dependencies]
-dynamo-metrics = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
 dynamo-kv-hints = { workspace = true }
@@ -45,6 +44,7 @@ tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
 [dev-dependencies]
+dynamo-metrics = { workspace = true }
 reqwest = { workspace = true }
 rmp-serde = { workspace = true }
 serde_json = { workspace = true }

@@ -2157,7 +2157,6 @@ dependencies = [
  "clap",
  "dynamo-kv-hints",
  "dynamo-llm",
- "dynamo-metrics",
  "dynamo-protocols 10.0.1",
  "dynamo-rl",
  "dynamo-runtime",
