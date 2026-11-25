@@ -3269,9 +3269,18 @@ mod tests {
         requests: Vec<DirectRequest>,
         num_workers: usize,
     ) -> TraceSimulationReport {
+        replay_with_router_config(args, None, requests, num_workers)
+    }
+
+    fn replay_with_router_config(
+        args: MockerConfig,
+        router_config: Option<KvRouterConfig>,
+        requests: Vec<DirectRequest>,
+        num_workers: usize,
+    ) -> TraceSimulationReport {
         simulate_trace_requests_with_router_mode_and_runtime_observers(
             args,
-            None,
+            router_config,
             None,
             requests,
             num_workers,
@@ -3390,6 +3399,43 @@ mod tests {
         assert_eq!(repeat_route.best_available_overlap_blocks, Some(2));
         assert_eq!(repeat_route.selected_overlap_blocks, Some(2));
         assert_eq!(repeat_route.reported_overlap_tokens, Some(8));
+    }
+
+    /// `evicted_prefix_requests` on ranks whose G2 and KVCR-owned memory each
+    /// hold one prompt: C pushes A out of G1 and both on A's worker, and KVCR
+    /// writes A to that rank's disk.
+    #[test]
+    fn kvcr_disk_residency_routes_repeat_to_the_owning_worker() {
+        let mut args = host_offload_args(Some(
+            NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.0),
+        ));
+        args.engine.kvcr = Some(
+            serde_json::from_value(serde_json::json!({
+                "local_g2": {"num_blocks": 2, "copy_bandwidth_gbps": 0.0},
+                "g3": {
+                    "num_blocks": 8,
+                    "latency_to_first_byte_ms": 0.0,
+                    "read_bandwidth_gbps": 0.0,
+                    "write_bandwidth_gbps": 0.0
+                }
+            }))
+            .unwrap(),
+        );
+        // Host credit is off, so only the Disk events of A's worker can score the repeat.
+        let router_config = KvRouterConfig {
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 1.0,
+            ..KvRouterConfig::default()
+        };
+        let report =
+            replay_with_router_config(args, Some(router_config), evicted_prefix_requests(), 2);
+        assert_eq!(report.request_counts.completed_requests, 4);
+        let repeat_route = route(&report, 4);
+        assert_eq!(
+            repeat_route.logical_worker_id,
+            route(&report, 1).logical_worker_id
+        );
+        assert_eq!(repeat_route.selected_overlap_blocks, Some(2));
     }
 
     /// Six one-second-apart copies of one 10-token prompt (two complete

@@ -13543,7 +13543,7 @@ mod tests {
             chunk
         }
         fn recorded(chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Option<bool> {
-            let (progress, updater) = dynamo_admission::host::RequestProgress::new(0);
+            let (progress, updater) = dynamo_admission::host::request_progress(0);
             let tracker = RequestTracker::new();
             tracker.set_classifier_progress(updater);
             for chunk in chunks {
@@ -17186,7 +17186,7 @@ mod tests {
         ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
             let (request, context) = request.transfer(());
             let tracker = request.tracker.clone().unwrap();
-            tracker.set_classifier_progress(dynamo_admission::host::RequestProgress::new(0).1);
+            tracker.set_classifier_progress(dynamo_admission::host::request_progress(0).1);
             let classifier_progress = self.classifier_progress.clone();
             let output = BackendOutput {
                 token_ids: vec![],
@@ -17239,7 +17239,7 @@ mod tests {
             "tool_choice": "auto",
         }))
         .unwrap();
-        let (progress, classifier_progress) = dynamo_admission::host::RequestProgress::new(0);
+        let (progress, classifier_progress) = dynamo_admission::host::request_progress(0);
         let next: Arc<
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         > = Arc::new(RepliesWith {

@@ -121,10 +121,11 @@ contract are unchanged.
 CRDs to be installed before upgrading the operator.
 
 **Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
-Ordinary Helm upgrades remove the flag automatically. The legacy
-`dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability; it remains solely
-for the existing Planner live-retune RBAC condition. Retune behavior and its disabled defaults are
-unchanged. Review API migration notes before future upgrades.
+Ordinary Helm upgrades remove the flag automatically. Remove `dynamo-operator.dgdrV1Beta2.enabled`
+and `dynamo-operator.dgdrV1Beta2.plannerLiveRetune` from your Helm overrides. On install or
+upgrade, every Planner ServiceAccount can create DGDR Requests, read Runs and Candidates, and
+get, create, update, or delete any Lease in its namespace, even when the old values are `false`.
+Enable experimental live retune per deployment with `retune.executor: dgdr` in the Planner config.
 
 #### Operator behavior breaking changes
 

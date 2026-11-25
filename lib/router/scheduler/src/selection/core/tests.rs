@@ -21,8 +21,9 @@ use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 use dynamo_worker_selection::experimental::resident_blocks::{
     CacheOwnerCapacity, RESIDENT_BLOCKS, ResidentBlocksByRow,
 };
+use dynamo_worker_selection::host::SelectionConfigHostExt;
 use dynamo_worker_selection::{
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -644,8 +645,10 @@ async fn the_default_policy_gives_copies_no_credit() {
     for multiplier in [0.0, 0.5] {
         let expected_worker = 1;
         let mut config = test_config(true);
-        config.selection.shared_cache_multiplier = Some(multiplier);
-        config.selection.overlap_score_credit_decay = 0.0;
+        config.selection = config
+            .selection
+            .with_shared_cache_multiplier(Some(multiplier))
+            .with_overlap_score_credit_decay(0.0);
         let (core, _entry, tokens) = hint_fixture_with(config, 32, hint_capable).await;
         // Busy worker 1 (12 prefill tokens, 3 decode blocks) costs 3 + 11 = 14.
         // Worker 2 costs 8 + 8 = 16; copy credit would have lowered it to 12.
@@ -946,12 +949,12 @@ impl dynamo_worker_selection::WorkerPicker for CapturingPicker {
 
     fn pick(
         &self,
-        context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+        request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
         input: dynamo_worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::types::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
-            session_context: context.session_context().cloned(),
-            affinity_target: context.affinity_target(),
+            session_context: request.info().session_context().cloned(),
+            affinity_target: request.affinity_target(),
             shared_beyond_device_blocks: input
                 .cache()
                 .expect("CACHE inputs requested")
@@ -983,10 +986,9 @@ fn capturing_policy_factory() -> (
 ) {
     let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let factory_observed = Arc::clone(&observed);
-    let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, worker_type, _partition| {
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
         WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type.as_str(),
+            context.worker_type().as_str(),
             Vec::new(),
             Box::new(CapturingPicker {
                 observed: Arc::clone(&factory_observed),
@@ -1143,7 +1145,7 @@ impl WorkerPicker for ResidentBlocksRecorder {
 
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         self.observed.lock().push(input.resident_blocks(0));
@@ -1156,10 +1158,9 @@ fn resident_blocks_core(
 ) -> (SelectionCore, Arc<parking_lot::Mutex<Vec<Option<u64>>>>) {
     let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let factory_observed = Arc::clone(&observed);
-    let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, worker_type, _partition| {
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
         WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type.as_str(),
+            context.worker_type().as_str(),
             Vec::new(),
             Box::new(ResidentBlocksRecorder {
                 inputs,
@@ -1883,7 +1884,7 @@ async fn queued_selection_errors_on_shutdown() {
 async fn uncached_selection_stays_uncached_after_queue_refresh_deadline() {
     let shared_queries = SharedCacheCalls::default();
     let mut config = test_router_config(false, Some(0.0));
-    config.selection.shared_cache_multiplier = Some(0.0);
+    config.selection = config.selection.with_shared_cache_multiplier(Some(0.0));
     let mut host = SelectionHost::default();
     host.cache.shared = Some(Arc::new(RecordingSharedCache {
         calls: Arc::clone(&shared_queries),
@@ -4749,7 +4750,7 @@ mod hint_policies {
     };
     use dynamo_worker_selection::{
         WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-        WorkerSelectionContext, WorkerSelectionPolicyError,
+        WorkerSelectionPolicyError, WorkerSelectionRequest,
     };
 
     /// Scores each worker by its negated device overlap, so cache reuse wins.
@@ -4762,7 +4763,7 @@ mod hint_policies {
 
         fn score(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -4781,7 +4782,7 @@ mod hint_policies {
     impl WorkerPicker for LowestCostPicker {
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             Ok(input
@@ -4799,10 +4800,9 @@ mod hint_policies {
     }
 
     fn overlap_policy() -> Option<WorkerSelectionPolicyFactory> {
-        Some(Arc::new(|config, role, _| {
+        Some(Arc::new(|context| {
             WorkerSelectionPolicy::new(
-                config.clone(),
-                role.as_str(),
+                context.worker_type().as_str(),
                 vec![Box::new(DeviceOverlapScorer)],
                 Box::new(LowestCostPicker),
             )
@@ -5009,7 +5009,7 @@ mod hint_policies {
 
         fn score(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -5024,10 +5024,9 @@ mod hint_policies {
     }
 
     fn copy_policy() -> Option<WorkerSelectionPolicyFactory> {
-        Some(Arc::new(|config, role, _| {
+        Some(Arc::new(|context| {
             WorkerSelectionPolicy::new(
-                config.clone(),
-                role.as_str(),
+                context.worker_type().as_str(),
                 vec![Box::new(CopyOfferScorer)],
                 Box::new(LowestCostPicker),
             )

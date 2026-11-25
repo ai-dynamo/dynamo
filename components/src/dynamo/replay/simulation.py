@@ -103,6 +103,9 @@ class DynamoReplayRunnerFactory:
             supports_weka_chat_template=(
                 engine_capabilities.supports_weka_chat_template
             ),
+            # The mocker maps the engine's `Disk` residency events to the router's
+            # disk tier, so a role may carry `kvcr.g3`.
+            supports_kvcr_g3=True,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=tuple(

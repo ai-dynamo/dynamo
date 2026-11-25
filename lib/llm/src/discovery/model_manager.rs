@@ -1601,6 +1601,19 @@ impl ModelManager {
         Err(SystemOneSelectionError::NotFound)
     }
 
+    /// Largest log-probability count a request to `model` (a served name or
+    /// an alias) may ask for. The OpenAI limit for a model that is not
+    /// registered.
+    pub fn max_logprobs(&self, model: &str) -> u8 {
+        let catalog = self.catalog.load();
+        let canonical = catalog.aliases.get(model).map_or(model, String::as_str);
+        catalog
+            .models
+            .get(canonical)
+            .map(|model| model.max_logprobs())
+            .unwrap_or(crate::protocols::openai::validate::MAX_TOP_LOGPROBS)
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -2503,14 +2516,31 @@ impl ModelManager {
             &effective_kv_router_config,
             index_inputs,
         );
-        let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
-            Some(
-                self.get_or_create_kv_source_membership_watch(&endpoint)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        // A frontend that dials its engines itself reaches them through the
+        // runtime's direct dispatch; they publish KV events on their own sockets
+        // and have no event-plane KV sources to track. Direct mode requires
+        // process-local discovery, so it never sees sidecar workers and one
+        // answer per router is enough. A router that wants no events keeps the
+        // runtime ingress, which then subscribes to nothing.
+        let has_direct_kv_events = endpoint
+            .drt()
+            .direct_dispatch::<
+                crate::protocols::common::preprocessor::PreprocessedRequest,
+                crate::protocols::Annotated<
+                    crate::protocols::common::llm_backend::LLMEngineOutput,
+                >,
+            >()
+            .is_some()
+            && kv_event_source_requirement.should_subscribe();
+        let kv_source_membership =
+            if !has_direct_kv_events && kv_event_source_requirement.should_subscribe() {
+                Some(
+                    self.get_or_create_kv_source_membership_watch(&endpoint)
+                        .await?,
+                )
+            } else {
+                None
+            };
 
         let runtime_model_name = model_name.clone();
         let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
@@ -2531,6 +2561,7 @@ impl ModelManager {
                 .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
+            has_direct_kv_events,
         )
         .await?;
 
@@ -3721,6 +3752,28 @@ mod tests {
 
         assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
         assert_eq!(mm.resolve_canonical_name("llama"), "llama");
+    }
+
+    #[test]
+    fn max_logprobs_follows_the_published_limit_through_aliases() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use crate::protocols::openai::validate::MAX_TOP_LOGPROBS;
+
+        let mm = ModelManager::new();
+        assert_eq!(mm.max_logprobs("llama"), MAX_TOP_LOGPROBS);
+
+        let mut card = ModelDeploymentCard::default();
+        card.runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), 32.into());
+        let mut worker_set = WorkerSet::new("ns1".to_string(), "abc".to_string(), card);
+        worker_set.chat_engine = Some(make_chat_engine());
+        assert!(mm.add_worker_set("llama", "ns1", worker_set));
+        assert!(mm.register_alias("llama-alias", "llama"));
+
+        assert_eq!(mm.max_logprobs("llama"), 32);
+        assert_eq!(mm.max_logprobs("llama-alias"), 32);
+        assert_eq!(mm.max_logprobs("other"), MAX_TOP_LOGPROBS);
     }
 
     #[test]

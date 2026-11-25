@@ -1589,22 +1589,28 @@ def test_qwen3_coder_non_streaming_preserves_content_before_tool_call(
 def test_qwen3_coder_non_streaming_batches_reasoning_before_tool_parse(
     tokenizer, qwen3_coder_request_for_sampling, sampling_params
 ):
+    # Each chunk's text matches its token IDs, so the reasoning markers arrive
+    # as the real <think> / </think> tokens, as they do from the engine.
+    chunks = [
+        ("<think>", [151667]),
+        ("Need the weather.", [1001]),
+        ("</think>", [151668]),
+        (
+            "\n<function=get_weather>\n<parameter=location>\nNYC\n"
+            "</parameter>\n</function>",
+            [1002],
+        ),
+    ]
     outputs = [
         CompletionOutput(
             index=0,
-            text=(
-                "<think>Need the weather.</think>\n"
-                "<function=get_weather>\n"
-                "<parameter=location>\n"
-                "NYC\n"
-                "</parameter>\n"
-                "</function>"
-            ),
-            token_ids=[1001],
+            text=text,
+            token_ids=token_ids,
             cumulative_logprob=None,
             logprobs=None,
-            finish_reason="stop",
+            finish_reason="stop" if i == len(chunks) - 1 else None,
         )
+        for i, (text, token_ids) in enumerate(chunks)
     ]
 
     proc = StreamingPostProcessor(
