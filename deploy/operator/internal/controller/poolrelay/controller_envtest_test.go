@@ -65,11 +65,11 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 		ObjectMeta: relayMeta,
 		Spec:       relaySpec("east"),
 	}
-	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+	r := &reconciler{Client: apiClient, scheme: scheme}
 	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
 	var firstResourceVersion string
 	for attempt := range 2 {
-		_, wanted, err := render(relay, []string{"green-runtime"})
+		_, wanted, err := render(relay, "green-runtime", []string{"green-runtime"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	if err := apiClient.Update(ctx, &drifted); err != nil {
 		t.Fatal(err)
 	}
-	_, wanted, err := render(relay, []string{"green-runtime"})
+	_, wanted, err := render(relay, "green-runtime", []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 		corev1.Container{Name: "metrics", Image: "metrics:test"})
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = append(relay.Spec.PodTemplate.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: "DYN_EVENT_PLANE", Value: "zmq"})
-	_, wanted, err = render(relay, []string{"green-runtime"})
+	_, wanted, err = render(relay, "green-runtime", []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	}
 	relay.Spec.PodTemplate.Spec.Containers = relay.Spec.PodTemplate.Spec.Containers[:1]
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = nil
-	_, wanted, err = render(relay, []string{"green-runtime"})
+	_, wanted, err = render(relay, "green-runtime", []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,14 +233,14 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 	}
 	serviceKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
 
-	t.Log("Wait for target publication without guessing from the DGD spec")
+	t.Log("Wait for runtime bindings without guessing from the DGD spec")
 	if err := wait.PollUntilContextTimeout(ctx, 25*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (bool, error) {
 		var pending v1alpha1.DynamoPoolRelay
 		if err := apiClient.Get(ctx, key, &pending); err != nil {
 			return false, err
 		}
 		for _, condition := range pending.Status.Conditions {
-			if condition.Type == "Ready" && condition.Reason == "DiscoveryPending" {
+			if condition.Type == "Ready" && condition.Reason == "RuntimeNamespacePending" {
 				return true, nil
 			}
 		}
@@ -249,14 +249,14 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := apiClient.Get(ctx, serviceKey, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("Relay published without current target roles: %v", err)
+		t.Fatalf("Relay published without a runtime namespace: %v", err)
 	}
 
 	t.Log("A DGD status-only update wakes the Relay dependency watch")
 	dgd.Status = v1beta1.DynamoGraphDeploymentStatus{
 		ObservedGeneration: dgd.Generation,
 		State:              v1beta1.DGDStatePending,
-		Components:         map[string]v1beta1.ComponentReplicaStatus{"decode": podDiscoveryComponentStatus("")},
+		Components:         map[string]v1beta1.ComponentReplicaStatus{"decode": {ComponentKind: v1beta1.ComponentKindDeployment, RuntimeNamespace: "published-worker"}},
 	}
 	if err := apiClient.Status().Update(ctx, dgd); err != nil {
 		t.Fatal(err)

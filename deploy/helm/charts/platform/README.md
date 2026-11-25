@@ -128,6 +128,19 @@ unchanged. Review API migration notes before future upgrades.
 
 #### Operator behavior breaking changes
 
+##### Experimental Pool Relay runtime bindings
+
+**Change:** Pool Relay uses published component `runtimeNamespace` status rather than deriving
+namespaces or interpreting DGD discovery configuration. Kubernetes pod-mode discovery remains a
+prerequisite. Missing namespace status leaves existing Relay resources and sources unchanged.
+
+**Affected:** Existing `DynamoPoolRelay` resources. For DGDs without a frontend, the Relay now uses
+the first published worker namespace in sorted order for its own runtime binding. This can restart
+Relay Pods during upgrade and when that binding changes. Inference workloads are not restarted.
+
+**Action:** Verify that workers use Kubernetes pod-mode discovery before upgrading. Allow the
+experimental Relay listeners to restart if their runtime binding changes; no manifest change is required.
+
 ##### LPX units-only deployment contract
 
 **Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.

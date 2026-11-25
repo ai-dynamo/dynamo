@@ -82,15 +82,21 @@ reconciliation. If `Ready` is False, inspect the condition reason with
 `kubectl -n inference describe dynamopoolrelay green` and check the Relay Pod logs. To publish
 serving load, set `DYN_SERVING_LOAD_PUBLISH=1` on the DGD's frontend Pods.
 
-The operator checks discovery settings in the DGD's current sparse role `podSpec`, not its authored
-PodTemplates. Native runtime sidecars are read from `initContainers`, otherwise from container `main`.
-An omitted `DYN_KUBE_DISCOVERY_MODE` uses the runtime default `pod`; an omitted
-`DYN_DISCOVERY_BACKEND` uses the runtime default `etcd`, which this Relay does not support.
-If target status is missing or stale, or a discovery value is unresolved, `Ready` is Unknown with
-reason `DiscoveryPending`. Existing Relay resources and their endpoint remain unchanged while
-publication is pending. A current target with known incompatible discovery withdraws the listener.
-These checks do not replay published env values or read ConfigMaps, Secrets, image environments,
-or provider environments. A `valueFrom` or remaining `$(...)` reference is unavailable.
+Ensure the target workers use Kubernetes pod-mode discovery. The controller does not infer discovery
+compatibility from DGD annotations, environment variables, commands, or PodTemplates. If the Relay
+does not discover workers, check the workers' discovery settings and the published source namespaces.
+
+The controller reads worker namespaces from `status.components.<name>.runtimeNamespace` and follows
+status-only namespace changes through the source file. It uses the published frontend runtime
+namespace for frontend load collection. A graph without a frontend uses the first worker namespace
+in sorted order for the Relay's own runtime binding. Changes to that binding roll the Relay Pods;
+changes only to worker sources do not roll Pods when the frontend binding is unchanged.
+
+If a required worker or frontend runtime namespace has not been published, `Ready` is Unknown with
+reason `RuntimeNamespacePending`. Existing resources, the source file, and the endpoint remain
+unchanged until the bindings are available. The controller does not derive missing namespaces from
+resource names or worker hashes. Frontends with distinct runtime namespaces and the shared global
+Dynamo namespace remain unsupported.
 
 The `podTemplate` follows DGD's Pod configuration shape. Put the image and transport environment
 on its `main` container. You can also set image pull secrets, resources, and sidecars there. The

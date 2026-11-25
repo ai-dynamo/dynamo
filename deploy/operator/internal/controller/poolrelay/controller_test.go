@@ -9,11 +9,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -65,14 +65,14 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{
-			"frontend": podDiscoveryComponentStatus(""),
-			"decode":   podDiscoveryComponentStatus("inference-green-hash"),
+			"frontend": {RuntimeNamespace: "inference-green"},
+			"decode":   {RuntimeNamespace: "inference-green-hash"},
 		}},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(relay, dgd, &appsv1.Deployment{}).
 		WithObjects(relay, dgd).Build()
-	r := &reconciler{Client: client, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+	r := &reconciler{Client: client, scheme: scheme}
 	childKey := types.NamespacedName{Namespace: key.Namespace, Name: "green-pool-relay"}
 
 	t.Log("Publish one DGD's Relay Service, Deployment, and source file")
@@ -98,7 +98,7 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 		!slices.Equal(container.Args, []string{"--cluster-id", "east", "--sources-file", sourcesFilePath, "--bind", "0.0.0.0:5561"}) {
 		t.Fatalf("unexpected Relay process command: %v %v", container.Command, container.Args)
 	}
-	t.Log("Relay listens for frontend load in the DGD base namespace while workers use a suffixed namespace")
+	t.Log("Relay uses the published frontend binding while workers use a different namespace")
 	foundNamespace := false
 	for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
 		if item.Name == "DYN_NAMESPACE" {
@@ -231,14 +231,71 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 		t.Fatal("new Relay Pod does not match the updated source file")
 	}
 
-	t.Log("Preserve published listeners while the next DGD generation awaits target publication")
-	beforePending := relay.DeepCopy()
+	t.Log("Roll the Relay when its published frontend load binding changes")
+	previousTemplate := deployment.Spec.Template.DeepCopy()
+	connectionRevision = sourceDocument.ConnectionRevision
 	if err := client.Get(ctx, key, dgd); err != nil {
 		t.Fatal(err)
 	}
-	dgd.Generation++
-	dgd.Spec.Env = []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"}}
-	if err := client.Update(ctx, dgd); err != nil {
+	dgd.Status.Components["frontend"] = v1beta1.ComponentReplicaStatus{RuntimeNamespace: "opaque-load-scope"}
+	if err := client.Status().Update(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, childKey, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, childKey, &sources); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(sources.Data["sources.json"]), &sourceDocument); err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(*previousTemplate, deployment.Spec.Template) || sourceDocument.ConnectionRevision == connectionRevision ||
+		!slices.ContainsFunc(deployment.Spec.Template.Spec.Containers[0].Env, func(env corev1.EnvVar) bool {
+			return env.Name == "DYN_NAMESPACE" && env.Value == "opaque-load-scope"
+		}) || !slices.ContainsFunc(deployment.Spec.Template.Spec.Containers[0].Env, func(env corev1.EnvVar) bool {
+		return env.Name == "DYN_RELAY_CONNECTION_REVISION" && env.Value == sourceDocument.ConnectionRevision
+	}) {
+		t.Fatal("frontend binding change did not update the Pod and paired source revision")
+	}
+	if len(sourceDocument.Sources) != 1 || sourceDocument.Sources[0].Namespace != "green-runtime-next" {
+		t.Fatalf("frontend binding change altered worker sources: %+v", sourceDocument.Sources)
+	}
+
+	t.Log("Make both listeners available before testing missing runtime bindings")
+	deployment.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: deployment.Generation, Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2,
+	}
+	if err := client.Status().Update(ctx, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, key, relay); err != nil {
+		t.Fatal(err)
+	}
+	if condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready"); condition == nil || condition.Status != metav1.ConditionTrue || relay.Status.AvailableReplicas != 2 {
+		t.Fatalf("expected two available listeners: %+v", relay.Status)
+	}
+	if err := client.Get(ctx, childKey, &service); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, childKey, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	beforeService, beforeDeployment, beforeSources := service.DeepCopy(), deployment.DeepCopy(), sources.DeepCopy()
+	beforePending := relay.DeepCopy()
+
+	t.Log("Preserve published listeners and the source file while a worker binding is unavailable")
+	if err := client.Get(ctx, key, dgd); err != nil {
+		t.Fatal(err)
+	}
+	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{}
+	if err := client.Status().Update(ctx, dgd); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
@@ -250,44 +307,24 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 	if err := client.Get(ctx, childKey, &deployment); err != nil {
 		t.Fatalf("Relay Deployment was withdrawn for pending target publication: %v", err)
 	}
+	if err := client.Get(ctx, childKey, &sources); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(*beforeService, service) || !reflect.DeepEqual(*beforeDeployment, deployment) || !reflect.DeepEqual(*beforeSources, sources) {
+		t.Fatal("pending publication changed existing Relay resources")
+	}
 	if err := client.Get(ctx, key, relay); err != nil {
 		t.Fatal(err)
 	}
-	if condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready"); condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != "DiscoveryPending" {
+	if condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready"); condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != "RuntimeNamespacePending" {
 		t.Fatalf("unexpected pending status: %+v", relay.Status)
 	}
 	if relay.Status.Endpoint != beforePending.Status.Endpoint || relay.Status.AvailableReplicas != beforePending.Status.AvailableReplicas || relay.Status.ObservedGeneration != beforePending.Status.ObservedGeneration {
 		t.Fatalf("pending publication changed the published listener status: before=%+v after=%+v", beforePending.Status, relay.Status)
 	}
 
-	t.Log("Withdraw only after the current target confirms incompatible discovery")
-	dgd.Status.ObservedGeneration = dgd.Generation
-	dgd.Status.Components["decode"].Roles[0].PodSpec.Containers[0].Env = []corev1.EnvVar{
-		{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
-	}
-	if err := client.Status().Update(ctx, dgd); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Get(ctx, childKey, &service); !apierrors.IsNotFound(err) {
-		t.Fatalf("Relay Service remained published for incompatible target discovery: %v", err)
-	}
-	if err := client.Get(ctx, childKey, &deployment); !apierrors.IsNotFound(err) {
-		t.Fatalf("Relay Deployment remained for incompatible target discovery: %v", err)
-	}
-	if err := client.Get(ctx, key, relay); err != nil {
-		t.Fatal(err)
-	}
-	if condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready"); condition == nil || condition.Reason != "UnsupportedDiscovery" {
-		t.Fatalf("unexpected unsupported discovery status: %+v", relay.Status)
-	}
-
-	t.Log("A status-only compatible target republishes the relay despite conflicting authored env")
-	dgd.Status.Components["decode"].Roles[0].PodSpec.Containers[0].Env = []corev1.EnvVar{
-		{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
-	}
+	t.Log("Resume reconciliation when the published worker binding returns")
+	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{RuntimeNamespace: "green-runtime-next"}
 	if err := client.Status().Update(ctx, dgd); err != nil {
 		t.Fatal(err)
 	}
@@ -378,8 +415,8 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker, GlobalDynamoNamespace: true},
 		}},
 		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{
-			"frontend": podDiscoveryComponentStatus(""),
-			"decode":   podDiscoveryComponentStatus("inference-green-previoushash"),
+			"frontend": {RuntimeNamespace: "green-runtime"},
+			"decode":   {RuntimeNamespace: "inference-green-previoushash"},
 		}},
 	}
 	if err := client.Create(ctx, globalDGD); err != nil {
@@ -436,7 +473,7 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{
-			"decode": podDiscoveryComponentStatus(""),
+			"decode": {RuntimeNamespace: "green-runtime"},
 		}},
 	}
 	if err := client.Create(ctx, dottedRelay); err != nil {
@@ -477,10 +514,10 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{
-			"decode": podDiscoveryComponentStatus(""),
+			"decode": {RuntimeNamespace: "green-runtime"},
 		}},
 	}
-	_, old, err := render(relay, []string{"green-runtime"})
+	_, old, err := render(relay, "green-runtime", []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +531,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 	}
 	stale := old.DeepCopy()
 	relay.Spec.PodTemplate.Spec.Containers[0].Image = "relay:new"
-	_, wanted, err := render(relay, []string{"green-runtime"})
+	_, wanted, err := render(relay, "green-runtime", []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +554,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 			return nil
 		},
 	}).Build()
-	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+	r := &reconciler{Client: apiClient, scheme: scheme}
 	observed, err := r.applyDeployment(ctx, relay, wanted)
 	if err != nil {
 		t.Fatal(err)
@@ -539,45 +576,6 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 	}
 }
 
-func TestPendingDiscoveryDoesNotWithdrawPublishedRelay(t *testing.T) {
-	ctx := context.Background()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{
-		v1alpha1.AddToScheme, v1beta1.AddToScheme, appsv1.AddToScheme, corev1.AddToScheme,
-	} {
-		if err := add(scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	key := types.NamespacedName{Name: "green", Namespace: "inference"}
-	relay := &v1alpha1.DynamoPoolRelay{Name: key.Name, Namespace: key.Namespace, UID: "relay-uid", Spec: relaySpec("east")}
-	dgd := &v1beta1.DynamoGraphDeployment{
-		Name: key.Name, Namespace: key.Namespace,
-		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
-		}},
-	}
-	childKey := types.NamespacedName{Name: serviceName(key.Name), Namespace: key.Namespace}
-	service := &corev1.Service{Name: childKey.Name, Namespace: childKey.Namespace}
-	deployment := &appsv1.Deployment{Name: childKey.Name, Namespace: childKey.Namespace}
-	for _, obj := range []client.Object{service, deployment} {
-		if err := controllerutil.SetControllerReference(relay, obj, scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	apiClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(relay).WithObjects(relay, dgd, service, deployment).Build()
-	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
-		t.Fatal(err)
-	}
-	if err := apiClient.Get(ctx, childKey, service); err != nil {
-		t.Fatalf("Service was withdrawn for pending discovery: %v", err)
-	}
-	if err := apiClient.Get(ctx, childKey, deployment); err != nil {
-		t.Fatalf("Deployment was withdrawn for pending discovery: %v", err)
-	}
-}
-
 func TestRelayEnvironmentOwnership(t *testing.T) {
 	relayMeta := metav1.ObjectMeta{Name: "green", Namespace: "inference"}
 	relay := &v1alpha1.DynamoPoolRelay{
@@ -586,7 +584,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 	}
 	relay.Spec.PodTemplate.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "relay-registry"}}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_PUBLICATION_THRESHOLD", Value: "32"}}
-	_, deployment, err := render(relay, []string{"green-runtime"})
+	_, deployment, err := render(relay, "green-runtime", []string{"green-runtime"})
 	if err != nil {
 		t.Fatalf("supported Relay tuning was rejected: %v", err)
 	}
@@ -599,7 +597,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 		t.Fatal("PodTemplate image pull secrets were not preserved")
 	}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_CONNECTION_REVISION", Value: "wrong"}}
-	if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
+	if _, _, err := render(relay, "green-runtime", []string{"green-runtime"}); err == nil {
 		t.Fatal("operator-owned connection revision was accepted")
 	}
 }
@@ -613,7 +611,7 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 				ObjectMeta: relayMeta,
 				Spec:       relaySpec(clusterID),
 			}
-			if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
+			if _, _, err := render(relay, "green-runtime", []string{"green-runtime"}); err == nil {
 				t.Fatalf("accepted cluster ID %q", clusterID)
 			}
 		})
@@ -641,7 +639,7 @@ func TestApplyFailureWithdrawsStaleReadiness(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{
-			"decode": podDiscoveryComponentStatus(""),
+			"decode": {RuntimeNamespace: "green-runtime"},
 		}},
 	}
 	childKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
@@ -657,7 +655,7 @@ func TestApplyFailureWithdrawsStaleReadiness(t *testing.T) {
 				return c.Create(ctx, obj, opts...)
 			},
 		}).Build()
-	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+	r := &reconciler{Client: apiClient, scheme: scheme}
 	t.Log("Publish the Relay and mark the current generation ready")
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
@@ -766,13 +764,13 @@ func TestPrerequisiteOwnershipConflictWithdrawsRelay(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 		Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{
-			"decode": podDiscoveryComponentStatus("green-runtime"),
+			"decode": {RuntimeNamespace: "green-runtime"},
 		}},
 	}
 	apiClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(relay, dgd, &appsv1.Deployment{}).
 		WithObjects(relay, dgd).Build()
-	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+	r := &reconciler{Client: apiClient, scheme: scheme}
 	reconcile := func() error {
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 		return err
