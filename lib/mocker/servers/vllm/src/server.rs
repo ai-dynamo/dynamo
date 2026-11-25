@@ -9,12 +9,13 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, RawKvEvent, WorkerType,
 };
 use dynamo_mocker::live::{
     LiveEngine, LiveEngineConfig, LiveRequest, RequestOutputBuffering, stable_request_uuid,
 };
 use dynamo_mocker::scheduler::MockerMetrics;
+use dynamo_mocker::services::grpc_kv_events::KvCacheEventData;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_vllm_sidecar::proto as pb;
 use futures::Stream;
@@ -30,9 +31,52 @@ mod request;
 mod kv_events {
     dynamo_mocker::grpc_kv_events!(
         dynamo_vllm_sidecar::proto,
-        dynamo_vllm_sidecar::proto::block_hash::Value::UnsignedValue,
-        Some(0)
+        data_parallel_rank,
+        super::kv_event
     );
+}
+
+/// The fields the Mocker's ZMQ sink publishes for the same event.
+fn kv_event(raw: &RawKvEvent, block_size: u32) -> pb::KvCacheEvent {
+    use pb::kv_cache_event::Event;
+    let hash = |value: u64| pb::BlockHash {
+        value: Some(pb::block_hash::Value::UnsignedValue(value)),
+    };
+    let medium = raw.storage_tier.to_kv_medium().map(str::to_string);
+    let event = match &raw.event.data {
+        KvCacheEventData::Stored(data) => Event::BlockStored(pb::BlockStored {
+            block_hashes: data
+                .blocks
+                .iter()
+                .map(|block| hash(block.block_hash.0))
+                .collect(),
+            parent_block_hash: data.parent_hash.map(|parent| hash(parent.0)),
+            token_ids: raw
+                .block_token_ids
+                .iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect(),
+            block_size,
+            medium,
+            group_idx: Some(0),
+            session_id: raw.session_id.clone(),
+            ..Default::default()
+        }),
+        KvCacheEventData::Removed(data) => Event::BlockRemoved(pb::BlockRemoved {
+            block_hashes: data
+                .block_hashes
+                .iter()
+                .map(|block| hash(block.0))
+                .collect(),
+            medium,
+            group_idx: Some(0),
+            ..Default::default()
+        }),
+        KvCacheEventData::Cleared => Event::AllBlocksCleared(pb::AllBlocksCleared {}),
+    };
+    pb::KvCacheEvent { event: Some(event) }
 }
 
 const DP_RANK: u32 = 0;

@@ -13,12 +13,13 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, RawKvEvent, WorkerType,
 };
 use dynamo_mocker::live::{
     LiveEngine, LiveEngineConfig, RequestOutputBuffering, stable_request_uuid,
 };
 use dynamo_mocker::scheduler::MockerMetrics;
+use dynamo_mocker::services::grpc_kv_events::KvCacheEventData;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use futures::Stream;
 use sglang_api_types::api::v1 as pb;
@@ -29,11 +30,41 @@ use tonic::{Request, Response, Status};
 mod request;
 
 mod kv_events {
-    dynamo_mocker::grpc_kv_events!(
-        sglang_kv_types::kv::v1,
-        |hash: u64| sglang_kv_types::kv::v1::block_hash::Value::SignedValue(hash.cast_signed()),
-        None
-    );
+    dynamo_mocker::grpc_kv_events!(sglang_kv_types::kv::v1, attn_dp_rank, super::kv_event);
+}
+
+/// The fields the Mocker's ZMQ sink publishes for the same event.
+fn kv_event(raw: &RawKvEvent, block_size: u32) -> sglang_kv_types::kv::v1::KvCacheEvent {
+    use sglang_kv_types::kv::v1 as kv;
+    use sglang_kv_types::kv::v1::kv_cache_event::Event;
+    let medium = raw.storage_tier.to_kv_medium().map(str::to_string);
+    let event = match &raw.event.data {
+        KvCacheEventData::Stored(data) => Event::BlockStored(kv::BlockStored {
+            block_hashes: (data.blocks.iter())
+                .map(|block| block.block_hash.0.cast_signed())
+                .collect(),
+            parent_block_hash: data.parent_hash.map(|parent| parent.0.cast_signed()),
+            token_ids: Some(kv::block_stored::TokenIds::Single(kv::TokenIdList {
+                token_ids: (raw.block_token_ids.iter().flatten().flatten())
+                    .map(|&token| u64::from(token))
+                    .collect(),
+            })),
+            block_size,
+            medium,
+            session_id: raw.session_id.clone(),
+            ..Default::default()
+        }),
+        KvCacheEventData::Removed(data) => Event::BlockRemoved(kv::BlockRemoved {
+            block_hashes: data
+                .block_hashes
+                .iter()
+                .map(|block| block.0.cast_signed())
+                .collect(),
+            medium,
+        }),
+        KvCacheEventData::Cleared => Event::AllBlocksCleared(kv::AllBlocksCleared {}),
+    };
+    kv::KvCacheEvent { event: Some(event) }
 }
 
 use kv_events::{KvEventResponses, KvEventStream};

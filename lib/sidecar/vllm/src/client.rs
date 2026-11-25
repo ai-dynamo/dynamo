@@ -24,9 +24,7 @@ pub(crate) use dynamo_sidecar_common::{
 
 use crate::proto as pb;
 
-mod kv_event_proto {
-    dynamo_sidecar_common::kv_event_proto!(crate::proto);
-}
+mod kv_event_proto;
 
 pub(crate) const CONTROL_SERVICE: &str = "vllm.Control";
 pub(crate) const INFERENCE_SERVICE: &str = "vllm.Inference";

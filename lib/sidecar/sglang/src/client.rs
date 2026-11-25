@@ -458,9 +458,7 @@ impl Pool {
     }
 }
 
-mod kv_event_proto {
-    dynamo_sidecar_common::kv_event_proto!(sglang_kv_types::kv::v1);
-}
+mod kv_event_proto;
 
 /// GetServerInfo, GetModelInfo and ListModels, mapped to typed discovery.
 /// An engine that answers any of them UNIMPLEMENTED does not serve the

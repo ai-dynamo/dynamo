@@ -47,16 +47,12 @@ tikv-jemallocator = { version = "0.6", default-features = false, optional = true
 
 [dev-dependencies]
 async-trait = { workspace = true }
-rmp-serde = { workspace = true }
-serde_bytes = { workspace = true }
-sglang-kv-types = { workspace = true }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }
 tonic-health = { workspace = true }
 tower = { workspace = true }
-vllm-proto = { workspace = true }
 
 [features]
 # The v14 protobuf/tonic surface, for sidecars generated against prost 0.14.

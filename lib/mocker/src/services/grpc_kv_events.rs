@@ -8,14 +8,13 @@ pub use dynamo_kv_events::event::KvCacheEventData;
 
 /// Defines `KvEventStream`, a KV event sink that publishes each batch on the
 /// Mocker's ZMQ sink and to the subscribers of the `KvEvents` service of proto
-/// package `$pb`. vLLM's `vllm` and SGLang's `sglang.kv.v1` packages define the
-/// same messages. `$hash` builds the engine's block hash value from a `u64`,
-/// and `$group_idx` is the group index it reports. Invoke it in a module of its
-/// own, in a crate with `anyhow`, `async_stream`, `futures`, `tokio`,
-/// `tonic_v14` and `uuid`.
+/// package `$pb`. `$rank` names the rank field of the engine's batch, and
+/// `$event` converts a `RawKvEvent` and the block size into the engine's
+/// `KvCacheEvent`. Invoke it in a module of its own, in a crate with `anyhow`,
+/// `async_stream`, `futures`, `tokio`, `tonic_v14` and `uuid`.
 #[macro_export]
 macro_rules! grpc_kv_events {
-    ($pb:path, $hash:expr, $group_idx:expr) => {
+    ($pb:path, $rank:ident, $event:path) => {
         use std::pin::Pin;
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +23,6 @@ macro_rules! grpc_kv_events {
         use ::tokio::sync::broadcast;
         use ::tonic_v14::Status;
         use $crate::common::protocols::{RawKvEvent, RawKvEventSink};
-        use $crate::services::grpc_kv_events::KvCacheEventData;
         use $crate::services::zmq_events::ZmqKvEventSink;
         use $pb as pb;
 
@@ -113,56 +111,9 @@ macro_rules! grpc_kv_events {
                 let _ = self.batches.send(pb::KvEventBatch {
                     sequence_number: self.next_sequence.fetch_add(1, Ordering::Relaxed),
                     ts,
-                    data_parallel_rank: Some(self.dp_rank),
+                    $rank: Some(self.dp_rank),
                     events,
                 });
-            }
-
-            /// The fields the Mocker's ZMQ sink publishes for the same event.
-            fn event(&self, raw: &RawKvEvent) -> pb::KvCacheEvent {
-                use pb::kv_cache_event::Event;
-                let hash = |value: u64| pb::BlockHash {
-                    value: Some(($hash)(value)),
-                };
-                let medium = raw.storage_tier.to_kv_medium().map(str::to_string);
-                let event = match &raw.event.data {
-                    KvCacheEventData::Stored(data) => Event::BlockStored(pb::BlockStored {
-                        block_hashes: data
-                            .blocks
-                            .iter()
-                            .map(|block| hash(block.block_hash.0))
-                            .collect(),
-                        parent_block_hash: data.parent_hash.map(|parent| hash(parent.0)),
-                        token_ids: Some(pb::BlockTokenIds {
-                            ids: Some(pb::block_token_ids::Ids::Single(pb::TokenIdList {
-                                token_ids: raw
-                                    .block_token_ids
-                                    .iter()
-                                    .flatten()
-                                    .flatten()
-                                    .map(|&token| u64::from(token))
-                                    .collect(),
-                            })),
-                        }),
-                        block_size: self.block_size,
-                        medium,
-                        group_idx: $group_idx,
-                        session_id: raw.session_id.clone(),
-                        ..Default::default()
-                    }),
-                    KvCacheEventData::Removed(data) => Event::BlockRemoved(pb::BlockRemoved {
-                        block_hashes: data
-                            .block_hashes
-                            .iter()
-                            .map(|block| hash(block.0))
-                            .collect(),
-                        medium,
-                        group_idx: $group_idx,
-                        ..Default::default()
-                    }),
-                    KvCacheEventData::Cleared => Event::AllBlocksCleared(pb::AllBlocksCleared {}),
-                };
-                pb::KvCacheEvent { event: Some(event) }
             }
         }
 
@@ -172,7 +123,13 @@ macro_rules! grpc_kv_events {
             }
 
             fn publish_batch(&self, events: Vec<RawKvEvent>) -> ::anyhow::Result<()> {
-                self.send(events.iter().map(|event| self.event(event)).collect());
+                let block_size = self.block_size;
+                self.send(
+                    events
+                        .iter()
+                        .map(|event| $event(event, block_size))
+                        .collect(),
+                );
                 self.zmq.publish_batch(events)
             }
         }
