@@ -2689,56 +2689,74 @@ def test_build_sampling_params_openai_root_thinking_token_budget_overrides_nvext
     assert sp.thinking_token_budget == 2048
 
 
-@pytest.mark.asyncio
-async def test_generate_text_mode_applies_nvext_cache_salt():
-    from dynamo.vllm.handlers import DecodeWorkerHandler
+def _text_mode_handler(engine_client, input_ids=(1, 2, 3)):
+    """The handler attributes DecodeWorkerHandler._generate_text_mode touches.
 
-    captured = {}
+    ``input_ids`` is what the stub InputParamManager returns for every request.
+    """
 
     class InputParams:
         def get_input_param(self, request, use_tokenizer):
             assert use_tokenizer is True
-            return [1, 2, 3]
-
-    class EngineClient:
-        def generate(self, prompt, *args, **kwargs):
-            captured["prompt"] = prompt
-
-            async def gen():
-                output = SimpleNamespace(index=0, text="ok", finish_reason=None)
-                yield SimpleNamespace(outputs=[output])
-
-            return gen()
+            return list(input_ids)
 
     @asynccontextmanager
     async def abort_monitor(*args, **kwargs):
         yield
 
-    handler = SimpleNamespace(
+    return SimpleNamespace(
         input_param_manager=InputParams(),
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
-        engine_client=EngineClient(),
+        engine_client=engine_client,
         _shutdown_on_engine_dead=lambda exc: None,
         _abort_monitor=abort_monitor,
         _to_local_dp_rank=lambda rank: None,
     )
-    context = SimpleNamespace(trace_headers=lambda: {})
-    request = {
-        "model": "test-model",
-        "prompt": "ignored after tokenization",
-        "nvext": {"cache_salt": "tenant-a"},
-    }
 
-    chunks = [
+
+class _PromptCapturingEngine:
+    """Engine client that records the prompt and streams one ``ok`` chunk."""
+
+    def __init__(self):
+        self.prompt = None
+
+    def generate(self, prompt, *args, **kwargs):
+        self.prompt = prompt
+
+        async def gen():
+            output = SimpleNamespace(index=0, text="ok", finish_reason=None)
+            yield SimpleNamespace(outputs=[output])
+
+        return gen()
+
+
+async def _run_text_mode(handler, request, context=None):
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    if context is None:
+        context = SimpleNamespace(trace_headers=lambda: {})
+    return [
         chunk
         async for chunk in DecodeWorkerHandler._generate_text_mode(
             handler, request, context, "req-1"
         )
     ]
 
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_applies_nvext_cache_salt():
+    engine = _PromptCapturingEngine()
+    request = {
+        "model": "test-model",
+        "prompt": "ignored after tokenization",
+        "nvext": {"cache_salt": "tenant-a"},
+    }
+
+    chunks = await _run_text_mode(_text_mode_handler(engine), request)
+
     assert chunks
-    assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
+    assert engine.prompt["cache_salt"] == "dynamo-cache-salt:tenant-a"
 
 
 @pytest.mark.asyncio
@@ -2747,67 +2765,24 @@ async def test_generate_text_mode_passes_chat_ids_as_tokens_prompt():
     engine never re-tokenizes rendered text and adds a second BOS (#18810)."""
     from vllm.inputs import TokensPrompt
 
-    from dynamo.vllm.handlers import DecodeWorkerHandler
-
-    captured = {}
-
-    class InputParams:
-        def get_input_param(self, request, use_tokenizer):
-            assert use_tokenizer is True
-            assert "messages" in request
-            return [128000, 128006, 882]
-
-    class EngineClient:
-        def generate(self, prompt, *args, **kwargs):
-            captured["prompt"] = prompt
-
-            async def gen():
-                output = SimpleNamespace(index=0, text="ok", finish_reason=None)
-                yield SimpleNamespace(outputs=[output])
-
-            return gen()
-
-    @asynccontextmanager
-    async def abort_monitor(*args, **kwargs):
-        yield
-
-    handler = SimpleNamespace(
-        input_param_manager=InputParams(),
-        default_sampling_params={},
-        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
-        engine_client=EngineClient(),
-        _shutdown_on_engine_dead=lambda exc: None,
-        _abort_monitor=abort_monitor,
-        _to_local_dp_rank=lambda rank: None,
-    )
-    context = SimpleNamespace(trace_headers=lambda: {})
+    engine = _PromptCapturingEngine()
     request = {
         "model": "test-model",
         "messages": [{"role": "user", "content": "What is 2 + 3?"}],
     }
 
-    chunks = [
-        chunk
-        async for chunk in DecodeWorkerHandler._generate_text_mode(
-            handler, request, context, "req-1"
-        )
-    ]
+    chunks = await _run_text_mode(
+        _text_mode_handler(engine, input_ids=[128000, 128006, 882]), request
+    )
 
     assert chunks
     # TokensPrompt is a TypedDict, so compare the mapping itself.
-    assert captured["prompt"] == TokensPrompt(prompt_token_ids=[128000, 128006, 882])
-    assert "prompt" not in captured["prompt"]
+    assert engine.prompt == TokensPrompt(prompt_token_ids=[128000, 128006, 882])
+    assert "prompt" not in engine.prompt
 
 
 @pytest.mark.asyncio
 async def test_generate_text_mode_notifies_for_empty_decoded_token():
-    from dynamo.vllm.handlers import DecodeWorkerHandler
-
-    class InputParams:
-        def get_input_param(self, request, use_tokenizer):
-            assert use_tokenizer is True
-            return [1, 2, 3]
-
     class Context:
         def __init__(self):
             self.notifications = 0
@@ -2847,27 +2822,11 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
 
             return gen()
 
-    @asynccontextmanager
-    async def abort_monitor(*args, **kwargs):
-        yield
-
-    handler = SimpleNamespace(
-        input_param_manager=InputParams(),
-        default_sampling_params={},
-        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
-        engine_client=EngineClient(),
-        _shutdown_on_engine_dead=lambda exc: None,
-        _abort_monitor=abort_monitor,
-        _to_local_dp_rank=lambda rank: None,
-    )
     request = {"model": "test-model", "prompt": "ignored after tokenization"}
 
-    chunks = [
-        chunk
-        async for chunk in DecodeWorkerHandler._generate_text_mode(
-            handler, request, context, "req-1"
-        )
-    ]
+    chunks = await _run_text_mode(
+        _text_mode_handler(EngineClient()), request, context=context
+    )
 
     assert chunks[0]["choices"][0]["delta"]["content"] == ""
     assert context.notifications == 1

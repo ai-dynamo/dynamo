@@ -73,7 +73,6 @@ def test_chat_prompt_carries_exactly_one_bos():
     )
     assert ids == expected
     assert ids[0] == BOS and ids[1] != BOS
-    # The engine must never see rendered text for a chat request.
     assert isinstance(ids, list) and all(isinstance(t, int) for t in ids)
 
 
