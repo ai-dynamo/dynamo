@@ -189,7 +189,7 @@ impl SglangSidecarEngine {
             }
             NativeBackend::Encoder(info) => {
                 let encoder = Encoder::new(
-                    info,
+                    *info,
                     &endpoint,
                     args.encoder_advertise_endpoint.as_deref(),
                     std::time::Duration::from_secs(args.encoder_stage_timeout_secs.into()),
@@ -1208,9 +1208,11 @@ mod tests {
             staged_layout_id: "layout".into(),
             ..Default::default()
         };
-        let (engine, config) =
-            SglangSidecarEngine::from_discovered(args(), super::NativeBackend::Encoder(info))
-                .unwrap();
+        let (engine, config) = SglangSidecarEngine::from_discovered(
+            args(),
+            super::NativeBackend::Encoder(Box::new(info)),
+        )
+        .unwrap();
         assert!(matches!(engine.service, super::NativeService::Encoder(_)));
         assert_eq!(config.disaggregation_mode, DisaggregationMode::Encode);
         assert_eq!(config.component, "encode");

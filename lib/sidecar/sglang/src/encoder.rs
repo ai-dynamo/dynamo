@@ -33,7 +33,7 @@ type EncoderClient = pb::sglang_encoder_client::SglangEncoderClient<Channel>;
 
 pub(crate) enum NativeBackend {
     Language(Box<EngineInfo>),
-    Encoder(pb::GetEncoderInfoResponse),
+    Encoder(Box<pb::GetEncoderInfoResponse>),
 }
 
 impl From<EngineInfo> for NativeBackend {
@@ -320,9 +320,8 @@ pub(crate) fn validate_consumer(
     if let Some(result) = &request.encoder_result {
         let handoff = Handoff::deserialize(result)
             .map_err(|e| client::invalid_arg(format!("invalid SGLang encoder_result: {e}")))?;
-        if !capabilities.handoff_key_id.is_empty()
-            && !(is_lower_hex(&handoff.signature, 64) && is_lower_hex(&handoff.instance_id, 32))
-        {
+        let signed = is_lower_hex(&handoff.signature, 64) && is_lower_hex(&handoff.instance_id, 32);
+        if !capabilities.handoff_key_id.is_empty() && !signed {
             return Err(client::invalid_request(
                 "missing or malformed signed encoder receipt",
             ));

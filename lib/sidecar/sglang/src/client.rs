@@ -245,7 +245,7 @@ pub(crate) async fn bootstrap_discover(
     })
     .await?;
     if let Some(info) = info {
-        return Ok(NativeBackend::Encoder(info));
+        return Ok(NativeBackend::Encoder(Box::new(info)));
     }
     let client = client_from_channel(channel);
     let discovery = retry_unavailable(transport.retry_interval, deadline, || {
