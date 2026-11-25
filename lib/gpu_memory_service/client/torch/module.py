@@ -244,19 +244,19 @@ def _iter_slot_names(cls: type) -> Iterator[str]:
             yield resolved
 
 
-def _rebind_replaced_parameters(
+def _rebind_replaced_tensors(
     root: torch.nn.Module,
-    replaced_params: dict[int, tuple[torch.nn.Parameter, torch.nn.Parameter]],
+    replaced_tensors: dict[int, tuple[torch.Tensor, torch.Tensor]],
     *,
     max_depth: int = 6,
 ) -> int:
-    """Rebind aliased references to replaced ``Parameter`` objects.
+    """Rebind aliased references to replaced ``Tensor`` or ``Parameter`` objects.
 
-    Custom routers, MoE runners, or weight-tied modules may retain direct
-    Python references (attributes, slots, or containers) to meta ``Parameter``
-    instances created during model construction. When materialization replaces
-    those parameters with new ``torch.nn.Parameter`` objects, update stale
-    aliases to point to the materialized parameters.
+    Custom routers, attention backends, MoE runners, or weight-tied modules may
+    retain direct Python references (attributes, slots, or containers) to meta
+    parameters or pool-resident tensors created during construction. When
+    materialization or non-parameter cloning replaces them, update stale aliases
+    to point to the new tensor/Parameter instances.
     """
     # Maps id(obj) -> shallowest depth seen so a shallower path revisits it.
     visited: dict[int, int] = {}
@@ -276,7 +276,7 @@ def _rebind_replaced_parameters(
             stack.append((val, next_depth))
 
     def _rebind_value(val: object, depth: int) -> tuple[object, int]:
-        pair = replaced_params.get(id(val))
+        pair = replaced_tensors.get(id(val))
         if pair is not None and val is pair[0]:
             return pair[1], 1
         if depth > max_depth:
@@ -340,9 +340,24 @@ def _rebind_replaced_parameters(
             for pname, p in list(obj._parameters.items()):
                 if p is None:
                     continue
-                pair = replaced_params.get(id(p))
-                if pair is not None and p is pair[0]:
+                pair = replaced_tensors.get(id(p))
+                if (
+                    pair is not None
+                    and p is pair[0]
+                    and isinstance(pair[1], torch.nn.Parameter)
+                ):
                     obj._parameters[pname] = pair[1]
+                    rebound += 1
+            for bname, b in list(obj._buffers.items()):
+                if b is None:
+                    continue
+                pair = replaced_tensors.get(id(b))
+                if (
+                    pair is not None
+                    and b is pair[0]
+                    and not isinstance(pair[1], torch.nn.Parameter)
+                ):
+                    obj._buffers[bname] = pair[1]
                     rebound += 1
 
         d = _get_instance_dict(obj)
@@ -412,43 +427,75 @@ def materialize_module_from_gms(
         device_index: CUDA device index.
     """
     specs = GMSTensorSpec.load_all(gms_client_memory_manager)
-    # Maps id(old_param) -> (old_param, new_param); keeping old_param alive
+    # Maps id(old_tensor) -> (old_tensor, new_tensor); keeping old_tensor alive
     # here prevents id() reuse until alias rebinding finishes below.
-    replaced_params: dict[int, tuple[torch.nn.Parameter, torch.nn.Parameter]] = {}
+    replaced_tensors: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     materialized_params: dict[
-        tuple[int, str, int, tuple[int, ...], tuple[int, ...], torch.dtype],
+        tuple[int, str, int, tuple[int, ...], tuple[int, ...], str],
         torch.nn.Parameter,
     ] = {}
+    # Deduplicate private non-parameter clones per backing GMS region so shared
+    # scratch buffers/caches stay aliased without duplicating device memory.
+    cloned_nonparams: dict[
+        tuple[str, int, tuple[int, ...], tuple[int, ...], str], torch.Tensor
+    ] = {}
+
+    def _spec_region_key(
+        spec: GMSTensorSpec,
+    ) -> tuple[str, int, tuple[int, ...], tuple[int, ...], str]:
+        return (
+            spec.allocation_id,
+            spec.offset_bytes,
+            tuple(spec.meta.shape),
+            tuple(spec.meta.stride),
+            spec.meta.dtype,
+        )
 
     for name, spec in specs.items():
-        tensor = spec.materialize(gms_client_memory_manager, device_index)
         mod, attr = _resolve_module_attr(model, name)
         tensor_type = spec.meta.tensor_type
 
-        # Tensor attrs and buffers: clone since they may be mutated
         if tensor_type in ("tensor_attr", "buffer"):
-            cloned = tensor.detach().clone()
             is_existing_buffer = (
                 tensor_type == "buffer"
                 and hasattr(mod, "_buffers")
                 and attr in mod._buffers
             )
-            if is_existing_buffer:
-                mod._buffers[attr] = cloned
-            elif tensor_type == "buffer" and _can_register_missing_tensor(
-                mod, attr, other_registry="_parameters"
-            ):
-                mod.__dict__.pop(attr, None)
-                mod.register_buffer(attr, cloned)
-            elif _is_readonly_property(mod, attr):
+            if not is_existing_buffer and _is_readonly_property(mod, attr):
                 logger.debug(
                     "[GMS] Skipping read-only property %s on %s",
                     name,
                     type(mod).__name__,
                 )
+                continue
+
+            cache_key = _spec_region_key(spec)
+            cloned = cloned_nonparams.get(cache_key)
+            if cloned is None:
+                tensor = spec.materialize(gms_client_memory_manager, device_index)
+                cloned = tensor.detach().clone()
+                cloned_nonparams[cache_key] = cloned
+
+            if is_existing_buffer:
+                old_val = mod._buffers[attr]
+                if torch.is_tensor(old_val) and old_val is not cloned:
+                    replaced_tensors.setdefault(id(old_val), (old_val, cloned))
+                mod._buffers[attr] = cloned
             else:
-                setattr(mod, attr, cloned)
+                if not _is_property(type(mod), attr):
+                    old_val = getattr(mod, attr, None)
+                    if torch.is_tensor(old_val) and old_val is not cloned:
+                        replaced_tensors.setdefault(id(old_val), (old_val, cloned))
+                if tensor_type == "buffer" and _can_register_missing_tensor(
+                    mod, attr, other_registry="_parameters"
+                ):
+                    mod.__dict__.pop(attr, None)
+                    mod.register_buffer(attr, cloned)
+                else:
+                    setattr(mod, attr, cloned)
             continue
+
+        tensor = spec.materialize(gms_client_memory_manager, device_index)
 
         # Parameters: replace meta placeholders (which predate post-load
         # weight transforms like reshaping or quantized repacking), register
@@ -475,14 +522,7 @@ def materialize_module_from_gms(
                     tensor.dtype,
                 )
             if param.is_meta or param.device != tensor.device:
-                param_key = (
-                    id(param),
-                    spec.allocation_id,
-                    spec.offset_bytes,
-                    tuple(tensor.shape),
-                    tuple(tensor.stride()),
-                    tensor.dtype,
-                )
+                param_key = (id(param), *_spec_region_key(spec))
                 new_param = materialized_params.get(param_key)
                 if new_param is None:
                     requires_grad = param.requires_grad and (
@@ -492,7 +532,7 @@ def materialize_module_from_gms(
                     )
                     new_param = torch.nn.Parameter(tensor, requires_grad=requires_grad)
                     materialized_params[param_key] = new_param
-                    replaced_params.setdefault(id(param), (param, new_param))
+                    replaced_tensors.setdefault(id(param), (param, new_param))
                 mod._parameters[attr] = new_param
             else:
                 param.data = tensor
@@ -501,10 +541,11 @@ def materialize_module_from_gms(
         if tensor_type == "parameter" and _can_register_missing_tensor(
             mod, attr, other_registry="_buffers"
         ):
-            mod.__dict__.pop(attr, None)
-            mod.register_parameter(
-                attr, torch.nn.Parameter(tensor, requires_grad=False)
-            )
+            old_val = mod.__dict__.pop(attr, None)
+            new_param = torch.nn.Parameter(tensor, requires_grad=False)
+            if torch.is_tensor(old_val) and old_val is not new_param:
+                replaced_tensors.setdefault(id(old_val), (old_val, new_param))
+            mod.register_parameter(attr, new_param)
             continue
 
         if (
@@ -514,23 +555,36 @@ def materialize_module_from_gms(
         ):
             # Parameter overwrote a buffer on the writer; clone so the reader's
             # buffer registry never points directly at read-only GMS memory.
-            mod._buffers[attr] = tensor.detach().clone()
+            cache_key = _spec_region_key(spec)
+            cloned_buf = cloned_nonparams.get(cache_key)
+            if cloned_buf is None:
+                cloned_buf = tensor.detach().clone()
+                cloned_nonparams[cache_key] = cloned_buf
+            old_val = mod._buffers[attr]
+            if torch.is_tensor(old_val) and old_val is not cloned_buf:
+                replaced_tensors.setdefault(id(old_val), (old_val, cloned_buf))
+            mod._buffers[attr] = cloned_buf
             continue
 
-        # Fallback: set as attribute
         if _is_readonly_property(mod, attr):
             logger.debug(
                 "[GMS] Skipping read-only property %s on %s",
                 name,
                 type(mod).__name__,
             )
-        else:
-            setattr(mod, attr, tensor)
+            continue
+        if not _is_property(type(mod), attr):
+            old_val = getattr(mod, attr, None)
+            if torch.is_tensor(old_val) and old_val is not tensor:
+                replaced_tensors.setdefault(id(old_val), (old_val, tensor))
+        setattr(mod, attr, tensor)
 
-    if replaced_params:
-        rebound = _rebind_replaced_parameters(model, replaced_params)
+    if replaced_tensors:
+        rebound = _rebind_replaced_tensors(model, replaced_tensors)
         if rebound:
-            logger.debug("[GMS] Rebound %d aliased Parameter reference(s)", rebound)
+            logger.debug(
+                "[GMS] Rebound %d aliased tensor/Parameter reference(s)", rebound
+            )
 
     # Check for meta tensors and warn
     meta_tensors = [n for n, p in model.named_parameters() if p.is_meta]
@@ -574,6 +628,20 @@ def rebind_nonparameter_tensors(
     """
     mappings = gms_client_memory_manager.mappings
     rebound_bytes = 0
+    cloned_by_src: dict[
+        tuple[
+            torch.device,
+            int,
+            tuple[int, ...],
+            tuple[int, ...],
+            torch.dtype,
+            bool,
+            bool,
+        ],
+        torch.Tensor,
+    ] = {}
+    replaced_tensors: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
     for name, tensor, tensor_type in list(_iter_module_tensors(model)):
         if tensor_type == "parameter":
             continue
@@ -585,40 +653,71 @@ def rebind_nonparameter_tensors(
             continue
 
         mod, attr = _resolve_module_attr(model, name)
-        if (
+        is_buffer = (
             tensor_type == "buffer"
             and hasattr(mod, "_buffers")
             and attr in mod._buffers
-        ):
-            mod._buffers[attr] = tensor.detach().clone()
-        elif attr.isdigit() and not isinstance(mod, torch.nn.Module):
-            # Element of a tensor list/tuple attribute.
-            if isinstance(mod, list):
-                mod[int(attr)] = tensor.detach().clone()
-            elif isinstance(mod, tuple):
-                # Tuples are immutable: rebuild the tuple on its owner.
-                container_name, _ = name.rsplit(".", 1)
-                owner, container_attr = _resolve_module_attr(model, container_name)
-                if isinstance(getattr(type(owner), container_attr, None), property):
-                    # Read-only derived attribute; the underlying tensors
-                    # are iterated (and rebound) separately.
-                    logger.debug("[GMS] Skipping property attribute %r", name)
+        )
+        is_container_elem = attr.isdigit() and not isinstance(mod, torch.nn.Module)
+        tuple_owner: object = None
+        tuple_attr = ""
+
+        if not is_buffer:
+            if is_container_elem:
+                if isinstance(mod, tuple):
+                    container_name, _ = name.rsplit(".", 1)
+                    tuple_owner, tuple_attr = _resolve_module_attr(
+                        model, container_name
+                    )
+                    if _is_property(type(tuple_owner), tuple_attr):
+                        logger.debug("[GMS] Skipping property attribute %r", name)
+                        continue
+                elif not isinstance(mod, list):
+                    logger.debug("[GMS] Cannot rebind container element %r", name)
                     continue
-                elements = list(mod)
-                elements[int(attr)] = tensor.detach().clone()
-                setattr(owner, container_attr, tuple(elements))
-            else:
-                logger.debug("[GMS] Cannot rebind container element %r", name)
-                continue
-        else:
-            if isinstance(getattr(type(mod), attr, None), property):
+            elif _is_property(type(mod), attr):
                 # Read-only derived attribute; the underlying tensor is
                 # iterated (and rebound) separately.
                 logger.debug("[GMS] Skipping property attribute %r", name)
                 continue
-            setattr(mod, attr, tensor.detach().clone())
-        if retain_gms_tensors is not None:
-            retain_gms_tensors.append(tensor)
-        rebound_bytes += tensor.numel() * tensor.element_size()
+
+        src_key = (
+            tensor.device,
+            ptr,
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            tensor.dtype,
+            tensor.is_conj(),
+            tensor.is_neg(),
+        )
+        cloned = cloned_by_src.get(src_key)
+        if cloned is None:
+            cloned = tensor.detach().clone()
+            cloned_by_src[src_key] = cloned
+            if retain_gms_tensors is not None:
+                retain_gms_tensors.append(tensor)
+            rebound_bytes += tensor.numel() * tensor.element_size()
+
+        if tensor is not cloned:
+            replaced_tensors.setdefault(id(tensor), (tensor, cloned))
+
+        if is_buffer:
+            mod._buffers[attr] = cloned
+        elif is_container_elem:
+            if isinstance(mod, list):
+                mod[int(attr)] = cloned
+            else:
+                elements = list(mod)
+                elements[int(attr)] = cloned
+                setattr(tuple_owner, tuple_attr, tuple(elements))
+        else:
+            setattr(mod, attr, cloned)
+
+    if replaced_tensors:
+        rebound = _rebind_replaced_tensors(model, replaced_tensors)
+        if rebound:
+            logger.debug(
+                "[GMS] Rebound %d aliased non-parameter tensor reference(s)", rebound
+            )
 
     return rebound_bytes
