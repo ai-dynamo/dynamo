@@ -9,25 +9,36 @@ use dynamo_parsers_v2::structural_tag::{
     StructuralTagSchemaMode as StructuralTagSchemaModeV2,
     StructuralTagToolChoice as StructuralTagToolChoiceV2,
 };
+use dynamo_parsers_v2::unified::LoadedGuidance;
+use dynamo_parsers_v2::unified::plugin::{GuidanceChoice, GuidanceRequest};
 
 #[cfg(test)]
 use crate::protocols::openai::chat_completions::tool_parser_v2;
 
 use super::StructuralTagBuildRequest;
 
-#[derive(Clone, Copy)]
-pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
+#[derive(Clone)]
+pub(crate) enum StructuralTagBuilder {
+    Builtin(&'static InnerBuilder),
+    /// A loaded parser plugin builds its own constraint through the plugin ABI.
+    Plugin(std::sync::Arc<LoadedGuidance>),
+}
 
 impl StructuralTagBuilder {
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
         let family = crate::protocols::openai::chat_completions::unified_parser::canonical_family(
             parser_name,
         )?;
-        dynamo_parsers_v2::structural_tag_builder_for_family(family).map(Self)
+        if let Some(builder) = dynamo_parsers_v2::structural_tag_builder_for_family(family) {
+            return Some(Self::Builtin(builder));
+        }
+        dynamo_parsers_v2::resolve_unified_parser(family)?
+            .plugin_guidance()
+            .map(Self::Plugin)
     }
 
     pub(super) fn build(
-        self,
+        &self,
         request: &StructuralTagBuildRequest<'_>,
     ) -> anyhow::Result<Option<serde_json::Value>> {
         let tools = request.tools.iter().map(to_v2_tool).collect::<Vec<_>>();
@@ -50,21 +61,38 @@ impl StructuralTagBuilder {
             super::ResolvedReasoningBoundary::Backend => ReasoningBoundaryV2::External,
         };
 
-        self.0.build_with_options(
-            &StructuralTagContext {
-                tool_choice,
-                tools: &tools,
+        let options = StructuralTagOptions {
+            exclude_special_tokens: request.exclude_special_tokens,
+            reasoning_boundary,
+            tool_arguments_any_order: request.tool_arguments_any_order,
+        };
+        match self {
+            Self::Builtin(builder) => builder.build_with_options(
+                &StructuralTagContext {
+                    tool_choice,
+                    tools: &tools,
+                    parallel_tool_calls: request.parallel_tool_calls,
+                    schema_mode,
+                    structured_output_schema: request.structured_output_schema,
+                    starts_in_reasoning: request.starts_in_reasoning,
+                },
+                &options,
+            ),
+            Self::Plugin(guide) => guide(GuidanceRequest {
+                choice: match tool_choice {
+                    StructuralTagToolChoiceV2::None => GuidanceChoice::None,
+                    StructuralTagToolChoiceV2::Auto => GuidanceChoice::Auto,
+                    StructuralTagToolChoiceV2::Required => GuidanceChoice::Required,
+                    StructuralTagToolChoiceV2::Named(name) => GuidanceChoice::Named(name.into()),
+                },
+                tools,
                 parallel_tool_calls: request.parallel_tool_calls,
                 schema_mode,
-                structured_output_schema: request.structured_output_schema,
+                structured_output_schema: request.structured_output_schema.cloned(),
                 starts_in_reasoning: request.starts_in_reasoning,
-            },
-            &StructuralTagOptions {
-                exclude_special_tokens: request.exclude_special_tokens,
-                reasoning_boundary,
-                tool_arguments_any_order: request.tool_arguments_any_order,
-            },
-        )
+                options,
+            }),
+        }
     }
 }
 

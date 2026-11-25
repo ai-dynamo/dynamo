@@ -187,6 +187,34 @@ For MiniMax M3, explicit `guided_json`, `guided_regex`, `guided_choice`, or `gui
 
 Forced choices can install guided JSON or family-native structural tags. A mode requiring the V1 jail cannot silently fall back under explicit V2; unsupported combinations are rejected. See [Structural Tags](structural-tag.md) for builder availability and backend activation.
 
+## Native parser plugins
+
+Dynamo reads parser names, aliases, and capabilities from the frontend-crates parser registry. A parser built as a separate Rust shared library against the `dynamo-parsers-v2` plugin SDK can join that registry at startup, without rebuilding Dynamo. Pass the library with `--tool-parser-plugin` to every process that selects or validates its names, then select the name it registers with the usual worker flags:
+
+```bash
+# Frontend
+python -m dynamo.frontend \
+  --tool-parser-plugin /opt/dynamo/plugins/libacme_parser.so
+
+# Worker
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+  --tool-parser-plugin /opt/dynamo/plugins/libacme_parser.so \
+  --dyn-tool-call-parser acme_qwen \
+  --dyn-reasoning-parser acme_qwen
+```
+
+Repeat `--tool-parser-plugin` to load several libraries. Plugins load before the worker builds its `--dyn-tool-call-parser` and `--dyn-reasoning-parser` choices. The library stays local to each process; the model card carries only the selector names. A frontend without the library rejects a model whose card names a plugin parser.
+
+To inspect the registry, run `python -m dynamo.frontend --list-parsers`, adding the same `--tool-parser-plugin` flags. It prints JSON and exits without starting the server. Each entry lists the family, aliases, input kinds, guidance, and `source` (`builtin` or `plugin`, with the library's `plugin_identity`).
+
+Startup fails with an error naming the library when:
+
+- The file is missing, or exports neither `dynamo_parser_plugin_v2` nor `dynamo_parser_plugin_v1`, or its entry point rejects the ABI version.
+- Its family or an alias is already registered by a built-in parser or another plugin.
+- It accepts only token IDs. Dynamo passes decoded text to plugin parsers.
+
+Plugins are Unified V2 parsers. Under `DYN_PARSER_VERSION=1`, a plugin name is rejected like any name missing from the V1 registry. A plugin that declares a structural-tag builder builds its forced `tool_choice` grammar through the plugin. When the plugin requires that tag for `required` or named choices and cannot build it, the request fails with HTTP 400 before generation. Whether the backend enforces the tag follows [Structural Tags](structural-tag.md).
+
 ## Known limitations and follow-up
 
 The pinned V2 release includes the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and Kimi tool-ID and call-boundary fixes from [#332](https://github.com/ai-dynamo/frontend-crates/pull/332).

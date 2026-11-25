@@ -7,7 +7,7 @@ import argparse
 import logging
 import os
 from importlib.metadata import version as distribution_version
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Sequence
 
 import msgspec
 from packaging.version import Version
@@ -19,6 +19,10 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+)
+from dynamo.common.parser_plugins import (
+    add_parser_plugin_argument,
+    load_parser_plugins_from_argv,
 )
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
@@ -76,6 +80,7 @@ class DynamoRuntimeConfig(ConfigBase):
     connector: list[str]
     enable_local_indexer: bool = True
 
+    tool_parser_plugin: list[str]
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
     dyn_default_thinking_mode: Optional[str] = None
@@ -243,7 +248,16 @@ class DynamoRuntimeConfig(ConfigBase):
 # - To avoid name conflicts with different backends, prefix "dyn-" for dynamo specific
 #   args.
 class DynamoRuntimeArgGroup(ArgGroup):
-    """Dynamo runtime configuration parameters (common to all backends)."""
+    """Dynamo runtime configuration parameters (common to all backends).
+
+    Args:
+        argv: The command line this parser will read; ``None`` means
+            ``sys.argv[1:]``. Parser plugins it names load before the
+            ``--dyn-*-parser`` choices are built.
+    """
+
+    def __init__(self, argv: Optional[Sequence[str]] = None) -> None:
+        self.argv = argv
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add Dynamo runtime arguments to parser."""
@@ -324,7 +338,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
             nargs="*",
         )
 
-        # Optional: tool/reasoning parsers (choices from dynamo._core when available)
+        # Optional: tool/reasoning parsers (choices from dynamo._core when available).
+        # Plugins load first so the names they register are valid choices.
+        add_parser_plugin_argument(g)
+        load_parser_plugins_from_argv(self.argv)
         add_argument(
             g,
             flag_name="--dyn-tool-call-parser",

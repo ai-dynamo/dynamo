@@ -69,9 +69,11 @@ use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 /// the same XML grammar; `qwen3` is the canonical registry name and the one the
 /// conformance corpus uses, so it is what this module passes and logs.
 pub(crate) const QWEN3_UNIFIED_FAMILY: &str = "qwen3";
+#[cfg(test)]
 pub(crate) const KIMI_K2_UNIFIED_FAMILY: &str = "kimi_k2";
 pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
+#[cfg(test)]
 pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
 /// The empty thought channel Gemma 4 opens with thinking off.
@@ -88,8 +90,8 @@ pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
 /// with `--dyn-reasoning-parser nemotron_v3`.
 pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 /// The `dynamo-parsers-v2` unified family for Mistral v11+ (`[TOOL_CALLS]NAME[ARGS]{json}`).
-/// The `mistral` parser name maps to it through [`DYNAMO_FAMILY_ALIASES`], and
-/// [`FAMILY_REQUIRED_TOKENS`] rejects pre-v11 tokenizers at model setup.
+/// The registry maps the `mistral` selector to it and declares the `[ARGS]` token
+/// that rejects pre-v11 tokenizers at model setup.
 pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
 const MISTRAL_REASONING_START: &str = "[THINK]";
 
@@ -100,64 +102,105 @@ fn uses_qwen_xml_grammar(family: &str) -> bool {
     matches!(family, QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY)
 }
 
-/// A family that borrows another family's tool grammar names the owner through its
-/// reasoning half: `qwen3_coder` + `nemotron_v3` is Nemotron, not Qwen3, because the
-/// forced-reasoning default lives in the reasoning parser and the XML grammar is shared.
-fn shared_grammar_family(tool_family: &str, reasoning_family: &str) -> Option<&'static str> {
-    match (tool_family, reasoning_family) {
-        (QWEN3_UNIFIED_FAMILY, NEMOTRON_V3_UNIFIED_FAMILY) => Some(NEMOTRON_V3_UNIFIED_FAMILY),
-        _ => None,
+/// Selector names that are not compile-time built-in literals: plugin families and
+/// legacy configuration selectors. Registrations are startup-only and add-only, so
+/// each distinct name is leaked at most once.
+static REGISTERED_NAMES: LazyLock<std::sync::RwLock<HashSet<&'static str>>> =
+    LazyLock::new(Default::default);
+
+fn registered_name(name: &str) -> &'static str {
+    if let Some(name) = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES
+        .iter()
+        .find(|registered| **registered == name)
+    {
+        return name;
     }
+    if let Some(name) = REGISTERED_NAMES
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+    {
+        return name;
+    }
+    let mut names = REGISTERED_NAMES.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(name) = names.get(name) {
+        return name;
+    }
+    let name: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    names.insert(name);
+    name
 }
 
-const DYNAMO_FAMILY_ALIASES: &[(&str, &str)] = &[
-    ("deepseek-v4", DEEPSEEK_V4_UNIFIED_FAMILY),
-    ("deepseekv4", DEEPSEEK_V4_UNIFIED_FAMILY),
-    ("muse", MUSE_UNIFIED_FAMILY),
-    ("gemma-4", GEMMA4_UNIFIED_FAMILY),
-    ("glm45", GLM47_UNIFIED_FAMILY),
-    ("kimi_k25", KIMI_K2_UNIFIED_FAMILY),
-    ("mistral", MISTRAL_UNIFIED_FAMILY),
-];
+/// Families resolved through the registry, so a request does not copy the catalog.
+static RESOLVED_SELECTORS: LazyLock<std::sync::RwLock<HashMap<String, &'static str>>> =
+    LazyLock::new(Default::default);
 
 /// Canonical family names and aliases share one route for registration, stream, and batch.
+/// The parser registry owns every name, alias, and legacy configuration selector,
+/// including those of loaded parser plugins.
 pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
-    let parser = DYNAMO_FAMILY_ALIASES
-        .iter()
-        .find_map(|(alias, family)| (*alias == parser).then_some(*family))
-        .unwrap_or(parser);
-    dynamo_parsers_v2::canonical_unified_family(parser)
+    if let Some(family) = dynamo_parsers_v2::canonical_unified_family(parser) {
+        return Some(family);
+    }
+    if let Some(family) = RESOLVED_SELECTORS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(parser)
+    {
+        return Some(family);
+    }
+    let family = registered_name(
+        &dynamo_parsers_v2::resolve_unified_parser_pair(Some(parser), None)?
+            .descriptor
+            .family,
+    );
+    RESOLVED_SELECTORS
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(parser.to_owned(), family);
+    Some(family)
 }
-
-/// Aliases that still route but are scheduled for removal, paired with the family
-/// to configure instead. `muse` predates Muse Spark Open and now reads as "any Muse
-/// model" while it selects only Muse Glimmer; a Spark deployment configured with it
-/// starts without complaint and runs the wrong parser.
-/// TODO(next minor): remove these from `DYNAMO_FAMILY_ALIASES` and `FAMILY_NAMES` so
-/// the alias becomes a startup error.
-pub(crate) const DEPRECATED_FAMILY_ALIASES: &[(&str, &str)] = &[("muse", MUSE_UNIFIED_FAMILY)];
 
 /// The startup warning for a deprecated alias, or `None` for any other selector.
 pub(crate) fn deprecated_alias_warning(parser: &str) -> Option<String> {
-    DEPRECATED_FAMILY_ALIASES
+    let descriptor = dynamo_parsers_v2::resolve_unified_parser(parser)?.descriptor;
+    if !descriptor
+        .deprecated_aliases
         .iter()
-        .find(|(alias, _)| *alias == parser)
-        .map(|(alias, family)| {
-            format!(
-                "parser `{alias}` is a deprecated alias of `{family}` and will be removed in a \
-                 future release; configure `{family}` instead. Muse Spark Open is a different \
-                 parser: `muse_spark_open`"
-            )
-        })
+        .any(|alias| alias == parser)
+    {
+        return None;
+    }
+    let family = &descriptor.family;
+    let mut warning = format!(
+        "parser `{parser}` is a deprecated alias of `{family}` and will be removed in a \
+         future release; configure `{family}` instead."
+    );
+    if let Some(note) = &descriptor.deprecation_note {
+        warning.push(' ');
+        warning.push_str(note);
+    }
+    Some(warning)
 }
 
-pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
-    names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
+/// Every selectable unified name: families, aliases, and legacy configuration
+/// selectors of built-in, vendor, and plugin registrations.
+pub(crate) fn family_names() -> Vec<&'static str> {
+    let mut names: Vec<_> = dynamo_parsers_v2::unified_parser_registrations()
+        .iter()
+        .flat_map(|entry| {
+            let descriptor = &entry.descriptor;
+            std::iter::once(&descriptor.family)
+                .chain(&descriptor.aliases)
+                .chain(&descriptor.legacy_configuration_selectors)
+                .map(|name| registered_name(name))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     names.sort_unstable();
     names.dedup();
     names
-});
+}
 
 /// A configured half may select a unified family, but two configured halves must agree.
 pub(crate) fn configured_family(
@@ -171,7 +214,10 @@ pub(crate) fn configured_family(
             if tool_family == reasoning_family {
                 return Some(tool_family);
             }
-            shared_grammar_family(tool_family, reasoning_family)
+            // A reasoning grammar may declare compatible tool selectors, e.g.
+            // `qwen3_coder` + `nemotron_v3` is Nemotron over the shared XML grammar.
+            dynamo_parsers_v2::resolve_unified_parser_pair(Some(tool), Some(reasoning))
+                .map(|entry| registered_name(&entry.descriptor.family))
         }
         (Some(parser), None) | (None, Some(parser)) => canonical_family(parser),
         (None, None) => None,
@@ -211,14 +257,18 @@ pub(crate) fn selected_family_for_selection(
     selection: dynamo_runtime::config::ParserVersion,
 ) -> Option<&'static str> {
     // Qwen3 thinking models can use Hermes syntax; reasoning-only Nemotron cards
-    // do not identify their tool grammar. Auto keeps both on the legacy path.
+    // do not identify their tool grammar. Their registrations require a tool selector
+    // in Auto, which keeps them on the legacy path.
     if selection == dynamo_runtime::config::ParserVersion::V1
         || (selection == dynamo_runtime::config::ParserVersion::Auto
             && tool_call_parser.is_none()
-            && matches!(
-                reasoning_parser,
-                Some("qwen3" | "nemotron_v3" | "nemotron3")
-            ))
+            && reasoning_parser.is_some_and(|reasoning| {
+                dynamo_parsers_v2::resolve_unified_parser(reasoning).is_some_and(|entry| {
+                    entry
+                        .descriptor
+                        .requires_tool_selector_in_auto(Some(reasoning))
+                })
+            }))
     {
         return None;
     }
@@ -253,30 +303,13 @@ pub(crate) fn parsers_v2_selected() -> bool {
     super::tool_parser_v2::enabled()
 }
 
-/// A vocabulary token a unified family's call format needs.
-struct RequiredToken {
-    family: &'static str,
-    token: &'static str,
-    /// The tokenizers that have the token, for the error message.
-    tokenizers: &'static str,
-    /// The v1 parser that serves a tokenizer without it under `DYN_PARSER_VERSION=1`.
-    v1_parser: &'static str,
-}
-
-/// A Mistral vocabulary without `[ARGS]` is pre-v11 and writes `[TOOL_CALLS]` followed
-/// by a JSON array, which `mistral_4` does not read (stock vLLM's
-/// `_is_pre_v11_tokeniser` vocabulary check).
-const FAMILY_REQUIRED_TOKENS: &[RequiredToken] = &[RequiredToken {
-    family: MISTRAL_UNIFIED_FAMILY,
-    token: "[ARGS]",
-    tokenizers: "Mistral tokenizer v11 or later",
-    v1_parser: "mistral",
-}];
-
-fn required_token(family: &str) -> Option<&'static RequiredToken> {
-    FAMILY_REQUIRED_TOKENS
-        .iter()
-        .find(|required| required.family == family)
+/// Vocabulary the selected family's registration requires, e.g. Mistral's `[ARGS]`:
+/// a Mistral vocabulary without it is pre-v11 and writes `[TOOL_CALLS]` followed by a
+/// JSON array, which `mistral_4` does not read.
+fn required_tokens(family: &str) -> Vec<dynamo_parsers_v2::RequiredVocabularyToken> {
+    dynamo_parsers_v2::resolve_unified_parser(family)
+        .map(|entry| entry.descriptor.required_tokens)
+        .unwrap_or_default()
 }
 
 /// Reject model setup when the configured unified family needs a vocabulary token
@@ -286,18 +319,18 @@ pub(crate) fn check_family_tokens(
     reasoning_parser: Option<&str>,
     tokenizer: &dyn Tokenizer,
 ) -> anyhow::Result<()> {
-    let Some(required) =
-        configured_family(tool_call_parser, reasoning_parser).and_then(required_token)
-    else {
+    let Some(family) = configured_family(tool_call_parser, reasoning_parser) else {
         return Ok(());
     };
-    let token = required.token;
-    if tokenizer
-        .token_to_id(token)
-        .map_err(|error| error.context(format!("look up {token} for {}", required.family)))?
-        .is_none()
-    {
-        return missing_family_token(tool_call_parser, reasoning_parser, required);
+    for required in required_tokens(family) {
+        let token = &required.token;
+        if tokenizer
+            .token_to_id(token)
+            .map_err(|error| error.context(format!("look up {token} for {family}")))?
+            .is_none()
+        {
+            return missing_family_token(tool_call_parser, reasoning_parser, family, &required);
+        }
     }
     Ok(())
 }
@@ -310,8 +343,13 @@ pub(crate) fn check_legacy_mistral_family(
     if configured_family(tool_call_parser, reasoning_parser) != Some(MISTRAL_UNIFIED_FAMILY) {
         return Ok(());
     }
-    match required_token(MISTRAL_UNIFIED_FAMILY) {
-        Some(required) => missing_family_token(tool_call_parser, reasoning_parser, required),
+    match required_tokens(MISTRAL_UNIFIED_FAMILY).first() {
+        Some(required) => missing_family_token(
+            tool_call_parser,
+            reasoning_parser,
+            MISTRAL_UNIFIED_FAMILY,
+            required,
+        ),
         None => Ok(()),
     }
 }
@@ -319,28 +357,32 @@ pub(crate) fn check_legacy_mistral_family(
 fn missing_family_token(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
-    required: &RequiredToken,
+    family: &str,
+    required: &dynamo_parsers_v2::RequiredVocabularyToken,
 ) -> anyhow::Result<()> {
     // DYN_PARSER_VERSION=1 selects no unified family, so the v1 parsers serve this model.
     if super::tool_parser_v2::selected_version()? == dynamo_runtime::config::ParserVersion::V1 {
         return Ok(());
     }
-    let RequiredToken {
-        family,
-        token,
-        tokenizers,
-        v1_parser,
-    } = required;
+    let token = &required.token;
+    let tokenizers = &required.tokenizer_description;
     let selector = [tool_call_parser, reasoning_parser]
         .into_iter()
         .flatten()
         .next()
         .unwrap_or(family);
+    let fallback = required
+        .legacy_parser
+        .as_ref()
+        .map_or_else(String::new, |v1_parser| {
+            format!(
+                " To serve it, configure `{v1_parser}` and set DYN_PARSER_VERSION=1, which selects \
+             the v1 parsers for every model on the frontend"
+            )
+        });
     anyhow::bail!(
         "parser `{selector}` selects the unified family `{family}`, which needs a \
-         {tokenizers} with {token}; this model's tokenizer has no {token}. To serve it, \
-         configure `{v1_parser}` and set DYN_PARSER_VERSION=1, which selects the v1 \
-         parsers for every model on the frontend"
+         {tokenizers} with {token}; this model's tokenizer has no {token}.{fallback}"
     )
 }
 
@@ -351,8 +393,7 @@ pub(crate) fn needs_tokenizer_check(
     reasoning_parser: Option<&str>,
 ) -> bool {
     configured_family(tool_call_parser, reasoning_parser)
-        .and_then(required_token)
-        .is_some()
+        .is_some_and(|family| !required_tokens(family).is_empty())
 }
 
 /// Request facts for parser initialization and response interpretation.
@@ -12967,7 +13008,7 @@ pub(crate) mod tests {
             assert_eq!(deprecated_alias_warning(parser), None, "{parser}");
         }
         assert_eq!(canonical_family("muse"), Some(MUSE_UNIFIED_FAMILY));
-        assert!(FAMILY_NAMES.contains(&"muse"));
+        assert!(family_names().contains(&"muse"));
     }
 
     #[test]
@@ -14317,7 +14358,7 @@ pub(crate) mod tests {
             selected_family(None, Some("nemotron_v3")),
             (selection == "2").then_some(NEMOTRON_V3_UNIFIED_FAMILY)
         );
-        for &parser in FAMILY_NAMES.iter() {
+        for &parser in family_names().iter() {
             let family = canonical_family(parser).unwrap();
             for (tool, reasoning) in [
                 (Some(parser), Some(family)),
@@ -15755,7 +15796,7 @@ mod beam_routing_tests {
             ),
             None
         );
-        assert!(FAMILY_NAMES.contains(&BEAM_UNIFIED_FAMILY));
+        assert!(family_names().contains(&BEAM_UNIFIED_FAMILY));
     }
 
     #[test]

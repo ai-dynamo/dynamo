@@ -207,8 +207,9 @@ pub(crate) fn supports_family(family: &str) -> bool {
     v2_family(family).is_some()
 }
 
-pub fn unified_family_names() -> &'static [&'static str] {
-    &super::unified_parser::FAMILY_NAMES
+/// Selectable unified parser names, including those of loaded parser plugins.
+pub fn unified_family_names() -> Vec<&'static str> {
+    super::unified_parser::family_names()
 }
 
 /// Resolve the configured family through the shared generation and pair policy.

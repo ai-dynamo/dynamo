@@ -19,6 +19,7 @@
 import argparse
 import asyncio
 import importlib.metadata
+import json
 import logging
 import os
 import signal
@@ -28,8 +29,13 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import uvloop
 
+from dynamo._core import get_parser_registry_json
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.parser_plugins import (
+    add_parser_plugin_argument,
+    load_parser_plugins_from_argv,
+)
 from dynamo.llm import (
     AisPerfConfig,
     EngineType,
@@ -296,8 +302,20 @@ def parse_args() -> (
     )
 
     FrontendArgGroup().add_arguments(parser)
+    add_parser_plugin_argument(parser)
+    parser.add_argument(
+        "--list-parsers",
+        action="store_true",
+        help="Print the parser registry (built-in parsers and loaded "
+        "--tool-parser-plugin libraries) as JSON and exit.",
+    )
 
     args, unknown = parser.parse_known_args()
+    # Plugins register before any model card names their parsers.
+    load_parser_plugins_from_argv()
+    if args.list_parsers:
+        print(json.dumps(json.loads(get_parser_registry_json()), indent=2))
+        sys.exit(0)
 
     config = FrontendConfig.from_cli_args(args)
     config.validate()

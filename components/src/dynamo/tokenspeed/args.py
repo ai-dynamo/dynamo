@@ -133,7 +133,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
         formatter_class=argparse.RawTextHelpFormatter,
         allow_abbrev=False,
     )
-    DynamoRuntimeArgGroup().add_arguments(parser)
+    DynamoRuntimeArgGroup(cli_args).add_arguments(parser)
     DynamoTokenSpeedArgGroup().add_arguments(parser)
 
     server_args_cls = _server_args_cls()

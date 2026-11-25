@@ -163,7 +163,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
-    DynamoRuntimeArgGroup().add_arguments(parser)
+    DynamoRuntimeArgGroup(cli_args).add_arguments(parser)
     DynamoTrtllmArgGroup().add_arguments(parser)
 
     # Router advertisement flags are parsed into their own config object rather

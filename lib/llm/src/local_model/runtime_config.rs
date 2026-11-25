@@ -700,7 +700,7 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         let mut supported = get_available_tool_parsers();
         // Unified parser names live outside the v1 registry; normalize the union
         // for a stable error message.
-        supported.extend_from_slice(unified_family_names());
+        supported.extend(unified_family_names());
         supported.sort_unstable();
         supported.dedup();
         if !supported.contains(&parser) {
@@ -1566,7 +1566,7 @@ mod tests {
         };
 
         // Every v2 or unified parser must remain valid at registration.
-        for &parser in V2_FAMILIES.iter().chain(unified_family_names()) {
+        for &parser in V2_FAMILIES.iter().chain(&unified_family_names()) {
             assert!(validate(parser).is_ok(), "{parser} must be supported");
         }
         assert!(validate("").is_ok());
