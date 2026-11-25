@@ -20,12 +20,12 @@ use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::tokenizers::Encoding;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_llm::worker_type::WorkerType;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::Prompt;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::discovery::{
@@ -1961,7 +1961,7 @@ mod tests {
             .unwrap()
             .endpoint("generate");
         sibling.register_endpoint_instance().await.unwrap();
-        dynamo_llm::local_model::register_model_card(&sibling, &card)
+        dynamo_model_card::local_model::register_model_card(&sibling, &card)
             .await
             .unwrap();
 
@@ -2002,7 +2002,7 @@ mod tests {
             .unwrap()
             .endpoint("generate");
         generation.register_endpoint_instance().await.unwrap();
-        dynamo_llm::local_model::register_model_card(&generation, &card)
+        dynamo_model_card::local_model::register_model_card(&generation, &card)
             .await
             .unwrap();
         let selected =
@@ -3235,7 +3235,7 @@ mod tests {
         use dynamo_kv_router::config::KvRouterConfig;
         use dynamo_llm::kv_router::prefill_router::PrefillError;
         use dynamo_llm::kv_router::{KvRouter, SelectionPolicySource};
-        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+        use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
         use dynamo_runtime::distributed::DistributedConfig;
         use dynamo_scheduler::host::KvSchedulerError;
 

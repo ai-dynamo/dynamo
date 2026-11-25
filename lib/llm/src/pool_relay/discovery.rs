@@ -13,10 +13,10 @@ use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, ModelAlias, ModelTarget, WorkerRole,
 };
 use super::resolution::{ResolvedIndexerDomain, resolve_indexer_domain};
-use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_card::ModelDeploymentCard;
-use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_model_card::model_card::ModelDeploymentCard;
+use dynamo_model_card::model_type::ModelType;
 
 #[cfg(test)]
 use super::{
@@ -957,8 +957,8 @@ fn same_membership(left: &EndpointMembership, right: &EndpointMembership) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_card::LoraInfo;
     use crate::worker_type::WorkerType;
+    use dynamo_model_card::model_card::LoraInfo;
     use dynamo_runtime::discovery::ModelTaintsUpdate;
 
     fn card(name: &str, artifact: &str, block_size: u32) -> ModelDeploymentCard {
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[test]
     fn encode_role_is_preserved_for_surface_less_and_front_door_cards() {
-        use crate::model_type::ModelType;
+        use dynamo_model_card::model_type::ModelType;
 
         let mut surface_less = card("vision-language", "vision-language", 16);
         surface_less.worker_type = Some(WorkerType::Encode);

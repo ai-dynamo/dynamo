@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
-    endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, input::common},
     http::service::{
@@ -16,13 +15,14 @@ use crate::{
         service_v2::{self, HttpService},
     },
     kv_router::plugins::RouterPluginBuilder,
-    local_model::runtime_config::TokenizerBackend,
-    model_type::ModelType,
     namespace::NamespaceFilter,
-    router_config::RouterConfig,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
+};
+use dynamo_model_card::{
+    endpoint_type::EndpointType, local_model::runtime_config::TokenizerBackend,
+    model_type::ModelType, router_config::RouterConfig,
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
@@ -482,13 +482,13 @@ fn update_model_metrics(
 mod tests {
     use super::*;
     use crate::engines::make_echo_engine;
-    use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
     use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_model_card::model_card::{LoraInfo, ModelDeploymentCard};
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {
-        use crate::local_model::LocalModelBuilder;
+        use dynamo_model_card::local_model::LocalModelBuilder;
         use dynamo_runtime::{Runtime, distributed::DistributedConfig, pipeline::RouterMode};
 
         let policy_file = tempfile::NamedTempFile::new().unwrap();
@@ -547,7 +547,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(request_trace_lifecycle)]
     async fn http_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
-        use crate::local_model::LocalModelBuilder;
+        use dynamo_model_card::local_model::LocalModelBuilder;
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
         use std::time::Duration;
 

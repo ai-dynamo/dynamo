@@ -18,12 +18,12 @@ use std::sync::Arc;
 
 use anyhow::Error;
 use dynamo_llm::http::service::service_v2::HttpService;
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::{BackendOutput, OpenAIPreprocessor, PreprocessedRequest};
 use dynamo_llm::protocols::Annotated;
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_runtime::CancellationToken;
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, SingleIn,

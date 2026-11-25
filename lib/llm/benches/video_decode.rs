@@ -6,8 +6,8 @@ use std::hint::black_box;
 use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
-use dynamo_llm::media_config::MediaDecoder;
 use dynamo_llm::preprocessor::media::{Decoder, EncodedMediaData};
+use dynamo_model_card::media_config::MediaDecoder;
 use rayon::{ThreadPoolBuilder, prelude::*};
 
 const RUN_CONCURRENT_SWEEP_ENV: &str = "RUN_VIDEO_DECODE_SWEEP";

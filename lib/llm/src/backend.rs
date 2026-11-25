@@ -26,7 +26,7 @@ use std::{
 use anyhow::Result;
 use futures::stream::{Stream, StreamExt};
 
-use crate::model_card::ModelDeploymentCard;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass},

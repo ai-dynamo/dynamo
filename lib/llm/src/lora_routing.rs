@@ -14,7 +14,6 @@ use dynamo_worker_selection::host::HostedWorkerPicker;
 use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::hosted_request,
-    local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     routing_policy::{
@@ -22,6 +21,7 @@ use crate::{
         KvAdmissionPolicy,
     },
 };
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 fn policy(request: &PreprocessedRequest) -> RequestPolicy {
     let version = request.routing.as_ref().and_then(|routing| {

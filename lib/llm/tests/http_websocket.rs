@@ -13,9 +13,9 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::EchoBidirectionalEngine;
 use dynamo_llm::http::service::service_v2::HttpService;
+use dynamo_model_card::endpoint_type::EndpointType;
 use dynamo_runtime::CancellationToken;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;

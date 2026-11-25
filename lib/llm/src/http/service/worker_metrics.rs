@@ -295,7 +295,7 @@ pub(super) fn register_worker_metrics(
 mod tests {
     use super::*;
     use crate::discovery::worker_inventory::WorkerInventory;
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
     use dynamo_runtime::protocols::EndpointId;
     use parking_lot::Mutex;
 
@@ -397,7 +397,7 @@ mod tests {
                         name: "generate".into(),
                     },
                     worker_type: "decode",
-                    model_type: crate::model_type::ModelType::Chat,
+                    model_type: dynamo_model_card::model_type::ModelType::Chat,
                     workers: ids
                         .iter()
                         .map(|&id| {
@@ -711,8 +711,8 @@ mod tests {
         f.observe(&[1, 2], &[1, 2], WorkerGroupState::Ready);
         let mut group = f.inventory.snapshot().pop().unwrap().1;
         group.worker_type = "encode";
-        group.model_type =
-            crate::model_type::ModelType::Chat | crate::model_type::ModelType::Completions;
+        group.model_type = dynamo_model_card::model_type::ModelType::Chat
+            | dynamo_model_card::model_type::ModelType::Completions;
         f.inventory.publish("group".into(), Some(group.clone()));
         *f.available.lock() = HashSet::from([1, 2]);
         for gauge in &f.values {

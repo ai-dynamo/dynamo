@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dynamo_kv_hints::KvTransferEnforcement;
-use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 use tokio::time::Instant;
 
 use dynamo_runtime::config::parse_bool;

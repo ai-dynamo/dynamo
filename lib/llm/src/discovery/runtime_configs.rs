@@ -13,8 +13,8 @@ use dynamo_runtime::discovery::{
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 use tokio_util::sync::CancellationToken;
 
-use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_card::ModelDeploymentCard;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_router_protocol::worker::WorkerId;
 
 /// Type alias for the runtime config watch receiver.
@@ -253,7 +253,7 @@ mod tests {
         base.runtime_config.data_parallel_start_rank = 3;
         base.runtime_config.data_parallel_size = 2;
         let mut lora = ModelDeploymentCard::default();
-        lora.lora = Some(crate::model_card::LoraInfo {
+        lora.lora = Some(dynamo_model_card::model_card::LoraInfo {
             name: "adapter".to_string(),
             max_gpu_lora_count: Some(4),
         });

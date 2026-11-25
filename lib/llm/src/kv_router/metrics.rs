@@ -1690,7 +1690,7 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
         let (workers_tx, workers_rx) =
             tokio::sync::watch::channel(std::collections::HashMap::from([(
                 123,
-                crate::local_model::runtime_config::ModelRuntimeConfig::default(),
+                dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig::default(),
             )]));
         let _registration = metrics.watch_workers(
             workers_rx,

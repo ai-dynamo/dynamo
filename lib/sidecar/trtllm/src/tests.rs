@@ -13,7 +13,7 @@ use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
     PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
-use dynamo_llm::local_model::runtime_config::TOKEN_BUDGET_RUNTIME_KEY;
+use dynamo_model_card::local_model::runtime_config::TOKEN_BUDGET_RUNTIME_KEY;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;

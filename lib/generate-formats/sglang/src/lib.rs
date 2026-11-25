@@ -12,7 +12,8 @@ pub use merge::{ClientCodec, Encoded, Native, SglangFormat, rules};
 
 pub const NAME: &str = "sglang";
 /// The runtime capability workers serving SGLang's `/generate` advertise.
-pub const CAPABILITY: &str = dynamo_llm::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+pub const CAPABILITY: &str =
+    dynamo_model_card::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 /// `extra_args` key carrying SGLang's request to the worker.
 pub const PAYLOAD_KEY: &str = "sglang_tito";
 /// `engine_data` key carrying each SGLang response back.

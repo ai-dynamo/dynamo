@@ -28,7 +28,7 @@ use dynamo_runtime::config::{
 };
 use serde_json::Value;
 
-use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
+use dynamo_model_card::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 
 use super::{
     common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},

@@ -50,3 +50,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }
+dynamo-model-card = { workspace = true }

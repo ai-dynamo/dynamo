@@ -37,7 +37,7 @@ use crate::kv_router::metrics::{
     ActiveSequenceIngressMetrics, ROUTER_QUEUE_METRICS, RegistrationAvailabilityProvider,
     RouterQueueMetricHandles, RouterRequestMetrics, WORKER_LOAD_METRICS,
 };
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Inputs the embedded backend needs from the router at construction.
 pub(crate) struct EmbeddedSelectionArgs {
@@ -502,7 +502,7 @@ pub(crate) fn worker_request_from_runtime_config(
     // which the ZMQ ingress subscribes to per rank.
     let kv_events_endpoints: HashMap<u32, String> = config
         .runtime_data
-        .get(crate::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY)
+        .get(dynamo_model_card::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY)
         .and_then(serde_json::Value::as_object)
         .map(|endpoints| {
             endpoints
@@ -515,7 +515,7 @@ pub(crate) fn worker_request_from_runtime_config(
         .unwrap_or_default();
     let idempotent_stores = config
         .runtime_data
-        .get(crate::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY)
+        .get(dynamo_model_card::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY)
         .and_then(serde_json::Value::as_bool);
     WorkerRequest {
         worker_id,
@@ -668,7 +668,8 @@ mod tests {
             ..ModelRuntimeConfig::default()
         };
         config.runtime_data.insert(
-            crate::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY.to_string(),
+            dynamo_model_card::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY
+                .to_string(),
             serde_json::json!({"0": "tcp://engine:5557", "1": "tcp://engine:5558"}),
         );
         let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
@@ -683,7 +684,7 @@ mod tests {
         assert_eq!(request.idempotent_stores, None);
 
         config.runtime_data.insert(
-            crate::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY
+            dynamo_model_card::local_model::runtime_config::DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY
                 .to_string(),
             true.into(),
         );

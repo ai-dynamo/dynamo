@@ -91,9 +91,9 @@ pub use routing_load::{
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
     kv_router::sequence::{SequenceError, SequenceRequest},
-    local_model::runtime_config::ModelRuntimeConfig,
     worker_type::WorkerType,
 };
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Where a `KvRouter` gets the worker-selection policy its partition runs.
 #[derive(Clone, Default)]
@@ -2053,7 +2053,7 @@ mod tests {
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
     #[test]
     fn all_filtered_workers_map_to_unavailable() {
@@ -3438,7 +3438,7 @@ mod tests {
     async fn queued_lora_requests_refresh_registration_without_widening_constraints() {
         use crate::lora::state_tracker::LoraWorkerProjection;
         use crate::lora::{LoraFilter, LoraReplicaConfig, LoraRoutingTable, LoraStateTracker};
-        use crate::model_card::LoraInfo;
+        use dynamo_model_card::model_card::LoraInfo;
 
         let tracker = LoraStateTracker::new();
         let publish = |loaded: &[u64]| {

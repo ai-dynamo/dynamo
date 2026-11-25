@@ -1179,8 +1179,9 @@ mod tests {
             indexer::{Indexer, LowerTierIndexers},
             metrics::RouterWorkerStatusMetrics,
         },
-        local_model::runtime_config::ModelRuntimeConfig,
-        model_card::ModelDeploymentCard,
+    };
+    use dynamo_model_card::{
+        local_model::runtime_config::ModelRuntimeConfig, model_card::ModelDeploymentCard,
     };
 
     #[derive(Default)]

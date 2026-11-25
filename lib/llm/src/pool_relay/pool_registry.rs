@@ -33,7 +33,7 @@ use super::publication::{
 };
 use super::serving_load::PoolServingLoad;
 use crate::kv_router::ActiveLoad;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
 const DEFAULT_INITIALIZED_POOL_HUBS: usize = 64;

@@ -24,10 +24,7 @@ use super::metrics::{
 };
 use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
-use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
-use crate::reasoning_field::ReasoningField;
-use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_http_server::lifecycle::{
@@ -35,6 +32,9 @@ use dynamo_http_server::lifecycle::{
 };
 use dynamo_http_server::metrics::Metrics;
 use dynamo_http_server::server::{HttpServer, HttpServerConfig, listen_socket_addr};
+use dynamo_model_card::endpoint_type::EndpointType;
+use dynamo_model_card::reasoning_field::ReasoningField;
+use dynamo_model_card::request_template::RequestTemplate;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
@@ -52,7 +52,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-use crate::frontend_config::{
+use dynamo_model_card::frontend_config::{
     ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig,
     MediaRejectionConfig, MetricsConfig,
 };
@@ -1823,7 +1823,7 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_model::runtime_config::{
+    use dynamo_model_card::local_model::runtime_config::{
         SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     };
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -2130,7 +2130,7 @@ mod tests {
             reqwest::StatusCode::NOT_FOUND
         );
 
-        let mut card = crate::model_card::ModelDeploymentCard::default();
+        let mut card = dynamo_model_card::model_card::ModelDeploymentCard::default();
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
         let mut workers =
@@ -2563,7 +2563,7 @@ mod tests {
                 .port(port)
                 .enable_streaming_tool_dispatch(enabled)
                 .enable_streaming_reasoning_dispatch(enabled)
-                .reasoning_field(crate::reasoning_field::ReasoningField::Reasoning)
+                .reasoning_field(dynamo_model_card::reasoning_field::ReasoningField::Reasoning)
                 .build()
                 .unwrap();
             let cancel = CancellationToken::new();
@@ -3583,7 +3583,7 @@ mod tests {
             reqwest::StatusCode::SERVICE_UNAVAILABLE
         );
 
-        let mut card = crate::model_card::ModelDeploymentCard::default();
+        let mut card = dynamo_model_card::model_card::ModelDeploymentCard::default();
         card.display_name = "pending-llama".to_string();
         service
             .model_manager()

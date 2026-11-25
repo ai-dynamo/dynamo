@@ -20,7 +20,8 @@ use futures::{FutureExt, StreamExt};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
+use crate::namespace::NamespaceFilter;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 use super::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
 
@@ -1352,7 +1353,7 @@ mod tests {
     };
     use tokio::sync::{Semaphore, mpsc};
 
-    use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+    use dynamo_model_card::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
 
     struct Prepared(u64);
 
@@ -2040,7 +2041,7 @@ mod tests {
 
     #[tokio::test]
     async fn systemone_serial_cohort_excludes_unsafe_workers_at_same_endpoint() {
-        use crate::local_model::runtime_config::{
+        use dynamo_model_card::local_model::runtime_config::{
             SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
         };
 
@@ -2627,7 +2628,8 @@ mod tests {
 
     #[tokio::test]
     async fn inventory_preserves_encode_topology_and_generation_timing_attribution() {
-        use crate::{model_type::ModelType, worker_type::WorkerType};
+        use crate::worker_type::WorkerType;
+        use dynamo_model_card::model_type::ModelType;
 
         for (capabilities, timing_type) in [
             (ModelType::Chat, "decode"),

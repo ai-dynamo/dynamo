@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::protocols::Annotated;
-use crate::tensor_model::{DataType, Parameters, TensorMetadata};
 use anyhow::Result;
+use dynamo_model_card::tensor_model::{DataType, Parameters, TensorMetadata};
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use futures::{Stream, StreamExt, pin_mut};
 use half::{bf16, f16};

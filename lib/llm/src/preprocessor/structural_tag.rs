@@ -8,15 +8,15 @@ mod v2;
 
 use std::borrow::Cow;
 
-use crate::local_model::runtime_config::{
+use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
+use crate::protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
+use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
+use dynamo_model_card::local_model::runtime_config::{
     ModelRuntimeConfig, StructuralTagConfig, StructuralTagReasoningBoundary, StructuralTagScope,
     TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
 };
-use crate::parser_family::unified_family_names;
-use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
-use crate::protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
-use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
+use dynamo_model_card::parser_family::unified_family_names;
 
 use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefinition};
 use dynamo_protocols::types::ResponseFormat;
@@ -946,10 +946,9 @@ pub(super) fn validate_runtime_config(
 mod tests {
     use std::{path::PathBuf, sync::Arc};
 
-    use crate::{
-        local_model::runtime_config::StructuralTagConfig,
-        model_card::ModelDeploymentCard,
-        protocols::common::{OutputOptions, SamplingOptions, StopConditions},
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_model_card::{
+        local_model::runtime_config::StructuralTagConfig, model_card::ModelDeploymentCard,
     };
 
     use super::*;

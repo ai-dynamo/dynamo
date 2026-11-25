@@ -133,7 +133,7 @@ pub(crate) fn from_triton_response(
 mod tests {
     use dynamo_llm::grpc::service::kserve::inference;
     use dynamo_llm::protocols::tensor::{FlattenTensor, NvCreateTensorRequest, Tensor};
-    use dynamo_llm::tensor_model::{DataType, TensorMetadata};
+    use dynamo_model_card::tensor_model::{DataType, TensorMetadata};
 
     use super::{from_triton_response, to_triton_request};
 

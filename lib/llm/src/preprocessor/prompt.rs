@@ -20,13 +20,13 @@ use dynamo_renderer::{
     RenderedSegment, kimi_k3_formatter_for, native_formatter_for,
 };
 
-use crate::model_card::{
-    ModelDeploymentCard, PromptFormatterArtifact, TekkenMetadata, TokenizerKind,
-};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
 use crate::protocols::unified::UnifiedRequest;
+use dynamo_model_card::model_card::{
+    ModelDeploymentCard, PromptFormatterArtifact, TekkenMetadata, TokenizerKind,
+};
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
 /// [`dynamo_renderer::OAIChatLikeRequest`] so `dynamo_renderer` stays free of the media module;

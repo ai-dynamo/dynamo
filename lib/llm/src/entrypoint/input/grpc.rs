@@ -9,14 +9,15 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, input::common},
     grpc::service::kserve,
-    local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
-    router_config::RouterConfig,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
 use dynamo_http_server::metrics::Metrics;
+use dynamo_model_card::{
+    local_model::runtime_config::TokenizerBackend, router_config::RouterConfig,
+};
 use dynamo_runtime::DistributedRuntime;
 
 /// Build and run an KServe gRPC service
@@ -195,7 +196,8 @@ async fn run_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{engines::make_echo_engine, local_model::LocalModelBuilder};
+    use crate::engines::make_echo_engine;
+    use dynamo_model_card::local_model::LocalModelBuilder;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use std::time::Duration;
 

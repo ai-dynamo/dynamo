@@ -363,7 +363,8 @@ mod tests {
     use crate::pool_relay::namespace_source::file::{
         PoolRelaySourcesFile, RelaySource, SourcesDocument,
     };
-    use crate::{model_card::ModelDeploymentCard, worker_type::WorkerType};
+    use crate::worker_type::WorkerType;
+    use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_runtime::discovery::{DiscoverySpec, MockDiscovery, SharedMockRegistry};
     use dynamo_runtime::protocols::EndpointId;
 

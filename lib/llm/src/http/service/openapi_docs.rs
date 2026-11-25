@@ -56,7 +56,7 @@ use crate::protocols::openai::{
 /// Defaults match the frontend: canonical reasoning key and no named dispatches.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenApiOptions {
-    pub reasoning_field: crate::reasoning_field::ReasoningField,
+    pub reasoning_field: dynamo_model_card::reasoning_field::ReasoningField,
     pub streaming_tool_dispatch: bool,
     pub streaming_reasoning_dispatch: bool,
 }
@@ -426,7 +426,7 @@ fn annotate_request_aliases(document: &mut utoipa::openapi::OpenApi) -> Result<(
 /// Earlier component changes are not rolled back.
 fn configure_response_schemas(
     openapi: &mut utoipa::openapi::OpenApi,
-    reasoning_field: crate::reasoning_field::ReasoningField,
+    reasoning_field: dynamo_model_card::reasoning_field::ReasoningField,
 ) -> Result<(), String> {
     use utoipa::openapi::schema::Schema;
 
@@ -1281,7 +1281,7 @@ mod tests {
 
     #[test]
     fn stale_response_reasoning_schemas_are_not_silently_ignored() {
-        use crate::reasoning_field::ReasoningField;
+        use dynamo_model_card::reasoning_field::ReasoningField;
         use utoipa::openapi::{Ref, Schema};
 
         // Exercise both projections and both response types: dependency schema

@@ -58,8 +58,8 @@ use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
 
+use dynamo_model_card::router_config::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
-use llm_rs::router_config::LoadThresholdConfig as RsLoadThresholdConfig;
 type RsRoutingHost = RoutingHost;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
@@ -1997,7 +1997,7 @@ fn infer_metric_worker_type(
 /// Keep the advertised role for existing router metadata and require the same explicit role for
 /// custom-policy dispatch. Legacy cards are ambiguous between decode and aggregated workers.
 fn advertised_and_policy_worker_roles(
-    card: &llm_rs::model_card::ModelDeploymentCard,
+    card: &dynamo_model_card::model_card::ModelDeploymentCard,
 ) -> (
     Option<llm_rs::worker_type::WorkerType>,
     Option<llm_rs::worker_type::WorkerType>,
@@ -2027,11 +2027,12 @@ mod metric_worker_type_tests {
             .unwrap()
             .endpoint("generate".to_string());
         inner.register_endpoint_instance().await.unwrap();
-        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("encode-model");
+        let mut card =
+            dynamo_model_card::model_card::ModelDeploymentCard::with_name_only("encode-model");
         card.worker_type = Some(llm_rs::worker_type::WorkerType::Encode);
-        card.model_input = llm_rs::model_type::ModelInput::Tokens;
-        card.model_type = llm_rs::model_type::ModelType::Chat;
-        llm_rs::local_model::register_model_card(&inner, &card)
+        card.model_input = dynamo_model_card::model_type::ModelInput::Tokens;
+        card.model_type = dynamo_model_card::model_type::ModelType::Chat;
+        dynamo_model_card::local_model::register_model_card(&inner, &card)
             .await
             .unwrap();
         let client = inner.client().await.unwrap();
@@ -2073,7 +2074,7 @@ mod metric_worker_type_tests {
 
     #[test]
     fn requires_explicit_policy_role_for_legacy_cards() {
-        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("legacy");
+        let mut card = dynamo_model_card::model_card::ModelDeploymentCard::with_name_only("legacy");
         let (advertised, policy) = advertised_and_policy_worker_roles(&card);
         assert_eq!(advertised, None);
         assert_eq!(policy, None);
@@ -2219,7 +2220,7 @@ async fn create_kv_router_from_endpoint(
                 .await?;
             instances.into_iter().find_map(|instance| {
                 instance
-                    .deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                    .deserialize_model::<dynamo_model_card::model_card::ModelDeploymentCard>()
                     .ok()
             })
         };

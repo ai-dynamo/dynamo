@@ -3,14 +3,13 @@
 
 use std::path::Path;
 
-use dynamo_llm::{
-    local_model::runtime_config::TokenizerBackend,
-    model_card::ModelDeploymentCard,
-    tokenizers::{EncodeSegment, HuggingFaceTokenizer, traits::Encoder},
+use dynamo_model_card::{
+    local_model::runtime_config::TokenizerBackend, model_card::ModelDeploymentCard,
 };
 use dynamo_runtime::metrics::frontend_perf::{
     TOKENIZER_CACHE_CACHED_TOKENS_TOTAL, TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL,
 };
+use dynamo_tokenizers::{EncodeSegment, HuggingFaceTokenizer, traits::Encoder};
 
 // Keep these tests in their own binary, and give them all the same environment: the
 // production cache reads its budget once per process.
@@ -30,8 +29,8 @@ fn load_card(dir: &Path, backend: TokenizerBackend) -> anyhow::Result<ModelDeplo
 #[test]
 fn model_card_tokenizer_cache_reuses_only_matching_identities() -> anyhow::Result<()> {
     temp_env::with_vars(CACHE_ENV, || -> anyhow::Result<()> {
-        let model_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../llm/tests/data/sample-models/TinyLlama_v1.1");
         let card = load_card(&model_dir, TokenizerBackend::Default)?;
         let cached = TOKENIZER_CACHE_CACHED_TOKENS_TOTAL.with_label_values(&[&card.display_name]);
         let uncached =
@@ -67,7 +66,7 @@ fn model_card_tokenizer_cache_reuses_only_matching_identities() -> anyhow::Resul
         {
             use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
-            use dynamo_llm::{checked_file::CheckedFile, model_card::TokenizerKind};
+            use dynamo_model_card::{checked_file::CheckedFile, model_card::TokenizerKind};
 
             // HF accepts a Path; the alternate backends require UTF-8 paths.
             let temp = tempfile::tempdir()?;
@@ -102,8 +101,8 @@ fn model_card_tokenizer_cache_reuses_only_matching_identities() -> anyhow::Resul
 #[test]
 fn model_card_tokenizer_ignores_truncation_and_padding() -> anyhow::Result<()> {
     temp_env::with_vars(CACHE_ENV, || -> anyhow::Result<()> {
-        let model_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let model_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../llm/tests/data/sample-models/TinyLlama_v1.1");
         let temp = tempfile::tempdir()?;
         for entry in std::fs::read_dir(&model_dir)? {
             let entry = entry?;

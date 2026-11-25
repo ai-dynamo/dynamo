@@ -12,10 +12,10 @@ use dynamo_http_server::metrics::Metrics;
 
 use crate::discovery::ModelManager;
 use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
-use crate::request_template::{RequestTemplate, resolve_request_model};
-use crate::tensor_model::TensorModelConfig;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_model_card::request_template::{RequestTemplate, resolve_request_model};
+use dynamo_model_card::tensor_model::TensorModelConfig;
 use dynamo_runtime::config::environment_names::llm::metrics as env_metrics;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
@@ -958,8 +958,8 @@ mod readiness_gate_tests {
     use super::inference::{ModelReadyRequest, ServerReadyRequest};
     use super::*;
     use crate::discovery::WorkerSet;
-    use crate::model_card::ModelDeploymentCard;
     use crate::worker_type::WorkerType;
+    use dynamo_model_card::model_card::ModelDeploymentCard;
     use tonic::Request;
 
     /// A WorkerSet with an explicit role/needs, a live worker, and a chat engine

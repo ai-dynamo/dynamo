@@ -49,13 +49,13 @@ pub use frontend_extension::{
 };
 
 use crate::{
-    frontend_config::ChatTemplateDefaults,
     preprocessor::OpenAIPreprocessor,
     protocols::openai::{
         ParsingOptions,
         chat_completions::{NvCreateChatCompletionRequest, is_thinking_control_key},
     },
 };
+use dynamo_model_card::frontend_config::ChatTemplateDefaults;
 
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 use dynamo_runtime::error::DynamoError;
@@ -284,8 +284,8 @@ mod tests {
         ) {
             return;
         }
-        for selector in crate::parser_family::FAMILY_NAMES.iter() {
-            let family = crate::parser_family::canonical_family(selector).unwrap();
+        for selector in dynamo_model_card::parser_family::FAMILY_NAMES.iter() {
+            let family = dynamo_model_card::parser_family::canonical_family(selector).unwrap();
             for (tool, reasoning) in [
                 (Some(*selector), None),
                 (None, Some(*selector)),
@@ -655,8 +655,8 @@ mod tests {
             ] {
                 let options = ParsingOptions {
                     tool_call_parser: Some(parser.to_string()),
-                    structural_tag: Some(crate::local_model::runtime_config::StructuralTagConfig {
-                        scope: crate::local_model::runtime_config::StructuralTagScope::Always,
+                    structural_tag: Some(dynamo_model_card::local_model::runtime_config::StructuralTagConfig {
+                        scope: dynamo_model_card::local_model::runtime_config::StructuralTagScope::Always,
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -703,7 +703,7 @@ mod tests {
             }))
             .expect("response_format must deserialize"),
         );
-        let config = crate::local_model::runtime_config::StructuralTagConfig {
+        let config = dynamo_model_card::local_model::runtime_config::StructuralTagConfig {
             allow_tool_calls_with_structured_output: true,
             ..Default::default()
         };

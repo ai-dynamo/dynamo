@@ -11,7 +11,7 @@ use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery};
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 
-use crate::model_card::ModelDeploymentCard;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 /// Wait for a worker on `endpoint` to publish its `ModelDeploymentCard`.
 ///

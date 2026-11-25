@@ -457,7 +457,7 @@ fn python_history_defaults_to_legacy_coalescing_before_model_selection() {
         );
         assert!(python.get("responses_history_phases").is_none());
         for (tool, reasoning) in [(Some("muse_spark_open"), None), (None, Some("muse_spark"))] {
-            let config = crate::local_model::runtime_config::ModelRuntimeConfig {
+            let config = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
                 tool_call_parser: tool.map(str::to_owned),
                 reasoning_parser: reasoning.map(str::to_owned),
                 ..Default::default()
@@ -484,7 +484,7 @@ fn python_history_defaults_to_legacy_coalescing_before_model_selection() {
         // Even a previously selected phase view cannot leak to another model.
         let mut reused = phased;
         reused.normalize_responses_history_phases(true);
-        let other = crate::local_model::runtime_config::ModelRuntimeConfig {
+        let other = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
             reasoning_parser: Some("qwen3".into()),
             ..Default::default()
         };

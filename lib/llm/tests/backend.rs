@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::backend::Backend;
-use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 #[test]
 fn test_sequence_factory() {

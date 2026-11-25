@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::EncodedMediaData;
 use super::rdma::DecodedMediaData;
-use crate::media_config::MediaDecoder;
+use dynamo_model_card::media_config::MediaDecoder;
 pub mod image;
 #[cfg(feature = "media-ffmpeg")]
 pub mod video;

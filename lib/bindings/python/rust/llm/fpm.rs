@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::Endpoint;
 use crate::to_pyerr;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::Endpoint as RuntimeEndpoint;
 use dynamo_runtime::discovery::{
     DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, ModelCardInstanceId,
@@ -35,7 +36,6 @@ use dynamo_runtime::discovery::{
 };
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
-use llm_rs::local_model::runtime_config::ModelRuntimeConfig;
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 const DEFAULT_FPM_MAX_AGE: Duration = Duration::from_secs(15);

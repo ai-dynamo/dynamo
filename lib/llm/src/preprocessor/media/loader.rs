@@ -14,7 +14,7 @@ use dynamo_memory::nixl::NixlAgent;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
-use crate::media_config::{MediaDecoder, MediaFetcher};
+use dynamo_model_card::media_config::{MediaDecoder, MediaFetcher};
 
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, warn_if_unavailable_backends};
@@ -732,7 +732,7 @@ impl MediaLoader {
 mod tests {
     use super::super::rdma::DataType;
     use super::*;
-    use crate::media_config::ImageDecoder;
+    use dynamo_model_card::media_config::ImageDecoder;
     use dynamo_protocols::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
     #[test]
@@ -1286,7 +1286,7 @@ mod tests_non_nixl {
         // element. Matroska resync finds Info, then returns EIO on premature EOF.
         let bytes =
             b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm\x00\x15\x49\xa9\x66\x8c\x2a\xd7\xb1\x88\x00";
-        let decoder = crate::media_config::VideoDecoder::default();
+        let decoder = dynamo_model_card::media_config::VideoDecoder::default();
         let error = decoder
             .decode(EncodedMediaData::from_bytes(bytes.to_vec()))
             .expect_err("truncated WebM must fail to decode");

@@ -18,7 +18,6 @@ use anyhow::Error;
 use async_stream::stream;
 use dynamo_llm::{
     http::service::service_v2::HttpService,
-    model_card::ModelDeploymentCard,
     protocols::{
         Annotated,
         openai::chat_completions::{
@@ -26,6 +25,7 @@ use dynamo_llm::{
         },
     },
 };
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_runtime::{
     CancellationToken,
     pipeline::{

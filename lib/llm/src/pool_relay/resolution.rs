@@ -13,7 +13,7 @@ use dynamo_router_protocol::identity::{
 use dynamo_runtime::protocols::EndpointId;
 
 use super::identity::{KvQueryHashFormat, KvQuerySemantics, KvQuerySemanticsError};
-use crate::model_card::ModelDeploymentCard;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedIndexerDomain {

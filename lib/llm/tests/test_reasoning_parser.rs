@@ -152,7 +152,7 @@ mod tests {
         // reasoning_content: This is reasoning content
 
         // Create a mock runtime config with basic reasoning parser
-        let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
+        let runtime_config = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
             reasoning_parser: Some("basic".to_string()),
             ..Default::default()
         };
@@ -198,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn test_reasoning_parser_with_only_reasoning_content() {
         // Create a mock runtime config with basic reasoning parser
-        let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
+        let runtime_config = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
             reasoning_parser: Some("basic".to_string()),
             ..Default::default()
         };
@@ -244,7 +244,7 @@ mod tests {
     #[tokio::test]
     async fn test_reasoning_parser_with_only_normal_content() {
         // Create a mock runtime config with basic reasoning parser
-        let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
+        let runtime_config = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
             reasoning_parser: Some("basic".to_string()),
             ..Default::default()
         };
@@ -283,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn test_reasoning_parser_with_invalid_parser_name() {
         // Create a mock runtime config with invalid reasoning parser
-        let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
+        let runtime_config = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
             reasoning_parser: Some("invalid_parser_name".to_string()),
             ..Default::default()
         };
@@ -323,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn test_reasoning_parser_with_mistral_parser() {
         // Create a mock runtime config with mistral reasoning parser
-        let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
+        let runtime_config = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
             reasoning_parser: Some("mistral".to_string()),
             ..Default::default()
         };

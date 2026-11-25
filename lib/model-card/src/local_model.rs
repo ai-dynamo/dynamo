@@ -995,7 +995,7 @@ mod local_source_tests {
     use super::*;
 
     fn model_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../llm/tests/data/sample-models/TinyLlama_v1.1")
     }
 
     #[tokio::test]

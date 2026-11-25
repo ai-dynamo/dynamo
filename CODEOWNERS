@@ -195,6 +195,7 @@
 /tests/parity/                                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/tests/                                                                                         @ai-dynamo/dynamo-runtime-codeowners
 /lib/bindings/c/                                                                                        @ai-dynamo/dynamo-runtime-codeowners
+/lib/model-card/                                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /tests/CLAUDE.md                                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /tests/README.md                                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /examples/common/                                                                                       @ai-dynamo/dynamo-runtime-codeowners
@@ -225,11 +226,9 @@
 /lib/runtime/src/utils/                                                                                 @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/config/                                                                                @ai-dynamo/dynamo-runtime-codeowners
 /examples/custom_backend/                                                                               @ai-dynamo/dynamo-runtime-codeowners
-/lib/llm/src/local_model/                                                                               @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/compute/                                                                               @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/storage/                                                                               @ai-dynamo/dynamo-runtime-codeowners
 /examples/backends/sample/                                                                              @ai-dynamo/dynamo-runtime-codeowners
-/lib/llm/src/model_card.rs                                                                              @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/pipeline/                                                                              @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/component/                                                                             @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/discovery/                                                                             @ai-dynamo/dynamo-runtime-codeowners
@@ -241,6 +240,7 @@
 /components/src/dynamo/common/                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_models_dir_flag.py                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/report_pytest_markers.py                                                                         @ai-dynamo/dynamo-runtime-codeowners
+/lib/model-card/src/local_model/                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/artifacts/                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/multimodal_profiles/                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_predownload_models.py                                                                       @ai-dynamo/dynamo-runtime-codeowners
@@ -527,8 +527,11 @@ requirements.txt                                                                
 /tests/gpu_memory_service/common/                                                                       @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/preprocessor/media.rs                                                                      @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/http/                                                                     @ai-dynamo/dynamo-frontend-codeowners
+/lib/model-card/src/media_config.rs                                                                     @ai-dynamo/dynamo-multimodal-codeowners
+/lib/model-card/src/tensor_model.rs                                                                     @ai-dynamo/dynamo-frontend-codeowners
 /lib/backend-common/examples/mocker/                                                                    @ai-dynamo/dynamo-performance-codeowners
 /lib/bindings/python/rust/parsers.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners
+/lib/model-card/src/parser_family.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/cancellation/                                                                    @ai-dynamo/dynamo-fault-tolerance-codeowners
 /tests/router/test_pool_relay_e2e.py                                                                    @ai-dynamo/dynamo-global-router-codeowners
 /deploy/operator/internal/checkpoint/                                                                   @ai-dynamo/dynamo-gms-codeowners
@@ -665,6 +668,7 @@ requirements.txt                                                                
 /lib/router/scheduler/src/config.rs                                                                     @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /lib/backend-common/src/telemetry.rs                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/http/service/metrics.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/model-card/src/router_config.rs                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /container/deps/requirements.vllm.txt                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/operator/internal/checkpoint/                                                                   @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/dynamo/lpx/                                                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners

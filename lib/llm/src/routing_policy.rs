@@ -9,10 +9,8 @@ use std::{
 use dynamo_runtime::pipeline::Error;
 use dynamo_scheduler::host::{RoutingConstraints, SchedulingRequest};
 
-use crate::{
-    discovery::RuntimeConfigWatch, local_model::runtime_config::ModelRuntimeConfig,
-    preprocessor::PreprocessedRequest,
-};
+use crate::{discovery::RuntimeConfigWatch, preprocessor::PreprocessedRequest};
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 pub(crate) type AttemptLease = Box<dyn Send + Sync>;
 

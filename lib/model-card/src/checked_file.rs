@@ -413,8 +413,9 @@ mod tests {
 
     #[test]
     fn test_checked_file_from_disk() {
-        let root = env!("CARGO_MANIFEST_DIR"); // ${WORKSPACE}/lib/llm
-        let full_path = format!("{root}/tests/data/sample-models/TinyLlama_v1.1/config.json");
+        let root = env!("CARGO_MANIFEST_DIR"); // ${WORKSPACE}/lib/model-card
+        let full_path =
+            format!("{root}/../llm/tests/data/sample-models/TinyLlama_v1.1/config.json");
         let cf = CheckedFile::from_disk(full_path).unwrap();
         let expected =
             Checksum::blake3("62bc124be974d3a25db05bedc99422660c26715e5bbda0b37d14bd84a0c65ab2");

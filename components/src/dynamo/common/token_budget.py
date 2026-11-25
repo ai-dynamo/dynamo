@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 # Must match `TOKEN_BUDGET_RUNTIME_KEY` in
-# `lib/llm/src/local_model/runtime_config.rs`.
+# `lib/model-card/src/local_model/runtime_config.rs`.
 TOKEN_BUDGET_RUNTIME_KEY = "token_budget"
 
 

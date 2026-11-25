@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use video_rs::Time;
 
 use super::Decoder;
-use crate::media_config::VideoDecoder;
 use crate::preprocessor::media::{
     DecodedMediaData, EncodedMediaData, decoders::DecodedMediaMetadata,
 };
+use dynamo_model_card::media_config::VideoDecoder;
 
 /// Small time buffer (seconds) to avoid edge cases when seeking near frame boundaries
 const FRAME_TIME_BUFFER_SECS: f64 = 0.001;
@@ -579,7 +579,7 @@ impl Decoder for VideoDecoder {
 mod tests {
     use super::super::super::rdma::DataType;
     use super::*;
-    use crate::media_config::VideoDecoderLimits;
+    use dynamo_model_card::media_config::VideoDecoderLimits;
     use rstest::rstest;
     use video_rs::Location;
 

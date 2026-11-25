@@ -816,7 +816,7 @@ impl LLMEngine for VllmSidecarEngine {
             // vLLM applies the tool grammar after reasoning ends, so the
             // frontend must not include a second reasoning phase in it.
             engine_config.runtime_data.insert(
-                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY.to_string(),
+                dynamo_model_card::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY.to_string(),
                 Value::Bool(true),
             );
         }
@@ -1323,8 +1323,8 @@ async fn resolve_routing_image_token_id(
     model: &DiscoveredModel,
     startup_deadline: Instant,
 ) -> Option<u32> {
-    use dynamo_llm::local_model::LocalModel;
     use dynamo_llm::preprocessor::mm_routing::image::resolve_exact_routing_image_token_id;
+    use dynamo_model_card::local_model::LocalModel;
     use std::path::PathBuf;
     use tokio::time::timeout_at;
 

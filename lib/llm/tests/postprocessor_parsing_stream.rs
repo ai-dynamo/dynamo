@@ -6,7 +6,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
@@ -14,6 +13,7 @@ use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse,
 };
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionTool,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, FinishReason, FunctionName,
@@ -75,7 +75,7 @@ fn build_preprocessor_with_native_reasoning_gate(
     if let Some(enabled) = native_reasoning_gate {
         mdc.runtime_config
             .set_engine_specific(
-                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                dynamo_model_card::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
                 enabled,
             )
             .unwrap();

@@ -17,13 +17,13 @@ use std::{
 };
 
 use crate::discovery::ModelManager;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
     common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
-use crate::reasoning_field::{ReasoningField, RoutedReasoning};
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_model_card::model_card::ModelDeploymentCard;
+use dynamo_model_card::reasoning_field::{ReasoningField, RoutedReasoning};
 
 use super::RouteDoc;
 use dynamo_http_server::metrics::{

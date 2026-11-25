@@ -8,7 +8,6 @@ use crate::{
     backend::ExecutionContext,
     engines::StreamingEngineAdapter,
     first_token::{FirstTokenNotifier, FirstTokenSource},
-    model_type::{ModelInput, ModelType},
     preprocessor::PreprocessedRequest,
     types::{
         Annotated,
@@ -18,6 +17,7 @@ use crate::{
     },
     worker_type::WorkerType,
 };
+use dynamo_model_card::model_type::{ModelInput, ModelType};
 
 use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
@@ -299,7 +299,7 @@ mod integration_tests {
         let engine_config = EngineConfig::InProcessText {
             engine: crate::engines::make_echo_engine(),
             model: Box::new(
-                crate::local_model::LocalModelBuilder::default()
+                dynamo_model_card::local_model::LocalModelBuilder::default()
                     .model_name(Some("test-model".to_string()))
                     .build()
                     .await
