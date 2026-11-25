@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# AISim 0.15 no longer lists 0.5.20 as queryable, but retains the exact
+# performance data this historical case covers. Opt in explicitly rather than
+# allowing the symbolic "previous" alias to drift.
 command:
+- env
+- AIC_ALLOW_UNLISTED_VERSIONS=1
 - '{python}'
 - -m
 - aisim

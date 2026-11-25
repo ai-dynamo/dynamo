@@ -1,9 +1,9 @@
 {
-  "renderer": "aic",
-  "output": "dgd",
   "artifacts": [
     {
       "path": "deployment.yaml"
     }
-  ]
+  ],
+  "output": "dgd",
+  "renderer": "aic"
 }
