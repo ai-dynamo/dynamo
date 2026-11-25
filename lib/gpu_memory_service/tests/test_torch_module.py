@@ -37,20 +37,25 @@ pytestmark = [
 class _FakeSpec:
     tensor: torch.Tensor
     meta: TensorMetadata
+    allocation_id: str = "alloc-0"
+    offset_bytes: int = 0
 
     def materialize(self, _manager: Any, _device_index: int) -> torch.Tensor:
         return self.tensor
 
 
-def _spec_for(tensor: torch.Tensor, tensor_type: str = "parameter") -> _FakeSpec:
+def _spec_for(
+    tensor: torch.Tensor,
+    tensor_type: str = "parameter",
+    *,
+    allocation_id: str = "alloc-0",
+    offset_bytes: int | None = None,
+) -> _FakeSpec:
     return _FakeSpec(
         tensor=tensor,
-        meta=TensorMetadata(
-            dtype=str(tensor.dtype),
-            shape=list(tensor.shape),
-            stride=list(tensor.stride()),
-            tensor_type=tensor_type,
-        ),
+        meta=TensorMetadata.from_tensor(tensor, tensor_type),
+        allocation_id=allocation_id,
+        offset_bytes=id(tensor) if offset_bytes is None else offset_bytes,
     )
 
 

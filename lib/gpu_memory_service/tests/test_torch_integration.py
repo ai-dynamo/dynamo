@@ -467,19 +467,22 @@ def test_materialize_meta_module_with_post_processed_weights(running_gms):
 
     writer = GMSClientMemoryManager(socket_path, device=0)
     writer.connect(RequestedLockType.RW)
+    committed = False
+    try:
+        gms_model = _TinyModule().to(_DEVICE)
+        _, gms_weight = _make_gms_tensor(writer, reshaped, tag="weights")
+        gms_model.linear.weight = torch.nn.Parameter(gms_weight, requires_grad=False)
+        _, gms_scale = _make_gms_tensor(writer, repacked_scale, tag="weights")
+        gms_model._buffers["scale"] = gms_scale
+        _, gms_extra = _make_gms_tensor(writer, extra, tag="weights")
+        gms_model.extra = gms_extra
 
-    gms_model = _TinyModule().to(_DEVICE)
-    _, gms_weight = _make_gms_tensor(writer, reshaped, tag="weights")
-    gms_model.linear.weight = torch.nn.Parameter(gms_weight, requires_grad=False)
-    _, gms_scale = _make_gms_tensor(writer, repacked_scale, tag="weights")
-    gms_model._buffers["scale"] = gms_scale
-    _, gms_extra = _make_gms_tensor(writer, extra, tag="weights")
-    gms_model.extra = gms_extra
-
-    register_module_tensors(writer, gms_model)
-    assert writer.commit()
-    del gms_weight, gms_scale, gms_extra, gms_model
-    writer.close()
+        register_module_tensors(writer, gms_model)
+        committed = writer.commit()
+        del gms_weight, gms_scale, gms_extra, gms_model
+    finally:
+        writer.close()
+    assert committed
 
     reader = GMSClientMemoryManager(socket_path, device=0)
     reader.connect(RequestedLockType.RO)
