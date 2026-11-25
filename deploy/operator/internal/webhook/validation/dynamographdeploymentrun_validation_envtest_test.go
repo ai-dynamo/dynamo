@@ -34,7 +34,7 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 		{
 			name: "empty hardware is an accepted resolved opt-out when input overrides supply hardware",
 			test: admissionTestCase{object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-				run := schemaRunForAdmission(`{"engine":{"hardware":"h200_sxm","kv_transfer":{"bandwidth_gb_per_second":25}}}`, nil)
+				run := schemaRunForAdmission(`{"engine":{"hardware":"h200_sxm"}}`, nil)
 				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
 				return run
 			}()},
@@ -78,11 +78,22 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 					run := schemaRunForAdmission(`{"engine":{"hardware":"h200_sxm"}}`, nil)
 					run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
-						Interconnect: &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(25.0)},
+						Interconnect: &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(27.7)},
 					}
 					return run
 				}(),
 				wantCELError: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+			},
+		},
+		{
+			name: "KV-transfer bandwidth stays valid whatever the input overrides set",
+			test: admissionTestCase{object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := schemaRunForAdmission(`{"engine":{"mode":"aggregated"}}`, nil)
+				run.Spec.Hardware.Interconnect = &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(27.7)}
+				return run
+			}()},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				assertKVTransferBandwidth(t, result, 27.7)
 			},
 		},
 		{
@@ -210,42 +221,6 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "default modes without a KV-transfer bandwidth warn",
-			test: admissionTestCase{
-				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-					run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
-					run.Spec.Hardware.Interconnect = nil
-					return run
-				}(),
-				wantWarnings: []string{kvTransferWarningForAdmission},
-			},
-		},
-		{
-			name: "aggregated-only search rejects the typed KV-transfer bandwidth",
-			test: admissionTestCase{
-				object:            schemaRunForAdmission(`{"engine":{"mode":"aggregated"}}`, nil),
-				wantWebhookErrors: kvTransferAggregatedErrorsForAdmission(kvTransferTypedPath),
-			},
-		},
-		{
-			name: "aggregated-only search rejects an override KV-transfer model",
-			test: admissionTestCase{
-				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-					run := schemaRunForAdmission(`{"engine":{"mode":"aggregated","kv_transfer":{"bandwidth_gb_per_second":10}}}`, nil)
-					run.Spec.Hardware.Interconnect = nil
-					return run
-				}(),
-				wantWebhookErrors: kvTransferAggregatedErrorsForAdmission(kvTransferOverridePath),
-			},
-		},
-		{
-			name: "aggregated-only search names both KV-transfer sources",
-			test: admissionTestCase{
-				object:            schemaRunForAdmission(`{"engine":{"mode":"aggregated","kv_transfer":{"bandwidth_gb_per_second":55}}}`, nil),
-				wantWebhookErrors: kvTransferAggregatedErrorsForAdmission(kvTransferTypedPath, kvTransferOverridePath),
-			},
-		},
 
 		// A schema upgrade must not block existing Runs' metadata or status writes.
 		{
@@ -339,7 +314,6 @@ func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1
 			Hardware: &nvidiacomv1beta2.HardwareSpec{
 				GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(8))},
 				NumGPUsPerNode: new(int32(8)),
-				Interconnect:   &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(25.0)},
 			},
 			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{
 				InputTokens: new(int32(2)), OutputTokens: new(int32(1)),

@@ -733,7 +733,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{
 					"gpu":            map[string]any{"sku": "future_accelerator", "budget": int64(4)},
 					"numGpusPerNode": int64(2),
-					"interconnect":   v1beta2InterconnectForAdmission(),
 				}
 			}),
 			gpuDiscovery: true,
@@ -753,55 +752,43 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{
 					"gpu":            map[string]any{"sku": "h200_sxm", "budget": int64(4)},
 					"numGpusPerNode": int64(8),
-					"interconnect":   v1beta2InterconnectForAdmission(),
 				}
 			}),
 			gpuDiscovery: true,
 			discoveryErr: errors.New("discovery must not run for complete explicit hardware"),
 		},
-
-		// The KV-transfer model of the merged input must match the engine modes it searches.
 		{
-			name:         "v1beta2 default modes without a KV-transfer bandwidth warn",
-			request:      beta2SchemaDGDRForAdmission(`{}`, withoutBeta2Interconnect),
-			discovered:   discoveredH100,
-			wantWarnings: []string{kvTransferWarningForAdmission},
+			name: "v1beta2 KV-transfer bandwidth must be positive",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"interconnect": map[string]any{"kvTransferBandwidthGBps": 0.0}}
+			}),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.hardware.interconnect.kvTransferBandwidthGBps: Invalid value: 0: spec.hardware.interconnect.kvTransferBandwidthGBps in body should be greater than 0`,
 		},
 		{
-			name:         "v1beta2 an empty override KV-transfer model still warns",
-			request:      beta2SchemaDGDRForAdmission(`{"engine":{"kv_transfer":{}}}`, withoutBeta2Interconnect),
-			discovered:   discoveredH100,
-			wantWarnings: []string{kvTransferWarningForAdmission},
+			name: "v1beta2 interconnect-only hardware still discovers GPU fields",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"interconnect": map[string]any{"kvTransferBandwidthGBps": 27.7}}
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got != "h200_sxm" {
+					t.Fatalf("spec.hardware.gpu.sku = %q, want the discovered h200_sxm", got)
+				}
+				assertKVTransferBandwidth(t, result, 27.7)
+			},
 		},
 		{
-			name:       "v1beta2 aggregated-only search without a KV-transfer model is accepted",
-			request:    beta2SchemaDGDRForAdmission(`{"engine":{"mode":"aggregated"}}`, withoutBeta2Interconnect),
+			name: "v1beta2 KV-transfer bandwidth stays valid whatever the input overrides set",
+			request: beta2SchemaDGDRForAdmission(`{"engine":{"mode":"aggregated"}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware.Interconnect = &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(27.7)}
+			}),
 			discovered: discoveredH100,
-		},
-		{
-			name:       "v1beta2 aggregated-only search accepts an override that deletes the typed KV-transfer model",
-			request:    beta2SchemaDGDRForAdmission(`{"engine":{"mode":"aggregated","kv_transfer":null}}`, nil),
-			discovered: discoveredH100,
-		},
-		{
-			name:        "v1beta2 aggregated-only search rejects the typed KV-transfer bandwidth",
-			request:     beta2SchemaDGDRForAdmission(`{"engine":{"mode":"aggregated"}}`, nil),
-			discovered:  discoveredH100,
-			wantWebhook: kvTransferAggregatedErrorsForAdmission(kvTransferTypedPath),
-		},
-		{
-			name: "v1beta2 aggregated-only search rejects an override KV-transfer model",
-			request: beta2SchemaDGDRForAdmission(
-				`{"engine":{"mode":"aggregated","kv_transfer":{"bandwidth_gb_per_second":10}}}`, withoutBeta2Interconnect),
-			discovered:  discoveredH100,
-			wantWebhook: kvTransferAggregatedErrorsForAdmission(kvTransferOverridePath),
-		},
-		{
-			name: "v1beta2 aggregated-only search names both KV-transfer sources",
-			request: beta2SchemaDGDRForAdmission(
-				`{"engine":{"mode":"aggregated","kv_transfer":{"bandwidth_gb_per_second":55}}}`, nil),
-			discovered:  discoveredH100,
-			wantWebhook: kvTransferAggregatedErrorsForAdmission(kvTransferTypedPath, kvTransferOverridePath),
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				assertKVTransferBandwidth(t, result, 27.7)
+			},
 		},
 
 		{
@@ -1536,12 +1523,8 @@ const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
 // defaults. It is unstructured on purpose: an omitted field,
 // an explicit empty object and a null are different requests, and typed Go cannot tell them
 // apart.
-// The base Request models the KV transfer so only cases about it see the bandwidth warning.
 func v1beta2DGDRForAdmission(mutate func(spec map[string]any)) *unstructured.Unstructured {
-	spec := map[string]any{
-		"model":    map[string]any{"name": v1beta2AdmissionModel},
-		"hardware": map[string]any{"interconnect": v1beta2InterconnectForAdmission()},
-	}
+	spec := map[string]any{"model": map[string]any{"name": v1beta2AdmissionModel}}
 	if mutate != nil {
 		mutate(spec)
 	}
@@ -1554,33 +1537,13 @@ func v1beta2DGDRForAdmission(mutate func(spec map[string]any)) *unstructured.Uns
 	}}
 }
 
-// v1beta2InterconnectForAdmission is a measured prefill-to-decode KV-transfer bandwidth.
-func v1beta2InterconnectForAdmission() map[string]any {
-	return map[string]any{"kvTransferBandwidthGBps": 25.0}
-}
-
-const (
-	kvTransferTypedPath    = "spec.hardware.interconnect.kvTransferBandwidthGBps"
-	kvTransferOverridePath = "spec.aisim.inputOverrides.engine.kv_transfer"
-
-	// kvTransferWarningForAdmission is the warning for disaggregated candidates without a bandwidth.
-	kvTransferWarningForAdmission = kvTransferTypedPath + ": disaggregated candidates will be scored with an instantaneous prefill-to-decode KV transfer, which understates their TTFT and overstates goodput; set the measured bandwidth between prefill and decode GPUs"
-)
-
-// kvTransferAggregatedErrorsForAdmission is the rejection of a KV-transfer model in an
-// aggregated-only search: one error at each source, each naming all of them.
-func kvTransferAggregatedErrorsForAdmission(sources ...string) []string {
-	detail := "Forbidden: applies only to disaggregated candidates, but the effective engine.mode does not search them; remove " +
-		strings.Join(sources, " and ") + ", or include disaggregated in engine.mode"
-	errs := make([]string, len(sources))
-	for i, source := range sources {
-		errs[i] = source + ": " + detail
+// assertKVTransferBandwidth checks that admission stored the typed KV-transfer bandwidth unchanged.
+func assertKVTransferBandwidth(t *testing.T, result *unstructured.Unstructured, want float64) {
+	t.Helper()
+	got, found, err := unstructured.NestedFloat64(result.Object, "spec", "hardware", "interconnect", "kvTransferBandwidthGBps")
+	if err != nil || !found || got != want {
+		t.Fatalf("spec.hardware.interconnect.kvTransferBandwidthGBps = %v, found=%v, err=%v; want %v", got, found, err, want)
 	}
-	return errs
-}
-
-func withoutBeta2Interconnect(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-	request.Spec.Hardware.Interconnect = nil
 }
 
 // v1beta1CarrierForAdmission is a v1beta1 Request carrying a v1beta2 spec with workload under the
@@ -1598,7 +1561,6 @@ func v1beta2TraceRequestForAdmission(workload map[string]any) *unstructured.Unst
 		spec["workload"] = workload
 		spec["hardware"] = map[string]any{
 			"gpu": map[string]any{"sku": "h200_sxm", "budget": int64(8)}, "numGpusPerNode": int64(8),
-			"interconnect": v1beta2InterconnectForAdmission(),
 		}
 	})
 }
@@ -1648,6 +1610,5 @@ func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRe
 	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
 		GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
 		NumGPUsPerNode: &numGPUsPerNode,
-		Interconnect:   &nvidiacomv1beta2.InterconnectSpec{KVTransferBandwidthGBps: new(25.0)},
 	}
 }

@@ -18,7 +18,6 @@
 package validation
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -62,75 +61,9 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 		if !errors.As(err, &schemaErr) {
 			return append(allErrs, field.InternalError(fldPath, err))
 		}
-		return append(allErrs, inputSchemaErrors(schemaErr, fldPath)...)
+		allErrs = append(allErrs, inputSchemaErrors(schemaErr, fldPath)...)
 	}
-	return append(allErrs, v.validateKVTransferV1beta2(spec, input, fldPath)...)
-}
-
-// validateKVTransferV1beta2 checks the KV-transfer model of the effective input against the modes
-// it searches. spec, input, and fldPath must not be nil; input must already satisfy the schema.
-// AISimulate rejects engine.kv_transfer when no disaggregated mode is searched, so admission
-// reports that against every field that sets it, the typed bandwidth and the input override, and
-// names all of them in each error so that removing them leaves no transfer model behind.
-// Disaggregated candidates without a bandwidth are scored with an instantaneous transfer, which
-// admission allows but warns about.
-func (v *sharedValidation) validateKVTransferV1beta2(
-	spec *nvidiacomv1beta2.NativeSearchInput,
-	input map[string]any,
-	fldPath *field.Path,
-) field.ErrorList {
-	transfer, err := aisimulate.InspectKVTransfer(input)
-	if err != nil {
-		return field.ErrorList{field.Invalid(fldPath.Child("aisim", "inputOverrides", "engine", "mode"), "<redacted>", err.Error())}
-	}
-
-	if transfer.Configured && !transfer.SearchesDisaggregated {
-		var sources []*field.Path
-		if spec.Hardware != nil && spec.Hardware.Interconnect != nil &&
-			spec.Hardware.Interconnect.KVTransferBandwidthGBps != nil {
-			sources = append(sources, fldPath.Child("hardware", "interconnect", "kvTransferBandwidthGBps"))
-		}
-		if overridesSetKVTransfer(spec) || len(sources) == 0 {
-			sources = append(sources, fldPath.Child("aisim", "inputOverrides", "engine", "kv_transfer"))
-		}
-		names := make([]string, len(sources))
-		for i, source := range sources {
-			names[i] = source.String()
-		}
-		detail := "applies only to disaggregated candidates, but the effective engine.mode does not search them; remove " +
-			strings.Join(names, " and ") + ", or include disaggregated in engine.mode"
-		errs := make(field.ErrorList, 0, len(sources))
-		for _, source := range sources {
-			errs = append(errs, field.Forbidden(source, detail))
-		}
-		return errs
-	}
-
-	if transfer.SearchesDisaggregated && !transfer.HasBandwidth {
-		v.warnf(
-			"%s: disaggregated candidates will be scored with an instantaneous prefill-to-decode KV transfer, which understates their TTFT and overstates goodput; set the measured bandwidth between prefill and decode GPUs",
-			fldPath.Child("hardware", "interconnect", "kvTransferBandwidthGBps"),
-		)
-	}
-	return nil
-}
-
-// overridesSetKVTransfer reports whether spec.aisim.inputOverrides sets engine.kv_transfer to a
-// value other than null. spec must not be nil.
-func overridesSetKVTransfer(spec *nvidiacomv1beta2.NativeSearchInput) bool {
-	if spec.AISim == nil || spec.AISim.InputOverrides == nil {
-		return false
-	}
-	var overrides struct {
-		Engine struct {
-			KVTransfer json.RawMessage `json:"kv_transfer"`
-		} `json:"engine"`
-	}
-	if err := json.Unmarshal(spec.AISim.InputOverrides.Raw, &overrides); err != nil {
-		return false
-	}
-	value := bytes.TrimSpace(overrides.Engine.KVTransfer)
-	return len(value) != 0 && !bytes.Equal(value, []byte("null"))
+	return allErrs
 }
 
 // validateNativeSearchInputUpdate preserves metadata/status updates across upstream schema changes.

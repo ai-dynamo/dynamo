@@ -152,24 +152,13 @@ spec:
                       properties:
                         kvTransferBandwidthGBps:
                           description: |-
-                            KVTransferBandwidthGBps is the bandwidth, in decimal gigabytes per second, that moves a
-                            request's KV cache from a prefill worker to a decode worker. It lowers to AISimulate's
-                            engine.kv_transfer.bandwidth_gb_per_second, which adds the transfer time to the TTFT of
-                            disaggregated candidates and keeps the KV cache reserved on the prefill worker until the
-                            transfer finishes. Aggregated candidates do not transfer KV and are unaffected.
-                            Set the bandwidth of one GPU's link, for example a NIXL benchmark between one prefill GPU
-                            and one decode GPU, not the aggregate of a node or of a tensor-parallel group. With
-                            AISimulate's default engine.kv_transfer.bytes_per_token of auto, each transfer carries one
-                            GPU's KV shard for the prefill candidate's tensor- and pipeline-parallel shape, so the
-                            shards of a rank already move in parallel; an aggregate would count that parallelism
-                            twice. If several GPUs share a NIC or switch uplink, measure the sustained per-GPU bandwidth
-                            with all of them transferring at once, because AISimulate does not model contention between
-                            ranks on a shared link. Concurrent transfers on one rank share its link. If inputOverrides
-                            sets bytes_per_token to a whole rank's KV size, set the rank's aggregate bandwidth instead.
-                            When omitted, AISimulate models the transfer as instantaneous, so disaggregated candidates
-                            report optimistic TTFT and goodput; admission warns when such candidates are searched
-                            without a bandwidth. Admission rejects the field when the effective search is
-                            aggregated-only.
+                            KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that
+                            one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU
+                            value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's
+                            engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation
+                            (https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+                            describes how candidates use it, including link sharing. When omitted, no bandwidth is
+                            lowered and AISimulate's default applies, which models the transfer as instantaneous.
                           exclusiveMinimum: true
                           minimum: 0
                           type: number

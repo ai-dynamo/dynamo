@@ -27,7 +27,6 @@ var (
 	engineBackendChoices = []string{"engine", "backend", "choices"}
 	engineHardware       = []string{"engine", "hardware"}
 	engineWorkers        = []string{"engine", "workers"}
-	engineMode           = []string{"engine", "mode"}
 	engineKVTransfer     = []string{"engine", "kv_transfer"}
 	engineKVTransferBW   = []string{"engine", "kv_transfer", "bandwidth_gb_per_second"}
 

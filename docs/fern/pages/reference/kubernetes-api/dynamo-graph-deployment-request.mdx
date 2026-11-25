@@ -109,32 +109,18 @@ spec:
 
 ### v1beta2 KV-transfer bandwidth
 
-In a disaggregated candidate, the prefill worker sends each request's KV cache to
-a decode worker before decode starts. `spec.hardware.interconnect.kvTransferBandwidthGBps`
-sets the bandwidth of that link in decimal GB/s. It lowers to AISimulate's
-`engine.kv_transfer.bandwidth_gb_per_second`. AISimulate then adds the transfer time to
-each request's TTFT and keeps the KV cache reserved on the prefill worker until the
-transfer finishes. Aggregated candidates do not transfer KV and are unaffected.
+In a disaggregated candidate, the prefill worker sends each request's KV cache to a
+decode worker before decode starts. `spec.hardware.interconnect.kvTransferBandwidthGBps`
+is the sustained bandwidth, in decimal GB/s, that one GPU has for that transfer. It is a
+per-GPU value, not the aggregate of a node or of a parallel group. Prefer a measured value,
+for example from a NIXL benchmark, to the nominal NIC rate.
 
-When the field is omitted, AISimulate models the transfer as instantaneous. Disaggregated
-candidates then report optimistic TTFT and goodput, and can win the search for that reason
-alone. Admission accepts such a Request but returns a warning whenever the effective search
-includes disaggregated candidates, which is the default.
-
-Enter the bandwidth of one GPU's link, for example from a NIXL transfer benchmark between
-one prefill GPU and one decode GPU, not the aggregate of a node or of a tensor-parallel
-group. With AISimulate's default `engine.kv_transfer.bytes_per_token` of `auto`, each
-transfer carries one GPU's KV shard for the prefill candidate's tensor- and
-pipeline-parallel shape, so the shards already move in parallel. An aggregate value, such
-as eight times the per-GPU bandwidth for a TP8 candidate, counts that parallelism twice and
-understates the transfer time. A single GPU-pair measurement fits when each GPU has its own
-link. If several GPUs share a NIC or switch uplink, measure the sustained bandwidth per GPU
-while all of them transfer at once: AISimulate does not model contention between ranks on a
-shared link, and one pair benchmarked alone can use the whole link and make the predicted
-handoff too fast. Concurrent transfers on the same rank share its link. If `inputOverrides`
-sets `bytes_per_token` to a whole rank's KV size, enter the rank's aggregate bandwidth
-instead. Prefer a measured value to the nominal NIC rate. Setting `interconnect` does not
-opt out of hardware discovery.
+The field lowers to AISimulate's `engine.kv_transfer.bandwidth_gb_per_second`. When it is
+omitted, AISimulate's default models the transfer as instantaneous, so disaggregated
+candidates report optimistic TTFT and goodput. See AISimulate's
+[P/D KV transfer](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+documentation for how candidates use the bandwidth, including
+[link sharing](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md#link-sharing).
 
 ```yaml
 spec:
@@ -145,12 +131,9 @@ spec:
       kvTransferBandwidthGBps: 27.7 # Measured NIXL GPU-to-GPU bandwidth across nodes.
 ```
 
-`inputOverrides.engine.kv_transfer` remains the final overlay: it can replace the typed
-bandwidth, set `bytes_per_token` or `timing_mode`, or delete the transfer model with
-`null`. Admission rejects a transfer model when the effective `engine.mode` searches
-no disaggregated candidates, because AISimulate would reject it when the Run starts. The
-error names every field that sets the model, the typed bandwidth and the override, so
-remove all of them or include `disaggregated` in `engine.mode`.
+Setting `interconnect` does not opt out of hardware discovery. `inputOverrides` is applied
+after lowering, as for every other field: `engine.kv_transfer` can replace the bandwidth,
+set other transfer fields, or delete the transfer model with `null`.
 
 ### v1beta2 DGD Overrides
 
