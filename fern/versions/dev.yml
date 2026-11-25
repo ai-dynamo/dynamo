@@ -151,6 +151,9 @@ navigation:
             path: ../pages-dev/kubernetes/model-deployment/introduction.mdx
           - page: Deploy with DGD
             path: ../pages-dev/kubernetes/model-deployment/deploy-with-dgd.md
+          - link: Generate a DGD with AISim
+            href: /dynamo/dev/kubernetes/auto-deployment/generate-a-dgd-with-aisim
+            icon: link
           - page: Expose the Frontend
             path: ../pages-dev/kubernetes/model-deployment/expose-the-frontend.md
           - page: Deploy on Intel GPUs
@@ -223,6 +226,9 @@ navigation:
             path: ../pages-dev/kubernetes/auto-deployment/auto-deploy-with-dgdr.md
           - page: Search with DGDR v1beta2
             path: ../pages-dev/kubernetes/auto-deployment/dgdr-v1beta2.md
+          - page: Generate a DGD with AISim
+            slug: generate-a-dgd-with-aisim
+            path: ../pages-dev/kubernetes/auto-deployment/aisimulate-dgd.mdx
           - page: Dynamo Profiler
             path: ../pages-dev/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
@@ -1313,6 +1319,9 @@ navigation:
             path: ../pages-dev/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
             path: ../pages-dev/reference/components/profiler-configuration.mdx
+          - page: AISim DGD Output Adapter
+            slug: aisim-dgd-output-adapter
+            path: ../pages-dev/reference/components/aisimulate-dgd-output.md
           - page: Mocker CLI Reference
             path: ../pages-dev/reference/components/mocker-cli-reference.mdx
           - page: DynoSim Replay CLI Reference
