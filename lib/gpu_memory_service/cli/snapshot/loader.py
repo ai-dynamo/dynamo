@@ -64,11 +64,7 @@ def _load_device(
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
     )
-    client.load_to_gms(
-        input_dir,
-        max_workers=max_workers,
-        clear_existing=True,
-    )
+    client.load_to_gms(input_dir, max_workers=max_workers)
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint loaded: device=%d elapsed=%.2fs", device, elapsed)
 

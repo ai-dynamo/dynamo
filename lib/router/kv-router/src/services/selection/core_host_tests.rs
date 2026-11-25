@@ -12,17 +12,17 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_kv_indexer::backend::test_util::store_event;
-use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
+use dynamo_kv_indexer::testing::store_event;
+use dynamo_kv_indexer::{Indexer, IndexerPolicy};
+use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
-use dynamo_scheduler::config::RouterConfig;
-use dynamo_scheduler::identity::RoutingPartitionId;
-use dynamo_scheduler::protocols::RoutingConstraints;
-use dynamo_scheduler::selection::{
+use dynamo_scheduler::RouterConfig;
+use dynamo_scheduler::RoutingConstraints;
+use dynamo_scheduler::WorkerSelectionPolicyFactory;
+use dynamo_scheduler::{
     HostCache, KvIndexSource, PromptRequest, SelectRequest, SelectionCacheConfig, SelectionCore,
     SelectionError, SelectionHost, WorkerLifecycle, WorkerRequest,
 };
-use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
 use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
 use std::collections::HashSet;
 
@@ -42,11 +42,11 @@ fn test_config(use_kv_events: bool) -> KvRouterConfig {
     }
 }
 
-fn reference_factory() -> dynamo_scheduler::types::WorkerSelectionPolicyFactory {
-    Arc::new(|config, role, _| {
+fn reference_factory() -> dynamo_scheduler::WorkerSelectionPolicyFactory {
+    Arc::new(|context| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
+            context.selection_config().clone(),
+            context.worker_type().default_selector_label(),
         )
     })
 }
@@ -99,6 +99,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         data_parallel_size: None,
         max_num_batched_tokens: Some(1024),
         total_kv_blocks: None,
+        cache_owner_capacity_blocks: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
@@ -110,6 +111,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
         engine_owned_mm_identity: None,
+        idempotent_stores: None,
     }
 }
 
@@ -132,7 +134,7 @@ fn core_with(
     let tracking_hash =
         Arc::new(tracking_hash_context(&config).expect("valid tracking hash configuration"));
     let indexer_policy =
-        IndexerPolicy::from_config(&dynamo_kv_indexer::config::IndexerConfig::from(&config))
+        IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig::from(&config))
             .expect("indexer policy");
     let config = RouterConfig::from(&config)
         .validate()
@@ -354,6 +356,65 @@ async fn upsert_carries_engine_owned_mm_identity_to_the_listener() {
 }
 
 #[tokio::test]
+async fn upsert_and_patch_carry_idempotent_stores_to_the_listener() {
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
+    let listener = || {
+        let listed = serde_json::to_value(ingress.listeners().expect("attached").list()).unwrap();
+        listed[0]["listeners"]["0"].clone()
+    };
+    core.upsert_worker(WorkerRequest {
+        idempotent_stores: Some(true),
+        ..worker_with_kv_events(1)
+    })
+    .await
+    .expect("worker upsert");
+    assert_eq!(listener()["idempotent_stores"], true);
+    assert_eq!(listener()["engine_owned_mm_identity"], false);
+
+    let patch = serde_json::from_value(serde_json::json!({"idempotent_stores": false}))
+        .expect("worker patch");
+    core.patch_worker(1, patch).await.expect("patch worker");
+    assert_eq!(listener()["idempotent_stores"], false);
+    core.shutdown();
+}
+
+#[tokio::test]
+async fn equivalent_idempotent_stores_defaults_preserve_cached_overlap() {
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(worker_with_kv_events(1)).await.unwrap();
+    let indexer = ingress
+        .listeners()
+        .expect("attached")
+        .get_indexer(&default_key())
+        .unwrap()
+        .indexer
+        .clone();
+    indexer
+        .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
+        .await
+        .unwrap();
+    indexer.dump_events().await.expect("flush indexer");
+    for (setting, expected_overlap) in [(Some(false), 4), (None, 4), (Some(true), 0)] {
+        core.upsert_worker(WorkerRequest {
+            idempotent_stores: setting,
+            ..worker_with_kv_events(1)
+        })
+        .await
+        .unwrap();
+        let mut request = select_request();
+        request.prompt.token_ids = None;
+        request.prompt.block_hashes = Some(vec![11]);
+        request.prompt.sequence_hashes = Some(vec![101]);
+        request.prompt.isl_tokens = Some(4);
+        assert_eq!(
+            core.select(request).await.unwrap().overlap.gpu,
+            expected_overlap
+        );
+    }
+    core.shutdown();
+}
+
+#[tokio::test]
 async fn equivalent_mm_identity_defaults_preserve_cached_overlap() {
     let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
     core.upsert_worker(worker_with_kv_events(1)).await.unwrap();
@@ -393,9 +454,9 @@ async fn equivalent_mm_identity_defaults_preserve_cached_overlap() {
 /// for every configuration the indexer accepts.
 #[tokio::test]
 async fn config_predicts_kv_transfer_chain_retention() {
-    use dynamo_kv_indexer::backend::create_indexer_with_policy;
-    use dynamo_kv_indexer::config::{ApproximateCachePolicyKind, IndexerConfig};
+    use dynamo_kv_indexer::create_indexer_with_policy;
     use dynamo_kv_indexer::host::KvIndexerMetrics;
+    use dynamo_kv_indexer::{ApproximateCachePolicyKind, IndexerConfig};
 
     for use_kv_events in [true, false] {
         for router_predicted_ttl_secs in [None, Some(1.0)] {

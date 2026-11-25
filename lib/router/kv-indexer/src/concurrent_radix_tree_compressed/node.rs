@@ -643,7 +643,6 @@ impl Node {
         Some((consumed, stale_hashes, became_dead))
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn find_match_step<S: HashSequence>(
         &self,
         mut input: FindStepInput<'_, S>,

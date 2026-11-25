@@ -27,7 +27,8 @@ dynamo-truthy = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { version = "=1.3.2" }
+# Keep at the same version as nixl_ref in container/context.yaml.
+nixl-sys = { version = "=1.5.0" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }

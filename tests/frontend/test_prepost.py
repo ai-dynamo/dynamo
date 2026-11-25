@@ -13,12 +13,6 @@ import pytest
 from .common import check_module_available
 
 HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
-HAS_QWEN3_REASONING = check_module_available(
-    "vllm.reasoning.qwen3_engine_reasoning_parser"
-) or check_module_available("vllm.reasoning.qwen3_reasoning_parser")
-HAS_QWEN3_TOOL_PARSER = check_module_available(
-    "vllm.tool_parsers.qwen3_engine_tool_parser"
-) or check_module_available("vllm.tool_parsers.qwen3coder_tool_parser")
 if HAS_VLLM:
     from vllm.entrypoints.generate.base.protocol import FunctionDefinition
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -43,35 +37,20 @@ pytestmark = [
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"
-    pytest.mark.skipif(
-        not (HAS_VLLM and HAS_QWEN3_REASONING and HAS_QWEN3_TOOL_PARSER),
-        reason="requires vllm qwen3 reasoning+tool parser",
-    ),
+    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
 ]
 
 
 def _resolve_qwen3_reasoning_parser_class():
-    try:
-        from vllm.reasoning.qwen3_engine_reasoning_parser import (
-            Qwen3ParserReasoningAdapter,
-        )
+    from vllm.reasoning.qwen3_engine_reasoning_parser import Qwen3ParserReasoningAdapter
 
-        return Qwen3ParserReasoningAdapter
-    except ImportError:
-        from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
-
-        return Qwen3ReasoningParser
+    return Qwen3ParserReasoningAdapter
 
 
 def _resolve_qwen3_tool_parser_class():
-    try:
-        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
-        return Qwen3EngineToolParser
-    except ImportError:
-        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
-
-        return Qwen3CoderToolParser
+    return Qwen3EngineToolParser
 
 
 def _make_qwen3_tool_parser(tokenizer, tools):
@@ -1610,22 +1589,28 @@ def test_qwen3_coder_non_streaming_preserves_content_before_tool_call(
 def test_qwen3_coder_non_streaming_batches_reasoning_before_tool_parse(
     tokenizer, qwen3_coder_request_for_sampling, sampling_params
 ):
+    # Each chunk's text matches its token IDs, so the reasoning markers arrive
+    # as the real <think> / </think> tokens, as they do from the engine.
+    chunks = [
+        ("<think>", [151667]),
+        ("Need the weather.", [1001]),
+        ("</think>", [151668]),
+        (
+            "\n<function=get_weather>\n<parameter=location>\nNYC\n"
+            "</parameter>\n</function>",
+            [1002],
+        ),
+    ]
     outputs = [
         CompletionOutput(
             index=0,
-            text=(
-                "<think>Need the weather.</think>\n"
-                "<function=get_weather>\n"
-                "<parameter=location>\n"
-                "NYC\n"
-                "</parameter>\n"
-                "</function>"
-            ),
-            token_ids=[1001],
+            text=text,
+            token_ids=token_ids,
             cumulative_logprob=None,
             logprobs=None,
-            finish_reason="stop",
+            finish_reason="stop" if i == len(chunks) - 1 else None,
         )
+        for i, (text, token_ids) in enumerate(chunks)
     ]
 
     proc = StreamingPostProcessor(

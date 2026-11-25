@@ -87,14 +87,13 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
         def __init__(self, **kwargs):
             calls.append(("init", kwargs))
 
-        def load_to_gms(self, input_dir, *, max_workers, clear_existing):
+        def load_to_gms(self, input_dir, *, max_workers):
             calls.append(
                 (
                     "load_to_gms",
                     {
                         "input_dir": input_dir,
                         "max_workers": max_workers,
-                        "clear_existing": clear_existing,
                     },
                 )
             )
@@ -121,7 +120,6 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
         {
             "input_dir": "/checkpoints/run/versions/1/device-3",
             "max_workers": 16,
-            "clear_existing": True,
         },
     )
 

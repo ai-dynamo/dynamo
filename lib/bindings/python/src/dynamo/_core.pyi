@@ -21,7 +21,7 @@ from typing import (
     overload,
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules
@@ -114,6 +114,14 @@ class DistributedRuntime:
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
+        """
+        ...
+
+    @property
+    def response_plane(self) -> str:
+        """
+        The response transport this runtime uses ("tcp", "quic" or "velo"),
+        after the default and the TLS fallback are applied.
         """
         ...
 
@@ -291,7 +299,7 @@ class PyAsyncRequestStream:
 class TransportType:
     """
     A read-only view of an instance's transport, wrapping the runtime
-    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp")
+    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp" / "direct")
     and ``address`` is its (transport-specific) address. The address format is
     not a stable parse target.
     """
@@ -595,11 +603,11 @@ class Context:
 
         Call it before the engine's first yield, or before it raises. Returns
         ``False`` when this request's response cannot carry the header: the
-        response is already committed (a streaming request without
-        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
-        yield of one with it), or the request is not a ``/v1/chat/completions``
-        request. Otherwise raises ``ValueError`` for a name or value that is
-        not a valid header, or for a header the HTTP layer owns
+        response is already committed (streaming with the pre-commit wait
+        disabled, or after the first non-annotation event or the wait deadline),
+        or the request is not a ``/v1/chat/completions`` request. Otherwise raises
+        ``ValueError`` for a name or value that is not a valid header, or for a
+        header the HTTP layer owns
         (``content-type``, ``content-length``, ``content-encoding``,
         ``x-request-id``, hop-by-hop headers)."""
         ...
@@ -920,6 +928,55 @@ class SelectionService:
         """Per-worker potential loads for a prompt, without booking."""
         ...
 
+    async def register_worker_publisher(self, endpoint: str) -> bool:
+        """Subscribe to a worker's prefill and request completion events.
+
+        Events update local and replicated reservations without being republished.
+        Requires replica sync. Returns True if the subscription was added, or
+        False if the endpoint was already registered.
+        """
+        ...
+
+    async def deregister_worker_publisher(self, endpoint: str) -> bool:
+        """Unsubscribe from a worker publisher.
+
+        Returns True if the subscription was removed, or False if the endpoint
+        was not registered.
+        """
+        ...
+
+    def list_worker_publishers(self) -> list[str]:
+        """Endpoints of the subscribed worker publishers, sorted."""
+        ...
+
+class WorkerSequenceEventPublisher:
+    """Nonblocking ZMQ publisher for worker-origin active-sequence events."""
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        routing_group: str,
+        worker_id: int,
+        dp_rank: int = 0,
+        bind_endpoint: str = "tcp://*:*",
+    ) -> None:
+        ...
+
+    @property
+    def endpoint(self) -> str:
+        """Bound endpoint, including the port selected by ZMQ."""
+        ...
+
+    def mark_prefill_completed(self, request_id: str) -> None:
+        ...
+
+    def free(self, request_id: str) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
 class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information
@@ -962,6 +1019,7 @@ class ModelRuntimeConfig:
 
     context_length: int | None
     total_kv_blocks: int | None
+    cache_owner_capacity_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
@@ -1271,6 +1329,7 @@ class KvEventPublisher:
         kv_state_endpoint: Optional[str] = None,
         video_token_id: Optional[int] = None,
         engine_owned_mm_identity: bool = False,
+        idempotent_stores: bool = False,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1298,6 +1357,7 @@ class KvEventPublisher:
                 format (after sgl-project/sglang#43043), including for caller hashes,
                 so every event token at or above 1,000,000 is excluded from the index.
                 Otherwise only values that do not fit in 32 bits are.
+            idempotent_stores: Do not refcount repeated stores. Set for SGLang.
         """
 
     def publish_stored(
@@ -1601,11 +1661,11 @@ class HttpService:
                 raised by an engine generator before its first ``yield`` maps to
                 the same HTTP error response as it does for a non-streaming
                 request. When False (the default), the service inherits
-                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0``, it commits
-                HTTP 200 without waiting and such an error arrives as an SSE
-                error frame; set to a positive number of milliseconds, it waits
-                that long and still maps an error that arrives inside the
-                window. True overrides the variable with an unbounded wait.
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0`` commits
+                HTTP 200 without waiting. A positive value bounds the wait in
+                milliseconds. Errors after the first non-annotation event or the
+                deadline arrive as SSE error frames. True overrides the
+                variable with an unbounded wait.
         """
         ...
 
@@ -2299,12 +2359,32 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
     ...
 
 class FrontendExtensionContext:
-    """Read-only, live view of frontend state passed to extension route handlers.
+    """The request and a live view of frontend state, passed to route handlers.
 
-    Handlers receive this and answer from current state. The surface is
-    intentionally narrow (typed read-only accessors only); it does not expose
-    the internal service state.
+    The state accessors are read-only and do not expose the internal service
+    state. ``body``, ``headers`` and ``runtime`` describe the current request
+    and the frontend process.
     """
+
+    @property
+    def body(self) -> bytes:
+        """Raw request body; empty when the request has none."""
+        ...
+
+    @property
+    def headers(self) -> dict[str, str]:
+        """Request headers as a dict: lower-case names, repeated headers
+        joined with ``", "``."""
+        ...
+
+    @property
+    def runtime(self) -> DistributedRuntime:
+        """The frontend's own ``DistributedRuntime``, for request-plane calls.
+
+        Its async methods need the frontend's event loop, so call them from an
+        ``async def`` handler.
+        """
+        ...
 
     def is_ready(self) -> bool:
         """Whether the HTTP service has finished startup and is ready to serve."""
@@ -2333,18 +2413,22 @@ class FrontendExtensionContext:
 class FrontendRoute:
     """A trusted extension route served on the Dynamo HTTP frontend.
 
-    Currently restricted to static-path ``GET`` routes. ``handler`` is a
-    synchronous callable that receives a ``FrontendExtensionContext`` and
-    returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
-    to set the status code. Async handlers and path parameters are rejected at
-    construction.
+    ``method`` is one of ``GET``, ``POST``, ``PUT``, ``PATCH`` or ``DELETE``;
+    ``path`` is static (no parameters or wildcards). ``handler`` receives a
+    ``FrontendExtensionContext`` and returns a JSON-serializable body (implies
+    HTTP 200) or a ``FrontendResponse`` to set the status code. An ``async def``
+    handler runs on the frontend's event loop. A call that takes longer than
+    ``timeout_s`` seconds returns HTTP 503, and a request body larger than
+    ``max_body_bytes`` returns HTTP 413.
     """
 
     def __init__(
         self,
         method: str,
         path: str,
-        handler: Callable[[FrontendExtensionContext], object],
+        handler: Callable[[FrontendExtensionContext], object | Awaitable[object]],
+        timeout_s: float = 30.0,
+        max_body_bytes: int = 65536,
     ) -> None: ...
     @property
     def method(self) -> str: ...
@@ -2385,11 +2469,15 @@ class ReplaySchedulerMetricsSnapshot(TypedDict):
     waiting_requests: int
 
 class ReplaySchedulerIntervalMetrics(TypedDict):
+    g1_prefix_cache_lookup: Optional[dict[str, int]]
     cache_hit_tokens: int
     cache_total_tokens: int
     preemptions: int
 
 class ReplayTrafficMetricsSnapshot(TypedDict):
+    delivered_output_tokens: int
+    committed_prefill_tokens: int
+    first_admission: dict[str, int]
     duration_s: float
     arriving_requests: int
     completed_requests: int
@@ -2405,6 +2493,7 @@ class ReplayTrafficMetricsSnapshot(TypedDict):
     accept_length_forward_count: int
 
 class ReplayTelemetrySnapshot(TypedDict):
+    host_caches: list[dict[str, Any]]
     sample_ordinal: int
     kind: Literal["baseline", "periodic", "final"]
     interval_start_ms: float
@@ -2508,6 +2597,11 @@ def run_mocker_trace_replay(
     agentic_profile: Optional[Dict[str, Any]] = None,
     deterministic: bool = False,
     conversation_affinity: Optional[Dict[str, Any]] = None,
+    agentic_warmup_policy: Optional[
+        Literal["repeated_prefixes", "live_trajectory_v1"]
+    ] = None,
+    weka_client: Optional[Literal["recorded", "agentx"]] = None,
+    weka_chat_template: Optional[Dict[str, int]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2515,6 +2609,8 @@ def run_mocker_trace_replay(
 
     ``weka_nested_timestamp_basis`` applies only to Weka traces. Omission uses
     AISimulate's automatic selection; explicit absolute or relative overrides it.
+    ``weka_client`` and ``weka_chat_template`` also apply only to Weka traces;
+    omitting them keeps the recorded client and the trace's own token counts.
 
     Offline replay returns an internal native result consumed by
     ``dynamo.replay``; online replay retains the summary dictionary.
@@ -2646,224 +2742,6 @@ def run_mocker_synthetic_trace_replay(
     is independent from Planner ticks.
     """
     ...
-
-class Layer:
-    """
-    A KV cache block layer
-    """
-
-    ...
-
-    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
-        """
-        Get a dlpack capsule of the layer
-        """
-        ...
-
-    def __dlpack_device__(self) -> Any:
-        """
-        Get the dlpack device of the layer
-        """
-        ...
-
-class Block:
-    """
-    A KV cache block
-    """
-
-    ...
-
-    def __len__(self) -> int:
-        """
-        Get the number of layers in the list
-        """
-        ...
-
-    def __getitem__(self, index: int) -> Layer:
-        """
-        Get a layer by index
-        """
-        ...
-
-    def __iter__(self) -> 'Block':
-        """
-        Get an iterator over the layers
-        """
-        ...
-
-    def __next__(self) -> Block:
-        """
-        Get the next layer in the iterator
-        """
-        ...
-
-    def to_list(self) -> List[Layer]:
-        """
-        Get a list of layers
-        """
-        ...
-
-    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
-        """
-        Get a dlpack capsule of the block
-        Exception raised if the block is not contiguous
-        """
-        ...
-
-    def __dlpack_device__(self) -> Any:
-        """
-        Get the dlpack device of the block
-        """
-        ...
-
-class BlockList:
-    """
-    A list of KV cache blocks
-    """
-
-    ...
-
-    def __len__(self) -> int:
-        """
-        Get the number of blocks in the list
-        """
-        ...
-
-    def __getitem__(self, index: int) -> Block:
-        """
-        Get a block by index
-        """
-        ...
-
-    def __iter__(self) -> 'BlockList':
-        """
-        Get an iterator over the blocks
-        """
-        ...
-
-    def __next__(self) -> Block:
-        """
-        Get the next block in the iterator
-        """
-        ...
-
-    def to_list(self) -> List[Block]:
-        """
-        Get a list of blocks
-        """
-        ...
-
-class BlockManager:
-    """
-    A KV cache block manager
-    """
-
-    def __init__(
-        self,
-        worker_id: int,
-        num_layer: int,
-        page_size: int,
-        inner_dim: int,
-        dtype: Optional[str] = None,
-        host_num_blocks: Optional[int] = None,
-        device_num_blocks: Optional[int] = None,
-        device_id: int = 0
-    ) -> None:
-        """
-        Create a `BlockManager` object
-
-        Parameters:
-        -----------
-        worker_id: int
-            The worker ID for this block manager
-        num_layer: int
-            Number of layers in the model
-        page_size: int
-            Page size for blocks
-        inner_dim: int
-            Inner dimension size
-        dtype: Optional[str]
-            Data type (e.g., 'fp16', 'bf16', 'fp32'), defaults to 'fp16' if None
-        host_num_blocks: Optional[int]
-            Number of host blocks to allocate, None means no host blocks
-        device_num_blocks: Optional[int]
-            Number of device blocks to allocate, None means no device blocks
-        device_id: int
-            CUDA device ID, defaults to 0
-        """
-        ...
-
-    def allocate_host_blocks_blocking(self, count: int) -> BlockList:
-        """
-        Allocate a list of host blocks (blocking call)
-
-        Parameters:
-        -----------
-        count: int
-            Number of blocks to allocate
-
-        Returns:
-        --------
-        BlockList
-            List of allocated blocks
-        """
-        ...
-
-    async def allocate_host_blocks(self, count: int) -> BlockList:
-        """
-        Allocate a list of host blocks
-
-        Parameters:
-        -----------
-        count: int
-            Number of blocks to allocate
-
-        Returns:
-        --------
-        BlockList
-            List of allocated blocks
-        """
-        ...
-
-    def allocate_device_blocks_blocking(self, count: int) -> BlockList:
-        """
-        Allocate a list of device blocks (blocking call)
-
-        Parameters:
-        -----------
-        count: int
-            Number of blocks to allocate
-
-        Returns:
-        --------
-        BlockList
-            List of allocated blocks
-        """
-        ...
-
-    async def allocate_device_blocks(self, count: int) -> BlockList:
-        """
-        Allocate a list of device blocks
-
-        Parameters:
-        -----------
-        count: int
-            Number of blocks to allocate
-
-        Returns:
-        --------
-        BlockList
-            List of allocated blocks
-        """
-        ...
-
-class KvbmRequest:
-    """
-    A request for KV cache
-    """
-
-    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
-        ...
 
 class PoolRelay:
     def __init__(

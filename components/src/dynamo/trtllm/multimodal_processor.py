@@ -50,6 +50,7 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.audio_loader import AudioLoader
 
 configure_dynamo_logging()
 
@@ -100,13 +101,18 @@ def _video_frames_to_uint8(video: VideoData) -> VideoData:
     uint8 ``(N, H, W, 3)`` array, TRT-LLM's ``format="np"`` video form.
 
     Both decode paths scale uint8 frames by 1/255, so rounding back recovers
-    the decoded pixels exactly. Other fields are kept.
+    the decoded pixels exactly. Frames go into the output one at a time, so
+    the conversion needs one float frame of scratch space, not float copies
+    of the whole clip. Other fields are kept.
     """
-    stacked = torch.stack(list(video.frames))
-    frames_u8 = stacked.mul(255.0).round_().clamp_(0, 255).to(torch.uint8)
-    return dataclasses.replace(
-        video, frames=frames_u8.permute(0, 2, 3, 1).contiguous().numpy()
-    )
+    frames = list(video.frames)
+    channels, height, width = frames[0].shape
+    frames_u8 = torch.empty((len(frames), height, width, channels), dtype=torch.uint8)
+    scaled = torch.empty_like(frames[0])
+    for out, frame in zip(frames_u8, frames):
+        torch.mul(frame, 255.0, out=scaled).round_().clamp_(0, 255)
+        out.copy_(scaled.permute(1, 2, 0))
+    return dataclasses.replace(video, frames=frames_u8.numpy())
 
 
 def _mm_item_order(
@@ -233,8 +239,10 @@ class MultimodalRequestProcessor:
         tokenizer: Optional[TokenizerProtocol] = None,
         allowed_local_media_path: str = "",
         enable_frontend_decoding: bool = False,
+        supports_audio: bool = True,
     ):
         self.model_type = model_type
+        self.supports_audio = supports_audio
         self.model_dir = model_dir
         self.modality = ""
         self.allowed_local_media_path = allowed_local_media_path
@@ -258,6 +266,9 @@ class MultimodalRequestProcessor:
         # backends agree on DYN_MM_VIDEO_NUM_FRAMES.
         self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
         self._url_policy = UrlValidationPolicy.from_env()
+        self.audio_loader = AudioLoader(
+            max_bytes=self.max_file_size_bytes, url_policy=self._url_policy
+        )
 
         # Input processor used to size an omitted max_tokens (see
         # _expanded_prompt_len) and to read the model's preferred video format
@@ -482,7 +493,7 @@ class MultimodalRequestProcessor:
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
     ) -> Optional[Any]:
         """
-        Process OpenAI request and return multimodal data in TokensPrompt format.
+        Prepare an OpenAI request for TRT-LLM multimodal inference.
 
         Supports three flows:
         1. EPD Case 1: Encoder fully processed (has _epd_processed_prompt)
@@ -492,7 +503,7 @@ class MultimodalRequestProcessor:
         Returns dict compatible with TRT-LLM's generate_async:
         {
             "prompt_token_ids": List[int],
-            "multi_modal_data": Dict[str, List[torch.Tensor]]
+            "multi_modal_data": Dict[str, List[Any]]
         }
         or for EPD Case 1:
         {
@@ -502,6 +513,35 @@ class MultimodalRequestProcessor:
 
         """
         self.previous_decoded_text = ""
+
+        multi_modal_data = request.get("multi_modal_data")
+        audio_items = (
+            multi_modal_data.get("audio_url", [])
+            if isinstance(multi_modal_data, dict)
+            else []
+        )
+        if not isinstance(audio_items, list):
+            raise HttpStatusError(
+                400, "Malformed audio_url field: expected a list", "audio_url"
+            )
+        if audio_items and (
+            request.get("_epd_processed_prompt") is not None
+            or embeddings is not None
+            or ep_disaggregated_params is not None
+        ):
+            raise HttpStatusError(
+                400,
+                "Audio with disaggregated encoder inputs is not supported by TensorRT-LLM",
+                "audio_url",
+            )
+
+        if audio_items and (
+            not self.supports_audio
+            or not MULTIMODAL_PLACEHOLDER_REGISTRY.is_valid(self.model_type, "audio")
+        ):
+            raise InvalidArgument(
+                "This model does not support audio input in TensorRT-LLM"
+            )
 
         # EPD Flow Case 1: Encoder has fully processed the prompt
         # The encode worker has done everything: vision encoding, prompt processing, tokenization
@@ -535,6 +575,13 @@ class MultimodalRequestProcessor:
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
         formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
+        if audio_items and (
+            not isinstance(formatted_prompt_from_frontend, str)
+            or not formatted_prompt_from_frontend
+        ):
+            raise HttpStatusError(
+                400, "Audio request is missing the formatted prompt", "audio_url"
+            )
 
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
         # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
@@ -560,9 +607,8 @@ class MultimodalRequestProcessor:
         # TODO: Add frontend decoding support
 
         # Handle multimodal data if present
-        multi_modal_data = request.get("multi_modal_data")
         if multi_modal_data and isinstance(multi_modal_data, dict):
-            processed_mm_data = {}
+            processed_mm_data: Dict[str, List[Any]] = {}
             loaded_embeddings: list[torch.Tensor] = []
 
             # Process images and embedding paths from image_url field
@@ -597,6 +643,14 @@ class MultimodalRequestProcessor:
                         image_urls.append(
                             item if isinstance(item, dict) else {"Url": item}
                         )
+
+                if audio_items and embedding_paths:
+                    raise HttpStatusError(
+                        400,
+                        "Audio with precomputed image embeddings is not supported "
+                        "by TensorRT-LLM",
+                        "audio_url",
+                    )
 
                 # Load regular images as PIL Images for TRT-LLM's input processor
                 # TRT-LLM will auto-detect this and compute mrope_config
@@ -662,22 +716,23 @@ class MultimodalRequestProcessor:
                 raise HttpStatusError(
                     400, "Malformed video_url field: expected a list", str(video_items)
                 )
-            # Images reach the model as PIL (not rescaled) and both video
-            # decode paths give float [0,1] tensors (rescaled). A processor that
-            # takes one rescale flag for both modalities cannot take that mix:
-            # Qwen3-VL's rejects it, and Qwen2/2.5-VL's would leave the image
-            # unscaled. Next to an image, videos therefore go over as uint8
-            # when the model asks for that format, as Qwen3-VL does. For the
-            # models in _SHARED_RESCALE_FLAG_MODEL_TYPES, which do not, the
-            # request is refused before any video is fetched; other models get
-            # the media as decoded. Video-only requests are unchanged.
+            # Videos go over as uint8 when the model asks for that format, as
+            # Qwen3-VL does, with or without an image: trtllm-serve sends them
+            # that way, and the same clip then gets the same multimodal hash
+            # in both kinds of request. Images reach the model as PIL (not
+            # rescaled) and both video decode paths give float [0,1] tensors
+            # (rescaled). A processor that takes one rescale flag for both
+            # modalities cannot take that mix: Qwen3-VL's rejects it, and
+            # Qwen2/2.5-VL's would leave the image unscaled. For the models in
+            # _SHARED_RESCALE_FLAG_MODEL_TYPES, which ask for no format, image +
+            # video requests are refused before any video is fetched; other
+            # models get the media as decoded.
             image_and_video = bool(video_items) and "image" in processed_mm_data
             if image_and_video and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES:
                 raise InvalidArgument(
                     "This model cannot take an image and a video in the same "
                     "request yet; send them in separate requests"
                 )
-            uint8_videos = image_and_video and self._prefers_np_video()
             videos = []
             for item in video_items:
                 url = item.get("Url") if isinstance(item, dict) else item
@@ -793,7 +848,7 @@ class MultimodalRequestProcessor:
                         source,
                     ) from e
             if videos:
-                if uint8_videos:
+                if self._prefers_np_video():
                     # CPU work that grows with the frame count: run it off the
                     # event loop, as the decode is.
                     videos = [
@@ -804,6 +859,12 @@ class MultimodalRequestProcessor:
                     ]
                 processed_mm_data["video"] = videos
                 logging.info("Loaded %d video(s)", len(videos))
+
+            if audio_items:
+                processed_mm_data["audio"] = await self.audio_loader.load_audio_batch(
+                    audio_items
+                )
+                logging.debug("Loaded %d audio clip(s)", len(audio_items))
 
             if loaded_embeddings:
                 # For TRT-LLM MM embeddings, the currently
@@ -824,9 +885,9 @@ class MultimodalRequestProcessor:
                 if len(processed_mm_data) > 1:
                     # With more than one modality, TRT-LLM needs the items'
                     # prompt order to give each item its own tokens and
-                    # embeddings. Without it, its multimodal hashing counts
-                    # the first modality's tokens only, and the assertion
-                    # that catches this stops the engine.
+                    # embeddings. Without it, its multimodal hashing fails
+                    # unless the model's processor derives the order from
+                    # the prompt.
                     processed_inputs["mm_item_order"] = _mm_item_order(
                         request.get("multi_modal_order"),
                         {m: len(items) for m, items in processed_mm_data.items()},
@@ -843,6 +904,12 @@ class MultimodalRequestProcessor:
                     and len(mm_hashes) == len(images)
                 ):
                     processed_inputs["multi_modal_uuids"] = {"image": list(mm_hashes)}
+
+        if audio_items:
+            # TRT-LLM's audio processor needs the prompt text to expand its
+            # audio placeholders and prepare model-specific features.
+            processed_inputs["prompt"] = formatted_prompt_from_frontend
+            return processed_inputs
 
         # Get token_ids from request (already tokenized by Rust frontend)
         token_ids = token_ids_to_list(request.get("token_ids"))

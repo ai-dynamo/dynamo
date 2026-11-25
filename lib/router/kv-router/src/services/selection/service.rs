@@ -14,27 +14,30 @@ use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
 use crate::tracking_hash::tracking_hash_context;
-use dynamo_kv_indexer::backend::IndexerPolicy;
+use dynamo_kv_indexer::IndexerPolicy;
 use dynamo_router_protocol::worker::WorkerId;
-use dynamo_scheduler::config::RouterConfig;
-use dynamo_scheduler::protocols::PotentialLoad;
-use dynamo_scheduler::replication::AffinityBindingEvent;
-use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
+use dynamo_scheduler::PotentialLoad;
+use dynamo_scheduler::RouterConfig;
+use dynamo_scheduler::WorkerSelectionPolicyFactory;
+use dynamo_session_affinity::AffinityBindingEvent;
 
 #[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
 use crate::plugins::RouterPluginRegistry;
+use crate::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_router_protocol::WorkerType;
 #[cfg(feature = "ingest-zmq")]
 use dynamo_scheduler::host::HostCache;
+#[cfg(feature = "ingest-zmq")]
+use dynamo_scheduler::host::KvIndexSource;
 use dynamo_scheduler::host::SelectionCacheConfig;
 use dynamo_scheduler::host::SelectionError;
-use dynamo_scheduler::host::{KvIndexSource, SelectionCore, SelectionHost};
 use dynamo_scheduler::host::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
+use dynamo_scheduler::host::{SelectionCore, SelectionHost};
 use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
 
 pub struct SelectionServiceBuilder {
@@ -96,7 +99,7 @@ impl SelectionServiceBuilder {
             worker_type,
             plugin_registry,
             // The standalone service's partitions index worker KV events
-            // published over ZMQ; `kv_index` and `host` override this. Without
+            // published over ZMQ; `host` overrides this. Without
             // the ZMQ ingress the host feeds the index itself.
             #[cfg(feature = "ingest-zmq")]
             host: SelectionHost {
@@ -123,13 +126,6 @@ impl SelectionServiceBuilder {
         factory: WorkerSelectionPolicyFactory,
     ) -> Self {
         self.worker_selection_policy_factory = Some(factory);
-        self
-    }
-
-    /// Where each partition's KV index comes from (see [`KvIndexSource`]).
-    /// Shorthand for setting `host.cache.index`.
-    pub fn kv_index(mut self, source: KvIndexSource) -> Self {
-        self.host.cache.index = source;
         self
     }
 
@@ -213,7 +209,7 @@ impl SelectionServiceBuilder {
             dynamo_session_affinity::SessionAffinity::validate_ttl(ttl)?;
         }
         self.kv_router_config
-            .validate_config()
+            .validate()
             .map_err(anyhow::Error::msg)?;
         if !self.host_manages_request_lifecycle
             && self.kv_router_config.request_classifier_config()?.is_some()
@@ -225,7 +221,7 @@ impl SelectionServiceBuilder {
             None => self
                 .plugin_registry
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
-                .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
+                .ok_or(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
         // Hint policies are a peer plugin role, resolved independently of worker selection.
         if self.host.hints.policies.is_none() {
@@ -235,9 +231,9 @@ impl SelectionServiceBuilder {
             );
         }
         let tracking_hash = Arc::new(tracking_hash_context(&self.kv_router_config)?);
-        let indexer_policy = IndexerPolicy::from_config(
-            &dynamo_kv_indexer::config::IndexerConfig::from(&self.kv_router_config),
-        )?;
+        let indexer_policy = IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig::from(
+            &self.kv_router_config,
+        ))?;
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         #[cfg(feature = "replica-sync-zmq")]
@@ -378,13 +374,10 @@ pub fn local_selection_core_with_host(
     kv_router_config
         .apply_policy_config()
         .map_err(anyhow::Error::msg)?;
-    kv_router_config
-        .validate_config()
-        .map_err(anyhow::Error::msg)?;
+    kv_router_config.validate().map_err(anyhow::Error::msg)?;
     let tracking_hash = Arc::new(tracking_hash_context(&kv_router_config)?);
-    let indexer_policy = IndexerPolicy::from_config(
-        &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
-    )?;
+    let indexer_policy =
+        IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig::from(&kv_router_config))?;
     let config = RouterConfig::from(&kv_router_config).validate()?;
     Ok(SelectionCore::new(
         config,
@@ -562,10 +555,10 @@ impl SelectionService {
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
-                    std::sync::Arc::new(|config, role, _| {
+                    std::sync::Arc::new(|context| {
                         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                            config.clone(),
-                            role.default_selector_label(),
+                            context.selection_config().clone(),
+                            context.worker_type().default_selector_label(),
                         )
                     }),
                     SelectionHost {
@@ -733,6 +726,41 @@ impl SelectionService {
             .unwrap_or_default()
     }
 
+    /// Subscribe to a worker's prefill and request completion events.
+    /// Events update local and replicated reservations without being republished.
+    /// Requires replica sync. Returns `true` if the subscription was added.
+    #[cfg(feature = "replica-sync-zmq")]
+    pub async fn register_worker_publisher(
+        &self,
+        endpoint: String,
+    ) -> Result<bool, ReplicaPeerError> {
+        let peer_manager = self
+            .peer_manager
+            .as_ref()
+            .ok_or(ReplicaPeerError::Disabled)?;
+        peer_manager.register_worker_publisher(endpoint).await
+    }
+
+    #[cfg(feature = "replica-sync-zmq")]
+    pub async fn deregister_worker_publisher(
+        &self,
+        endpoint: String,
+    ) -> Result<bool, ReplicaPeerError> {
+        let peer_manager = self
+            .peer_manager
+            .as_ref()
+            .ok_or(ReplicaPeerError::Disabled)?;
+        peer_manager.deregister_worker_publisher(endpoint).await
+    }
+
+    #[cfg(feature = "replica-sync-zmq")]
+    pub fn list_worker_publishers(&self) -> Vec<String> {
+        self.peer_manager
+            .as_ref()
+            .map(|peer_manager| peer_manager.list_worker_publishers())
+            .unwrap_or_default()
+    }
+
     // Only the HTTP server's replica-peer routes read it.
     #[cfg(all(
         feature = "http",
@@ -808,10 +836,10 @@ mod tests {
     }
 
     fn test_registry() -> RouterPluginRegistry {
-        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
             dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                config.clone(),
-                role.default_selector_label(),
+                context.selection_config().clone(),
+                context.worker_type().default_selector_label(),
             )
         }))
     }
@@ -829,8 +857,8 @@ mod tests {
             panic!("missing default accepted")
         };
         assert!(matches!(
-            error.downcast_ref::<crate::plugins::WorkerSelectionPolicyRegistryError>(),
-            Some(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)
+            error.downcast_ref::<crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError>(),
+            Some(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)
         ));
     }
 

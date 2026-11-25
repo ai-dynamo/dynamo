@@ -12,15 +12,6 @@ use crate::prelude::*;
 use dynamo_router_protocol::identity::CacheOwnerId;
 use dynamo_tokens::SequenceHash;
 
-/// Trait for types that may represent an error response.
-/// Used for RPC-style responses that can indicate success or failure.
-pub trait MaybeError {
-    /// Construct an instance from an error.
-    fn from_err(err: impl std::error::Error + 'static) -> Self;
-    /// Convert to an error instance if this represents an error.
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>>;
-}
-
 // -------
 // Distributed router - Worker KV Query types
 // -------
@@ -171,19 +162,6 @@ pub enum WorkerKvQueryResponse {
     Error(String),
 }
 
-impl MaybeError for WorkerKvQueryResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        WorkerKvQueryResponse::Error(err.to_string())
-    }
-
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
-        match self {
-            WorkerKvQueryResponse::Error(msg) => Some(Box::new(std::io::Error::other(msg.clone()))),
-            _ => None,
-        }
-    }
-}
-
 // -------
 // Standalone indexer query types (request plane)
 // -------
@@ -216,19 +194,6 @@ pub enum IndexerQueryResponse {
     Error(String),
 }
 
-impl MaybeError for IndexerQueryResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        IndexerQueryResponse::Error(err.to_string())
-    }
-
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
-        match self {
-            IndexerQueryResponse::Error(msg) => Some(Box::new(std::io::Error::other(msg.clone()))),
-            _ => None,
-        }
-    }
-}
-
 /// Request to record a routing decision on a served approximate-mode indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexerRecordRoutingDecisionRequest {
@@ -247,19 +212,4 @@ pub struct IndexerRecordRoutingDecisionRequest {
 pub enum IndexerRecordRoutingDecisionResponse {
     Recorded,
     Error(String),
-}
-
-impl MaybeError for IndexerRecordRoutingDecisionResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        IndexerRecordRoutingDecisionResponse::Error(err.to_string())
-    }
-
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
-        match self {
-            IndexerRecordRoutingDecisionResponse::Error(msg) => {
-                Some(Box::new(std::io::Error::other(msg.clone())))
-            }
-            _ => None,
-        }
-    }
 }

@@ -9,8 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_kv_router::WorkerId;
-use dynamo_scheduler::selection::membership::CatalogReconciler;
-use dynamo_scheduler::selection::types::WorkerRequest;
+use dynamo_scheduler::host::{CatalogReconciler, WorkerRequest};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;

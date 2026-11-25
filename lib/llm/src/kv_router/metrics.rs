@@ -63,8 +63,8 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
+use dynamo_http_server::metrics::generate_log_buckets;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
@@ -1169,7 +1169,7 @@ impl RouterRequestMetrics {
         let shared_cache_beyond_blocks = metrics
             .create_histogram(
                 &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
-                "Shared cache blocks beyond device overlap for the selected worker",
+                "Shared cache blocks the selected worker can load past its local prefix",
                 extra_labels,
                 Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
             )

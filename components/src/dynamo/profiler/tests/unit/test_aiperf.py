@@ -84,6 +84,41 @@ def test_benchmark_decode_logs_stdout_and_stderr(caplog):
     assert "stderr: profile failed" in caplog.text
 
 
+@pytest.mark.parametrize("warmup_request_count", [0, 3, 12])
+def test_benchmark_decode_forwards_warmup_request_count(warmup_request_count):
+    process = MagicMock(returncode=0)
+    process.communicate.return_value = ("", "")
+    expected_result = {"inter_token_latency": {"avg": 1.0}}
+
+    with (
+        patch(
+            "dynamo.profiler.utils.aiperf.subprocess.Popen",
+            return_value=process,
+        ) as mock_popen,
+        patch(
+            "dynamo.profiler.utils.aiperf.get_aiperf_result",
+            return_value=expected_result,
+        ),
+    ):
+        result = benchmark_decode(
+            100,
+            10,
+            1,
+            "artifacts",
+            "test-model",
+            "test-tokenizer",
+            warmup_request_count=warmup_request_count,
+        )
+
+    assert result is expected_result
+    assert mock_popen.call_count == 2
+    for call in mock_popen.call_args_list:
+        command = call.args[0]
+        assert command[command.index("--warmup-request-count") + 1] == str(
+            warmup_request_count
+        )
+
+
 def test_benchmark_decode_stops_when_warmup_fails(caplog):
     warmup_process = _failed_process("warmup rejected", "warmup failed")
 
