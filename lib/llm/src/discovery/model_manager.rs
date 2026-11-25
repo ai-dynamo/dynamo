@@ -2768,29 +2768,30 @@ impl ModelManager {
 
     // -- Worker monitoring --
 
-    /// Gets or sets the load threshold config for a model's worker monitor.
-    /// Checks across all WorkerSets for the model.
+    /// Gets or sets a model's busy thresholds, for one role's pools or for all of them.
+    /// See [`Model::load_threshold_config`].
     pub fn load_threshold_config(
         &self,
         model: &str,
+        role: Option<WorkerType>,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
         let model_entry = self.models.get(model)?;
-        model_entry.load_threshold_config(config)
+        model_entry.load_threshold_config(role, config)
     }
 
     /// See [`Model::accepts_load_thresholds`].
-    pub(crate) fn accepts_load_thresholds(&self, model: &str) -> bool {
+    pub(crate) fn accepts_load_thresholds(&self, model: &str, role: Option<WorkerType>) -> bool {
         self.models
             .get(model)
-            .is_some_and(|model| model.accepts_load_thresholds())
+            .is_some_and(|model| model.accepts_load_thresholds(role))
     }
 
     /// Lists all models with worker monitors configured.
     pub fn list_busy_thresholds(&self) -> Vec<(String, LoadThresholdConfig)> {
         let mut result = Vec::new();
         for entry in self.models.iter() {
-            if let Some(config) = entry.value().load_threshold_config(None) {
+            if let Some(config) = entry.value().load_threshold_config(None, None) {
                 result.push((entry.key().clone(), config));
             }
         }

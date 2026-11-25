@@ -16,6 +16,7 @@ use dynamo_kv_router::plugins::worker_selection::{SessionAffinitySetting, Sessio
 use dynamo_kv_router::scheduling::RouterPolicyConfigError;
 use dynamo_runtime::pipeline::RouterMode;
 
+use crate::discovery::LoadThresholdConfig;
 use crate::entrypoint::RouterConfig;
 use crate::session_affinity::SessionAffinityMode;
 use crate::worker_type::WorkerType;
@@ -149,6 +150,61 @@ pub(crate) fn inherited_prefill_session_affinity(
     )
 }
 
+/// Where a role's busy thresholds were configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BusyThresholdSource {
+    /// The role's `busy_threshold` in the frontend's policy file.
+    PolicyFile,
+    /// The `router_config` the serving set's workers advertise.
+    WorkerCard,
+    /// The frontend's `--active-*-threshold` flags.
+    FrontendFlags,
+    /// The decode set's card or flags, inherited by its prefill pool.
+    DecodeSet,
+}
+
+/// The busy thresholds a role's workers start with.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RoleBusyThresholds {
+    pub(crate) thresholds: LoadThresholdConfig,
+    pub(crate) source: BusyThresholdSource,
+}
+
+/// Resolve the busy thresholds a role's workers start with.
+///
+/// The role's `busy_threshold` in the frontend's policy file is taken whole: a limit it omits
+/// is not checked, whatever a card or a flag says. A role without the key keeps `inherited`,
+/// the thresholds of the serving set's [`serving_set_routing`] result, and reports
+/// `inherited_from`. For the prefill pool that is the decode set's result, never the file's
+/// `decode` entry: a role's entry in the file applies to that role alone.
+///
+/// Pass the frontend's own configuration, as for [`policy_file_session_affinity`].
+pub(crate) fn role_busy_thresholds(
+    frontend: &RouterConfig,
+    worker_type: WorkerType,
+    inherited: &LoadThresholdConfig,
+    inherited_from: BusyThresholdSource,
+) -> Result<RoleBusyThresholds, RouterPolicyConfigError> {
+    let policy_file = frontend
+        .kv_router_config
+        .worker_selection_config()?
+        .and_then(|config| config.busy_threshold(worker_type));
+    Ok(match policy_file {
+        Some(spec) => RoleBusyThresholds {
+            thresholds: LoadThresholdConfig {
+                active_decode_blocks_threshold: spec.active_decode_blocks,
+                active_prefill_tokens_threshold: None,
+                active_prefill_tokens_threshold_frac: spec.active_prefill_tokens_frac,
+            },
+            source: BusyThresholdSource::PolicyFile,
+        },
+        None => RoleBusyThresholds {
+            thresholds: inherited.clone(),
+            source: inherited_from,
+        },
+    })
+}
+
 /// What the prefill hop inherits from the decode set it fronts.
 #[derive(Debug)]
 pub(crate) struct DecodeRouting {
@@ -246,6 +302,7 @@ pub(crate) fn log_serving_set_routing(
     advertised: bool,
     routing: &RouterConfig,
     session_affinity: &RoleSessionAffinity,
+    busy_thresholds: &RoleBusyThresholds,
 ) {
     tracing::info!(
         model_name,
@@ -255,7 +312,8 @@ pub(crate) fn log_serving_set_routing(
         advertised,
         session_affinity = ?session_affinity.spec,
         session_affinity_source = ?session_affinity.source,
-        busy_thresholds = ?routing.load_threshold_config,
+        busy_thresholds = ?busy_thresholds.thresholds,
+        busy_thresholds_source = ?busy_thresholds.source,
         kv_tuning = ?routing
             .router_mode
             .is_kv_routing()
@@ -534,6 +592,59 @@ worker_selection:
                 spec: None,
                 source: SessionAffinitySource::DecodeSet,
             }
+        );
+    }
+
+    #[test]
+    fn role_busy_thresholds_are_the_policy_file_taken_whole_else_the_card_or_flags() {
+        let card_or_flags = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.9),
+            active_prefill_tokens_threshold: Some(1000),
+            active_prefill_tokens_threshold_frac: Some(2.0),
+        };
+        let frontend = frontend_with_policy_file(
+            r#"
+worker_selection:
+  decode: {type: alpha, busy_threshold: {active_decode_blocks: 0.5}}
+  aggregated: {type: alpha, busy_threshold: {}}
+  prefill: alpha
+"#,
+        );
+        let resolve = |frontend: &RouterConfig, worker_type| {
+            let resolved = role_busy_thresholds(
+                frontend,
+                worker_type,
+                &card_or_flags,
+                BusyThresholdSource::WorkerCard,
+            )
+            .unwrap();
+            (resolved.thresholds, resolved.source)
+        };
+
+        // Taken whole: the limits the entry omits are unset, not the card's or the flags'.
+        assert_eq!(
+            resolve(&frontend, WorkerType::Decode),
+            (
+                LoadThresholdConfig {
+                    active_decode_blocks_threshold: Some(0.5),
+                    ..Default::default()
+                },
+                BusyThresholdSource::PolicyFile
+            )
+        );
+        assert_eq!(
+            resolve(&frontend, WorkerType::Aggregated),
+            (
+                LoadThresholdConfig::default(),
+                BusyThresholdSource::PolicyFile
+            )
+        );
+        // The prefill pool has no key, so it does not pick up the file's decode entry.
+        let inherited = (card_or_flags.clone(), BusyThresholdSource::WorkerCard);
+        assert_eq!(resolve(&frontend, WorkerType::Prefill), inherited);
+        assert_eq!(
+            resolve(&RouterConfig::default(), WorkerType::Decode),
+            inherited
         );
     }
 

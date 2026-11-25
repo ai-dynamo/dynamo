@@ -27,7 +27,8 @@ use crate::{
     discovery::{LoadThresholdHandle, RuntimeConfigWatch, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     kv_router::plugins::RouterPluginBuilder,
-    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, role_routing},
+    kv_router::role_routing::{self, BusyThresholdSource, RoleBusyThresholds},
+    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
         DISAGG_PREFILL_CANCEL_ANYTIME_V1, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -558,6 +559,16 @@ impl ModelWatcher {
             &self.router_config,
             worker_type,
         )?;
+        let busy_thresholds = role_routing::role_busy_thresholds(
+            &self.router_config,
+            worker_type,
+            &router_config.load_threshold_config,
+            if card.router_config.is_some() {
+                BusyThresholdSource::WorkerCard
+            } else {
+                BusyThresholdSource::FrontendFlags
+            },
+        )?;
         role_routing::log_serving_set_routing(
             card.name(),
             &spec.key.id(),
@@ -565,6 +576,7 @@ impl ModelWatcher {
             card.router_config.is_some(),
             &router_config,
             &session_affinity,
+            &busy_thresholds,
         );
 
         if card.model_input == ModelInput::Tokens
@@ -632,7 +644,8 @@ impl ModelWatcher {
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
-            let load_thresholds = load_threshold_handle(&router_config);
+            let load_thresholds =
+                load_threshold_handle(router_config.router_mode, worker_type, busy_thresholds);
             let load_context = if needs_preprocessed_routing {
                 let source = RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
@@ -702,7 +715,25 @@ impl ModelWatcher {
                 prefill_config.router_track_active_blocks = false;
                 // Created here, not per prefill binding, so that thresholds written
                 // through the API survive a binding rebuild.
-                let prefill_load_thresholds = prefill_threshold_handle(&load_thresholds);
+                let prefill_busy_thresholds = role_routing::role_busy_thresholds(
+                    &self.router_config,
+                    WorkerType::Prefill,
+                    &router_config.load_threshold_config,
+                    BusyThresholdSource::DecodeSet,
+                )?;
+                // The prefill router's activation line prints the handle's current value,
+                // which the API may have changed; this is where the starting value came from.
+                tracing::info!(
+                    model_name,
+                    busy_thresholds = ?prefill_busy_thresholds.thresholds,
+                    busy_thresholds_source = ?prefill_busy_thresholds.source,
+                    "Prefill pool busy thresholds"
+                );
+                let prefill_load_thresholds = load_threshold_handle(
+                    router_config.router_mode,
+                    WorkerType::Prefill,
+                    prefill_busy_thresholds,
+                );
                 worker_set.prefill_load_thresholds = Some(prefill_load_thresholds.clone());
 
                 // Fallback only: a prefill worker that declares its own
@@ -945,7 +976,8 @@ impl ModelWatcher {
             // OpenAI surfaces. Build each declared surface independently:
             // ModelType is a bitflag, so choosing one mutually-exclusive branch
             // would silently omit engines for mixed-capability cards.
-            let load_thresholds = load_threshold_handle(&router_config);
+            let load_thresholds =
+                load_threshold_handle(router_config.router_mode, worker_type, busy_thresholds);
             let load_context = RoutingLoadContext::start(
                 client,
                 RouterLoadSource::from_worker_type(effective_worker_type(
@@ -1625,32 +1657,34 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
         && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
 }
 
-/// A frontend in direct routing mode does not pick workers, so its handle
-/// ignores busy-worker thresholds: they belong to the caller that picks workers.
-/// The prefill pool's handle is disabled with it, because in direct mode the
-/// caller (EPP) picks both workers, decode and prefill.
-fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
-    if !router_config.router_mode.is_direct_routing() {
-        return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+/// The threshold handle of one role's pool, starting from the role's resolved thresholds.
+///
+/// A frontend in direct routing mode does not pick workers, so its handles
+/// ignore busy-worker thresholds: they belong to the caller that picks workers.
+/// `router_mode` is the serving set's. The prefill pool's handle is disabled
+/// with its decode set's, because in direct mode the caller (EPP) picks both
+/// workers, decode and prefill.
+fn load_threshold_handle(
+    router_mode: RouterMode,
+    worker_type: WorkerType,
+    busy_thresholds: RoleBusyThresholds,
+) -> LoadThresholdHandle {
+    let RoleBusyThresholds { thresholds, source } = busy_thresholds;
+    if !router_mode.is_direct_routing() {
+        return LoadThresholdHandle::new(thresholds);
     }
-    if router_config.load_threshold_config.is_configured() {
+    // A prefill pool that inherits its thresholds is covered by the decode set's warning.
+    if thresholds.is_configured() && source != BusyThresholdSource::DecodeSet {
         tracing::warn!(
-            thresholds = ?router_config.load_threshold_config,
-            "ignoring busy-worker thresholds in direct routing mode: the caller picks workers, \
-             not this frontend"
+            ?worker_type,
+            ?thresholds,
+            ?source,
+            "ignoring busy-worker thresholds: the serving worker set is in direct routing \
+             mode, where the caller picks workers, and a prefill pool's thresholds are \
+             disabled with its decode set's"
         );
     }
     LoadThresholdHandle::disabled()
-}
-
-/// The prefill pool's handle: a separate cell that starts from the serving
-/// set's thresholds and is disabled when that set's handle is.
-fn prefill_threshold_handle(serving: &LoadThresholdHandle) -> LoadThresholdHandle {
-    if serving.is_enabled() {
-        LoadThresholdHandle::new(serving.get())
-    } else {
-        LoadThresholdHandle::disabled()
-    }
 }
 
 /// A custom policy factory cannot infer whether an untyped legacy card is
@@ -1742,7 +1776,7 @@ fn worker_set_chat_preprocessor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::Model;
+    use crate::discovery::{LoadThresholdConfig, Model};
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
     use crate::session_affinity::SessionAffinityMode;
@@ -2129,28 +2163,29 @@ mod tests {
 
     #[test]
     fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {
-        let thresholds = crate::discovery::LoadThresholdConfig {
+        let thresholds = LoadThresholdConfig {
             active_decode_blocks_threshold: Some(0.9),
             ..Default::default()
         };
-        let config = |router_mode| {
-            RouterConfig::new(
+        let handle = |router_mode| {
+            load_threshold_handle(
                 router_mode,
-                dynamo_kv_router::config::KvRouterConfig::default(),
+                WorkerType::Decode,
+                RoleBusyThresholds {
+                    thresholds: thresholds.clone(),
+                    source: BusyThresholdSource::FrontendFlags,
+                },
             )
-            .with_load_threshold_config(thresholds.clone())
         };
-        let direct = load_threshold_handle(&config(RouterMode::Direct));
+        let direct = handle(RouterMode::Direct);
         direct.update(&thresholds);
         assert!(!direct.is_enabled());
         assert!(!direct.is_configured());
-        assert!(load_threshold_handle(&config(RouterMode::KV)).is_configured());
+        assert!(handle(RouterMode::KV).is_configured());
     }
 
     #[tokio::test]
     async fn decode_set_gives_its_prefill_pool_a_separate_threshold_handle() {
-        use crate::discovery::LoadThresholdConfig;
-
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
@@ -2164,16 +2199,37 @@ mod tests {
             active_prefill_tokens_threshold: Some(value),
             ..Default::default()
         };
-        for (index, router_mode, worker_type) in [
-            (0, RouterMode::RoundRobin, WorkerType::Decode),
-            (1, RouterMode::Direct, WorkerType::Decode),
-            (2, RouterMode::RoundRobin, WorkerType::Aggregated),
+        // Each role's `busy_threshold` in the policy file replaces the flags for that role.
+        let per_role = r#"
+worker_selection:
+  decode: {type: default, busy_threshold: {active_decode_blocks: 0.5}}
+  prefill: {type: default, busy_threshold: {active_prefill_tokens_frac: 0.25}}
+"#;
+        for (index, router_mode, worker_type, policy_file) in [
+            (0, RouterMode::RoundRobin, WorkerType::Decode, None),
+            (1, RouterMode::Direct, WorkerType::Decode, None),
+            (2, RouterMode::RoundRobin, WorkerType::Aggregated, None),
+            (
+                3,
+                RouterMode::RoundRobin,
+                WorkerType::Decode,
+                Some(per_role),
+            ),
+            (4, RouterMode::Direct, WorkerType::Decode, Some(per_role)),
         ] {
+            let mut router_config = RouterConfig::new(router_mode, Default::default())
+                .with_load_threshold_config(configured.clone());
+            if let Some(yaml) = policy_file {
+                let kv = &mut router_config.kv_router_config;
+                kv.router_policy_config = Some("policy.yaml".to_string());
+                kv.policy_config_cache
+                    .set(dynamo_kv_router::scheduling::RouterPolicyConfig::from_yaml(yaml).unwrap())
+                    .expect("empty cache");
+            }
             let watcher = ModelWatcher::new(
                 drt.clone(),
                 Arc::new(ModelManager::new()),
-                RouterConfig::new(router_mode, Default::default())
-                    .with_load_threshold_config(configured.clone()),
+                router_config,
                 0,
                 None,
                 None,
@@ -2223,8 +2279,25 @@ mod tests {
             let enabled = !router_mode.is_direct_routing();
             assert_eq!(serving.is_enabled(), enabled);
             assert_eq!(prefill.is_enabled(), enabled);
-            assert_eq!(serving.get(), prefill.get());
             assert_eq!(prefill.is_configured(), enabled);
+            if policy_file.is_none() {
+                assert_eq!(serving.get(), prefill.get());
+            } else if enabled {
+                assert_eq!(
+                    serving.get(),
+                    LoadThresholdConfig {
+                        active_decode_blocks_threshold: Some(0.5),
+                        ..Default::default()
+                    }
+                );
+                assert_eq!(
+                    prefill.get(),
+                    LoadThresholdConfig {
+                        active_prefill_tokens_threshold_frac: Some(0.25),
+                        ..Default::default()
+                    }
+                );
+            }
 
             // `/busy_threshold` on a LoRA adapter name writes through the adapter view.
             let mut adapter_card = ModelDeploymentCard::with_name_only("adapter");
@@ -2234,14 +2307,30 @@ mod tests {
             });
             let model = Model::new("adapter".to_string());
             model.add_worker_set(namespace, Arc::new(worker_set.adapter_view(adapter_card)));
-            assert_eq!(model.accepts_load_thresholds(), enabled);
-            model.load_threshold_config(Some(&prefill_tokens(7)));
+            assert_eq!(model.accepts_load_thresholds(None), enabled);
+            model.load_threshold_config(None, Some(&prefill_tokens(7)));
             let written = enabled.then_some(7);
             assert_eq!(serving.get().active_prefill_tokens_threshold, written);
             assert_eq!(prefill.get().active_prefill_tokens_threshold, written);
 
-            prefill.update(&prefill_tokens(9));
+            // A role names one pool. The adapter view keeps the base set's role.
+            let prefill_write =
+                model.load_threshold_config(Some(WorkerType::Prefill), Some(&prefill_tokens(9)));
+            assert_eq!(prefill_write, Some(prefill.get()));
             assert_eq!(serving.get().active_prefill_tokens_threshold, written);
+            assert_eq!(
+                prefill.get().active_prefill_tokens_threshold,
+                enabled.then_some(9)
+            );
+            let read = |role| model.load_threshold_config(role, None);
+            assert_eq!(read(Some(WorkerType::Decode)), Some(serving.get()));
+            assert_eq!(read(None), Some(serving.get()));
+            assert_eq!(read(Some(WorkerType::Aggregated)), None);
+            assert_eq!(
+                model.accepts_load_thresholds(Some(WorkerType::Prefill)),
+                enabled
+            );
+            assert!(!model.accepts_load_thresholds(Some(WorkerType::Aggregated)));
         }
         runtime.shutdown();
     }
@@ -3369,7 +3458,7 @@ request_classifier:
         assert!(model.has_pooling_engine());
         assert_eq!(
             model
-                .load_threshold_config(None)
+                .load_threshold_config(None, None)
                 .unwrap()
                 .active_decode_blocks_threshold,
             Some(0.8)
