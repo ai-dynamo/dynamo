@@ -279,6 +279,20 @@ impl Model {
             .any(|worker_set| worker_set.has_decode_engine())
     }
 
+    /// Largest log-probability count a request to this model may ask for: the
+    /// smallest limit among the WorkerSets that can serve it, so admission
+    /// does not depend on which set the request is routed to. The OpenAI
+    /// limit when no decode WorkerSet exists.
+    pub fn max_logprobs(&self) -> u8 {
+        self.worker_sets
+            .load()
+            .values()
+            .filter(|worker_set| worker_set.has_decode_engine())
+            .map(|worker_set| worker_set.max_logprobs())
+            .min()
+            .unwrap_or(crate::protocols::openai::validate::MAX_TOP_LOGPROBS)
+    }
+
     /// Check if this model tracks prefill (any WorkerSet is a prefill set).
     pub fn has_prefill(&self) -> bool {
         self.worker_sets
@@ -1540,6 +1554,62 @@ mod tests {
                 .unwrap();
             assert!(Arc::ptr_eq(&engine, &flagged_engine));
         }
+    }
+
+    #[test]
+    fn max_logprobs_is_the_smallest_limit_among_decode_worker_sets() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use crate::protocols::openai::validate::MAX_TOP_LOGPROBS;
+        let set = |namespace: &str, published: Option<serde_json::Value>, decode: bool| {
+            let mut card = ModelDeploymentCard::default();
+            if let Some(published) = published {
+                card.runtime_config
+                    .runtime_data
+                    .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), published);
+            }
+            let mut ws = WorkerSet::new(namespace.to_string(), format!("{namespace}-sum"), card);
+            if decode {
+                ws.chat_engine = Some(make_test_chat_engine());
+            }
+            Arc::new(ws)
+        };
+
+        // What one worker set publishes.
+        assert_eq!(set("a", None, true).max_logprobs(), MAX_TOP_LOGPROBS);
+        assert_eq!(set("a", Some(32.into()), true).max_logprobs(), 32);
+        assert_eq!(set("a", Some(5.into()), true).max_logprobs(), 5);
+        // The request fields are u8, so a larger limit saturates.
+        assert_eq!(set("a", Some(151_936.into()), true).max_logprobs(), u8::MAX);
+        // Anything but a non-negative integer counts as not published.
+        for malformed in [
+            serde_json::json!("32"),
+            serde_json::json!(-1),
+            serde_json::json!(32.5),
+            serde_json::json!(true),
+        ] {
+            assert_eq!(
+                set("a", Some(malformed.clone()), true).max_logprobs(),
+                MAX_TOP_LOGPROBS,
+                "{malformed}"
+            );
+        }
+
+        let model = Model::new("logprobs".to_string());
+        assert_eq!(model.max_logprobs(), MAX_TOP_LOGPROBS);
+
+        // A set without a decode engine does not serve these requests.
+        model.add_worker_set("prefill".to_string(), set("prefill", Some(5.into()), false));
+        assert_eq!(model.max_logprobs(), MAX_TOP_LOGPROBS);
+
+        model.add_worker_set("raised".to_string(), set("raised", Some(32.into()), true));
+        assert_eq!(model.max_logprobs(), 32);
+
+        // Every decode set must accept the request, so the smallest limit wins.
+        model.add_worker_set("default".to_string(), set("default", None, true));
+        assert_eq!(model.max_logprobs(), MAX_TOP_LOGPROBS);
+        model.remove_worker_set("default");
+        model.add_worker_set("higher".to_string(), set("higher", Some(64.into()), true));
+        assert_eq!(model.max_logprobs(), 32);
     }
 
     fn systemone_worker_set(

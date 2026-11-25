@@ -996,6 +996,23 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
 
+### Log-probability limits
+
+`top_logprobs` on `/v1/chat/completions` and `/v1/responses`, and `logprobs` on
+`/v1/completions`, accept counts from 0 to 20 by default. A worker can publish
+its engine's own limit as `max_logprobs` in the model's runtime data, and the
+frontend then uses that limit for the model, whether it is above or below 20:
+
+- `/v1/chat/completions` and `/v1/completions` return `400` for a larger count.
+- `/v1/responses` lowers a larger count to the limit and reports the lowered
+  value in the response.
+
+The vLLM worker (`dynamo.vllm`) publishes the engine's `--max-logprobs`, so
+raising it there is enough. Other workers publish no limit and keep 20. When a
+model is served by several worker groups with different limits, the frontend
+uses the smallest. To publish a limit from a custom backend, see
+[Writing unified backends](../../developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md).
+
 ### Image API Compatibility
 
 **Experimental.** Image editing requires a backend and model that support

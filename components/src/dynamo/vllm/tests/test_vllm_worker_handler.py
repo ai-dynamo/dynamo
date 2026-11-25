@@ -212,7 +212,8 @@ def test_lora_discovery_publishes_engine_generate_capability(
     handler.config.engine_args.max_loras = 2
     handler.engine_client = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            lora_config=SimpleNamespace(enable_tower_connector_lora=True)
+            lora_config=SimpleNamespace(enable_tower_connector_lora=True),
+            model_config=SimpleNamespace(max_logprobs=32),
         )
     )
     runtime_config = MagicMock()
@@ -250,6 +251,8 @@ def test_lora_discovery_publishes_engine_generate_capability(
         assert model_type_arg.supports_chat()
         assert worker_arg == expected_worker_type
         assert tower_lora_arg is True
+    # A LoRA card carries the engine's logprobs limit, like the base model's.
+    runtime_config.set_engine_specific.assert_any_call("max_logprobs", "32")
     assert register_model.await_args.kwargs["runtime_config"] is runtime_config
 
 

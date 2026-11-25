@@ -403,6 +403,20 @@ impl WorkerSet {
         self.has_chat_engine() || self.has_completions_engine()
     }
 
+    /// Largest log-probability count this set's workers accept, from the
+    /// `max_logprobs` they publish. The request fields are `u8`, so a larger
+    /// published value saturates. A set that publishes none, or a value that
+    /// is not a non-negative integer, gets the OpenAI limit.
+    pub fn max_logprobs(&self) -> u8 {
+        self.card
+            .runtime_config
+            .runtime_data
+            .get(crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY)
+            .and_then(serde_json::Value::as_u64)
+            .map(|published| u8::try_from(published).unwrap_or(u8::MAX))
+            .unwrap_or(crate::protocols::openai::validate::MAX_TOP_LOGPROBS)
+    }
+
     /// Whether this set has any engine capable of producing output for an
     /// inference request. Single source of truth for the "is something attached
     /// that can serve a request?" question — keep the engine-kind list here so

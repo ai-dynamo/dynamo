@@ -1253,9 +1253,9 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
 
         // Scores need the include selector plus an explicit count (chat defaults to 1).
         // A bare `top_logprobs` is only echoed: chat rejects it without `logprobs: true`.
+        // The HTTP handler has already lowered the count to the model's limit.
         let logprobs_requested = include_requests_logprobs(resp.inner.include.as_deref());
-        let top_logprobs =
-            logprobs_requested.then(|| convert_top_logprobs(resp.inner.top_logprobs).unwrap_or(0));
+        let top_logprobs = logprobs_requested.then(|| resp.inner.top_logprobs.unwrap_or(0));
 
         let (tools, tool_choice) = convert_tools_and_choice(
             (!inner_tools.is_empty()).then_some(inner_tools.as_slice()),
@@ -1426,8 +1426,10 @@ pub(crate) fn output_text_logprobs_to_events(entries: &[LogProb]) -> Vec<Respons
         .collect()
 }
 
-fn convert_top_logprobs(input: Option<u8>) -> Option<u8> {
-    input.map(|x| x.min(20))
+/// Lowers a Responses `top_logprobs` to `max`, the serving model's limit. The
+/// Responses API lowers an over-limit count instead of refusing the request.
+pub(crate) fn convert_top_logprobs(input: Option<u8>, max: u8) -> Option<u8> {
+    input.map(|x| x.min(max))
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,9 +1500,11 @@ impl ResponseParams {
     }
 
     /// The `top_logprobs` value the response object reports: the count the
-    /// backend was asked for, so a request above the supported cap sees the cap.
+    /// backend was asked for. The HTTP handler lowers the request's count to
+    /// the model's limit before building these params, so a request above the
+    /// limit sees the limit.
     pub(crate) fn echoed_top_logprobs(&self) -> u8 {
-        convert_top_logprobs(self.top_logprobs).unwrap_or(0)
+        self.top_logprobs.unwrap_or(0)
     }
 
     fn reasoning_summary_requested(&self) -> bool {
@@ -2244,15 +2248,6 @@ mod tests {
 
         let resp = chat_completion_to_response(chat_resp.clone(), &params, None).unwrap();
         assert_eq!(resp.inner.top_logprobs, Some(2));
-        let capped = ResponseParams {
-            top_logprobs: Some(21),
-            ..params.clone()
-        };
-        assert_eq!(
-            capped.echoed_top_logprobs(),
-            20,
-            "echo the count sent to chat"
-        );
         let OutputItem::Message(message) = &resp.inner.output[0] else {
             panic!("expected message output");
         };
@@ -4447,10 +4442,14 @@ mod tests {
 
     #[test]
     fn test_convert_top_logprobs_clamped() {
-        assert_eq!(convert_top_logprobs(Some(5)), Some(5));
-        assert_eq!(convert_top_logprobs(Some(21)), Some(20));
-        assert_eq!(convert_top_logprobs(Some(255)), Some(20));
-        assert_eq!(convert_top_logprobs(None), None);
+        assert_eq!(convert_top_logprobs(Some(5), 20), Some(5));
+        assert_eq!(convert_top_logprobs(Some(21), 20), Some(20));
+        assert_eq!(convert_top_logprobs(Some(255), 20), Some(20));
+        assert_eq!(convert_top_logprobs(None, 20), None);
+        // A model that publishes its own limit is lowered to that instead.
+        assert_eq!(convert_top_logprobs(Some(32), 32), Some(32));
+        assert_eq!(convert_top_logprobs(Some(33), 32), Some(32));
+        assert_eq!(convert_top_logprobs(Some(10), 5), Some(5));
     }
 
     #[test]

@@ -108,7 +108,7 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from .args import Config
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
-from .capacity import publish_vllm_token_budget
+from .capacity import publish_vllm_max_logprobs, publish_vllm_token_budget
 from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
@@ -2412,6 +2412,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         runtime_config.context_length = self.model_max_len
         publish_vllm_token_budget(runtime_config, self.model_max_len)
+        publish_vllm_max_logprobs(
+            runtime_config, self.engine_client.vllm_config.model_config
+        )
         runtime_config.kv_event_publishing_enabled = getattr(
             self.config, "use_kv_events", False
         )

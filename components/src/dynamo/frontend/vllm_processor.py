@@ -31,6 +31,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutp
 from vllm.v1.engine.parallel_sampling import ParentRequest
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.max_logprobs import read_max_logprobs
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsSender,
@@ -459,6 +460,11 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
+
+
+def _runtime_config_max_logprobs(mdc: ModelDeploymentCard) -> int | None:
+    """The log-probability limit the model's workers publish, if any."""
+    return read_max_logprobs(mdc.runtime_config())
 
 
 def _ensure_chat_template(
@@ -1767,6 +1773,11 @@ class EngineFactory:
                 "from runtime_config.context_length",
                 context_length,
             )
+        max_logprobs = _runtime_config_max_logprobs(mdc)
+        if max_logprobs is not None:
+            # vLLM checks requested logprob counts against this. Its default
+            # (20) would refuse counts the worker's engine accepts.
+            model_config_kwargs["max_logprobs"] = max_logprobs
         # Preserve vLLM defaults when optional frontend arguments are absent.
         for name in ("renderer_num_workers", "mm_processor_cache_gb"):
             value = getattr(self.flags, name, None)
