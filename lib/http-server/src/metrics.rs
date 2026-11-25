@@ -9,9 +9,7 @@ use dynamo_runtime::metrics::prometheus_names::{
 };
 use dynamo_runtime::{
     config::environment_names::llm::metrics as env_metrics,
-    engine::Data,
     error::{DynamoError, ErrorType as DynamoErrorType},
-    pipeline::Context,
 };
 use prometheus::{
     GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
@@ -629,7 +627,6 @@ pub struct RequestMetrics {
 const STATE_AWAITING_FIRST_TOKEN: &str = "awaiting_first_token";
 const STATE_GENERATING: &str = "generating";
 
-const REQUEST_METRICS_KEY: &str = "frontend.request_metrics";
 const FINISHED: u64 = 1 << 63;
 const GENERATING: u64 = 1 << 62;
 const INPUT_TOKENS: u64 = GENERATING - 1;
@@ -654,16 +651,6 @@ impl RequestMetrics {
             input_tokens: metrics.input_tokens_counter.with_label_values(labels),
             output_tokens: metrics.output_tokens_counter.with_label_values(labels),
         }
-    }
-
-    pub fn attach_to<T: Data>(self: &Arc<Self>, context: &mut Context<T>) {
-        context.insert_arc(REQUEST_METRICS_KEY, self.clone());
-    }
-
-    pub fn from_context<T: Data>(context: &Context<T>) -> Option<Arc<Self>> {
-        context
-            .get_optional(REQUEST_METRICS_KEY)
-            .expect("request metrics have a fixed registry type")
     }
 
     /// Count a prompt of `tokens` tokens as soon as it is tokenized. A batched
@@ -3290,12 +3277,6 @@ mod tests {
                 .clone()
                 .create_inflight_guard("model", Endpoint::Completions, true, "");
         let request = guard.request_metrics().clone();
-        let mut context = Context::new(());
-        request.attach_to(&mut context);
-        assert!(Arc::ptr_eq(
-            &request,
-            &RequestMetrics::from_context(&context).unwrap()
-        ));
         request.add_input_tokens(3);
         request.add_input_tokens(5);
         request.observe_input_tokens(5);

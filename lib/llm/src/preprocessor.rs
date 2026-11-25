@@ -20,6 +20,7 @@ pub mod mm_routing;
 #[cfg(all(test, feature = "mm-routing"))]
 mod glm5_next_tests;
 pub mod prompt;
+pub mod request_metrics;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub use structural_tag::structural_tag_parser_names;
@@ -83,7 +84,6 @@ use crate::protocols::common::preprocessor::{
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
-use dynamo_http_server::metrics::RequestMetrics;
 
 use dynamo_parsers::{
     ReasoningParser, ReasoningParserType, reasoning::ParserResult,
@@ -9073,7 +9073,7 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
-        if let Some(tracked) = RequestMetrics::from_context(&context) {
+        if let Some(tracked) = request_metrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
         attach_request_context_metadata(&mut common_request, &context);
@@ -9332,7 +9332,7 @@ impl
             .context("preprocessed extra_args must be an object")?;
         extra_args.insert("request_type".to_string(), "completions".into());
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
-        if let Some(tracked) = RequestMetrics::from_context(&context) {
+        if let Some(tracked) = request_metrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
         attach_request_context_metadata(&mut common_request, &context);
@@ -9444,7 +9444,7 @@ impl
         // Preprocess the embedding request
         let (preprocessed_request, annotations) =
             self.preprocess_embedding_request(&request).await?;
-        if let Some(metrics) = RequestMetrics::from_context(&context) {
+        if let Some(metrics) = request_metrics::from_context(&context) {
             metrics.add_input_tokens(preprocessed_request.token_ids.iter().map(Vec::len).sum());
         }
 
@@ -17318,7 +17318,7 @@ mod tests {
             "",
         );
         let mut context = PipelineContext::new(request);
-        inflight.request_metrics().attach_to(&mut context);
+        request_metrics::attach(inflight.request_metrics(), &mut context);
         let backend = Arc::new(PromptRecordingBackend::default());
         let Err(error) = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await
         else {
@@ -17367,7 +17367,7 @@ mod tests {
             "",
         );
         let mut context = PipelineContext::new(request);
-        inflight.request_metrics().attach_to(&mut context);
+        request_metrics::attach(inflight.request_metrics(), &mut context);
         let backend = Arc::new(PromptRecordingBackend::default());
 
         let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;

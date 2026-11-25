@@ -1501,7 +1501,7 @@ async fn completions_single(
     drop(nvtx_lookup);
 
     let mut response_collector = inflight_guard.response_collector();
-    inflight_guard.request_metrics().attach_to(&mut request);
+    crate::preprocessor::request_metrics::attach(inflight_guard.request_metrics(), &mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1848,9 +1848,10 @@ async fn completions_batch(
         );
         copy_context_metadata(&request, &mut single_request_context);
         // The preprocessor adds each prompt's tokens to the one tracked request.
-        inflight_guard
-            .request_metrics()
-            .attach_to(&mut single_request_context);
+        crate::preprocessor::request_metrics::attach(
+            inflight_guard.request_metrics(),
+            &mut single_request_context,
+        );
 
         // Generate stream for this prompt. One range per prompt: each covers that
         // prompt's preprocessing, routing and wire handoff.
@@ -2109,7 +2110,7 @@ async fn embeddings(
     let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
 
-    inflight.request_metrics().attach_to(&mut request);
+    crate::preprocessor::request_metrics::attach(inflight.request_metrics(), &mut request);
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
@@ -4431,7 +4432,7 @@ async fn chat_completions(
         request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = inflight_guard.response_collector();
-    inflight_guard.request_metrics().attach_to(&mut request);
+    crate::preprocessor::request_metrics::attach(inflight_guard.request_metrics(), &mut request);
 
     let annotations = request.annotations();
 
@@ -5250,7 +5251,7 @@ async fn responses(
         request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = inflight_guard.response_collector();
-    inflight_guard.request_metrics().attach_to(&mut request);
+    crate::preprocessor::request_metrics::attach(inflight_guard.request_metrics(), &mut request);
 
     tracing::trace!("Issuing generate call for responses");
 
