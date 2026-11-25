@@ -3,7 +3,7 @@
 
 //! Active-request scorer for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 /// Scores active requests above the least-loaded surviving candidate.
 pub(crate) struct ActiveRequestsScorer;
@@ -17,7 +17,7 @@ impl WorkerScorer for ActiveRequestsScorer {
     /// Find the batch minimum and write one relative load cost per worker.
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
