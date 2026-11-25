@@ -82,6 +82,7 @@ const ADMISSION_CHANNEL_CAPACITY: usize = 32;
 /// A taken batch has freed its channel slots, so its rows add to those the capacity bounds.
 const ADMISSION_BATCH: usize = 8;
 
+#[derive(Default)]
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -89,6 +90,30 @@ struct ClassQueueCounters {
     received_total: AtomicU64,
     rejected_due_time_passed_total: AtomicU64,
     rejected_queue_size_exceeded_total: AtomicU64,
+}
+
+impl ClassQueueCounters {
+    /// Counts an entry that entered the class's queue.
+    fn add(&self, snapshot: QueueSnapshot) {
+        self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.pending_isl_tokens
+            .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
+        self.pending_cached_tokens
+            .fetch_add(snapshot.cached_tokens, AtomicOrdering::Relaxed);
+    }
+
+    /// Uncounts an entry that left the class's queue.
+    fn sub(&self, snapshot: QueueSnapshot) {
+        debug_assert!(self.pending_count.load(AtomicOrdering::Relaxed) > 0);
+        debug_assert!(
+            self.pending_isl_tokens.load(AtomicOrdering::Relaxed) >= snapshot.raw_isl_tokens
+        );
+        self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+        self.pending_isl_tokens
+            .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
+        self.pending_cached_tokens
+            .fetch_sub(snapshot.cached_tokens, AtomicOrdering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1248,8 +1273,6 @@ struct SchedulerQueueActor<
     capacity_updates: Arc<CapacityUpdates>,
     capacity_workers: FxHashSet<WorkerWithDpRank>,
     profile: Arc<PolicyProfile>,
-    pending_count: Arc<AtomicUsize>,
-    pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
     slots: ActorSlots<P>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
@@ -1305,12 +1328,8 @@ pub struct SchedulerQueue<
     cleanup: Arc<AdmissionCleanup>,
     capacity_updates: Option<Arc<CapacityUpdates>>,
     direct_release: DirectBookingRelease,
-    /// Number of requests currently parked in the pending queue.
-    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
-    pending_count: Arc<AtomicUsize>,
-    /// Sum of `isl_tokens` for requests currently parked in the pending queue.
-    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
-    pending_isl_tokens: Arc<AtomicUsize>,
+    /// Per class, what is parked in the pending queue and what was received and rejected.
+    /// The actor counts after a push and after a pop; reads are `Relaxed` loads.
     class_counters: Arc<Vec<ClassQueueCounters>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     workers_generation: Arc<AtomicU64>,
@@ -1436,20 +1455,11 @@ impl<
         } else {
             None
         };
-        let pending_count = Arc::new(AtomicUsize::new(0));
-        let pending_isl_tokens = Arc::new(AtomicUsize::new(0));
         let class_counters = Arc::new(
             profile
                 .classes()
                 .iter()
-                .map(|_| ClassQueueCounters {
-                    pending_count: AtomicUsize::new(0),
-                    pending_isl_tokens: AtomicUsize::new(0),
-                    pending_cached_tokens: AtomicUsize::new(0),
-                    received_total: AtomicU64::new(0),
-                    rejected_due_time_passed_total: AtomicU64::new(0),
-                    rejected_queue_size_exceeded_total: AtomicU64::new(0),
-                })
+                .map(|_| ClassQueueCounters::default())
                 .collect(),
         );
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
@@ -1509,8 +1519,6 @@ impl<
             capacity_updates: Arc::clone(&actor_wake),
             capacity_workers: FxHashSet::default(),
             profile: Arc::clone(&profile),
-            pending_count: Arc::clone(&pending_count),
-            pending_isl_tokens: Arc::clone(&pending_isl_tokens),
             class_counters: Arc::clone(&class_counters),
             slots: ActorSlots::new(slots, Arc::clone(&actor_writes)),
             workers_with_configs: workers_with_configs.clone(),
@@ -1542,8 +1550,6 @@ impl<
             cleanup,
             capacity_updates,
             direct_release,
-            pending_count,
-            pending_isl_tokens,
             class_counters,
             workers_with_configs,
             workers_generation,
@@ -2030,12 +2036,18 @@ impl<
 
     /// Number of requests currently parked in the pending queue (lock-free).
     pub fn pending_count(&self) -> usize {
-        self.pending_count.load(AtomicOrdering::Relaxed)
+        self.class_counters
+            .iter()
+            .map(|counters| counters.pending_count.load(AtomicOrdering::Relaxed))
+            .sum()
     }
 
     /// Sum of `isl_tokens` for requests currently parked in the pending queue (lock-free).
     pub fn pending_isl_tokens(&self) -> usize {
-        self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
+        self.class_counters
+            .iter()
+            .map(|counters| counters.pending_isl_tokens.load(AtomicOrdering::Relaxed))
+            .sum()
     }
 
     pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {
@@ -2191,20 +2203,7 @@ impl<
 
         let class_counters = Arc::clone(&self.class_counters);
         for entry in self.pending.drain() {
-            let class_index = entry.class_index();
-            let snapshot = entry.snapshot();
-            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
-            self.pending_isl_tokens
-                .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-            let counters = &class_counters[class_index];
-            counters.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
-            counters
-                .pending_isl_tokens
-                .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-            counters
-                .pending_cached_tokens
-                .fetch_sub(snapshot.cached_tokens, AtomicOrdering::Relaxed);
-
+            class_counters[entry.class_index()].sub(entry.snapshot());
             let mut request = entry.into_payload().request;
             request.respond(Err(KvSchedulerError::SubscriberShutdown));
         }
@@ -2409,10 +2408,7 @@ impl<
         if let Some(transfer) = lifecycle_transfer {
             transfer.arm_pending();
         }
-        self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
-        self.pending_isl_tokens
-            .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-        self.add_class_counters(class_index, snapshot);
+        self.class_counters[class_index].add(snapshot);
         true
     }
 
@@ -2517,7 +2513,7 @@ impl<
         let expired = self.pending.take_expired(class_index, now);
         let removed = !expired.is_empty();
         for entry in expired {
-            self.subtract_pending_counters(class_index, entry.snapshot());
+            self.class_counters[class_index].sub(entry.snapshot());
             let mut request = entry.into_payload().request;
             self.reject_due_time_passed(class_index, &mut request);
         }
@@ -2599,7 +2595,7 @@ impl<
                 removed_ready_head |= class_head_removed;
                 let lost_entries = !removed.is_empty();
                 for entry in removed {
-                    self.subtract_pending_counters(class_index, entry.snapshot());
+                    self.class_counters[class_index].sub(entry.snapshot());
                 }
                 if lost_entries {
                     self.rearm_class_timer(class_index);
@@ -2637,13 +2633,6 @@ impl<
             .any_ready_head(|class_index, class, queued| pass.check(class_index, class, queued));
         self.gate_recheck_at = gate_recheck_at.get();
         dispatchable
-    }
-
-    fn subtract_pending_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
-        self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
-        self.pending_isl_tokens
-            .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-        self.subtract_class_counters(class_index, snapshot);
     }
 
     /// Consume recorded capacity changes before draining. A worker free re-asks the lanes
@@ -2762,17 +2751,7 @@ impl<
             };
             let snapshot = candidate.snapshot();
             let class_index = candidate.class_index();
-            debug_assert!(
-                self.pending_count.load(AtomicOrdering::Relaxed) > 0,
-                "pending_count underflow on queue drain"
-            );
-            debug_assert!(
-                self.pending_isl_tokens.load(AtomicOrdering::Relaxed) >= snapshot.raw_isl_tokens,
-                "pending_isl_tokens underflow: pending={} request_isl_tokens={}",
-                self.pending_isl_tokens.load(AtomicOrdering::Relaxed),
-                snapshot.raw_isl_tokens
-            );
-            self.subtract_pending_counters(class_index, snapshot);
+            self.class_counters[class_index].sub(snapshot);
             let queued = candidate.payload_mut();
             let mut refreshed = false;
             let mut released = false;
@@ -3452,28 +3431,6 @@ impl<
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
         })
-    }
-
-    fn add_class_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
-        let counters = &self.class_counters[class_index];
-        counters.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
-        counters
-            .pending_isl_tokens
-            .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-        counters
-            .pending_cached_tokens
-            .fetch_add(snapshot.cached_tokens, AtomicOrdering::Relaxed);
-    }
-
-    fn subtract_class_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
-        let counters = &self.class_counters[class_index];
-        counters.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
-        counters
-            .pending_isl_tokens
-            .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-        counters
-            .pending_cached_tokens
-            .fetch_sub(snapshot.cached_tokens, AtomicOrdering::Relaxed);
     }
 }
 
@@ -5521,8 +5478,6 @@ mod tests {
             capacity_updates: Arc::new(CapacityUpdates::new()),
             capacity_workers: FxHashSet::default(),
             profile: Arc::clone(&queue.profile),
-            pending_count: Arc::clone(&queue.pending_count),
-            pending_isl_tokens: Arc::clone(&queue.pending_isl_tokens),
             class_counters: Arc::clone(&queue.class_counters),
             slots: ActorSlots::new(Arc::clone(slots), Arc::clone(&queue.actor_writes)),
             workers_with_configs: queue.workers_with_configs.clone(),
