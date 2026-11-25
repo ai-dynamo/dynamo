@@ -10,7 +10,7 @@
 //!
 //! [`backends`] implements those traits: registrations kept in memory or in
 //! a DynamoDB table, and the EndpointSlices that SIG Multicluster (MCS)
-//! imports, joined with registrations.
+//! imports.
 
 pub mod backends;
 pub mod pool_discovery;

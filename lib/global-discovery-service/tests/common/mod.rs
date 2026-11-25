@@ -31,22 +31,22 @@ pub fn key(cluster: &str, namespace: &str, dgd: &str) -> PoolKey {
     PoolKey::new(cluster, namespace, dgd).unwrap()
 }
 
-/// A registration whose frontends are deliberately not in sorted order.
+/// A registration in `region`, whose frontends are deliberately not in
+/// sorted order. Cases tell a pool's versions apart by region.
 pub fn registration(
     cluster: &str,
     namespace: &str,
     dgd: &str,
-    model: &str,
+    region: &str,
     frontends: &[&str],
 ) -> PoolRegistration {
     PoolRegistration {
         key: key(cluster, namespace, dgd),
         location: PoolLocation {
-            region: "us-west-2".to_owned(),
+            region: region.to_owned(),
             availability_zone: None,
             datacenter: None,
         },
-        model: model.to_owned(),
         frontends: frontends
             .iter()
             .map(|frontend| Url::parse(frontend).unwrap())
@@ -55,12 +55,12 @@ pub fn registration(
 }
 
 /// The registration most cases use: pool `dgd` of cluster `west`.
-pub fn mocker(dgd: &str, model: &str) -> PoolRegistration {
+pub fn mocker(dgd: &str, region: &str) -> PoolRegistration {
     registration(
         "west",
         "dynamo",
         dgd,
-        model,
+        region,
         &["http://10.43.1.3:8000/", "http://10.43.1.2:8000/"],
     )
 }
@@ -155,7 +155,7 @@ pub mod conformance {
         let _ = registrar.register(sent).await.unwrap();
 
         let listing = find(&*pools, "mocker").await.expect("listed");
-        assert_eq!(listing.model.as_deref(), Some("m1"));
+        assert_eq!(listing.location.region, "m1");
         assert_eq!(
             listing.frontends,
             [
@@ -176,7 +176,7 @@ pub mod conformance {
         let _ = registrar.register(mocker("mocker", "m2")).await.unwrap();
         let snapshot = pools.list().await.unwrap();
         assert_eq!(snapshot.items.len(), 1);
-        assert_eq!(snapshot.items[0].model.as_deref(), Some("m2"));
+        assert_eq!(snapshot.items[0].location.region, "m2");
     }
 
     /// Pools are told apart by their whole key, including keys whose parts
@@ -200,9 +200,9 @@ pub mod conformance {
             ("a\\#", "b", "c"),
         ];
         for (index, (cluster, namespace, dgd)) in keys.iter().enumerate() {
-            let model = format!("model-{index}");
+            let region = format!("region-{index}");
             let _ = registrar
-                .register(registration(cluster, namespace, dgd, &model, &[]))
+                .register(registration(cluster, namespace, dgd, &region, &[]))
                 .await
                 .unwrap();
         }
@@ -212,7 +212,7 @@ pub mod conformance {
             let listing = find_key(&*pools, &key(cluster, namespace, dgd))
                 .await
                 .unwrap_or_else(|| panic!("{cluster}/{namespace}/{dgd} is not listed"));
-            assert_eq!(listing.model, Some(format!("model-{index}")));
+            assert_eq!(listing.location.region, format!("region-{index}"));
         }
     }
 
@@ -260,7 +260,7 @@ pub mod conformance {
         let PoolEvent::Upserted(changed) = next_change(&mut watch).await else {
             panic!("expected the change");
         };
-        assert_eq!(changed.model.as_deref(), Some("m2"));
+        assert_eq!(changed.location.region, "m2");
     }
 
     /// `a_missed_lease_hides_then_removes_the_pool`.

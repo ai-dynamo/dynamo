@@ -5,12 +5,15 @@ title: Global Discovery Service Registration Storage
 subtitle: Keep pool registrations in memory or in a shared DynamoDB table
 ---
 
-**Experimental.** The Global Discovery Service keeps the registrations that [Pool Relays](pool-relay.md)
-send with `POST /pools`, with every `--pool-discovery` value. With `registrations`, it lists the
-registered pools. With `karmada` or `mcs`, it joins them with the EndpointSlices that Multi-Cluster
-Services imports. The registration store decides where those registrations live, and each store works
-in every mode. This page explains when to use each store, how to set up DynamoDB, and how to run and
-verify the service. For every flag and endpoint, see
+**Experimental.** With `--pool-discovery registrations`, the Global Discovery Service lists the pools
+that [Pool Relays](pool-relay.md) register with `POST /pools`. The registration store decides where
+those registrations live. With `karmada` or `mcs`, the service lists the pools whose Pool Relay
+Services Multi-Cluster Services imports, takes no registrations, and needs no store; to take a store
+away from such a service, follow
+[the upgrade steps](../../reference/components/global-discovery-service-configuration.md#upgrade-from-a-version-whose-registrations-named-a-model).
+This page
+explains when to use each store, how to set up DynamoDB, and how to run and verify the service. For
+every flag and endpoint, see
 [Global Discovery Service Configuration](../../reference/components/global-discovery-service-configuration.md).
 
 ## Choose a store
@@ -153,8 +156,8 @@ spec:
 > `--tls-key-path` encrypt the traffic (see
 > [Global Discovery Service Configuration](../../reference/components/global-discovery-service-configuration.md)).
 
-With Karmada, the DynamoDB flags stay the same. The router Service's flags replace `--router`, and the
-service joins the registrations with the pools that Karmada imports:
+With Karmada, the service lists the pools that Karmada imports and keeps no registrations, so it takes
+none of these flags. The router Service's flags replace `--router`:
 
 ```yaml
           args:
@@ -163,14 +166,11 @@ service joins the registrations with the pools that Karmada imports:
             - --router-namespace=global-discovery
             - --router-service=global-router
             - --router-port-name=http
-            - --registration-storage=dynamodb
-            - --dynamodb-table=global-discovery-pools
-            - --dynamodb-region=us-east-1
 ```
 
 Start from [`container/global-discovery-service.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/global-discovery-service.yaml),
-which grants the EndpointSlice access this mode needs, and give its ServiceAccount the IAM role above.
-With `--pool-discovery mcs`, only that flag changes.
+which grants the access this mode needs. With `--pool-discovery mcs`, only that flag changes. Each
+replica reads the same imports, so run as many as you need, without a table.
 
 At startup, the service checks that the table exists (`DescribeTable`), that it can read the table (a
 `Query` of one item), and that it can write it (an `UpdateItem` whose condition never holds, so nothing
@@ -204,9 +204,6 @@ and let the service create the table:
             - name: AWS_SECRET_ACCESS_KEY
               value: local
 ```
-
-With Karmada, keep these DynamoDB flags and use the Karmada flags from the example above in place of
-`--pool-discovery=registrations`.
 
 `--dynamodb-ensure-table` creates the table if it is missing and turns on TTL if it is off, on every
 start, without point-in-time recovery or replicas. Without the TTL permissions, it logs a warning and
@@ -245,14 +242,13 @@ With a registered Pool Relay, the response lists the pool, even right after a re
 ```json
 {"pools": [{"key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
             "location": {"region": "us-west-2", "availability_zone": null, "datacenter": null},
-            "model": "Qwen/Qwen3-0.6B", "frontends": ["http://10.43.1.2:8000/"],
-            "relay_identities": []}],
+            "frontends": ["http://10.43.1.2:8000/"], "relay_identities": []}],
  "complete": true}
 ```
 
-Query another replica, or delete a Pod, and the same pools appear. With `--pool-discovery registrations`,
-`relay_identities` is empty because registrations do not carry relay identities. With `karmada` or
-`mcs`, MCS supplies them, and a pool is listed only while MCS also imports a Ready Pool Relay for it.
+Query another replica, or delete a Pod, and the same pools appear. `relay_identities` is empty because
+registrations do not carry relay identities. A listing does not say what the pool serves: Global
+Routers learn that from its Pool Relays' state streams.
 
 `GET /healthz` is for readiness. Until the startup check has passed, nothing listens, so the probe
 fails and the Pod stays out of the Service. After that, `GET /healthz` returns 200 without calling
@@ -271,7 +267,9 @@ replica out of the Service at once:
   `POST /pools` and any replica answers `GET /pools`. A pool registered through one replica shows on
   the others at their next read of the table, within `--dynamodb-poll-interval-secs`.
 - **Rolling restarts.** Nothing special is needed. A new replica lists every live pool at once, with
-  `complete: false` for one lease, and Pool Relays keep heartbeating through the Service.
+  `complete: false` for one lease, and Pool Relays keep heartbeating through the Service. Replicas from
+  before registrations dropped `model` read the items newer replicas write, since those keep a stand-in
+  `model` for them.
 - **Moving to DynamoDB, or to another table.** During a rolling update, old and new replicas keep
   different registrations, and each Pool Relay keeps registering with the replica it is connected to. A
   new replica reports `complete: false` for only one lease, so replace all replicas at once
@@ -281,8 +279,8 @@ replica out of the Service at once:
   Pool Relay registers again on its next heartbeat. On-demand capacity absorbs the expected write rate,
   roughly `pools x relay replicas / heartbeat interval`, for example 80 writes per second for 200 pools
   with two relay replicas at a 5 second heartbeat.
-- **Several Pool Relays for one pool.** They must send the same registration: model, location, and
-  frontends, in any order. The last write wins, so if they differ, the pool's
+- **Several Pool Relays for one pool.** They must send the same registration: location and frontends,
+  in any order. The last write wins, so if they differ, the pool's
   listing switches between their versions at every heartbeat. The service logs a warning that names
   such a pool.
 - **Corrupt items.** An item that cannot be decoded is logged and skipped. The rest of the list is served.

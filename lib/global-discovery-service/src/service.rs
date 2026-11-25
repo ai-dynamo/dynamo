@@ -5,21 +5,22 @@
 //! `dynamo_global_common`, shared with the service's clients.
 //!
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
-//!   and each call is also the pool's heartbeat.
-//! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
+//!   and each call is also the pool's heartbeat. A backend that finds pools
+//!   without registrations, as through MCS, answers `501`.
+//!
+//! - `GET /routers`: the Global Router replicas a PoolRelay connects to, and
+//!   whether the service takes `POST /pools`, so a PoolRelay knows whether to
+//!   register.
+//!
 //! - `POST /routers`: register or renew one router incarnation when explicitly
 //!   enabled. Static and MCS router directories answer `501`.
+//!
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
-//!   while the list may be missing pools: for one lease after the service
-//!   starts, while PoolRelays may not have registered yet; with MCS, also
-//!   while the MCS watch keeps failing; and with DynamoDB, also while the
-//!   table cannot be reached and for one lease after, and while a pool from
-//!   another region of a Global Table is listed past its lease, in case
-//!   replication is late. A caller that keeps
-//!   its own list replaces it with a complete list, but merges a partial
-//!   one: it adds new pools and updates changed ones, keeps known pools that
-//!   are missing, and waits for a complete list to remove any. A caller that
-//!   knows no pools yet still uses a partial list.
+//!   while the service knows the list may lack live pools: with registrations,
+//!   for a lease after a start or a store outage; with MCS, while its watch
+//!   fails, for a minute after a pool leaves, and while it lists none. Callers
+//!   remove pools only on a complete list ([`crate::pool_discovery`]).
+//!
 //! - `GET /healthz`: readiness. OK once the backend has answered, which with
 //!   DynamoDB follows the startup check of the table. A later failure of the
 //!   backend shows in the answers to requests, not here, so that an outage
@@ -84,6 +85,12 @@ pub struct Tls {
 /// backend keeps each one for its lease. axum's default is 2 MiB.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// Why `POST /pools` answers `501`. `GET /routers` tells PoolRelays not to
+/// call it, so only an older PoolRelay, or one that reads another replica of
+/// a service being reconfigured, gets this.
+const NO_POOL_REGISTRATIONS: &str =
+    "pool registration is disabled: POST /pools is only for pool discovery from registrations";
+
 /// What the handlers share.
 struct Shared {
     backend: PoolDiscoveryBackend,
@@ -138,11 +145,7 @@ async fn register_pool(
     registration: Result<Json<PoolRegistration>, JsonRejection>,
 ) -> Response {
     let Some(registrar) = &shared.backend.registrar else {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            "this service takes no registrations",
-        )
-            .into_response();
+        return (StatusCode::NOT_IMPLEMENTED, NO_POOL_REGISTRATIONS).into_response();
     };
     let Json(registration) = match registration {
         Ok(registration) => registration,
@@ -170,6 +173,7 @@ async fn list_routers(State(shared): State<Arc<Shared>>) -> Response {
         Ok(snapshot) => Json(RoutersResponse {
             routers: snapshot.items,
             complete: snapshot.completeness == Completeness::Exact,
+            accepts_pool_registrations: shared.backend.registrar.is_some(),
         })
         .into_response(),
         Err(error) => error_response(error),
@@ -253,7 +257,6 @@ mod tests {
                 "availability_zone": null,
                 "datacenter": null
             },
-            "model": "Qwen/Qwen3-0.6B",
             "frontends": ["http://10.43.1.2:8000/"]
         })
     }
@@ -326,7 +329,6 @@ mod tests {
                         "availability_zone": null,
                         "datacenter": null
                     },
-                    "model": "Qwen/Qwen3-0.6B",
                     "frontends": ["http://10.43.1.2:8000/"],
                     "relay_identities": []
                 }],
@@ -359,7 +361,11 @@ mod tests {
         assert_eq!(status, reqwest::StatusCode::OK);
         assert_eq!(
             routers,
-            json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}], "complete": true})
+            json!({
+                "routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}],
+                "complete": true,
+                "accepts_pool_registrations": true
+            })
         );
         shutdown.cancel();
     }
@@ -406,21 +412,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_without_registrar_refuses_registrations() {
+    async fn backend_without_registrar_refuses_registrations_and_says_so() {
         let mut backend = registrations_backend();
         backend.registrar = None;
         let (base, shutdown) = start(backend).await;
-        let (status, _) = post_pool(&base, &registration()).await;
-        assert_eq!(status, reqwest::StatusCode::NOT_IMPLEMENTED);
+        // PoolRelays read that they should not register.
+        let (_, routers) = get_json(&base, "/routers").await;
+        assert_eq!(routers["accepts_pool_registrations"], json!(false));
         // Whatever the body is.
-        let (status, _) = post_pool(&base, &json!({})).await;
-        assert_eq!(status, reqwest::StatusCode::NOT_IMPLEMENTED);
-        let response = reqwest::Client::new()
-            .post(format!("{base}/pools"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+        for body in [Some(registration()), Some(json!({})), None] {
+            let request = reqwest::Client::new().post(format!("{base}/pools"));
+            let request = match &body {
+                Some(body) => request
+                    .header("content-type", "application/json")
+                    .body(body.to_string()),
+                None => request,
+            };
+            let response = request.send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::NOT_IMPLEMENTED,
+                "{body:?}"
+            );
+            // The reason names no flags: the binary's flags are not this layer's.
+            let reason = response.text().await.unwrap();
+            assert!(
+                reason.starts_with("pool registration is disabled")
+                    && reason.contains("only for pool discovery from registrations")
+                    && !reason.contains("--"),
+                "{reason}"
+            );
+        }
         shutdown.cancel();
     }
 
@@ -437,6 +459,24 @@ mod tests {
             response.status(),
             reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_older_pool_relays_model_capabilities_and_capacity_are_ignored() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let mut older = registration();
+        older["model"] = json!("Qwen/Qwen3-0.6B");
+        older["capabilities"] = json!(["aggregated"]);
+        older["capacity"] = json!([{"sku": "H100", "workers": 8}]);
+        let (status, _) = post_pool(&base, &older).await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let (_, pools) = get_json(&base, "/pools").await;
+        let listed = pools["pools"][0].as_object().unwrap();
+        assert!(listed.contains_key("frontends"), "{pools}");
+        for field in ["model", "capabilities", "capacity"] {
+            assert!(!listed.contains_key(field), "{field}: {pools}");
+        }
         shutdown.cancel();
     }
 

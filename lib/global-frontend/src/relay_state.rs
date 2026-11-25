@@ -183,15 +183,21 @@ impl RelayPoolState {
         (self.serving_sequence, self.kv_sequence)
     }
 
+    /// Projects this Relay's load for `pool` into `signals`: the load of
+    /// `model`, or with `None`, of every model the pool serves.
     pub(crate) fn project(
         &self,
         pool: &PoolId,
-        model: &str,
+        model: Option<&str>,
         signals: &PoolSignals,
         serving_receipt: Option<ReportReceipt>,
         kv_receipt: Option<ReportReceipt>,
     ) {
-        if !self.ready_for(model) {
+        let ready = match model {
+            Some(model) => self.ready_for(model),
+            None => !self.ready_models.is_empty(),
+        };
+        if !ready {
             signals.forget_source(pool, self.source);
             return;
         }
@@ -200,7 +206,8 @@ impl RelayPoolState {
             .as_ref()
             .zip(serving_receipt)
             .and_then(|(load, receipt)| {
-                pool_report(load, self.canonical_model(model)).map(|report| (report, receipt))
+                let model = model.map(|model| self.canonical_model(model));
+                pool_report(load, model).map(|report| (report, receipt))
             });
         let kv = self
             .kv_load
@@ -249,16 +256,15 @@ fn pool_kv(update: &KvPoolLoadUpdate) -> Option<(u64, u64)> {
 }
 
 /// The pool's requests in flight (waiting for a first token or generating)
-/// for `model`, those generating, and how many its workers can run at once.
-/// `None` unless the request counts are reported: the Relay leaves them
-/// unset when its view is incomplete, and unset does not mean zero. A Relay
-/// watching one pool reports one model; a model it names differently from
-/// the catalog still counts.
-fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
+/// for `model`, or every model with `None`, those generating, and how many
+/// its workers can run at once. `None` unless the counts are reported: an
+/// incomplete view leaves them unset, and unset is not zero. A model the
+/// Relay names differently from the catalog counts as every model.
+fn pool_report(update: &ServingLoadUpdate, model: Option<&str>) -> Option<LoadReport> {
     let named = update
         .models
         .iter()
-        .filter(|entry| entry.canonical_model_id == model)
+        .filter(|entry| model.is_some_and(|model| entry.canonical_model_id == model))
         .collect::<Vec<_>>();
     let models = if named.is_empty() {
         update.models.iter().collect()
@@ -334,7 +340,10 @@ mod tests {
 
     #[test]
     fn counts_waiting_and_generating_requests_against_capacity() {
-        let report = pool_report(&update(Some(128), &[("qwen", Some(3), Some(20))]), "qwen");
+        let report = pool_report(
+            &update(Some(128), &[("qwen", Some(3), Some(20))]),
+            Some("qwen"),
+        );
         assert_eq!(
             report,
             Some(LoadReport {
@@ -347,25 +356,39 @@ mod tests {
         // A Relay naming the model differently still reports its pool.
         let report = pool_report(
             &update(Some(128), &[("Qwen/Qwen3", Some(1), Some(1))]),
-            "qwen",
+            Some("qwen"),
         );
         assert_eq!(report.map(|report| report.in_flight), Some(2));
         // Without the workers' capacity the counts still arrive.
-        let report = pool_report(&update(None, &[("qwen", Some(1), Some(1))]), "qwen");
+        let report = pool_report(&update(None, &[("qwen", Some(1), Some(1))]), Some("qwen"));
         assert_eq!(report.map(|report| report.max_concurrency), Some(None));
+        // A pool whose models come from its Relay counts every model.
+        let both = update(
+            Some(128),
+            &[("qwen", Some(1), Some(2)), ("llama", Some(3), Some(4))],
+        );
+        assert_eq!(
+            pool_report(&both, None).map(|report| report.in_flight),
+            Some(10)
+        );
+        assert_eq!(
+            pool_report(&both, Some("llama")).map(|report| report.in_flight),
+            Some(7)
+        );
     }
 
     #[test]
     fn incomplete_views_are_unknown_not_zero() {
         assert_eq!(
-            pool_report(&update(Some(128), &[("qwen", None, Some(1))]), "qwen"),
+            pool_report(&update(Some(128), &[("qwen", None, Some(1))]), Some("qwen")),
             None
         );
         assert_eq!(
-            pool_report(&update(Some(128), &[("qwen", Some(1), None)]), "qwen"),
+            pool_report(&update(Some(128), &[("qwen", Some(1), None)]), Some("qwen")),
             None
         );
-        assert_eq!(pool_report(&update(Some(128), &[]), "qwen"), None);
+        assert_eq!(pool_report(&update(Some(128), &[]), Some("qwen")), None);
+        assert_eq!(pool_report(&update(Some(128), &[]), None), None);
     }
 
     #[test]

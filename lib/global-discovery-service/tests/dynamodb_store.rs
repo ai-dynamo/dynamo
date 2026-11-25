@@ -204,7 +204,7 @@ async fn two_stores_see_each_other_through_the_watch() {
     let PoolEvent::Upserted(listing) = next_change(&mut watch).await else {
         panic!("expected the change");
     };
-    assert_eq!(listing.model.as_deref(), Some("m2"));
+    assert_eq!(listing.location.region, "m2");
 
     // And when it goes: past A's lease, with nobody renewing.
     fixture.advance(lease().duration() + SKEW + Duration::from_secs(1));
@@ -365,7 +365,7 @@ async fn a_corrupt_item_is_skipped_while_the_others_list() {
     put_raw(
         &fixture,
         "bad-key",
-        r#"{"key":{"cluster_id":" ","namespace":"n","dgd_name":"d"},"location":{"region":"r","availability_zone":null,"datacenter":null},"model":"m"}"#,
+        r#"{"key":{"cluster_id":" ","namespace":"n","dgd_name":"d"},"location":{"region":"r","availability_zone":null,"datacenter":null}}"#,
         None,
     )
     .await;
@@ -422,10 +422,7 @@ async fn an_unknown_attribute_is_tolerated() {
     assert_eq!(snapshot.items.len(), 2, "{:?}", snapshot.items);
     // The attribute is not in the way of a renewal or of a change.
     let _ = store.register(mocker("older", "m2")).await.unwrap();
-    assert_eq!(
-        find(&*store, "older").await.unwrap().model.as_deref(),
-        Some("m2")
-    );
+    assert_eq!(find(&*store, "older").await.unwrap().location.region, "m2");
 }
 
 /// More than one 1 MB page of items, so `list` has to paginate.

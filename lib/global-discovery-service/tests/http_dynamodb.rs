@@ -40,7 +40,6 @@ fn registration() -> Value {
             "availability_zone": null,
             "datacenter": null
         },
-        "model": "Qwen/Qwen3-0.6B",
         "frontends": ["http://10.43.1.2:8000/"]
     })
 }
@@ -130,7 +129,6 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
                     "availability_zone": null,
                     "datacenter": null
                 },
-                "model": "Qwen/Qwen3-0.6B",
                 "frontends": ["http://10.43.1.2:8000/"],
                 "relay_identities": []
             }],
@@ -147,7 +145,11 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
     let (_, routers) = get_json(&b, "/routers").await;
     assert_eq!(
         routers,
-        json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}], "complete": true})
+        json!({
+            "routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}],
+            "complete": true,
+            "accepts_pool_registrations": true
+        })
     );
 
     // A lease later, both lists are complete at their next poll, and the

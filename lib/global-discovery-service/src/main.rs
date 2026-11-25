@@ -3,15 +3,11 @@
 
 //! Global Discovery Service. See `dynamo_global_discovery_service::service`.
 //!
-//! Two flags choose the backend behind the API:
-//! - `--pool-discovery`: where the pool and router lists come from. Either
-//!   the registrations PoolRelays send (`registrations`), or the
-//!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
-//!   the standard way (`mcs`), joined with registrations.
-//! - `--registration-storage`: where registrations are kept. Either in this
-//!   process (`memory`), so run one replica, or in a DynamoDB table that
-//!   every replica shares (`dynamodb`), in one region or, through a Global
-//!   Table, in several.
+//! `--pool-discovery` chooses where pools and routers come from: PoolRelays'
+//! registrations (`registrations`), or the EndpointSlices that MCS imports,
+//! named the Karmada way (`karmada`) or the standard way (`mcs`). With
+//! registrations, `--registration-storage` keeps them in this process
+//! (`memory`, one replica) or in a shared DynamoDB table (`dynamodb`).
 //!
 //! ```bash
 //! cargo run -p dynamo-global-discovery-service -- \
@@ -29,7 +25,7 @@
 //!     --dynamodb-ensure-table
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -41,16 +37,15 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
-use dynamo_global_common::Lease;
+use dynamo_global_common::{Lease, PoolKey, PoolLocation};
 use dynamo_global_discovery_service::backends::dynamodb::{
     ConnectError, DynamoDbConfig, DynamoDbPoolStore,
 };
 use dynamo_global_discovery_service::backends::kubernetes::{
-    ExportedService, FrontendService, KARMADA_MAX_SERVICE_NAME, McsImplementation,
+    ClusterRegions, ExportedService, FrontendService, KARMADA_MAX_SERVICE_NAME, McsImplementation,
     McsPoolDirectory, McsReplicaDirectory,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
-use dynamo_global_discovery_service::backends::registered::RegisteredPoolDirectory;
 use dynamo_global_discovery_service::backends::routers::RouterStore;
 use dynamo_global_discovery_service::pool_discovery::{
     PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
@@ -85,8 +80,8 @@ const _: () = assert!(KUBE_CONNECT_TIMEOUT.as_secs() + KUBE_READ_TIMEOUT.as_secs
 const WITH_REGISTRATIONS: &str = "With --pool-discovery registrations";
 const WITH_MCS: &str = "With --pool-discovery karmada or mcs";
 /// The `--help` heading for the flags that only `--registration-storage
-/// dynamodb` reads, with any `--pool-discovery` value: every value keeps
-/// registrations. Without that storage, such a flag fails at startup.
+/// dynamodb` reads. That storage needs `--pool-discovery registrations`, and
+/// without it such a flag fails at startup.
 const WITH_DYNAMODB: &str = "With --registration-storage dynamodb";
 
 #[derive(Debug, Parser)]
@@ -105,17 +100,23 @@ struct Args {
     #[arg(long, value_enum, default_value_t = PoolDiscovery::Registrations)]
     pool_discovery: PoolDiscovery,
     /// Where registrations are kept.
-    #[arg(long, value_enum, default_value_t = RegistrationStorage::Memory)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = RegistrationStorage::Memory,
+        help_heading = WITH_REGISTRATIONS
+    )]
     registration_storage: RegistrationStorage,
     /// How often a PoolRelay registers again.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 5, help_heading = WITH_REGISTRATIONS)]
     heartbeat_interval_secs: u64,
     /// How long a registration lasts. Longer than the heartbeat interval, and
     /// at most a day.
     #[arg(
         long,
         default_value_t = 15,
-        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS)
+        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS),
+        help_heading = WITH_REGISTRATIONS
     )]
     lease_duration_secs: u64,
     /// A Global Router replica as `<id>=<url>`. Repeat it for each replica.
@@ -128,7 +129,6 @@ struct Args {
     /// `_`, `-` or `.`. Needed with `--registration-storage dynamodb`.
     #[arg(
         long,
-        required_if_eq("registration_storage", "dynamodb"),
         value_parser = parse_dynamodb_table,
         help_heading = WITH_DYNAMODB
     )]
@@ -232,6 +232,13 @@ struct Args {
         required_if_eq_any = MCS_VALUES
     )]
     router_port_name: Option<String>,
+    /// A pool cluster's region as `<cluster>=<region>`, where the cluster is
+    /// its name in MCS. Repeat it for each cluster. A slice's
+    /// `topology.kubernetes.io/region` label comes first, then with `karmada`
+    /// a member Cluster's `spec.region`; a cluster with no region is listed
+    /// with its name as the region.
+    #[arg(long = "cluster-region", value_parser = parse_cluster_region, help_heading = WITH_MCS)]
+    cluster_regions: Vec<(String, PoolLocation)>,
 }
 
 /// The `--pool-discovery` values that read MCS, for clap's
@@ -244,9 +251,9 @@ enum PoolDiscovery {
     /// The pools PoolRelays register (`POST /pools`), while their leases
     /// last. Router replicas come from `--router`.
     Registrations,
-    /// The pools whose PoolRelay Services Karmada imports, joined with their
-    /// registrations, and the replicas of the router Service, from
-    /// EndpointSlices named the Karmada way.
+    /// The pools whose PoolRelay Services Karmada imports, and the replicas
+    /// of the router Service, from EndpointSlices named the Karmada way. The
+    /// service takes no registrations.
     Karmada,
     /// As `karmada`, from EndpointSlices with the standard
     /// `multicluster.kubernetes.io` labels.
@@ -295,6 +302,20 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
     })
 }
 
+/// `<cluster>=<region>`, each non-empty, without surrounding whitespace or
+/// control characters.
+fn parse_cluster_region(value: &str) -> Result<(String, PoolLocation), String> {
+    let (cluster, region) = value
+        .split_once('=')
+        .ok_or("expected <cluster>=<region>".to_owned())?;
+    let rule = "must be non-empty, without surrounding whitespace or control characters";
+    if !PoolKey::is_valid_part(cluster) {
+        return Err(format!("the cluster {rule}"));
+    }
+    let location = PoolLocation::in_region(region).ok_or(format!("the region {rule}"))?;
+    Ok((cluster.to_owned(), location))
+}
+
 fn parse_dynamodb_endpoint(value: &str) -> Result<Url, String> {
     http_url(value, "http://localhost:8000")
 }
@@ -328,8 +349,9 @@ fn http_url(value: &str, example: &str) -> Result<Url, String> {
 
 /// Parses the flags. A flag set under the `--help` heading of another
 /// `--pool-discovery` value fails, as clap's own errors do, and so does a
-/// flag under [`WITH_DYNAMODB`] without `--registration-storage dynamodb`. A
-/// flag left at its default is not refused.
+/// flag under [`WITH_DYNAMODB`] without `--registration-storage dynamodb`,
+/// which itself needs registrations. A flag left at its default is not
+/// refused.
 fn parse_args<I, T>(args: I) -> Result<Args, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -338,9 +360,9 @@ where
     let mut command = Args::command();
     let matches = command.try_get_matches_from_mut(args)?;
     let parsed = Args::from_arg_matches(&matches)?;
-    let refused = match parsed.pool_discovery {
-        PoolDiscovery::Registrations => WITH_MCS,
-        PoolDiscovery::Karmada | PoolDiscovery::Mcs => WITH_REGISTRATIONS,
+    let (refused, also_refused) = match parsed.pool_discovery {
+        PoolDiscovery::Registrations => (WITH_MCS, None),
+        PoolDiscovery::Karmada | PoolDiscovery::Mcs => (WITH_REGISTRATIONS, Some(WITH_DYNAMODB)),
     };
     let given = |refuse: &dyn Fn(&clap::Arg) -> bool| {
         command
@@ -353,7 +375,10 @@ where
             })
             .map(|arg| arg.get_long().unwrap_or(arg.get_id().as_str()).to_owned())
     };
-    let conflict = if let Some(flag) = given(&|arg| arg.get_help_heading() == Some(refused)) {
+    let conflict = if let Some(flag) = given(&|arg| {
+        let heading = arg.get_help_heading();
+        heading == Some(refused) || (heading.is_some() && heading == also_refused)
+    }) {
         Some(format!("--{flag} works only {}", refused.to_lowercase()))
     } else if parsed.registration_storage != RegistrationStorage::Dynamodb {
         given(&|arg| arg.get_help_heading() == Some(WITH_DYNAMODB))
@@ -364,15 +389,25 @@ where
     if let Some(message) = conflict {
         return Err(command.error(ErrorKind::ArgumentConflict, message));
     }
+    // Checked here rather than by clap, so that with MCS the storage flag is
+    // refused for its mode first.
+    if parsed.registration_storage == RegistrationStorage::Dynamodb
+        && parsed.dynamodb_table.is_none()
+    {
+        return Err(command.error(
+            ErrorKind::MissingRequiredArgument,
+            "--registration-storage dynamodb needs --dynamodb-table",
+        ));
+    }
     if let Err(error) = Lease::new(parsed.heartbeat_interval_secs, parsed.lease_duration_secs) {
         return Err(command.error(
             ErrorKind::ValueValidation,
             format!("check --heartbeat-interval-secs and --lease-duration-secs: {error}"),
         ));
     }
-    // In every mode, lists come from polls of the DynamoDB table. A pool's
-    // renewal must show in one before its lease and the skew run out, or a
-    // live pool would drop out of lists between polls.
+    // Lists come from polls of the DynamoDB table. A pool's renewal must show
+    // in one before its lease and the skew run out, or a live pool would drop
+    // out of lists between polls.
     if parsed.registration_storage == RegistrationStorage::Dynamodb
         && parsed
             .dynamodb_poll_interval_secs
@@ -409,6 +444,17 @@ where
         return Err(command.error(
             ErrorKind::ValueValidation,
             format!("--router {} is given twice", repeated.replica.0),
+        ));
+    }
+    let mut clusters = HashSet::new();
+    if let Some((repeated, _)) = parsed
+        .cluster_regions
+        .iter()
+        .find(|(cluster, _)| !clusters.insert(cluster))
+    {
+        return Err(command.error(
+            ErrorKind::ValueValidation,
+            format!("--cluster-region gives cluster {repeated} twice"),
         ));
     }
     // Karmada imports no Service with a longer name, and the API server
@@ -574,11 +620,11 @@ fn dynamodb_config(args: &Args) -> Result<DynamoDbConfig> {
     })
 }
 
-/// Pools from what MCS imports, joined with registrations: a pool is listed
-/// while MCS imports a Ready PoolRelay endpoint for it and one of its
-/// PoolRelays has registered within the lease. MCS gives the addresses; the
-/// registration gives the model and location. Router replicas come from the
-/// router Service's imports.
+/// Pools from what MCS imports: a pool is listed while MCS imports a Ready
+/// PoolRelay endpoint for it. MCS gives the addresses, and [`ClusterRegions`]
+/// the region; routers learn what a pool serves from its PoolRelays' state
+/// streams. Router replicas come from the router Service's imports. The
+/// service takes no registrations.
 async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscoveryBackend> {
     let (Some(namespace), Some(name), Some(port_name)) = (
         &args.router_namespace,
@@ -590,19 +636,26 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
              --router-port-name"
         );
     };
-    let lease = lease(args)?;
-    let (registrations, registrar, _) = registration_storage(args, lease).await?;
     let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
-    let imported = McsPoolDirectory::new(
+    // With Karmada, the imports' API server, when it is the control plane,
+    // also has each member's Cluster object.
+    let regions = ClusterRegions::new(
+        args.cluster_regions
+            .iter()
+            .cloned()
+            .collect::<HashMap<_, _>>(),
+        (mcs == McsImplementation::Karmada).then(|| client.clone()),
+    );
+    let pools = McsPoolDirectory::new(
         client.clone(),
         mcs,
         args.pool_service_suffix.clone(),
         frontend_service(args),
+        regions,
     )
     .context("check --frontend-service-suffix and --pool-service-suffix")?;
-    let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations, lease);
     let router = ExportedService {
         namespace: namespace.clone(),
         name: name.clone(),
@@ -611,7 +664,7 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
     Ok(PoolDiscoveryBackend {
         pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
-        registrar: Some(registrar),
+        registrar: None,
         router_registrar: None,
     })
 }
@@ -717,9 +770,6 @@ mod tests {
             "tls_cert_path",
             "tls_key_path",
             "pool_discovery",
-            "registration_storage",
-            "heartbeat_interval_secs",
-            "lease_duration_secs",
             "help",
         ];
         for arg in Args::command().get_arguments() {
@@ -770,37 +820,59 @@ mod tests {
             "frontend-service-suffix",
             "karmada or mcs",
         );
-        // Every --pool-discovery value takes registrations, kept in either
-        // storage.
-        assert!(
-            parse_args(karmada(&[
-                "--lease-duration-secs",
-                "30",
-                "--registration-storage",
-                "memory"
-            ]))
-            .is_ok()
+        assert_refused(
+            &["gds", "--cluster-region=east=us-east-2"],
+            "cluster-region",
+            "karmada or mcs",
         );
-        assert!(
-            parse_args(karmada(&[
+        // With MCS the service takes no registrations, so it keeps none.
+        for flags in [
+            &["--registration-storage", "memory"][..],
+            &["--registration-storage", "dynamodb"],
+            &["--heartbeat-interval-secs", "5"],
+            &["--lease-duration-secs", "30"],
+            &[
                 "--registration-storage",
                 "dynamodb",
                 "--dynamodb-table",
-                "pools"
-            ]))
-            .is_ok()
-        );
-        // A DynamoDB flag still needs that storage, in every mode.
-        let error = parse_args(karmada(&["--dynamodb-table", "pools"])).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
-        assert!(
-            error
-                .to_string()
-                .contains("--dynamodb-table works only with --registration-storage dynamodb"),
-            "{error}"
-        );
+                "pools",
+            ],
+            &["--dynamodb-table", "pools"],
+            &["--lease-skew-secs", "3"],
+        ] {
+            assert_refused(&karmada(flags), &flags[0][2..], "registrations");
+        }
         // Flags left at their defaults are not refused, whatever their heading.
         assert!(parse_args(karmada(&[])).is_ok());
+    }
+
+    #[test]
+    fn cluster_regions_are_checked_when_parsed() {
+        let args = parse_args(karmada(&[
+            "--cluster-region",
+            "aws-ohio=us-east-2",
+            "--cluster-region=aws-west=us-west-2",
+        ]))
+        .unwrap();
+        let regions = args
+            .cluster_regions
+            .iter()
+            .map(|(cluster, location)| (cluster.as_str(), location.region.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            regions,
+            [("aws-ohio", "us-east-2"), ("aws-west", "us-west-2")]
+        );
+        for value in ["aws-ohio", "=us-east-2", "aws-ohio=", "aws-ohio= us-east-2"] {
+            let error = parse_args(karmada(&["--cluster-region", value])).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{value}: {error}");
+        }
+        let twice = [
+            "--cluster-region=aws-ohio=us-east-2",
+            "--cluster-region=aws-ohio=us-east-1",
+        ];
+        let error = parse_args(karmada(&twice)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
     }
 
     /// `--registration-storage dynamodb --dynamodb-table pools`, then `extra`.
@@ -861,27 +933,21 @@ mod tests {
             "--dynamodb-replication-grace-secs",
             "30",
         ];
-        // With every --pool-discovery value.
-        let mut mcs = karmada(&flags);
-        mcs[2] = "mcs";
-        let mut registrations = vec!["gds"];
-        registrations.extend_from_slice(&flags);
-        for args in [registrations, karmada(&flags), mcs] {
-            let parsed = parse_args(args.clone()).unwrap();
-            assert_eq!(
-                dynamodb_config(&parsed).unwrap(),
-                DynamoDbConfig {
-                    table: "pools".to_owned(),
-                    region: Some("us-east-2".to_owned()),
-                    endpoint: Some(Url::parse("http://localhost:8000").unwrap()),
-                    poll_interval: Duration::from_secs(1),
-                    lease_skew: Duration::ZERO,
-                    replication_grace: Duration::from_secs(30),
-                    ensure_table: true,
-                },
-                "{args:?}"
-            );
-        }
+        let mut args = vec!["gds"];
+        args.extend_from_slice(&flags);
+        let parsed = parse_args(args).unwrap();
+        assert_eq!(
+            dynamodb_config(&parsed).unwrap(),
+            DynamoDbConfig {
+                table: "pools".to_owned(),
+                region: Some("us-east-2".to_owned()),
+                endpoint: Some(Url::parse("http://localhost:8000").unwrap()),
+                poll_interval: Duration::from_secs(1),
+                lease_skew: Duration::ZERO,
+                replication_grace: Duration::from_secs(30),
+                ensure_table: true,
+            }
+        );
         assert!(parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "0"])).is_err());
     }
 
@@ -974,35 +1040,19 @@ mod tests {
 
     #[test]
     fn dynamodb_polls_see_a_renewal_before_its_lease_lapses() {
-        // In every mode, lists come from polls: a renewal shows within the
-        // poll interval plus the heartbeat interval, which must be less than
-        // the lease plus the skew (by default 2 + 5 < 15 + 2).
-        for poll in ["11", "12"] {
-            let registrations = parse_args(dynamodb(&["--dynamodb-poll-interval-secs", poll]));
-            let with_karmada = parse_args(karmada(&[
-                "--registration-storage",
-                "dynamodb",
-                "--dynamodb-table",
-                "pools",
-                "--dynamodb-poll-interval-secs",
-                poll,
-            ]));
-            for parsed in [registrations, with_karmada] {
-                if poll == "11" {
-                    assert!(parsed.is_ok(), "{poll}");
-                    continue;
-                }
-                let error = parsed.unwrap_err();
-                assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
-                assert_eq!(error.exit_code(), 2);
-                assert!(
-                    error.to_string().contains(
-                        "must be less than --lease-duration-secs 15 plus --lease-skew-secs 2"
-                    ),
-                    "{error}"
-                );
-            }
-        }
+        // Lists come from polls: a renewal shows within the poll interval
+        // plus the heartbeat interval, which must be less than the lease plus
+        // the skew (by default 2 + 5 < 15 + 2).
+        assert!(parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "11"])).is_ok());
+        let error = parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "12"])).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error
+                .to_string()
+                .contains("must be less than --lease-duration-secs 15 plus --lease-skew-secs 2"),
+            "{error}"
+        );
         // More skew leaves room for a slower poll, and a 1 s heartbeat works.
         let slow = [
             "--dynamodb-poll-interval-secs",

@@ -11,13 +11,37 @@ use tokio_util::sync::CancellationToken;
 
 use crate::PoolSnapshot;
 
+/// Pools from Global Discovery. A listing says where a pool is, not what it
+/// serves, so each pool's `model` is empty, and only
+/// [`crate::RelayGatedPoolCatalog::for_discovery`] takes them: it gives each
+/// pool the models its live Relay views report ready.
+#[derive(Clone)]
+pub struct DiscoveredPools(pub(crate) watch::Receiver<Arc<PoolSnapshot>>);
+
+impl DiscoveredPools {
+    /// The pools as last listed.
+    pub fn borrow(&self) -> watch::Ref<'_, Arc<PoolSnapshot>> {
+        self.0.borrow()
+    }
+
+    /// As [`Self::borrow`], marking the pools seen.
+    pub fn borrow_and_update(&mut self) -> watch::Ref<'_, Arc<PoolSnapshot>> {
+        self.0.borrow_and_update()
+    }
+
+    /// Waits for pools not yet seen. Fails once discovery stops.
+    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.0.changed().await
+    }
+}
+
 /// Candidate pools from GDS. Partial lists add and update pools; only complete
-/// lists remove them. Relay liveness independently decides which are routable.
+/// lists remove them.
 pub fn discover_pools(
     client: GlobalDiscoveryClient,
     interval: Duration,
     cancel: CancellationToken,
-) -> watch::Receiver<Arc<PoolSnapshot>> {
+) -> DiscoveredPools {
     let cache = PoolCache::spawn(client, interval, cancel.clone());
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::default()));
     tokio::spawn(async move {
@@ -28,15 +52,7 @@ pub fn discover_pools(
             let mut pools = discovered
                 .borrow_and_update()
                 .values()
-                .filter_map(|pool| {
-                    let model = pool.model.as_deref()?;
-                    Some(Pool::new(
-                        &pool.key,
-                        model,
-                        &pool.location.region,
-                        pool.frontends.clone(),
-                    ))
-                })
+                .map(|pool| Pool::new(&pool.key, "", &pool.location.region, pool.frontends.clone()))
                 .collect::<Vec<_>>();
             // The cache is a map; stable order avoids changing selectors or
             // notifying subscribers when only the map's iteration order differs.
@@ -60,5 +76,5 @@ pub fn discover_pools(
             }
         }
     });
-    receiver
+    DiscoveredPools(receiver)
 }

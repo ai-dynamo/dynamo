@@ -73,10 +73,10 @@ async fn publisher(
     (sender, task)
 }
 
-fn pool_listing(name: &str, model: Option<&str>, frontend: &str) -> serde_json::Value {
+fn pool_listing(name: &str, frontend: &str) -> serde_json::Value {
     serde_json::json!({
         "key": {"cluster_id": "east", "namespace": "dynamo", "dgd_name": name},
-        "location": {"region": "east"}, "model": model, "frontends": [frontend]
+        "location": {"region": "east"}, "frontends": [frontend]
     })
 }
 
@@ -91,9 +91,8 @@ async fn discovery_projects_partial_updates_and_complete_removals() {
     let (answer, answers) = tokio::sync::watch::channel(listing(
         false,
         vec![
-            pool_listing("red", Some("qwen"), "http://red:8000"),
-            pool_listing("blue", Some("qwen"), "http://blue:8000"),
-            pool_listing("unknown", None, "http://unknown:8000"),
+            pool_listing("red", "http://red:8000"),
+            pool_listing("blue", "http://blue:8000"),
         ],
     ));
     let gds = Router::new().route(
@@ -116,37 +115,41 @@ async fn discovery_projects_partial_updates_and_complete_removals() {
         Duration::from_millis(20),
         cancel.clone(),
     );
-    // The first partial list is useful immediately, but an unknown model is
-    // not a routing candidate. Cache map iteration must not reorder candidates.
+    // The first partial list is useful immediately. Cache map iteration must
+    // not reorder candidates, and none has a model: their Relays name it.
     until(|| discovered.borrow().pools().len() == 2).await;
     assert_eq!(discovered.borrow().pools()[0].name, "east/dynamo/blue");
     assert_eq!(discovered.borrow().pools()[1].name, "east/dynamo/red");
+    assert!(
+        discovered
+            .borrow()
+            .pools()
+            .iter()
+            .all(|pool| pool.model.is_empty())
+    );
 
     answer.send_replace(listing(
         false,
         vec![
-            pool_listing("green", Some("llama"), "http://green:8000"),
-            pool_listing("blue", Some("qwen-updated"), "http://blue-new:8000"),
+            pool_listing("green", "http://green:8000"),
+            pool_listing("blue", "http://blue-new:8000"),
         ],
     ));
     until(|| {
         let snapshot = discovered.borrow();
-        snapshot.pools().len() == 3 && snapshot.pools()[0].model == "qwen-updated"
+        snapshot.pools().len() == 3
+            && snapshot.pools()[0].frontends[0].host_str() == Some("blue-new")
     })
     .await;
     {
         let snapshot = discovered.borrow();
-        assert_eq!(
-            snapshot.pools()[0].frontends[0].host_str(),
-            Some("blue-new")
-        );
-        assert_eq!(snapshot.pools()[1].model, "llama");
+        assert_eq!(snapshot.pools()[1].name, "east/dynamo/green");
         assert_eq!(snapshot.pools()[2].name, "east/dynamo/red");
     }
 
     answer.send_replace(listing(
         true,
-        vec![pool_listing("green", Some("llama"), "http://green:8000")],
+        vec![pool_listing("green", "http://green:8000")],
     ));
     until(|| discovered.borrow().pools().len() == 1).await;
     assert_eq!(discovered.borrow().pools()[0].name, "east/dynamo/green");
@@ -167,7 +170,7 @@ async fn cached_discovery_does_not_keep_a_disconnected_relay_routable() {
     let listed: PoolsResponse = serde_json::from_value(serde_json::json!({
         "complete": true, "pools": [{
             "key": {"cluster_id": "east", "namespace": "dynamo", "dgd_name": "blue"},
-            "location": {"region": "east"}, "model": "qwen", "frontends": ["http://pool:8000"]
+            "location": {"region": "east"}, "frontends": ["http://pool:8000"]
         }]
     }))
     .unwrap();
@@ -208,7 +211,7 @@ async fn cached_discovery_does_not_keep_a_disconnected_relay_routable() {
     until(|| discovered.borrow().pools().len() == 1).await;
     let pool = V1PoolIdDeriver.derive(&PoolKey::new("east", "dynamo", "blue").unwrap());
     let signals = Arc::new(PoolSignals::new(Arc::new(InFlightTracker::new())));
-    let catalog = Arc::new(RelayGatedPoolCatalog::with_signals(
+    let catalog = Arc::new(RelayGatedPoolCatalog::for_discovery(
         discovered.clone(),
         cancel.clone(),
         Some(signals.clone()),
@@ -218,7 +221,12 @@ async fn cached_discovery_does_not_keep_a_disconnected_relay_routable() {
     let address = listener.local_addr().unwrap();
     let receiver = tokio::spawn(serve_relay_views(listener, catalog, cancel.clone()));
     let (sender, task) = publisher(address, state(true, 1, 1, 1)).await;
-    until(|| current.borrow().pools().len() == 1 && signals.occupancy(&pool).is_some()).await;
+    // The listing names no model: the Relay's ready model and its alias do.
+    until(|| {
+        current.borrow().models() == ["qwen", "qwen-canonical"].into()
+            && signals.occupancy(&pool).is_some()
+    })
+    .await;
     let mut next = state(true, 1, 1, 2);
     let mut load = relay::ServingLoadUpdate::decode(next.serving_load).unwrap();
     load.models[0]

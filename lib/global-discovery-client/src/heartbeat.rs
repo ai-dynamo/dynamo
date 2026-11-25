@@ -38,12 +38,10 @@ pub enum RegistrationStatus {
 }
 
 /// Registers a pool with `POST /pools` and keeps it registered until
-/// cancelled or dropped. Stopping sends nothing: the service drops the pool
-/// once its lease passes.
-///
-/// Every failure is retried, a `501` included. Every Global Discovery mode
-/// takes registrations, and with MCS a pool is listed only while its
-/// registration is within the lease.
+/// cancelled or dropped; the service then drops it once its lease passes.
+/// Every failure is retried, a `501` included: callers register only with a
+/// service that says it takes registrations, so a `501` means its replicas
+/// disagree, as while it is reconfigured.
 #[derive(Debug)]
 #[must_use = "dropping the heartbeat stops registering the pool"]
 pub struct PoolHeartbeat {
@@ -319,22 +317,21 @@ mod tests {
         Lease::new(heartbeat_interval_s, lease_duration_s).unwrap()
     }
 
-    /// A registration whose model, `m<version>`, tells its versions apart.
+    /// A registration whose region, `r<version>`, tells its versions apart.
     fn pool(version: u32) -> PoolRegistration {
         PoolRegistration {
             key: PoolKey::new("aws-west", "dynamo", "mocker-west-1").unwrap(),
             location: PoolLocation {
-                region: "us-west-2".to_owned(),
+                region: format!("r{version}"),
                 availability_zone: None,
                 datacenter: None,
             },
-            model: format!("m{version}"),
             frontends: Vec::new(),
         }
     }
 
     fn version(registration: &PoolRegistration) -> u32 {
-        registration.model[1..].parse().unwrap()
+        registration.location.region[1..].parse().unwrap()
     }
 
     fn spawn(registrar: &FakeRegistrar, cancel: CancellationToken) -> PoolHeartbeat {

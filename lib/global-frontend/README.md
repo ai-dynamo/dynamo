@@ -225,11 +225,16 @@ cargo run -p dynamo-global-frontend -- --port 8000 \
 ```
 
 Set each Relay's `--global-discovery-url`, `--bind`,
-`--routing-pool <cluster>/<Kubernetes namespace>/<DGD name>`,
-`--routing-pool-region`, and, with registrations-mode discovery,
-`--routing-pool-frontends`. The Relay registers its pool with `POST /pools` and
-renews it on the lease heartbeat. Scope its discovery
-sources to that DGD. Each `GET /routers` endpoint must address a replica's gRPC
+`--routing-pool <cluster>/<Kubernetes namespace>/<DGD name>`, and, with
+registrations-mode discovery, `--routing-pool-region` and
+`--routing-pool-frontends`. With registrations-mode discovery, the Relay
+registers its pool with `POST /pools` and renews it on the lease heartbeat; with
+MCS, Global Discovery lists the pools MCS imports and takes no registrations.
+A listing says where a pool is, not what it serves: the router routes each
+discovered pool for every model, alias and adapter that one of its live Relay
+views reports ready, and weighs the pool's load over all of them. A name must
+mean one model in every pool: pools that report the same name for different
+models share its requests. Scope the Relay's discovery sources to that DGD. Each `GET /routers` endpoint must address a replica's gRPC
 receiving port. Relays send a fresh catalog/readiness/load snapshot on every
 connection, then updates. Separate Relay views keep active-active reports from
 being summed; loss of the last view removes the pool even when a failed GDS read
@@ -245,6 +250,12 @@ source-IP admission.
 Use a discovery readiness probe independent of pool availability, such as
 `/live`. The existing `/health` requires a routable pool, so using it to discover
 new routers could keep Relays from ever finding them.
+
+Coming from a build whose routers took each pool's model from Global Discovery,
+upgrade the routers before the discovery service: an older router does not route
+a pool listed without a model. The
+[upgrade steps](../../docs/fern/pages/reference/components/global-discovery-service-configuration.md#upgrade-from-a-version-whose-registrations-named-a-model)
+give the full order.
 
 ## Router self-registration
 

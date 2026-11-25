@@ -53,8 +53,18 @@ pub(super) struct Encoded {
     pub hash: String,
 }
 
+/// Replicas from before registrations dropped `model` skip an item without
+/// one, so items keep this stand-in, which newer readers ignore. Compatibility
+/// with those replicas during a rolling upgrade of the discovery service.
+/// TODO: remove once no replica older than this change reads the table.
+const OLDER_READERS_MODEL: &str = "unknown";
+
 pub(super) fn encode(registration: &PoolRegistration) -> Result<Encoded, serde_json::Error> {
-    let json = serde_json::to_string(registration)?;
+    let mut json = serde_json::to_value(registration)?;
+    if let Some(fields) = json.as_object_mut() {
+        fields.insert("model".to_owned(), OLDER_READERS_MODEL.into());
+    }
+    let json = serde_json::to_string(&json)?;
     Ok(Encoded {
         sort_key: keys::sort_key(&registration.key),
         hash: hash(&json),
@@ -237,7 +247,6 @@ mod tests {
                 availability_zone: Some("us-west-2a".to_owned()),
                 datacenter: None,
             },
-            model: "Qwen/Qwen3-0.6B".to_owned(),
             frontends: vec![Url::parse("http://10.43.1.2:8000/").unwrap()],
         }
     }
@@ -351,11 +360,26 @@ mod tests {
     }
 
     #[test]
+    fn a_replica_from_before_the_model_was_dropped_reads_what_this_one_writes() {
+        // Such a replica needs a `model` that is not blank, trimmed and
+        // without control characters, or it skips the item.
+        let encoded = encode(&registration()).unwrap();
+        let older: serde_json::Value = serde_json::from_str(&encoded.registration).unwrap();
+        let model = older["model"].as_str().unwrap();
+        assert!(!model.is_empty() && model.trim() == model && !model.contains(char::is_control));
+        // And this one reads it back unchanged, with the same hash.
+        let item = item(&encoded, 1_000_999, 15);
+        let stored = decode(&item).unwrap();
+        assert_eq!(stored.registration, registration());
+        assert_eq!(stored.hash, encoded.hash);
+    }
+
+    #[test]
     fn the_hash_follows_the_content() {
         let first = encode(&registration()).unwrap();
         assert_eq!(encode(&registration()).unwrap(), first);
         let mut changed = registration();
-        changed.model = "Qwen/Qwen3-8B".to_owned();
+        changed.location.region = "us-east-2".to_owned();
         assert_ne!(encode(&changed).unwrap().hash, first.hash);
     }
 

@@ -118,9 +118,14 @@ impl PoolKey {
     pub fn dgd_name(&self) -> &str {
         &self.dgd_name
     }
+
+    /// Whether `value` can be a key's cluster ID, namespace or DGD name.
+    pub fn is_valid_part(value: &str) -> bool {
+        validate(value, "part").is_ok()
+    }
 }
 
-pub(crate) fn validate(value: &str, field: &'static str) -> Result<(), PoolKeyError> {
+fn validate(value: &str, field: &'static str) -> Result<(), PoolKeyError> {
     if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
         return Err(PoolKeyError::InvalidField { field });
     }
@@ -158,6 +163,19 @@ pub struct PoolLocation {
     pub region: String,
     pub availability_zone: Option<String>,
     pub datacenter: Option<String>,
+}
+
+impl PoolLocation {
+    /// A location known only by its region, or `None` for a region that a
+    /// key's part could not be ([`PoolKey::is_valid_part`]).
+    pub fn in_region(region: impl Into<String>) -> Option<Self> {
+        let region = region.into();
+        PoolKey::is_valid_part(&region).then_some(Self {
+            region,
+            availability_zone: None,
+            datacenter: None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +240,17 @@ mod tests {
     fn api_representation_is_an_opaque_string() {
         let id = V1PoolIdDeriver.derive(&key("ohio", "dynamo", "mocker-1"));
         assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{id}\""));
+    }
+
+    #[test]
+    fn a_region_is_checked_as_a_key_part_is() {
+        assert_eq!(
+            PoolLocation::in_region("us-east-2").map(|location| location.region),
+            Some("us-east-2".to_owned())
+        );
+        for region in ["", " us-east-2", "us-east-2\n"] {
+            assert_eq!(PoolLocation::in_region(region), None, "{region:?}");
+        }
     }
 
     #[test]

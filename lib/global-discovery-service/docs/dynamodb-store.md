@@ -5,16 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # DynamoDB registration storage for the Global Discovery Service
 
-Design for `--registration-storage dynamodb`, an alternative to `memory` for
-every `--pool-discovery` value. It keeps pool registrations in one DynamoDB
+Design for `--registration-storage dynamodb`, an alternative to `memory` with
+`--pool-discovery registrations`. It keeps pool registrations in one DynamoDB
 table so that any number of service replicas, in one region or across regions
 through a Global Table, serve the same pool list and survive restarts. With
-`karmada` or `mcs`, the service joins these registrations with what MCS
-imports, as it does with `memory`.
+`karmada` or `mcs`, the service lists what MCS imports and keeps no
+registrations, so neither store applies.
 
 The service's contract does not change: `POST /pools` still answers a `Lease`,
 `GET /pools` still lists live pools with `complete`, and `GET /routers` still
-comes from `--router` or MCS. Only where registrations live changes.
+comes from `--router` or router registrations. Only where registrations live
+changes.
 
 ## Why
 
@@ -97,10 +98,9 @@ in another order or with repeats are the same registration: `register` sorts
 and deduplicates them before it hashes and stores. If the content differs,
 for example in the frontends each relay sees,
 the item switches between their versions at every heartbeat, and every
-replica's watchers see the pool change at almost every poll. With `karmada`
-or `mcs`, the join takes frontends from MCS, so a difference in frontends
-alone does not reach routers. The store warns, once per pool, when a pool's
-changes go back to the version before twice in a row.
+replica's watchers see the pool change at almost every poll. The store warns,
+once per pool, when a pool's changes go back to the version before twice in a
+row.
 
 Whether the registration is published to this replica's watchers is decided
 against what those watchers already have (the polled view, below), not
@@ -173,9 +173,8 @@ clock (nobody can renew while the table cannot be reached), and a
 successful poll a lease after reads recovered sends `Resync(Exact)` again. The poller stops when the store is dropped,
 which also ends every stream; a caller's `CancellationToken` ends its own.
 Polling rather than DynamoDB Streams keeps the store to one table and one IAM
-policy. With `--pool-discovery registrations` nothing consumes the watch yet:
-the HTTP API calls only `list` and `register`. With `karmada` or `mcs`, the
-join with MCS watches the store.
+policy. Nothing consumes the watch yet: the HTTP API calls only `list` and
+`register`.
 
 ## Clock
 
@@ -303,10 +302,9 @@ impl DynamoDbPoolStore {
 ```
 
 `main.rs` gains the flags, a `RegistrationStorage::Dynamodb` variant and a
-match arm in `registration_storage`, which `registrations_backend` and
-`mcs_backend` both use. The flags carry the `WITH_DYNAMODB` heading, and
-`parse_args` refuses a flag under it without `--registration-storage
-dynamodb`, whatever `--pool-discovery` is. The
+match arm in `registration_storage`, which `registrations_backend` uses. The
+flags carry the `WITH_DYNAMODB` heading, and `parse_args` refuses a flag under
+it without `--registration-storage dynamodb`, and with `karmada` or `mcs`. The
 `every_flag_says_what_it_works_with` test checks that every flag has a
 heading or works everywhere.
 

@@ -24,6 +24,10 @@ pub const SOURCE_CLUSTER_LABEL: &str = "multicluster.kubernetes.io/source-cluste
 /// Standard MCS: name of the imported Service a slice belongs to.
 pub const SERVICE_NAME_LABEL: &str = "multicluster.kubernetes.io/service-name";
 
+/// The well-known region label. A standard implementation may set it on an
+/// imported slice to the source cluster's region; Karmada does not.
+pub const REGION_LABEL: &str = "topology.kubernetes.io/region";
+
 /// Kubernetes: name of the Service a slice belongs to.
 pub const KUBERNETES_SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
@@ -100,6 +104,17 @@ pub fn warn_unknown_cluster(slice: &EndpointSlice, service: &str) {
         service,
         "skipping an imported EndpointSlice that does not say which cluster it came from; with Karmada, its name must be imported-<cluster>-<service>-<suffix>"
     );
+}
+
+/// The region label of a slice, naming the region of the cluster it came from.
+/// It may be empty or invalid; `PoolLocation::in_region` checks it.
+pub fn source_region(slice: &EndpointSlice) -> Option<&str> {
+    slice
+        .metadata
+        .labels
+        .as_ref()?
+        .get(REGION_LABEL)
+        .map(String::as_str)
 }
 
 /// The cluster the slice came from. With Karmada this is the Karmada member

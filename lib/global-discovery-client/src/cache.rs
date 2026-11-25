@@ -34,11 +34,13 @@ pub enum Freshness {
 
 /// The Global Router replicas from `GET /routers`, refreshed until cancelled
 /// or dropped. Partial lists add and update replicas; only complete lists
-/// remove missing replicas.
+/// remove missing replicas. Each read also says whether the service takes
+/// pool registrations.
 #[derive(Debug)]
 #[must_use = "dropping the cache stops its refresh task"]
 pub struct RouterCache {
     routers: watch::Receiver<HashSet<RouterReplica>>,
+    accepts_pool_registrations: watch::Receiver<Option<bool>>,
     freshness: watch::Receiver<Freshness>,
     _task: AbortOnDropHandle<()>,
 }
@@ -66,19 +68,21 @@ impl RouterCache {
     ) -> Self {
         let mut ticks = ticks(interval);
         let (routers, routers_rx) = watch::channel(HashSet::new());
+        let (accepts, accepts_rx) = watch::channel(None);
         let (freshness, freshness_rx) = watch::channel(Freshness::Unread);
         let task = tokio::spawn(async move {
             cancel
                 .run_until_cancelled(async {
                     loop {
                         ticks.tick().await;
-                        refresh_routers(&source, &routers, &freshness).await;
+                        refresh_routers(&source, &routers, &accepts, &freshness).await;
                     }
                 })
                 .await;
         });
         Self {
             routers: routers_rx,
+            accepts_pool_registrations: accepts_rx,
             freshness: freshness_rx,
             _task: AbortOnDropHandle::new(task),
         }
@@ -88,6 +92,13 @@ impl RouterCache {
     /// nothing. The channel closes when the cache stops.
     pub fn subscribe(&self) -> watch::Receiver<HashSet<RouterReplica>> {
         self.routers.clone()
+    }
+
+    /// Whether the service takes `POST /pools`, as its last successful read
+    /// said: `None` before the first. A failed read keeps the last answer.
+    /// The channel closes when the cache stops.
+    pub fn accepts_pool_registrations(&self) -> watch::Receiver<Option<bool>> {
+        self.accepts_pool_registrations.clone()
     }
 
     /// Whether [`Self::subscribe`] holds the service's current list.
@@ -113,6 +124,7 @@ impl RouterSource for GlobalDiscoveryClient {
 async fn refresh_routers(
     source: &impl RouterSource,
     routers: &watch::Sender<HashSet<RouterReplica>>,
+    accepts_pool_registrations: &watch::Sender<Option<bool>>,
     freshness: &watch::Sender<Freshness>,
 ) {
     let response = match source.routers().await {
@@ -126,6 +138,12 @@ async fn refresh_routers(
             return;
         }
     };
+    let accepts = Some(response.accepts_pool_registrations);
+    accepts_pool_registrations.send_if_modified(|current| {
+        let changed = *current != accepts;
+        *current = accepts;
+        changed
+    });
     let listed = response.routers.into_iter().collect::<HashSet<_>>();
     // Publish the set before marking it current, so a reader never sees
     // `Current` next to the previous set.
@@ -391,6 +409,7 @@ mod tests {
             *self.0.lock().unwrap() = ids.map(|ids| RoutersResponse {
                 routers: ids.iter().map(|id| router(id)).collect(),
                 complete: true,
+                accepts_pool_registrations: true,
             });
         }
     }
@@ -486,10 +505,42 @@ mod tests {
         *source.0.lock().unwrap() = Some(RoutersResponse {
             routers: vec![router("c")],
             complete: false,
+            accepts_pool_registrations: true,
         });
         assert_eq!(next_set(&mut routers).await, ["a", "b", "c"]);
         source.answer(Some(&["c"]));
         assert_eq!(next_set(&mut routers).await, ["c"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follows_whether_the_service_takes_pool_registrations() {
+        let source = FakeSource::default();
+        let cache = RouterCache::spawn_from(
+            source.clone(),
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        let mut accepts = cache.accepts_pool_registrations();
+        // Unknown until a read succeeds.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(*accepts.borrow_and_update(), None);
+        let answer = |accepts: bool| {
+            *source.0.lock().unwrap() = Some(RoutersResponse {
+                routers: Vec::new(),
+                complete: true,
+                accepts_pool_registrations: accepts,
+            });
+        };
+        answer(false);
+        accepts.changed().await.unwrap();
+        assert_eq!(*accepts.borrow_and_update(), Some(false));
+        // An outage keeps the last answer.
+        source.answer(None);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!accepts.has_changed().unwrap());
+        answer(true);
+        accepts.changed().await.unwrap();
+        assert_eq!(*accepts.borrow_and_update(), Some(true));
     }
 
     #[tokio::test(start_paused = true)]
@@ -545,16 +596,15 @@ mod tests {
         }
     }
 
-    /// A listing whose model, `m<version>`, tells its versions apart.
+    /// A listing whose region, `r<version>`, tells its versions apart.
     fn pool(name: &str, version: u32) -> PoolListing {
         PoolListing {
             key: PoolKey::new("aws-west", "dynamo", name).unwrap(),
             location: PoolLocation {
-                region: "us-west-2".to_owned(),
+                region: format!("r{version}"),
                 availability_zone: None,
                 datacenter: None,
             },
-            model: Some(format!("m{version}")),
             frontends: Vec::new(),
             relay_identities: Vec::new(),
         }
@@ -564,10 +614,7 @@ mod tests {
     fn pool_versions(pools: &HashMap<PoolKey, PoolListing>) -> Vec<String> {
         let mut pools = pools
             .values()
-            .map(|pool| {
-                let model = pool.model.as_deref().unwrap();
-                format!("{}={}", pool.key.dgd_name(), &model[1..])
-            })
+            .map(|pool| format!("{}={}", pool.key.dgd_name(), &pool.location.region[1..]))
             .collect::<Vec<_>>();
         pools.sort();
         pools

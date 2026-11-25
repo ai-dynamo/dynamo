@@ -8,33 +8,25 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use crate::pool::{self, PoolKey, PoolLocation};
+use crate::pool::{PoolKey, PoolLocation};
 use crate::replicas::RouterReplica;
 
 /// `POST /pools` body. A PoolRelay sends it on a timer, and each call is also
-/// the pool's heartbeat. Older PoolRelays also send `capabilities` and
-/// `capacity`, which the service ignores.
+/// the pool's heartbeat. It says where the pool is, not what it serves:
+/// routers learn a pool's models from its PoolRelays' state streams. Older
+/// PoolRelays also send `model`, `capabilities` and `capacity`, which the
+/// service ignores.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolRegistration {
     pub key: PoolKey,
     pub location: PoolLocation,
-    /// The model or checkpoint the pool serves. Reading it checks it as
-    /// [`PoolKey::new`] checks the key's fields.
-    #[serde(deserialize_with = "checked_model")]
-    pub model: String,
     /// Local frontends the Global Router sends requests to.
     #[serde(default)]
     pub frontends: Vec<Url>,
-}
-
-fn checked_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let model = String::deserialize(deserializer)?;
-    pool::validate(&model, "model").map_err(serde::de::Error::custom)?;
-    Ok(model)
 }
 
 /// `POST /routers` body. The identity names one process incarnation, and the
@@ -186,14 +178,13 @@ pub struct PoolsResponse {
     pub complete: bool,
 }
 
-/// One pool in `GET /pools`. Older services also list `capabilities` and
-/// `capacity`, which readers ignore.
+/// One pool in `GET /pools`. What it serves comes from its PoolRelays' state
+/// streams, not from here. Older services also list `model`, `capabilities`
+/// and `capacity`, which readers ignore.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolListing {
     pub key: PoolKey,
     pub location: PoolLocation,
-    /// `None` when the service does not know the pool's model.
-    pub model: Option<String>,
     /// Local frontends the Global Router sends requests to.
     #[serde(default)]
     pub frontends: Vec<Url>,
@@ -221,11 +212,16 @@ pub struct RoutersResponse {
     pub routers: Vec<RouterReplica>,
     /// Partial snapshots preserve previously known replicas at the client.
     /// Older services always returned complete lists and omitted this field.
-    #[serde(default = "complete_by_default")]
+    #[serde(default = "true_by_default")]
     pub complete: bool,
+    /// Whether the service takes `POST /pools`. A PoolRelay registers its
+    /// pool only while this is true: a service that finds pools through MCS
+    /// takes no registrations. Older services always took them.
+    #[serde(default = "true_by_default")]
+    pub accepts_pool_registrations: bool,
 }
 
-fn complete_by_default() -> bool {
+fn true_by_default() -> bool {
     true
 }
 
@@ -247,20 +243,15 @@ mod tests {
             json!({"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"});
         let location =
             json!({"region": "us-west-2", "availability_zone": null, "datacenter": null});
-        let mut registration = json!({
+        round_trip::<PoolRegistration>(json!({
             "key": key,
             "location": location,
-            "model": "Qwen/Qwen3-0.6B",
             "frontends": ["http://10.43.1.2:8000/"]
-        });
-        round_trip::<PoolRegistration>(registration.clone());
-        registration["model"] = json!(" ");
-        assert!(serde_json::from_value::<PoolRegistration>(registration).is_err());
+        }));
         round_trip::<PoolsResponse>(json!({
             "pools": [{
                 "key": key,
                 "location": location,
-                "model": null,
                 "frontends": [],
                 "relay_identities": ["ip:10.43.66.175", "ip:fd00::5"]
             }],
@@ -268,7 +259,8 @@ mod tests {
         }));
         round_trip::<RoutersResponse>(json!({
             "routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}],
-            "complete": true
+            "complete": true,
+            "accepts_pool_registrations": false
         }));
         let mapped: IpAddr = "::ffff:10.43.66.175".parse().unwrap();
         assert_eq!(address_identity(mapped), "ip:10.43.66.175");
@@ -302,8 +294,9 @@ mod tests {
                 "{url}"
             );
         }
+        // An older service always listed every router and took registrations.
         let old: RoutersResponse = serde_json::from_value(json!({"routers": []})).unwrap();
-        assert!(old.complete);
+        assert!(old.complete && old.accepts_pool_registrations);
     }
 
     #[test]
@@ -339,12 +332,20 @@ mod tests {
         let location =
             json!({"region": "us-west-2", "availability_zone": null, "datacenter": null, "new": 1});
         serde_json::from_value::<PoolRegistration>(json!({
-            "key": key, "location": location, "model": "Qwen/Qwen3-0.6B", "new": 1
+            "key": key, "location": location, "new": 1
         }))
         .unwrap();
+        // An older PoolRelay still sends a model, capabilities and capacity,
+        // even a model a newer reader would not accept.
+        serde_json::from_value::<PoolRegistration>(json!({
+            "key": key, "location": location, "model": " ",
+            "capabilities": ["aggregated"], "capacity": [{"sku": "H100", "workers": 8}]
+        }))
+        .unwrap();
+        // An older service still lists a model and capacity.
         serde_json::from_value::<PoolsResponse>(json!({
             "pools": [{
-                "key": key, "location": location, "model": null,
+                "key": key, "location": location, "model": "Qwen/Qwen3-0.6B",
                 "capacity": [{"sku": "H100", "workers": 8, "new": 1}], "new": 1
             }],
             "complete": true,

@@ -396,6 +396,12 @@ pool. It finds the frontends by a Service name suffix, `-frontend` by default, w
 frontend component named `Frontend`. The operator does not know that suffix, so a frontend component
 with another name is exported but not found until the suffix matches it.
 
+The exports must reach the cluster where the Global Discovery Service reads them. With `karmada`,
+Karmada imports a Service only into the clusters that its `ServiceImport` is propagated to, the pool's
+own cluster included, and it watches a member's `ServiceExport`s only while it has propagated at least
+one `ServiceExport` there. See the
+[Global Discovery Service configuration](../../reference/components/global-discovery-service-configuration.md).
+
 The operator exports a Service only while it exists, and a Service that does not exist yet is
 exported once it does. It finds a frontend's Service by its name alone, whichever workload path
 created it, so it also exports a Service of that name that someone else created in the DGD's
@@ -423,9 +429,10 @@ A relay's cluster ID is, in this order, with every Global Discovery mode:
    and the operator watches the property.
 
 With MCS, the ID must be the name that the MCS implementation gives this cluster, because the Global
-Discovery Service matches the pool's registration to its imports by that name: with `mcs`, leave
-both settings empty to use the About API, and with `karmada`, use this cluster's member cluster name
-in Karmada. With `--pool-discovery registrations`, any stable name that is unique per cluster works.
+Discovery Service lists the pool under that name, and Global Routers match the relay's state streams,
+which name the pool by its ID, to that listing: with `mcs`, leave both settings empty to use the About
+API, and with `karmada`, use this cluster's member cluster name in Karmada. With
+`--pool-discovery registrations`, any stable name that is unique per cluster works.
 
 A relay that sets `DYN_RELAY_ROUTING_POOL` itself needs its own `clusterId`, since that variable
 names the cluster too. A change of a relay's cluster ID restarts its Pods. While the operator cannot

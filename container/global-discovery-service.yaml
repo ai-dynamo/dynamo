@@ -5,23 +5,29 @@
 # cluster (not through Karmada). Replace IMAGE with the pushed image, for example
 # from the repository root:
 #   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" container/global-discovery-service.yaml | kubectl apply -f -
-# It needs only read access to EndpointSlices. PoolRelays register their pools
-# with it (POST /pools), and it lists a pool while its registration is live and
-# Karmada imports a Ready endpoint of its `<DGD name>-pool-relay` Service. The
-# pool's frontends are the Ready endpoints of its `<DGD name>-frontend` Service,
-# exported the same way. It also lists the replicas of the Global Router
-# Service named by the --router-* arguments: set those to the router's
-# namespace, its Service and the port PoolRelays connect to.
 #
-# It reads the imported slices with the pod's credentials, so this cluster
-# needs a ServiceImport for each pool's PoolRelay and frontend Services and for
-# the router Service. To read the Karmada control plane instead, which holds
-# every exported Service's slices, mount its kubeconfig from a Secret, point
-# KUBECONFIG at it, and grant the same read access there.
+# It takes no registrations. It lists a pool while Karmada imports a Ready
+# endpoint of its `<DGD name>-pool-relay` Service; its frontends are the Ready
+# endpoints of its `<DGD name>-frontend` Service. Set the --router-* arguments
+# to the Global Router's namespace, Service and the port PoolRelays connect to.
 #
-# With the default --registration-storage=memory, one instance keeps only the
-# registrations it receives, so run one, and have every PoolRelay register
-# with it.
+# It reads the imported slices with the pod's credentials, so Karmada must
+# propagate to this cluster a ServiceImport for each pool's PoolRelay and
+# frontend Services and for the router Service, this cluster's own pools
+# included. Karmada watches a member's ServiceExports only once it has
+# propagated at least one ServiceExport there.
+#
+# To read the Karmada control plane instead, which holds every exported
+# Service's slices, mount its kubeconfig from a Secret, point KUBECONFIG at
+# it, and grant this access there.
+#
+# A pool's region is its member Cluster's spec.region on the Karmada control
+# plane, else its cluster's --cluster-region, else the cluster's name. It
+# keeps no state, so run any number.
+#
+# Coming from a version whose Pool Relays registered pools, upgrade the Global
+# Routers first, and scale this Deployment to zero before applying the new one.
+# The Global Discovery Service configuration reference has every step.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -40,6 +46,10 @@ metadata:
 rules:
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Each member's region, on the Karmada control plane.
+  - apiGroups: ["cluster.karmada.io"]
+    resources: ["clusters"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -86,6 +96,9 @@ spec:
             - --router-namespace=global-discovery
             - --router-service=global-router
             - --router-port-name=http
+            # Reading this cluster rather than the Karmada control plane, give
+            # every pool cluster's region, by its member name.
+            # - --cluster-region=aws-ohio=us-east-2
           env:
             - name: DYN_LOG
               value: info

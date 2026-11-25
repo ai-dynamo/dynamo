@@ -6,10 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 # Global Discovery Service
 
 The Global Discovery Service serves the pool and router lists that Global Routers and Pool Relays read
-over HTTP. A Pool Relay registers its pool with `POST /pools` and renews it on a heartbeat. A Global
-Router reads `GET /pools` for the pools it can route to. A Pool Relay reads `GET /routers`
-to find each router replica that needs its state. With self-registration enabled, each router
-renews its own membership through `POST /routers`.
+over HTTP. A Global Router reads `GET /pools` for the pools it can route to; what each pool serves,
+it learns from the pool's Pool Relays' state streams. A Pool Relay reads `GET /routers` to find each
+router replica that needs its state, and whether to register its pool with `POST /pools`, which it
+then renews on a heartbeat. With self-registration enabled, each router renews its own membership
+through `POST /routers`.
 `GET /healthz` reports whether the service is ready: whether its backend has answered once.
 
 ## Pool discovery
@@ -20,9 +21,13 @@ renews its own membership through `POST /routers`.
   replicas come from repeated `--router <id>=<url>` flags by default. Set
   `--router-discovery registrations` for leased router self-registration.
 - `karmada` or `mcs`: the EndpointSlices that Multi-Cluster Services imports, named the Karmada way or
-  the standard way, joined with live registrations. A pool is listed while MCS imports a Ready
-  Pool Relay endpoint for it and its registration lease lasts. MCS supplies the addresses; the
-  registration supplies the model and location.
+  the standard way. A pool is listed while MCS imports a Ready Pool Relay endpoint for it. MCS
+  supplies the addresses. The region comes from the imported slice's `topology.kubernetes.io/region`
+  label when the MCS implementation sets it, then from the member `Cluster`'s `spec.region` with
+  Karmada, then from `--cluster-region`, and is otherwise the cluster's name. These modes take no
+  registrations: `POST /pools` answers 501, and `GET /routers` tells Pool Relays not to call it. A list
+  is partial while the MCS watch keeps failing, for a minute after a pool or router leaves it, and
+  while it is empty, so readers keep what an MCS implementation drops for a while.
 
 ## Router self-registration
 
@@ -60,7 +65,7 @@ clients ignore the field. New clients accept older services that omit it as comp
 
 ## Registration stores
 
-`--registration-storage` chooses where registrations are kept, with every `--pool-discovery` value:
+With `--pool-discovery registrations`, `--registration-storage` chooses where registrations are kept:
 
 - `memory` (default): in the process. Run one replica. A restart loses the registrations, and
   `GET /pools` reports `complete: false` until one lease has passed.

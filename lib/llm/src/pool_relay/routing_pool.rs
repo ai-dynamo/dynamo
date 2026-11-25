@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Registers the Relay's routing pool with Global Discovery under the model in
-//! its serving topology.
-
-use std::collections::BTreeSet;
-use std::sync::Arc;
+//! Registers the Relay's routing pool with Global Discovery while the service
+//! takes registrations. Routers learn what the pool serves from the Relay's
+//! state streams, so a registration says only where the pool is.
 
 use dynamo_global_common::{PoolKey, PoolLocation, PoolRegistration};
 use dynamo_global_discovery_client::{GlobalDiscoveryClient, PoolHeartbeat, RegistrationStatus};
@@ -14,95 +12,120 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use url::Url;
 
-use super::topology::{TopologyReadinessState, TopologySnapshot};
-
-/// Keeps the routing pool registered under one model of its serving topology,
-/// as [`select_model`] picks it, until cancelled or dropped. With no model to
-/// pick it registers nothing, and the pool drops out of Global Discovery once
-/// its last lease passes.
+/// Keeps the routing pool registered while Global Discovery takes
+/// registrations, as its `GET /routers` says, until cancelled or dropped. A
+/// service that finds pools through MCS takes none, and then nothing is
+/// registered and nothing is missing.
 pub(super) struct RoutingPoolRegistration {
     heartbeat: PoolHeartbeat,
-    withheld: watch::Receiver<Option<String>>,
+    plan: watch::Receiver<Plan>,
     _follow: AbortOnDropHandle<()>,
 }
 
+/// Whether the pool is registered, as [`follow_service`] decides it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Plan {
+    /// The pool should be registered but is not, for this reason.
+    Withheld(String),
+    /// The service takes no registrations.
+    NotTaken,
+    /// The heartbeat registers the pool.
+    Registering,
+}
+
 impl RoutingPoolRegistration {
+    /// `accepts` is the service's last answer to whether it takes
+    /// registrations, `None` before the first. Without a `location` the
+    /// pool cannot be registered.
     pub(super) fn spawn(
         client: GlobalDiscoveryClient,
         key: PoolKey,
-        location: PoolLocation,
+        location: Option<PoolLocation>,
         frontends: Vec<Url>,
-        topology: watch::Receiver<Arc<TopologySnapshot>>,
+        accepts: watch::Receiver<Option<bool>>,
         cancel: CancellationToken,
     ) -> Self {
         let (registration, registration_rx) = watch::channel(None);
-        let (withheld, withheld_rx) = watch::channel(None);
-        let template = PoolRegistration {
-            key,
+        let (plan, plan_rx) = watch::channel(Plan::Withheld(UNKNOWN.to_owned()));
+        let registration_of = move |location: PoolLocation| PoolRegistration {
+            key: key.clone(),
             location,
-            model: String::new(),
-            frontends,
+            frontends: frontends.clone(),
         };
-        let follow = tokio::spawn(follow_topology(
-            template,
-            topology,
+        let follow = tokio::spawn(follow_service(
+            location.map(registration_of),
+            accepts,
             registration,
-            withheld,
+            plan,
             cancel.clone(),
         ));
         Self {
             heartbeat: PoolHeartbeat::spawn(client, registration_rx, cancel),
-            withheld: withheld_rx,
+            plan: plan_rx,
             _follow: AbortOnDropHandle::new(follow),
         }
     }
 
-    /// Why the pool is not registered, or `None` while it is.
+    /// Why the pool is not registered though it should be, or `None` while
+    /// it is registered or the service takes no registrations.
     pub(super) fn unregistered_reason(&self) -> Option<String> {
-        if let Some(reason) = self.withheld.borrow().clone() {
-            return Some(reason);
-        }
-        match self.heartbeat.status() {
-            RegistrationStatus::Registered(_) => None,
-            RegistrationStatus::Unregistered => Some("no registration has finished yet".to_owned()),
-            RegistrationStatus::Failing(reason) => Some(reason),
+        match self.plan.borrow().clone() {
+            Plan::Withheld(reason) => Some(reason),
+            Plan::NotTaken => None,
+            Plan::Registering => match self.heartbeat.status() {
+                RegistrationStatus::Registered(_) => None,
+                RegistrationStatus::Unregistered => {
+                    Some("no registration has finished yet".to_owned())
+                }
+                RegistrationStatus::Failing(reason) => Some(reason),
+            },
         }
     }
 }
 
-/// Sets `registration` to `template` under the model [`select_model`] picks,
-/// or to `None` with the reason in `withheld`. Withdraws the registration when
-/// it stops.
-async fn follow_topology(
-    template: PoolRegistration,
-    mut topology: watch::Receiver<Arc<TopologySnapshot>>,
+const UNKNOWN: &str = "Global Discovery has not said yet whether it takes pool registrations";
+
+/// Sets `registration` to `pool` while the service takes registrations, and
+/// to `None` otherwise, with the reason in `plan`. Withdraws the
+/// registration when it stops.
+async fn follow_service(
+    pool: Option<PoolRegistration>,
+    mut accepts: watch::Receiver<Option<bool>>,
     registration: watch::Sender<Option<PoolRegistration>>,
-    withheld: watch::Sender<Option<String>>,
+    plan: watch::Sender<Plan>,
     cancel: CancellationToken,
 ) {
-    // The models last warned about, so each set is logged once.
-    let mut warned = BTreeSet::new();
     loop {
-        let current = registration
-            .borrow()
-            .as_ref()
-            .map(|registration| registration.model.clone());
-        let (candidates, selected) = select_model(&topology.borrow_and_update(), current);
-        if candidates.len() > 1 && candidates != warned {
-            tracing::warn!(pool = %template.key, models = ?candidates, registered = ?selected.as_ref().ok(), "the serving topology has more than one model, and Global Routers route the routing pool only by its registered model");
-            warned = candidates;
-        }
-        let (next, reason) = match selected {
-            Ok(model) => (
-                Some(PoolRegistration {
-                    model,
-                    ..template.clone()
-                }),
+        let answer = *accepts.borrow_and_update();
+        let (next, decided) = match (answer, &pool) {
+            (None, _) => (None, Plan::Withheld(UNKNOWN.to_owned())),
+            (Some(false), _) => (None, Plan::NotTaken),
+            (Some(true), None) => (
                 None,
+                Plan::Withheld(
+                    "Global Discovery takes pool registrations, but the routing pool has no \
+                     region to register"
+                        .to_owned(),
+                ),
             ),
-            Err(reason) => (None, Some(reason)),
+            (Some(true), Some(pool)) => (Some(pool.clone()), Plan::Registering),
         };
-        withheld.send_replace(reason);
+        if *plan.borrow() != decided {
+            match &decided {
+                Plan::NotTaken => tracing::info!(
+                    "Global Discovery takes no pool registrations, as when it finds pools \
+                     through MCS, so the routing pool is not registered"
+                ),
+                Plan::Registering => tracing::info!(
+                    "Global Discovery takes pool registrations; registering the routing pool"
+                ),
+                Plan::Withheld(reason) if answer.is_some() => {
+                    tracing::warn!(%reason, "the routing pool is not registered")
+                }
+                Plan::Withheld(_) => {}
+            }
+        }
+        plan.send_replace(decided);
         registration.send_if_modified(|current| {
             if *current == next {
                 return false;
@@ -113,81 +136,25 @@ async fn follow_topology(
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = registration.closed() => break,
-            changed = topology.changed() => if changed.is_err() {
+            changed = accepts.changed() => if changed.is_err() {
                 break;
             },
         }
     }
     // The heartbeat keeps sending the last value, so leave none.
-    withheld.send_replace(Some("the Relay stopped registering the pool".to_owned()));
+    plan.send_replace(Plan::Withheld(
+        "the Relay stopped registering the pool".to_owned(),
+    ));
     registration.send_replace(None);
-}
-
-/// Returns the topology's models and the one to register. `current` stays
-/// while it is in the topology in any state: membership is the same for every
-/// Relay replica, but readiness is each replica's own view, so following it
-/// could split replicas between models. Otherwise it is the one Ready model,
-/// or the one model while none is Ready. Adapters are not models here.
-fn select_model(
-    topology: &TopologySnapshot,
-    current: Option<String>,
-) -> (BTreeSet<String>, Result<String, String>) {
-    let models = |ready_only: bool| {
-        topology
-            .entries
-            .iter()
-            .filter(|entry| !ready_only || entry.state == TopologyReadinessState::Ready)
-            .map(|entry| entry.model.as_str().to_owned())
-            .collect::<BTreeSet<_>>()
-    };
-    let all = models(false);
-    if let Some(current) = current.filter(|model| all.contains(model)) {
-        return (all, Ok(current));
-    }
-    let ready = models(true);
-    let candidates = if ready.is_empty() { &all } else { &ready };
-    let mut candidate = candidates.iter();
-    let selected = match (candidate.next(), candidate.next()) {
-        (Some(model), None) => Ok(model.clone()),
-        (None, _) => Err("the serving topology has no model yet".to_owned()),
-        (Some(_), Some(_)) => Err(format!(
-            "the serving topology has more than one model ({}), and a registration names one",
-            candidates.iter().cloned().collect::<Vec<_>>().join(", ")
-        )),
-    };
-    (all, selected)
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::super::identity::CanonicalModelId;
-    use super::super::topology::{AdapterReadiness, TopologyEntry};
     use super::*;
 
-    fn entry(model: &str, state: TopologyReadinessState) -> TopologyEntry {
-        TopologyEntry {
-            namespace: "dynamo".to_owned(),
-            model: CanonicalModelId::new(model).unwrap(),
-            state,
-            present_roles: Vec::new(),
-            missing_roles: Vec::new(),
-            members: Vec::new(),
-            duplicate_role_endpoints: Vec::new(),
-            legacy_fallback_active: false,
-            adapters: Vec::new(),
-        }
-    }
-
-    fn snapshot(entries: Vec<TopologyEntry>) -> Arc<TopologySnapshot> {
-        Arc::new(TopologySnapshot {
-            revision: 0,
-            entries,
-        })
-    }
-
-    fn template() -> PoolRegistration {
+    fn pool() -> PoolRegistration {
         PoolRegistration {
             key: PoolKey::new("east", "dynamo", "blue").unwrap(),
             location: PoolLocation {
@@ -195,75 +162,8 @@ mod tests {
                 availability_zone: None,
                 datacenter: None,
             },
-            model: String::new(),
             frontends: vec![Url::parse("http://blue-frontend:8000/").unwrap()],
         }
-    }
-
-    fn selected(topology: Vec<TopologyEntry>, current: Option<&str>) -> Result<String, String> {
-        select_model(&snapshot(topology), current.map(str::to_owned)).1
-    }
-
-    #[test]
-    fn selects_the_ready_model() {
-        use TopologyReadinessState::{Ready, Unavailable, Unknown};
-        assert_eq!(
-            selected(Vec::new(), None),
-            Err("the serving topology has no model yet".to_owned())
-        );
-        // While nothing is Ready, the one model in any state.
-        assert_eq!(
-            selected(vec![entry("qwen", Unknown)], None),
-            Ok("qwen".to_owned())
-        );
-        // A model that is not Ready yet does not make the choice ambiguous,
-        // and an adapter is not a model.
-        let mut qwen = entry("qwen", Ready);
-        qwen.adapters.push(AdapterReadiness {
-            model: CanonicalModelId::new("qwen-lora").unwrap(),
-            state: Ready,
-            missing_roles: Vec::new(),
-        });
-        assert_eq!(
-            selected(vec![qwen, entry("llama", Unknown)], None),
-            Ok("qwen".to_owned())
-        );
-        assert_eq!(
-            selected(vec![entry("qwen", Ready), entry("llama", Ready)], None),
-            Err(
-                "the serving topology has more than one model (llama, qwen), and a registration names one"
-                    .to_owned()
-            )
-        );
-        // The registered model stays while it is in the topology in any
-        // state: while a second model rolls out, or while this replica sees
-        // it unavailable.
-        assert_eq!(
-            selected(
-                vec![entry("qwen", Ready), entry("llama", Ready)],
-                Some("qwen")
-            ),
-            Ok("qwen".to_owned())
-        );
-        assert_eq!(
-            selected(
-                vec![entry("qwen", Unavailable), entry("llama", Ready)],
-                Some("qwen")
-            ),
-            Ok("qwen".to_owned())
-        );
-        // Once it leaves, the choice starts over.
-        assert_eq!(
-            selected(vec![entry("llama", Ready)], Some("qwen")),
-            Ok("llama".to_owned())
-        );
-        assert!(
-            selected(
-                vec![entry("llama", Unknown), entry("mistral", Unknown)],
-                Some("qwen")
-            )
-            .is_err()
-        );
     }
 
     async fn changed<T: Clone>(receiver: &mut watch::Receiver<T>) -> T {
@@ -275,47 +175,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follows_the_topology_and_withdraws_when_it_stops() {
-        use TopologyReadinessState::Ready;
-        let (topology, topology_rx) = watch::channel(snapshot(Vec::new()));
+    async fn registers_only_while_the_service_takes_registrations() {
+        let (accepts, accepts_rx) = watch::channel(None);
         let (registration, mut registration_rx) = watch::channel(None);
-        let (withheld, mut withheld_rx) = watch::channel(None);
-        let follow = tokio::spawn(follow_topology(
-            template(),
-            topology_rx,
+        let (plan, mut plan_rx) = watch::channel(Plan::Withheld(UNKNOWN.to_owned()));
+        let follow = tokio::spawn(follow_service(
+            Some(pool()),
+            accepts_rx,
             registration,
-            withheld,
+            plan,
             CancellationToken::new(),
         ));
-        topology.send_replace(snapshot(vec![entry("qwen", Ready)]));
+        // Nothing is sent before the service has answered.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(*registration_rx.borrow_and_update(), None);
         assert_eq!(
-            changed(&mut registration_rx).await,
-            Some(PoolRegistration {
-                model: "qwen".to_owned(),
-                ..template()
-            })
-        );
-        assert_eq!(*withheld_rx.borrow_and_update(), None);
-
-        // A second model does not move the registration off the first.
-        topology.send_replace(snapshot(vec![entry("qwen", Ready), entry("llama", Ready)]));
-        assert_eq!(changed(&mut withheld_rx).await, None);
-        assert!(!registration_rx.has_changed().unwrap());
-        assert_eq!(
-            registration_rx
-                .borrow()
-                .as_ref()
-                .map(|registration| registration.model.as_str()),
-            Some("qwen")
+            *plan_rx.borrow_and_update(),
+            Plan::Withheld(UNKNOWN.to_owned())
         );
 
-        drop(topology);
+        accepts.send_replace(Some(true));
+        assert_eq!(changed(&mut registration_rx).await, Some(pool()));
+        assert_eq!(*plan_rx.borrow_and_update(), Plan::Registering);
+
+        // A service that finds pools through MCS takes none: the pool is
+        // withdrawn, and nothing is missing.
+        accepts.send_replace(Some(false));
         assert_eq!(changed(&mut registration_rx).await, None);
+        assert_eq!(*plan_rx.borrow_and_update(), Plan::NotTaken);
+
+        drop(accepts);
         assert_eq!(
-            withheld_rx.borrow().as_deref(),
-            Some("the Relay stopped registering the pool")
+            changed(&mut plan_rx).await,
+            Plan::Withheld("the Relay stopped registering the pool".to_owned())
         );
+        assert_eq!(*registration_rx.borrow(), None);
         follow.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pool_without_a_region_registers_nowhere() {
+        let (accepts, accepts_rx) = watch::channel(Some(false));
+        let (registration, registration_rx) = watch::channel(None);
+        let (plan, mut plan_rx) = watch::channel(Plan::Withheld(UNKNOWN.to_owned()));
+        let _follow = AbortOnDropHandle::new(tokio::spawn(follow_service(
+            None,
+            accepts_rx,
+            registration,
+            plan,
+            CancellationToken::new(),
+        )));
+        assert_eq!(changed(&mut plan_rx).await, Plan::NotTaken);
+        accepts.send_replace(Some(true));
+        let Plan::Withheld(reason) = changed(&mut plan_rx).await else {
+            panic!("expected the registration to be withheld");
+        };
+        assert!(reason.contains("no region"), "{reason}");
+        assert_eq!(*registration_rx.borrow(), None);
     }
 
     #[tokio::test]
@@ -330,25 +246,29 @@ mod tests {
             Duration::from_secs(1),
         )
         .unwrap();
-        let (topology, topology_rx) = watch::channel(snapshot(Vec::new()));
-        let template = template();
+        let (accepts, accepts_rx) = watch::channel(None);
+        let pool = pool();
         let registration = RoutingPoolRegistration::spawn(
             client,
-            template.key,
-            template.location,
-            template.frontends,
-            topology_rx,
+            pool.key,
+            Some(pool.location),
+            pool.frontends,
+            accepts_rx,
             CancellationToken::new(),
         );
-        let reason = |expected: String| {
+        let reason = |expected: Option<String>| {
             let registration = &registration;
             async move {
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
-                        if let Some(reason) = registration.unregistered_reason()
-                            && reason.starts_with(&expected)
-                        {
-                            return reason;
+                        let reason = registration.unregistered_reason();
+                        let matches = match (&reason, &expected) {
+                            (Some(reason), Some(expected)) => reason.starts_with(expected),
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        if matches {
+                            return;
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
@@ -357,8 +277,10 @@ mod tests {
                 .expect("the expected reason never showed")
             }
         };
-        reason("the serving topology has no model yet".to_owned()).await;
-        topology.send_replace(snapshot(vec![entry("qwen", TopologyReadinessState::Ready)]));
-        reason(format!("request to http://{unused}/pools failed")).await;
+        reason(Some(UNKNOWN.to_owned())).await;
+        accepts.send_replace(Some(true));
+        reason(Some(format!("request to http://{unused}/pools failed"))).await;
+        accepts.send_replace(Some(false));
+        reason(None).await;
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use dynamo_global_common::PoolId;
@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::{PoolSnapshot, RelayPoolState};
+use crate::{DiscoveredPools, PoolSnapshot, RelayPoolState};
 
 type View = Arc<RelayPoolState>;
 type Views = PoolViews<RelaySourceKey, PoolId, ReceivedView>;
@@ -51,15 +51,34 @@ impl ReceivedView {
     fn ready_for(&self, model: &str) -> bool {
         self.state.ready_for(model)
     }
-    fn project(&self, pool: &Pool, signals: &PoolSignals) {
+    fn ready_models(&self) -> &HashSet<String> {
+        self.state.ready_models()
+    }
+    fn project(&self, pool: &Pool, models: Models, signals: &PoolSignals) {
+        let model = match models {
+            Models::Configured { .. } => Some(pool.model.as_str()),
+            Models::Reported => None,
+        };
         self.state.project(
             &pool.id,
-            &pool.model,
+            model,
             signals,
             self.serving.map(|(_, receipt)| receipt),
             self.kv.map(|(_, receipt)| receipt),
         );
     }
+}
+
+/// What decides the models a candidate pool is routed for.
+#[derive(Clone, Copy)]
+enum Models {
+    /// Each candidate names its model. One that `requires_view` holds for is
+    /// routed only while a live view is ready for that model.
+    Configured { requires_view: fn(&Pool) -> bool },
+    /// The candidates' models are ignored: each is routed for every model
+    /// its live views report ready, once per model, and its load counts
+    /// every model it serves.
+    Reported,
 }
 
 /// One Relay Pod reporting one routing pool. Replica names need only be unique within a pool.
@@ -85,7 +104,7 @@ struct Inner {
     snapshot: watch::Sender<Arc<PoolSnapshot>>,
     views: Mutex<Views>,
     signals: Option<Arc<PoolSignals>>,
-    requires_view: fn(&Pool) -> bool,
+    models: Models,
 }
 
 impl Inner {
@@ -99,7 +118,7 @@ impl Inner {
                 .find(|candidate| &candidate.id == pool)
         {
             for (_, view) in views.pool_views(pool) {
-                view.project(candidate, signals);
+                view.project(candidate, self.models, signals);
             }
         }
     }
@@ -126,21 +145,41 @@ impl Inner {
             }
             for pool in discovery.pools() {
                 for (_, view) in views.pool_views(&pool.id) {
-                    view.project(pool, signals);
+                    view.project(pool, self.models, signals);
                 }
             }
         }
-        let pools = discovery
-            .pools()
-            .iter()
-            .filter(|pool| {
-                !(self.requires_view)(pool)
-                    || views
+        let pools = match self.models {
+            Models::Configured { requires_view } => discovery
+                .pools()
+                .iter()
+                .filter(|pool| {
+                    !requires_view(pool)
+                        || views
+                            .pool_views(&pool.id)
+                            .any(|(_, view)| view.ready_for(&pool.model))
+                })
+                .cloned()
+                .collect(),
+            // Any live view ready for a model makes the pool routable for it,
+            // as one ready view does for a configured model.
+            Models::Reported => discovery
+                .pools()
+                .iter()
+                .flat_map(|pool| {
+                    views
                         .pool_views(&pool.id)
-                        .any(|(_, view)| view.ready_for(&pool.model))
-            })
-            .cloned()
-            .collect();
+                        .flat_map(|(_, view)| view.ready_models())
+                        .filter(|model| !model.is_empty())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .map(|model| Pool {
+                            model: model.clone(),
+                            ..pool.clone()
+                        })
+                })
+                .collect(),
+        };
         let next = PoolSnapshot::new(pools);
         self.snapshot.send_if_modified(|current| {
             if **current == next {
@@ -152,21 +191,27 @@ impl Inner {
     }
 }
 
-/// Discovery pools gated by live, model-ready Relay views.
+/// Candidate pools gated by live, model-ready Relay views.
 pub struct RelayGatedPoolCatalog {
     inner: Arc<Inner>,
 }
 
 impl RelayGatedPoolCatalog {
+    /// Each candidate is routed for its own model while a live view is ready
+    /// for it.
     pub fn new(discovery: watch::Receiver<Arc<PoolSnapshot>>, cancel: CancellationToken) -> Self {
         Self::with_signals(discovery, cancel, None)
     }
+    /// As [`Self::new`], projecting each view's load into `signals`.
     pub fn with_signals(
         discovery: watch::Receiver<Arc<PoolSnapshot>>,
         cancel: CancellationToken,
         signals: Option<Arc<PoolSignals>>,
     ) -> Self {
-        Self::build(discovery, cancel, signals, |_| true)
+        let models = Models::Configured {
+            requires_view: |_| true,
+        };
+        Self::build(discovery, cancel, signals, models)
     }
     /// Static pools without a configured Relay retain their existing eligibility.
     pub fn for_subscriptions(
@@ -174,15 +219,25 @@ impl RelayGatedPoolCatalog {
         cancel: CancellationToken,
         signals: Arc<PoolSignals>,
     ) -> Self {
-        Self::build(discovery, cancel, Some(signals), |pool| {
-            pool.relay.is_some()
-        })
+        let models = Models::Configured {
+            requires_view: |pool| pool.relay.is_some(),
+        };
+        Self::build(discovery, cancel, Some(signals), models)
+    }
+    /// Routes each discovered pool for every model its live views report
+    /// ready, aliases and adapters included; its load counts them all.
+    pub fn for_discovery(
+        discovered: DiscoveredPools,
+        cancel: CancellationToken,
+        signals: Option<Arc<PoolSignals>>,
+    ) -> Self {
+        Self::build(discovered.0, cancel, signals, Models::Reported)
     }
     fn build(
         discovery: watch::Receiver<Arc<PoolSnapshot>>,
         cancel: CancellationToken,
         signals: Option<Arc<PoolSignals>>,
-        requires_view: fn(&Pool) -> bool,
+        models: Models,
     ) -> Self {
         let (snapshot, _) = watch::channel(Arc::new(PoolSnapshot::default()));
         let inner = Arc::new(Inner {
@@ -190,7 +245,7 @@ impl RelayGatedPoolCatalog {
             snapshot,
             views: Mutex::new(Views::new()),
             signals,
-            requires_view,
+            models,
         });
         inner.refresh();
         let watcher = Arc::clone(&inner);
@@ -676,6 +731,83 @@ mod tests {
         .await
         .unwrap();
         assert!(signals.occupancy(&pool).is_none());
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn discovered_pools_take_their_models_from_live_views() {
+        use prost::Message;
+        let key = PoolKey::new("east", "dynamo", "blue").unwrap();
+        // Discovery says where the pool is, not what it serves.
+        let candidate = Pool::new(&key, "", "east", vec!["http://pool:8000".parse().unwrap()]);
+        let pool = candidate.id.clone();
+        let (_sender, candidates) = watch::channel(Arc::new(PoolSnapshot::new(vec![candidate])));
+        let cancel = CancellationToken::new();
+        let signals = Arc::new(PoolSignals::new(Arc::new(
+            dynamo_global_router::InFlightTracker::new(),
+        )));
+        let catalog = RelayGatedPoolCatalog::for_discovery(
+            DiscoveredPools(candidates),
+            cancel.clone(),
+            Some(signals.clone()),
+        );
+        let current = catalog.subscribe();
+        let models = || {
+            let snapshot = current.borrow();
+            assert!(snapshot.pools().iter().all(|listed| listed.id == pool));
+            snapshot
+                .pools()
+                .iter()
+                .map(|listed| listed.model.clone())
+                .collect::<Vec<_>>()
+        };
+        let source = |replica: &str| RelaySourceKey {
+            pool: pool.clone(),
+            service: pool.to_string(),
+            replica: replica.into(),
+        };
+        // Listed, but no Relay has said what it serves.
+        assert!(models().is_empty());
+
+        // The fixture serves `qwen-canonical` as `qwen` too; add `other`.
+        let mut raw = super::fixtures::state(true, 1, 1, 10);
+        let mut readiness = wire::ServingReadinessUpdate::decode(raw.readiness).unwrap();
+        let mut other = readiness.entries[0].clone();
+        other.canonical_model_id = "other".into();
+        readiness.entries.push(other);
+        raw.readiness = readiness.encode_to_vec().into();
+        let mut serving = wire::ServingLoadUpdate::decode(raw.serving_load).unwrap();
+        let mut other = serving.models[0].clone();
+        other.canonical_model_id = "other".into();
+        other
+            .load
+            .as_mut()
+            .unwrap()
+            .requests
+            .as_mut()
+            .unwrap()
+            .requests_generating = Some(32);
+        serving.models.push(other);
+        raw.serving_load = serving.encode_to_vec().into();
+        let mut first = catalog.open(source("1"));
+        first
+            .replace_state_snapshot(0, Some(loaded_state(raw)))
+            .unwrap();
+        assert_eq!(models(), ["other", "qwen", "qwen-canonical"]);
+        // The pool's load counts every model it serves: 8 + 32 of 64.
+        assert_eq!(signals.occupancy(&pool).unwrap().slots, 40.0 / 64.0);
+
+        // A model only another replica reports ready still routes there.
+        let mut second = catalog.open(source("2"));
+        second
+            .replace_state_snapshot(0, Some(state(2, true)))
+            .unwrap();
+        assert_eq!(models(), ["model", "other", "qwen", "qwen-canonical"]);
+        drop(first);
+        assert_eq!(models(), ["model"]);
+        // A view with nothing ready routes nothing.
+        second.upsert_state(1, state(2, false)).unwrap();
+        assert!(models().is_empty());
         cancel.cancel();
     }
 
