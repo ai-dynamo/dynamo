@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Publish strict per-rank chunk paths from one window of passive observations."""
 
@@ -52,7 +53,15 @@ def publish(window, output):
     ) as handle:
         temp_path = Path(handle.name)
         try:
-            document = {key: window[key] for key in ("model_name", "routing_group", "block_size", "valid_until_unix_ms")}
+            document = {
+                key: window[key]
+                for key in (
+                    "model_name",
+                    "routing_group",
+                    "block_size",
+                    "valid_until_unix_ms",
+                )
+            }
             json.dump({**document, "profiles": profiles}, handle, allow_nan=False)
         except BaseException:
             handle.close()
