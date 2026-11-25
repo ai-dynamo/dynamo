@@ -147,26 +147,21 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 }
 
 // isSystemOneSerialOptIn mirrors dynamo.vllm: the last (--no-)systemone-serial flag wins,
-// else a literal truthy DYN_VLLM_SYSTEMONE_SERIAL; valueFrom does not count. Under a shell,
-// a control operator glued to the flag ("--systemone-serial;") is not part of it.
+// else a literal truthy DYN_VLLM_SYSTEMONE_SERIAL; valueFrom does not count.
 func isSystemOneSerialOptIn(container *corev1.Container) bool {
-	shellRun := len(container.Command) > 0 && isShellCommand(container.Command[0])
+	commandLine := slices.Concat(container.Command, container.Args)
 
-	// Remove comments from a private copy so they cannot override a real flag.
-	launch := *container
-	if shellRun {
-		launch.Command = nil
-		launch.Args = slices.Concat(container.Command, container.Args)
-		for i, arg := range launch.Args {
-			launch.Args[i] = stripShellComments(arg)
+	// Read shell words as arguments; direct launches already provide exact arguments.
+	if len(container.Command) > 0 && isShellCommand(container.Command[0]) {
+		var expanded []string
+		for _, script := range commandLine {
+			expanded = append(expanded, shellLaunchWords(script)...)
 		}
+		commandLine = expanded
 	}
 
-	// Keep the worker's last-flag precedence after filtering shell comments.
-	for _, arg := range slices.Backward(getExpandedCommandLine(&launch)) {
-		if shellRun {
-			arg = trimShellTerminator(arg)
-		}
+	// Keep the worker's last-flag precedence after reading comments and quotes.
+	for _, arg := range slices.Backward(commandLine) {
 		switch arg {
 		case systemOneSerialFlag:
 			return true
@@ -178,52 +173,73 @@ func isSystemOneSerialOptIn(container *corev1.Container) bool {
 	return env != nil && isTruthyEnvValue(env.Value)
 }
 
-// stripShellComments removes unquoted comments while preserving newlines and literal hashes.
-func stripShellComments(script string) string {
-	var result strings.Builder
+// shellLaunchWords reads literal shell arguments without evaluating expansions.
+func shellLaunchWords(script string) []string {
+	var words []string
+	var word strings.Builder
 	var quote rune
-	escaped, comment, wordStart := false, false, true
+	started, escaped, comment := false, false, false
 
-	// Track quoting and escapes so only a hash at the start of a shell word comments out a line.
+	// Quotes group a word, escapes preserve literal characters, and comments end at newlines.
 	for _, char := range script {
 		if comment {
-			if char != '\n' {
-				continue
+			if char == '\n' {
+				comment = false
 			}
-			comment = false
-		}
-		if escaped {
-			if char != '\n' {
-				wordStart = false
-			}
-			escaped = false
-			result.WriteRune(char)
 			continue
 		}
-		if char == '\\' && quote != '\'' {
-			escaped = true
-			result.WriteRune(char)
+		if escaped {
+			if quote == '"' && !strings.ContainsRune("$`\"\\\n", char) {
+				word.WriteRune('\\')
+			}
+			if char != '\n' {
+				word.WriteRune(char)
+				started = true
+			}
+			escaped = false
 			continue
 		}
 		if quote != 0 {
 			if char == quote {
 				quote = 0
+			} else if char == '\\' && quote == '"' {
+				escaped = true
+			} else {
+				word.WriteRune(char)
 			}
-		} else {
-			switch char {
-			case '\'', '"':
-				quote = char
-			case '#':
-				if wordStart {
-					comment = true
-					continue
-				}
-			}
-			wordStart = strings.ContainsRune(" \t\n;&|()<>", char)
+			continue
 		}
-		result.WriteRune(char)
+
+		// Only unquoted whitespace and shell control operators separate arguments.
+		switch char {
+		case '\'', '"':
+			quote = char
+			started = true
+		case '\\':
+			escaped = true
+		case '#':
+			if !started {
+				comment = true
+			} else {
+				word.WriteRune(char)
+			}
+		case ' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>':
+			if started {
+				words = append(words, word.String())
+				word.Reset()
+				started = false
+			}
+		default:
+			word.WriteRune(char)
+			started = true
+		}
 	}
-	return result.String()
+
+	// Retain the final argument even when it was quoted or had no trailing separator.
+	if started {
+		words = append(words, word.String())
+	}
+	return words
 }
 
 // isTruthyEnvValue matches the truthy values of dynamo's Python parse_bool.
