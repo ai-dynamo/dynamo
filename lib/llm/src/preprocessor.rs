@@ -714,6 +714,7 @@ fn build_llm_metric_annotation(
         input_tokens,
         output_tokens,
         chunk_tokens,
+        text_after_think_opener: None,
         cached_tokens,
         image_count: mm_counts.image,
         video_count: mm_counts.video,
@@ -811,7 +812,22 @@ impl ReasoningUsageEstimator {
 
         if token_count > 0 {
             if has_reasoning || usage_chunk_while_reasoning {
-                self.total = self.total.saturating_add(token_count);
+                // The parser can consume a leading <think> and emit the rest of
+                // the same chunk as reasoning. A separately streamed opener
+                // contributes zero, so exclude it here as well.
+                let stripped_opener = chunk
+                    .llm_metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.text_after_think_opener.as_deref())
+                    .is_some_and(|tail| {
+                        matches!(chunk.inner.choices.as_slice(), [choice]
+                        if !self.active_choices.contains(&choice.index)
+                            && !choice_has_visible_output(choice)
+                            && choice.delta.reasoning_content.as_deref() == Some(tail))
+                    });
+                self.total = self
+                    .total
+                    .saturating_add(token_count - u32::from(stripped_opener));
             } else if let Some(index) = held_choice {
                 let held = self.held.entry(index).or_default();
                 *held = held.saturating_add(token_count);
@@ -6809,6 +6825,18 @@ impl OpenAIPreprocessor {
                     };
 
                     let current_osl = self.cumulative_output_tokens;
+                    let text_after_think_opener = response.data.as_ref().and_then(|output| {
+                        if chunk_tokens > 1 && output.tokens.first()?.as_deref() == Some("<think>")
+                        {
+                            output
+                                .text
+                                .as_deref()?
+                                .strip_prefix("<think>")
+                                .map(Box::from)
+                        } else {
+                            None
+                        }
+                    });
 
                     let mut response = response.map_data(|data| {
                         self.response_generator
@@ -6828,7 +6856,7 @@ impl OpenAIPreprocessor {
                     // Create LLM metrics annotation with prefill/decode worker info from tracker.
                     // Worker types are stored at routing time to avoid expensive MDC lookup.
                     let tracker = self.detokenize_metrics.tracker();
-                    let llm_metrics = build_llm_metric_annotation(
+                    let mut llm_metrics = build_llm_metric_annotation(
                         tracker,
                         isl.unwrap_or(0),
                         current_osl,
@@ -6837,6 +6865,7 @@ impl OpenAIPreprocessor {
                         self.mm_counts,
                         self.image_tokens,
                     );
+                    llm_metrics.text_after_think_opener = text_after_think_opener;
                     if self.trace_tokens_enabled {
                         crate::request_trace::record_llm_metric_tokens(
                             tracker,
@@ -13090,6 +13119,64 @@ mod tests {
             ..Default::default()
         });
         chunk
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_counts_coalesced_qwen3_opener_like_split_tokens() {
+        let mut request = chat_request_with_args(None);
+        request.enable_usage_for_nonstreaming(false);
+        const IDS: [u32; 4] = [151667, 198, 151668, 9217];
+        const TOKENS: [&str; 4] = ["<think>", "\n", "</think>", "answer"];
+        for ranges in [vec![0..1, 1..2, 2..3, 3..4], vec![0..2, 2..3, 3..4]] {
+            let opener_size = ranges[0].len();
+            let backend = ranges.into_iter().map(|range| {
+                let tokens = &TOKENS[range.clone()];
+                let output: BackendOutput = serde_json::from_value(serde_json::json!({
+                    "token_ids": &IDS[range.clone()],
+                    "text": tokens.concat(),
+                    "tokens": tokens,
+                    "finish_reason": (range.end == IDS.len()).then_some("stop"),
+                }))
+                .unwrap();
+                Annotated::from_data(output)
+            });
+            let stream = OpenAIPreprocessor::transform_postprocessor_stream(
+                stream::iter(backend),
+                Box::new(request.response_generator("test".into())),
+                PipelineContext::new(()).context(),
+                false,
+                false,
+                None,
+                MultimodalCounts::default(),
+            );
+            let parsed = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+                stream,
+                "qwen3".into(),
+                false,
+            );
+            let chunks = annotate_reasoning_usage(parsed).collect::<Vec<_>>().await;
+            let usage = chunks
+                .last()
+                .unwrap()
+                .data
+                .as_ref()
+                .unwrap()
+                .inner
+                .usage
+                .as_ref()
+                .unwrap();
+            assert_eq!(usage.completion_tokens, 4);
+            // The newline and the closing token count in both streams.
+            assert_eq!(
+                usage
+                    .completion_tokens_details
+                    .as_ref()
+                    .unwrap()
+                    .reasoning_tokens,
+                Some(2),
+                "opener chunk size {opener_size}"
+            );
+        }
     }
 
     #[tokio::test]

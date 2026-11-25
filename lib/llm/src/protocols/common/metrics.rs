@@ -23,6 +23,10 @@ pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub chunk_tokens: usize,
+    /// Text following a standalone opening token in a multi-token chunk. Used
+    /// only in-process to match the reasoning parser's output back to its tokens.
+    #[serde(skip)]
+    pub text_after_think_opener: Option<Box<str>>,
     pub cached_tokens: Option<usize>,
     /// Number of `image_url` content parts in the request (0 for text-only).
     #[serde(default, skip_serializing_if = "is_zero")]
