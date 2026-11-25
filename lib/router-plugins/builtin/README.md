@@ -12,6 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 | Worker selection | `default`, `dynamo-default-cost-fn`, `kvcr` | `src/default/` |
 | Worker selection | `dynamo-sticky-min-load` | `src/sticky_min_load.rs` |
 | Worker selection | `dynamo-two-tier-cost-fn` | `src/two_tier_cost_fn.rs` |
+| Worker selection | `dynamo-kv-capacity-aware` | `src/kv_capacity_aware.rs` |
 | Worker selection | `random`, `round-robin`, `least-loaded` | `src/router_modes/` |
 | Worker selection and request classifier | `thunderagent` | `src/thunderagent/` |
 | Request classifier | `output_length_prediction` | `src/output_length/` |

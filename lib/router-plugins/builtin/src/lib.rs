@@ -4,12 +4,13 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom catalog
-//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, and ThunderAgent
-//! providers through `register`. The default itself uses the same public candidate inputs and scorer/picker
-//! dispatch as external policies. Sequence tracking, eligibility, and admission remain in
-//! dynamo-kv-router.
+//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, KV-capacity-aware, and
+//! ThunderAgent providers through `register`. The default itself uses the same public candidate
+//! inputs and scorer/picker dispatch as external policies. Sequence tracking, eligibility, and
+//! admission remain in dynamo-kv-router.
 
 mod default;
+mod kv_capacity_aware;
 pub mod kv_fetch;
 mod output_length;
 pub mod router_modes;
@@ -52,6 +53,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
+    kv_capacity_aware::register(registry)?;
     thunderagent::register(registry)?;
     output_length::register(registry)?;
     Ok(())
