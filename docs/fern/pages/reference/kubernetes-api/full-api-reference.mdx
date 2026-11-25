@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 220 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 221 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
-<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">41 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">42 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -5396,6 +5396,25 @@ See [GPUHardwareSpec](#gpuhardwarespec).
 <ParamField path="numGpusPerNode" type="integer">
 NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers to AISimulate's num_gpus_per_node input. An explicit value is authoritative. In a nonempty hardware object, admission discovers an omitted value from the selected cluster node shape. The Run controller never discovers this value. An exactly empty hardware object opts out of all operator hardware discovery and typed hardware defaults, leaving AISimulate input and defaults authoritative.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="interconnect" type="InterconnectSpec">
+Interconnect describes the links between candidate workers. Like gpu, it makes the hardware object nonempty, so admission still discovers omitted GPU fields.
+See [InterconnectSpec](#interconnectspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="interconnectspec" title="InterconnectSpec">
+InterconnectSpec describes the links that move data between candidate workers.
+
+
+**Kind:** `type`
+**Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
+
+<ParamField path="kvTransferBandwidthGBps" type="float">
+KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation (https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md) describes how candidates use it, including link sharing. When omitted, no bandwidth is lowered and AISimulate's default applies, which models the transfer as instantaneous.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

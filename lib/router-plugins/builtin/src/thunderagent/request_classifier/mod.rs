@@ -18,7 +18,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use async_trait::async_trait;
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+};
+use dynamo_kv_router::plugins::request_classifier::*;
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -183,23 +186,24 @@ impl RequestClassifier for ThunderAgentClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-        let Some(session) = request.session_context() else {
+        let info = request.info();
+        let Some(session) = info.session_context() else {
             return Ok(request);
         };
-        let Some(request_id) = request.request_id().map(str::to_owned) else {
+        let Some(request_id) = info.request_id().map(str::to_owned) else {
             return Err(Box::new(ThunderAgentError::MissingRequestId) as Box<ClassifierError>);
         };
         let session_id = session.session_id().to_owned();
         let registration = RequestRegistration::new(
             request_id,
             session_id.clone(),
-            request.isl_tokens(),
+            info.isl_tokens(),
             request.progress().clone(),
             session.session_final() == Some(true),
         )
-        .with_pinned_worker(request.pinned_worker());
+        .with_pinned_worker(info.pinned_worker());
         self.inner
             .state
             .lock()
@@ -230,7 +234,8 @@ impl DispatchGate for ThunderAgentGate {
     fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
         // `classify` registers only requests with a session, so nothing here knows a
         // sessionless head: it goes without the snapshot or the ledger lock.
-        let (Some(request_id), Some(_)) = (head.request_id(), head.session_context()) else {
+        let info = head.info();
+        let (Some(request_id), Some(_)) = (info.request_id(), info.session_context()) else {
             return DispatchDecision::Go { target: None };
         };
         let capacities = self.inner.capacities();
@@ -241,7 +246,8 @@ impl DispatchGate for ThunderAgentGate {
     }
 
     fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
-        let (Some(request_id), Some(_)) = (head.request_id(), head.session_context()) else {
+        let info = head.info();
+        let (Some(request_id), Some(_)) = (info.request_id(), info.session_context()) else {
             return;
         };
         let capacities = self.inner.capacities();
@@ -264,30 +270,13 @@ impl DispatchGate for ThunderAgentGate {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+        DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+    };
+    use dynamo_kv_router::plugins::request_classifier::*;
+    use dynamo_kv_router::plugins::testing::{classify, classify_request};
 
     use super::*;
-
-    /// A worker view with no rows: ThunderAgent's `classify` never reads the worker table.
-    struct NoWorkers;
-
-    impl WorkerView for NoWorkers {
-        fn len(&self) -> usize {
-            0
-        }
-
-        fn info(&self, _row: usize) -> Option<WorkerInfo> {
-            None
-        }
-
-        fn load(&self, _row: usize) -> Option<WorkerLoadView> {
-            None
-        }
-
-        fn cache(&self, _row: usize) -> Option<WorkerCacheView> {
-            None
-        }
-    }
 
     fn config() -> ThunderAgentConfig {
         ThunderAgentConfig {
@@ -317,10 +306,11 @@ mod tests {
     }
 
     fn session_request(request_id: &str, session_id: &str, tokens: usize) -> ClassifyRequest {
-        ClassifyRequest::for_test(
+        classify_request(
             tokens,
             Some(request_id),
             Some(SessionContext::new(session_id.into(), None, None, None)),
+            None,
         )
     }
 
@@ -375,21 +365,13 @@ mod tests {
         let wakes = attach_counter(gate.as_ref());
 
         // A request without a session passes through untouched.
-        let plain = ClassifyRequest::for_test(10, Some("plain"), None);
-        assert!(classifier.classify(plain, &NoWorkers).is_ok());
+        let plain = classify_request(10, Some("plain"), None, None);
+        assert!(classify(&mut classifier, plain).is_ok());
 
         let session_a = SessionContext::new("a".into(), None, None, None);
         let session_b = SessionContext::new("b".into(), None, None, None);
-        assert!(
-            classifier
-                .classify(session_request("a1", "a", 200), &NoWorkers)
-                .is_ok()
-        );
-        assert!(
-            classifier
-                .classify(session_request("b1", "b", 200), &NoWorkers)
-                .is_ok()
-        );
+        assert!(classify(&mut classifier, session_request("a1", "a", 200)).is_ok());
+        assert!(classify(&mut classifier, session_request("b1", "b", 200)).is_ok());
 
         // a fits; b must wait for room, with a forced-dispatch time.
         assert_eq!(
@@ -446,12 +428,40 @@ mod tests {
     #[tokio::test]
     async fn classification_requires_a_request_id_for_session_traffic() {
         let mut classifier = classifier(&[(1, 400)]);
-        let request = ClassifyRequest::for_test(
+        let request = classify_request(
             10,
             None,
             Some(SessionContext::new("a".into(), None, None, None)),
+            None,
         );
-        let error = classifier.classify(request, &NoWorkers).unwrap_err();
+        let error = classify(&mut classifier, request).unwrap_err();
         assert!(error.to_string().contains("request ID"));
+    }
+
+    #[tokio::test]
+    async fn a_pinned_request_is_admitted_onto_its_pin() {
+        // Both ranks have room for the turn, so without a pin the gate sends it to rank 1.
+        let mut classifier = classifier(&[(1, 500), (2, 500)]);
+        let gate = classifier
+            .dispatch_gate()
+            .expect("ThunderAgent exposes a gate");
+        let session = SessionContext::new("a".into(), None, None, None);
+        let pin = WorkerWithDpRank::new(2, 0);
+
+        let request = classify_request(200, Some("a1"), Some(session.clone()), Some(pin));
+        assert!(classify(&mut classifier, request).is_ok());
+        assert_eq!(
+            gate.check(&head("a1", &session, 200)),
+            DispatchDecision::Go { target: Some(pin) }
+        );
+
+        assert!(classify(&mut classifier, session_request("b1", "b", 200)).is_ok());
+        let unpinned = SessionContext::new("b".into(), None, None, None);
+        assert_eq!(
+            gate.check(&head("b1", &unpinned, 200)),
+            DispatchDecision::Go {
+                target: Some(WorkerWithDpRank::new(1, 0))
+            }
+        );
     }
 }

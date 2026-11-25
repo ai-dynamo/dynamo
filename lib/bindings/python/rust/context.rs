@@ -62,7 +62,7 @@ fn warn_bridge_missing_once(method: &str) {
 /// facade in `dynamo.common.backend.telemetry` is a one-line wrapper around
 /// those methods.
 #[derive(Clone)]
-#[pyclass]
+#[pyclass(from_py_object)]
 pub struct Context {
     inner: Arc<dyn AsyncEngineContext>,
     trace_context: Option<DistributedTraceContext>,
@@ -667,13 +667,13 @@ impl Drop for SpanProxy {
 /// Primitive types preserve type; everything else renders via `repr()`.
 fn py_to_otel_value(v: &Bound<'_, PyAny>) -> PyResult<opentelemetry::Value> {
     use opentelemetry::Value;
-    if let Ok(b) = v.downcast::<PyBool>() {
+    if let Ok(b) = v.cast::<PyBool>() {
         Ok(Value::Bool(b.is_true()))
-    } else if let Ok(i) = v.downcast::<PyInt>() {
+    } else if let Ok(i) = v.cast::<PyInt>() {
         Ok(Value::I64(i.extract::<i64>()?))
-    } else if let Ok(f) = v.downcast::<PyFloat>() {
+    } else if let Ok(f) = v.cast::<PyFloat>() {
         Ok(Value::F64(f.extract::<f64>()?))
-    } else if let Ok(s) = v.downcast::<PyString>() {
+    } else if let Ok(s) = v.cast::<PyString>() {
         // `to_cow` (not `to_str`) for abi3 compatibility: enabling the
         // `ais-forward-pass` pulls in AISimulate's consolidated perf-model core, which sets
         // pyo3 `abi3-py39`; under the <3.10 limited API `PyString::to_str` is

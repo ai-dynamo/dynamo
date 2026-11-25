@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use dynamo_slot_tracker::host::{BusyThresholds, SchedulerLoadSnapshot};
+use dynamo_slot_tracker::host::{BusyThresholds, BusyThresholdsHostExt, SchedulerLoadSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::kv_router::ActiveLoad;
@@ -720,13 +720,14 @@ impl From<LoadThresholdConfig> for BusyThresholds {
     /// The queue's vocabulary for the `/busy_threshold` config: token counts narrow to
     /// `usize` saturating, fractions pass through.
     fn from(config: LoadThresholdConfig) -> Self {
-        BusyThresholds {
-            prefill_busy_threshold: config
-                .active_prefill_tokens_threshold
-                .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
-            prefill_busy_threshold_frac: config.active_prefill_tokens_threshold_frac,
-            decode_busy_threshold_frac: config.active_decode_blocks_threshold,
-        }
+        BusyThresholds::default()
+            .with_prefill_busy_threshold(
+                config
+                    .active_prefill_tokens_threshold
+                    .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
+            )
+            .with_prefill_busy_threshold_frac(config.active_prefill_tokens_threshold_frac)
+            .with_decode_busy_threshold_frac(config.active_decode_blocks_threshold)
     }
 }
 
@@ -1303,7 +1304,7 @@ mod tests {
     };
     use crate::kv_router::ActiveLoad;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::host::SchedulerLoadSnapshot;
+    use dynamo_slot_tracker::host::{BusyThresholdsHostExt, SchedulerLoadSnapshot};
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -1916,9 +1917,9 @@ mod tests {
             active_prefill_tokens_threshold_frac: Some(0.5),
         };
         let thresholds = BusyThresholds::from(config);
-        assert_eq!(thresholds.decode_busy_threshold_frac, Some(0.9));
-        assert_eq!(thresholds.prefill_busy_threshold, Some(usize::MAX));
-        assert_eq!(thresholds.prefill_busy_threshold_frac, Some(0.5));
+        assert_eq!(thresholds.decode_busy_threshold_frac(), Some(0.9));
+        assert_eq!(thresholds.prefill_busy_threshold(), Some(usize::MAX));
+        assert_eq!(thresholds.prefill_busy_threshold_frac(), Some(0.5));
         assert_eq!(
             BusyThresholds::from(LoadThresholdConfig::default()),
             BusyThresholds::default()

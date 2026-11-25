@@ -107,6 +107,34 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 KV-transfer bandwidth
+
+In a disaggregated candidate, the prefill worker sends each request's KV cache to a
+decode worker before decode starts. `spec.hardware.interconnect.kvTransferBandwidthGBps`
+is the sustained bandwidth, in decimal GB/s, that one GPU has for that transfer. It is a
+per-GPU value, not the aggregate of a node or of a parallel group. Prefer a measured value,
+for example from a NIXL benchmark, to the nominal NIC rate.
+
+The field lowers to AISimulate's `engine.kv_transfer.bandwidth_gb_per_second`. When it is
+omitted, AISimulate's default models the transfer as instantaneous, so disaggregated
+candidates report optimistic TTFT and goodput. See AISimulate's
+[P/D KV transfer](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)
+documentation for how candidates use the bandwidth, including
+[link sharing](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md#link-sharing).
+
+```yaml
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  hardware:
+    interconnect:
+      kvTransferBandwidthGBps: 27.7 # Measured NIXL GPU-to-GPU bandwidth across nodes.
+```
+
+Setting `interconnect` does not opt out of hardware discovery. `inputOverrides` is applied
+after lowering, as for every other field: `engine.kv_transfer` can replace the bandwidth,
+set other transfer fields, or delete the transfer model with `null`.
+
 ### v1beta2 DGD Overrides
 
 DGDR v1beta2 is available without a feature gate and is not feature complete.
