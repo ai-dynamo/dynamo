@@ -332,6 +332,8 @@ async def init_decode(
     state_agent = StateAgentLifecycle()
     drain = None
     try:
+        if decode_worker_type == WorkerType.Aggregated:
+            await _start_artifact_delivery()
         drain = configure_worker_drain(
             handler,
             runtime,
@@ -402,12 +404,42 @@ async def init_decode(
             try:
                 await state_agent.close()
             finally:
-                await finish_worker_teardown(
-                    metrics_task,
-                    handler.cleanup,
-                    run_deferred_handlers,
-                    body_failed=body_failed,
-                )
+                try:
+                    # Finish accepted deliveries and free held NIXL buffers.
+                    await _close_artifact_delivery()
+                finally:
+                    await finish_worker_teardown(
+                        metrics_task,
+                        handler.cleanup,
+                        run_deferred_handlers,
+                        body_failed=body_failed,
+                    )
+
+
+async def _start_artifact_delivery() -> None:
+    """Check artifact delivery config, and start the NIXL agent, before serving."""
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        from dynamo.artifacts.runtime import initialize_configured_artifact_runtime
+
+        await initialize_configured_artifact_runtime()
+    if os.environ.get("DYNAMO_ARTIFACT_NIXL_BYTES"):
+        from dynamo.artifacts.nixl import configured_nixl_artifact_server
+
+        server = configured_nixl_artifact_server()
+        if server is not None:
+            await server.warm()
+            logging.info("NIXL artifact delivery ready")
+
+
+async def _close_artifact_delivery() -> None:
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        from dynamo.artifacts.runtime import close_configured_artifact_runtime
+
+        await close_configured_artifact_runtime()
+    if os.environ.get("DYNAMO_ARTIFACT_NIXL_BYTES"):
+        from dynamo.artifacts.nixl import close_configured_nixl_artifact_server
+
+        await close_configured_nixl_artifact_server()
 
 
 async def init_prefill(

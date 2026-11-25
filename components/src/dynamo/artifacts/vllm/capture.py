@@ -516,13 +516,20 @@ class VllmArtifactSession:
         # prompt's rows (for example, from one sample of a GRPO group) can skip
         # resending them for every other sample.
         row_bytes = layers * hidden_size * DTYPE_BYTES[loaded.dtype]
+        self._bind_hidden_rows(
+            start=start, rows=rows - start, data=loaded.data[start * row_bytes :]
+        )
+
+    def _bind_hidden_rows(self, *, start, rows, data):
+        """Store `rows` profile-shaped rows starting at position `start`."""
+        profile = cast(HiddenStateProfile, self.hidden_profile)
         if self.hidden_chunk_tokens is not None:
             component, self.hidden_parts = chunk_hidden_states(
                 token_start=start,
                 layer_ids=profile.layer_ids,
                 hidden_size=profile.hidden_size,
-                dtype=loaded.dtype,
-                data=memoryview(loaded.data)[start * row_bytes :],
+                dtype=profile.dtype,
+                data=memoryview(data),
                 chunk_tokens=self.hidden_chunk_tokens,
             )
             self.hidden_states = component
@@ -532,9 +539,9 @@ class VllmArtifactSession:
             profile.layer_ids,
             profile.hidden_size,
             Tensor(
-                loaded.dtype,
-                (rows - start, layers * hidden_size),
-                loaded.data[start * row_bytes :],
+                profile.dtype,
+                (rows, len(profile.layer_ids) * profile.hidden_size),
+                data,
             ),
         )
 

@@ -82,9 +82,9 @@ See [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidi
 
 ## Capture Target Hidden States
 
-Drafter training for speculative decoding, such as EAGLE-3, needs the target model's intermediate activations for each rollout token. A vLLM worker can return them in the `hidden_states` content of a generation artifact, delivered inline or to object storage like the other artifact contents.
+Drafter training for speculative decoding, such as EAGLE-3, needs the target model's intermediate activations for each rollout token. A vLLM or SGLang worker can return them in the `hidden_states` content of a generation artifact, delivered inline or to object storage like the other artifact contents. The request and the artifact are the same on both backends; see [Capture on SGLang](#capture-on-sglang) for that backend's launch flags and limits.
 
-Launch the worker with vLLM's `extract_hidden_states` method and its hidden-states connector. The layer IDs are fixed at launch; a request cannot choose them.
+Launch a vLLM worker with vLLM's `extract_hidden_states` method and its hidden-states connector. The layer IDs are fixed at launch; a request cannot choose them.
 
 ```bash
 python -m dynamo.vllm \
@@ -127,6 +127,32 @@ To skip rows the trainer already holds, set `token_start` in `content_options`. 
 ```
 
 `token_start` must be between 0 and the prompt length. A larger value fails the request before inference, and a value past the observed prompt returns `capture_invalid`; it is never clamped. The option reduces delivered bytes and capture memory, not the worker's own extraction work.
+
+`layer_ids` name the input of each decoder layer: ID `i` is the output of layer `i - 1`, and ID 0 is the embedding output. This is vLLM's convention for `eagle_aux_hidden_state_layer_ids`, and Dynamo reports SGLang captures the same way.
+
+### Capture on SGLang
+
+SGLang 0.5.23 can capture EAGLE-3 aux hidden states on a target model without loading a draft. Launch the worker with:
+
+```bash
+python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-8B \
+  --enable-return-aux-hidden-states \
+  --speculative-algorithm EAGLE3 \
+  --return-aux-hidden-state-layer-ids 1 17 32 \
+  --chunked-prefill-size 16384
+```
+
+`--speculative-algorithm EAGLE3` only names the capture convention; SGLang loads no draft. Dynamo requires `--return-aux-hidden-state-layer-ids`, so it can publish the layers without loading the model. SGLang's IDs name layer outputs, so the worker above publishes `layer_ids` `[2, 18, 33]`, the same rows as the vLLM example. The worker publishes `hidden_state_capture` like a vLLM worker.
+
+What differs from vLLM:
+
+- Only the `hidden_states` content is supported on SGLang for now.
+- SGLang hands the rows to Dynamo as Python lists, which take about 18 times the memory of bf16 values while Dynamo converts them. Capture admission reserves for that, so a worker admits much shorter captures per byte of `DYNAMO_ARTIFACT_CAPTURE_BYTES` than vLLM does.
+- SGLang resends every row so far with each streamed output, so Dynamo asks it to stream a capturing request's tokens only at the first token and at the finish.
+- A prefix-cache hit returns no rows for cached positions. Dynamo limits the prefix match to `token_start` (through `logprob_start_len`), so a request that skips the prompt rows keeps full prefix reuse, and one that wants them recomputes the prompt.
+- SGLang keeps only the last chunk's rows of a chunked prefill. Set `--chunked-prefill-size` above the longest prompt you capture; otherwise those requests return `capture_invalid`.
+- A request SGLang retracted under memory pressure returns `capture_invalid`, because its rows may repeat.
 
 ### Read the Artifact Directly over NIXL
 
@@ -209,10 +235,10 @@ A chunk must fit in 64 MiB (`chunk_tokens` times the row size), and an artifact 
 
 Limits of the current implementation:
 
-- `extract_hidden_states` takes the place of a drafter, so the worker does not speculate while it captures.
+- On both backends the capturing worker does not speculate: vLLM's `extract_hidden_states` takes the place of a drafter, and SGLang turns speculation off when it captures.
 - Capture requires aggregated serving with token prompts and one choice, like the other artifact contents.
 - Without chunking, an artifact payload is capped at 64 MiB, checked against the prompt length plus `max_tokens` before inference.
-- The connector writes each file to local disk before the worker reads, uploads, and deletes it.
+- vLLM's connector writes each file to local disk before the worker reads, uploads, and deletes it.
 - Chunk reuse depends on bitwise-identical rows. A prompt prefilled concurrently by two requests, rather than served from the prefix cache, may differ in its last bits and is stored twice.
 
 ## Handle Streaming and Retries
@@ -402,6 +428,7 @@ A status reflects the documented integration, not whether the framework can call
 | Completion token IDs through named `nvext` fields | Supported | Supported | Supported through the shared response path |
 | Native RL generation route | Experimental unary vLLM-compatible route | Streaming `/generate` | None |
 | Prompt log probabilities | Supported | Topology-dependent; validate the selected path | No dedicated RL end-to-end coverage recorded here |
+| Hidden-state artifacts | Aggregated; all artifact contents | Aggregated; `hidden_states` only | Not supported |
 | `/v1/rl/workers` registration | RL-enabled workers | Not currently registered | Not currently registered |
 | Built-in RL administration routes | Pause/resume, version, disk/distributed update, group lifecycle | Fixed weight controls plus explicit method allowlisting | No shared RL administration contract documented here |
 
