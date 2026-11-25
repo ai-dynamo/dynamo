@@ -16,7 +16,7 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
     if metrics::request_was_rejected(cause) {
         return DispatchError {
             status: overload_status_code(),
-            public_message: "SGLang scoring worker capacity is exhausted",
+            public_message: "scoring worker capacity is exhausted",
             detail: "backend capacity exhausted".to_string(),
             retry_after: true,
             is_capacity_exhausted: true,

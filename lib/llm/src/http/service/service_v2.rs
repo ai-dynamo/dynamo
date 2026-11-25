@@ -623,6 +623,10 @@ impl State {
             ),
             (model.has_realtime_engine(), EndpointType::Realtime),
             (
+                model.has_decision_engine() && self.systemone_enabled(),
+                EndpointType::SystemOne,
+            ),
+            (
                 model.has_generate_engine()
                     && (self.generate_api_enabled || !self.systemone_enabled()),
                 EndpointType::Generate,

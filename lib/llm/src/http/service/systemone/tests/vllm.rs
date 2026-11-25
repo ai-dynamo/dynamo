@@ -57,7 +57,8 @@ pub(super) fn terminal(
 }
 
 pub(super) fn configure_selection(selected: &mut SystemOneExecutionSelection) {
-    selected.backend = ScoringBackend::Vllm;
+    selected.execution = DecisionExecution::DynamoFrontend(ScoringBackend::Vllm);
+    selected.capabilities = ScoringBackend::Vllm.decision_capabilities();
     selected.card.runtime_config.max_num_seqs = Some(1);
     selected.card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
     selected
@@ -101,7 +102,7 @@ async fn mixed_profiles_route_the_whole_request_before_admission() {
         let mut workers =
             crate::discovery::WorkerSet::new(namespace.into(), namespace.into(), selected.card);
         workers.generate_engine = Some(selected.engine);
-        workers.systemone_preprocessor = Some(selected.preprocessor);
+        workers.systemone_preprocessor = selected.preprocessor;
         let (members, receiver) = tokio::sync::watch::channel(vec![41]);
         workers.set_instance_watcher(receiver);
         assert!(
@@ -155,11 +156,13 @@ async fn mixed_profiles_route_the_whole_request_before_admission() {
             if expected == dynamo_error::http::overload_status_code() {
                 let selected = state
                     .manager()
-                    .get_systemone_execution_selection("public-model", candidates)
+                    .get_systemone_execution_selection("public-model", |caps| {
+                        candidates <= caps.max_candidates
+                    })
                     .unwrap();
                 assert_eq!(selected.canonical_model, "test-model");
                 assert_eq!(
-                    selected.backend,
+                    selected.execution.scoring_backend().unwrap(),
                     if sglang_live {
                         ScoringBackend::Sglang
                     } else {
@@ -199,7 +202,7 @@ async fn candidate_limit_is_reported_and_rejected_before_admission() {
     let mut workers =
         crate::discovery::WorkerSet::new("worker".into(), "worker".into(), selected.card);
     workers.generate_engine = Some(selected.engine);
-    workers.systemone_preprocessor = Some(selected.preprocessor);
+    workers.systemone_preprocessor = selected.preprocessor;
     let (_members, receiver) = tokio::sync::watch::channel(vec![41]);
     workers.set_instance_watcher(receiver);
     assert!(
@@ -209,7 +212,7 @@ async fn candidate_limit_is_reported_and_rejected_before_admission() {
     );
     let capabilities = state
         .manager()
-        .get_systemone_execution_selection("test-model", 2)
+        .get_systemone_execution_selection("test-model", |caps| caps.max_candidates >= 2)
         .unwrap()
         .decision_capabilities();
     assert_eq!(capabilities.max_candidates, 26);
@@ -274,7 +277,7 @@ async fn run_causal(
     let branches = (0..3).map(prepared_branch).collect();
     let response = dispatch(
         selected,
-        branches,
+        PreparedDecision::DynamoFrontend(branches),
         "request".into(),
         Context::new(()).context(),
         Arc::new(Semaphore::new(3))

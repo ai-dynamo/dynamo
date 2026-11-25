@@ -138,7 +138,7 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
     let permit = admission.clone().acquire_many_owned(3).await.unwrap();
     let response = dispatch(
         selection,
-        (0..3).map(prepared_noul_branch).collect(),
+        PreparedDecision::DynamoFrontend((0..3).map(prepared_noul_branch).collect()),
         "worker-removal".into(),
         parent.clone(),
         permit,

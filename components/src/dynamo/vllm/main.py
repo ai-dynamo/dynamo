@@ -29,6 +29,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.constants import WORKER_CANONICAL_V1
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
@@ -951,6 +952,7 @@ async def register_vllm_model(
     vllm_config: VllmConfig,
     worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
+    worker_decision_capabilities: dict[str, Any] | None = None,
 ) -> None:
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -1004,14 +1006,27 @@ async def register_vllm_model(
     )
     if native_generate_supported:
         logging.info("Published vLLM engine-native generate capability")
-    publish_vllm_decision_capability(
-        runtime_config,
-        model_input,
-        worker_type,
-        config,
-        native_generate_supported=native_generate_supported,
-        needs=needs,
-    )
+    if worker_decision_capabilities is not None:
+        if (
+            model_input != ModelInput.Tokens
+            or worker_type != WorkerType.Aggregated
+            or any(needs or ())
+        ):
+            raise ValueError(
+                "canonical decisions require an aggregated token-input worker"
+            )
+        runtime_config.set_engine_specific(
+            WORKER_CANONICAL_V1, json.dumps(worker_decision_capabilities)
+        )
+    else:
+        publish_vllm_decision_capability(
+            runtime_config,
+            model_input,
+            worker_type,
+            config,
+            native_generate_supported=native_generate_supported,
+            needs=needs,
+        )
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len

@@ -37,8 +37,8 @@ use crate::{
         },
         response_merge::PREFILL_OUTPUT_ANNOTATION,
         systemone::{
-            ScoringBackend, VllmScoreCollector, build_native_score_request, causal_scoring_request,
-            parse_candidate_scores,
+            DecisionExecution, ScoringBackend, VllmScoreCollector, build_native_score_request,
+            causal_scoring_request, parse_candidate_scores,
         },
     },
 };
@@ -55,6 +55,9 @@ mod backend_error;
 mod response;
 pub(super) use response::attach_request_ids;
 use response::{decision_error, error};
+
+#[path = "systemone/worker.rs"]
+mod worker;
 
 #[path = "systemone/http.rs"]
 mod http;
@@ -76,6 +79,14 @@ fn metric_endpoint(dialect: Dialect) -> Endpoint {
         Dialect::Jev => Endpoint::SystemOne,
         Dialect::OpenAi => Endpoint::Decisions,
     }
+}
+
+enum PreparedDecision {
+    DynamoFrontend(Vec<PreparedBranch>),
+    WorkerCanonicalV1 {
+        request: Box<PreprocessedRequest>,
+        max_input_tokens: usize,
+    },
 }
 
 struct PreparedBranch {
@@ -247,16 +258,11 @@ async fn handle_request(
         );
     }
 
-    let required_candidates = request
-        .questions
-        .iter()
-        .map(|question| question.candidates.len())
-        .max()
-        .unwrap_or_default();
     let selection = match state
         .manager()
-        .get_systemone_execution_selection(&request.model, required_candidates)
-    {
+        .get_systemone_execution_selection(&request.model, |caps| {
+            request.validate_capabilities(caps).is_ok()
+        }) {
         Ok(selection) => selection,
         Err(SystemOneSelectionError::NotFound) => {
             return error(dialect, StatusCode::NOT_FOUND, "model is not registered");
@@ -310,7 +316,7 @@ async fn handle_request(
         deadline,
         spawn_blocking_with_permit(admission_permit, move || {
             let _preflight_permit = preflight_permit;
-            prepare_branches(
+            prepare_decision(
                 &preflight_request,
                 &selection_for_preflight,
                 max_input_tokens,
@@ -345,12 +351,14 @@ async fn handle_request(
         SystemOnePhase::Preflight,
         preflight_started.elapsed().as_secs_f64(),
     );
-    metrics.observe_systemone_work(
-        metric_model,
-        branches.len(),
-        branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
-        branches.iter().map(|branch| branch.label_ids.len()).sum(),
-    );
+    if let PreparedDecision::DynamoFrontend(branches) = &branches {
+        metrics.observe_systemone_work(
+            metric_model,
+            branches.len(),
+            branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
+            branches.iter().map(|branch| branch.label_ids.len()).sum(),
+        );
+    }
 
     let parent = Context::with_id_and_metadata((), request_id.clone(), Default::default());
     let parent_context = parent.context();
@@ -382,11 +390,35 @@ async fn handle_request(
     response
 }
 
+fn prepare_decision(
+    request: &CanonicalRequest,
+    selection: &SystemOneExecutionSelection,
+    max_input_tokens: usize,
+) -> Result<PreparedDecision, (StatusCode, String)> {
+    if selection.execution == DecisionExecution::WorkerCanonicalV1 {
+        return Ok(PreparedDecision::WorkerCanonicalV1 {
+            request: Box::new(worker::prepare(
+                request,
+                &selection.canonical_model,
+                max_input_tokens,
+            )?),
+            max_input_tokens,
+        });
+    }
+    prepare_branches(request, selection, max_input_tokens).map(PreparedDecision::DynamoFrontend)
+}
+
 fn prepare_branches(
     request: &CanonicalRequest,
     selection: &SystemOneExecutionSelection,
     max_input_tokens: usize,
 ) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
+    let backend = selection.execution.scoring_backend().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "incorrect frontend execution mode".to_string(),
+        )
+    })?;
     let context_length = selection.card.effective_context_length() as usize;
     let mut total_input_tokens = 0_usize;
     let mut remaining_tokenization_work = tokenization_work_limit(
@@ -417,7 +449,7 @@ fn prepare_branches(
             rendered.labels.len(),
         ));
         let (prompt_ids, label_ids, encoding_bytes) = selection
-            .preprocessor
+            .preprocessor.as_ref().ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "frontend decision preprocessor is unavailable".to_string()))?
             .render_systemone_question(
                 &selection.canonical_model,
                 &rendered.content,
@@ -480,7 +512,7 @@ fn prepare_branches(
                 .map_err(|message| (StatusCode::UNPROCESSABLE_ENTITY, message))?;
         remaining_tokenization_work -= prompt_ids.len() * (rendered.labels.len() + 2);
         remaining_encoding_bytes -= encoding_bytes;
-        let native = match selection.backend {
+        let native = match backend {
             ScoringBackend::Sglang => {
                 build_native_score_request(&prompt_ids, &label_ids, "validation")
             }
@@ -506,14 +538,81 @@ fn prepare_branches(
 
 async fn dispatch(
     selection: SystemOneExecutionSelection,
-    mut branches: Vec<PreparedBranch>,
+    prepared: PreparedDecision,
     request_id: String,
     parent_context: Arc<dyn AsyncEngineContext>,
     _admission_permit: OwnedSemaphorePermit,
     metrics: Arc<Metrics>,
     request: Arc<CanonicalRequest>,
 ) -> Response {
-    let dialect = request.dialect;
+    let result = match prepared {
+        PreparedDecision::DynamoFrontend(branches) => {
+            dispatch_frontend(
+                selection.clone(),
+                branches,
+                request_id.clone(),
+                parent_context.clone(),
+                metrics,
+            )
+            .await
+        }
+        PreparedDecision::WorkerCanonicalV1 {
+            request: native,
+            max_input_tokens,
+        } => {
+            let started = Instant::now();
+            let result = worker::execute(
+                &selection,
+                &request,
+                *native,
+                &request_id,
+                parent_context.clone(),
+                max_input_tokens,
+            )
+            .await;
+            metrics.observe_systemone_phase(
+                &selection.canonical_model,
+                SystemOnePhase::FirstBranch,
+                started.elapsed().as_secs_f64(),
+            );
+            if let Ok((_, usage)) = &result {
+                metrics.observe_systemone_work(
+                    &selection.canonical_model,
+                    request.questions.len(),
+                    usage.input_tokens as usize,
+                    0,
+                );
+                if let Some(cached) = usage.cached_tokens {
+                    metrics.observe_systemone_branch(&selection.canonical_model, cached as usize);
+                }
+            }
+            result
+        }
+    };
+    let (outcomes, usage) = match result {
+        Ok(result) => result,
+        Err(cause) => return dispatch_error(&request_id, &parent_context, cause, request.dialect),
+    };
+    let mut response =
+        match project_response(&request, &selection.canonical_model, &outcomes, &usage) {
+            Ok(body) => Json(body).into_response(),
+            Err(cause) => decision_error(cause),
+        };
+    attach_request_ids(&mut response, &request_id);
+    response
+}
+
+async fn dispatch_frontend(
+    selection: SystemOneExecutionSelection,
+    mut branches: Vec<PreparedBranch>,
+    request_id: String,
+    parent_context: Arc<dyn AsyncEngineContext>,
+    metrics: Arc<Metrics>,
+) -> Result<(Vec<QuestionOutcome>, Usage), DispatchError> {
+    let backend = selection
+        .execution
+        .scoring_backend()
+        .ok_or_else(|| DispatchError::malformed("incorrect frontend execution mode"))?;
     let mut salt_bytes = [0_u8; 16];
     // Share sibling prefixes, but isolate requests until a trusted tenant scope exists.
     // Client metadata and request IDs are not authenticated cache identities.
@@ -533,7 +632,7 @@ async fn dispatch(
     .await
     {
         Ok(result) => result,
-        Err(cause) => return dispatch_error(&request_id, &parent_context, cause, dialect),
+        Err(cause) => return Err(cause),
     };
     metrics.observe_systemone_phase(
         &selection.canonical_model,
@@ -579,7 +678,7 @@ async fn dispatch(
     }
     drop(siblings);
     if let Some(cause) = failure {
-        return dispatch_error(&request_id, &parent_context, cause, dialect);
+        return Err(cause);
     }
 
     metrics.observe_systemone_phase(
@@ -591,7 +690,7 @@ async fn dispatch(
     results.sort_by_key(|result| result.index);
     let mut outcomes = Vec::with_capacity(results.len());
     let mut usage = Usage {
-        output_tokens: (results.len() * selection.backend.output_tokens()) as u64,
+        output_tokens: (results.len() * backend.output_tokens()) as u64,
         cached_tokens: Some(0),
         ..Default::default()
     };
@@ -603,17 +702,7 @@ async fn dispatch(
             .map(|(total, next)| total + next as u64);
         outcomes.push(result.answer);
     }
-    let mut response =
-        match project_response(&request, &selection.canonical_model, &outcomes, &usage) {
-            Ok(body) => Json(body).into_response(),
-            Err(cause) => decision_error(cause),
-        };
-    attach_request_ids(&mut response, &request_id);
-    response.headers_mut().insert(
-        HeaderName::from_static("x-dynamo-systemone-version"),
-        HeaderValue::from_static("1"),
-    );
-    response
+    Ok((outcomes, usage))
 }
 
 fn dispatch_error(
@@ -650,6 +739,10 @@ async fn run_branch(
     parent_context: Arc<dyn AsyncEngineContext>,
     metrics: Arc<Metrics>,
 ) -> Result<BranchResult, DispatchError> {
+    let backend = selection
+        .execution
+        .scoring_backend()
+        .ok_or_else(|| DispatchError::malformed("incorrect frontend execution mode"))?;
     selection
         .validate_dispatch(pinned.map(|placement| placement.worker_id))
         .map_err(|_| {
@@ -665,7 +758,7 @@ async fn run_branch(
         request: mut preprocessed,
         exchange,
     } = bind_native(
-        selection.backend,
+        backend,
         &selection.canonical_model,
         selection.card.kv_cache_block_size,
         &native,
@@ -675,7 +768,7 @@ async fn run_branch(
     preprocessed
         .routing
         .get_or_insert_default()
-        .expected_output_tokens = Some(selection.backend.output_tokens() as u32);
+        .expected_output_tokens = Some(backend.output_tokens() as u32);
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(prepared.prompt_ids.len(), None);
     if let Some(placement) = pinned {
@@ -702,7 +795,7 @@ async fn run_branch(
     }
     let result = finish_branch(
         StartedBranch {
-            backend: selection.backend,
+            backend,
             prepared,
             tracker,
             stream,

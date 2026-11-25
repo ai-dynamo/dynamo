@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use super::{DecisionExecution, PreparedDecision};
 use crate::protocols::systemone::ScoringBackend;
 use async_trait::async_trait;
 use axum::{body::to_bytes, http::StatusCode, response::Response};
@@ -109,7 +110,7 @@ async fn deadline_kills_stalled_dispatch_and_releases_local_admission() {
     let permit = admission.clone().acquire_owned().await.unwrap();
     let task = tokio::spawn(dispatch(
         selection(engine.clone()),
-        vec![prepared_noul_branch(0)],
+        PreparedDecision::DynamoFrontend(vec![prepared_noul_branch(0)]),
         "deadline".into(),
         parent.clone(),
         permit,
@@ -736,11 +737,12 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
     card.runtime_config.data_parallel_size = 4;
     let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
     SystemOneExecutionSelection {
-        backend: ScoringBackend::Sglang,
+        execution: DecisionExecution::DynamoFrontend(ScoringBackend::Sglang),
+        capabilities: ScoringBackend::Sglang.decision_capabilities(),
         canonical_model: "test-model".to_string(),
         engine,
         card,
-        preprocessor,
+        preprocessor: Some(preprocessor),
         admitted_ids: None,
         lifecycle_cancellation: None,
     }
@@ -786,7 +788,7 @@ async fn dispatch_request(
         .unwrap();
     let response = dispatch(
         selection(engine),
-        (0..branch_count).map(prepared_noul_branch).collect(),
+        PreparedDecision::DynamoFrontend((0..branch_count).map(prepared_noul_branch).collect()),
         request_id.to_string(),
         parent.clone(),
         permit,
@@ -821,7 +823,7 @@ async fn assert_bounded_fanout(backend: ScoringBackend) {
     let permit = admission.clone().acquire_many_owned(20).await.unwrap();
     let task = tokio::spawn(dispatch(
         selected,
-        branches,
+        PreparedDecision::DynamoFrontend(branches),
         "bounded-fanout".to_string(),
         parent.clone(),
         permit,
@@ -971,7 +973,7 @@ async fn assert_cancellation(behavior: EngineBehavior) {
     let permit = semaphore.clone().acquire_many_owned(2).await.unwrap();
     let task = tokio::spawn(dispatch(
         selection(engine.clone()),
-        vec![prepared_noul_branch(0), prepared_noul_branch(1)],
+        PreparedDecision::DynamoFrontend(vec![prepared_noul_branch(0), prepared_noul_branch(1)]),
         "request".to_string(),
         parent.clone(),
         permit,

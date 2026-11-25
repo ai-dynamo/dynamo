@@ -1586,7 +1586,7 @@ impl ModelManager {
     pub(crate) fn get_systemone_execution_selection(
         &self,
         requested_model: &str,
-        required_candidates: usize,
+        supports: impl Fn(&dynamo_decisions::Capabilities) -> bool,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         let catalog = self.catalog.load();
         let canonical_model = catalog
@@ -1595,7 +1595,7 @@ impl ModelManager {
             .map(String::as_str)
             .unwrap_or(requested_model);
         if let Some(model) = catalog.models.get(canonical_model) {
-            return model.get_systemone_execution_selection(required_candidates);
+            return model.get_systemone_execution_selection(supports);
         }
 
         Err(SystemOneSelectionError::NotFound)
@@ -3178,14 +3178,15 @@ mod tests {
         let _workers = register_systemone_model(&manager, "model-a");
         for unregistered in ["jev-latest", "default", "typo"] {
             assert!(matches!(
-                manager.get_systemone_execution_selection(unregistered, 2),
+                manager.get_systemone_execution_selection(unregistered, |caps| caps.max_candidates
+                    >= 2),
                 Err(SystemOneSelectionError::NotFound)
             ));
         }
         assert!(manager.register_alias("jev-latest", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("jev-latest", 2)
+                .get_systemone_execution_selection("jev-latest", |caps| caps.max_candidates >= 2)
                 .unwrap()
                 .canonical_model,
             "model-a"
@@ -3193,18 +3194,19 @@ mod tests {
         assert!(manager.register_alias("public-model", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("public-model", 2)
+                .get_systemone_execution_selection("public-model", |caps| caps.max_candidates >= 2)
                 .unwrap()
                 .canonical_model,
             "model-a"
         );
         assert!(matches!(
-            manager.get_systemone_execution_selection("typo", 2),
+            manager.get_systemone_execution_selection("typo", |caps| caps.max_candidates >= 2),
             Err(SystemOneSelectionError::NotFound)
         ));
         manager.add_worker_set("unsupported", "other", make_worker_set("other", "other"));
         assert!(matches!(
-            manager.get_systemone_execution_selection("unsupported", 2),
+            manager
+                .get_systemone_execution_selection("unsupported", |caps| caps.max_candidates >= 2),
             Err(SystemOneSelectionError::Unsupported)
         ));
     }
@@ -3216,17 +3218,19 @@ mod tests {
         assert!(manager.register_alias("jev-latest", "model-a"));
         workers_a.send(vec![]).unwrap();
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest", 2),
+            manager
+                .get_systemone_execution_selection("jev-latest", |caps| caps.max_candidates >= 2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let _workers_b = register_systemone_model(&manager, "model-b");
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest", 2),
+            manager
+                .get_systemone_execution_selection("jev-latest", |caps| caps.max_candidates >= 2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("model-b", 2)
+                .get_systemone_execution_selection("model-b", |caps| caps.max_candidates >= 2)
                 .unwrap()
                 .canonical_model,
             "model-b"
@@ -3238,7 +3242,7 @@ mod tests {
         let manager = ModelManager::new();
         let workers = register_systemone_model(&manager, "model-a");
         let selection = manager
-            .get_systemone_execution_selection("model-a", 2)
+            .get_systemone_execution_selection("model-a", |caps| caps.max_candidates >= 2)
             .unwrap();
         assert_eq!(selection.validate_dispatch(None), Ok(()));
         assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
