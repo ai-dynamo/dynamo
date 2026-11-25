@@ -44,21 +44,14 @@ EXPECTED_CRATES = {
     "dynamo-tokens",
     "dynamo-truthy",
     "fastokens",
-    "kvbm-common",
-    "kvbm-config",
-    "kvbm-engine",
-    "kvbm-kernels",
-    "kvbm-logical",
-    "kvbm-physical",
 }
 CORE_CRATES = {
     "dynamo-kv-router",
     "dynamo-llm",
     "dynamo-memory",
     "dynamo-runtime",
-    "kvbm-logical",
 }
-# dynamo-rl and kvbm-engine moved into the advertised set with the 1.4.0
+# dynamo-rl moved into the advertised set with the 1.4.0
 # publish list; only the unpublished backend shim stays internal.
 INTERNAL_CRATES = {"dynamo-vllm-rs-backend"}
 

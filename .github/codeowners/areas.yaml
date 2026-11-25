@@ -139,6 +139,7 @@ areas:
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+  - lib/sidecar/triton/
 - label: sidecar
   github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
   path_globs:
@@ -404,6 +405,8 @@ areas:
   - deploy/utils/
   - deploy/utils/manifests/
   - deploy/utils/tests/
+  - docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+  - docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx
   - examples/deployments/
   - examples/gpu-sharing/
   - recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json
@@ -1073,6 +1076,10 @@ shared:
   - frontend
   - kv-memory
   - epp
+- glob: lib/error/src/http.rs
+  owners:
+  - runtime
+  - frontend
 - glob: lib/llm/src/http/service/error.rs
   owners:
   - frontend
@@ -1210,6 +1217,10 @@ shared:
 - glob: lib/sidecar/testkit/
   owners:
   - runtime
+  - sidecar
+- glob: lib/sidecar/triton/
+  owners:
+  - backend-triton
   - sidecar
 - glob: lib/sidecar/trtllm/
   owners:

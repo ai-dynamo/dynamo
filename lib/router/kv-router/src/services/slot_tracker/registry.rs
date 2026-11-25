@@ -525,6 +525,7 @@ mod tests {
                 },
                 router_id,
                 lora_name: None,
+                origin: Default::default(),
             },
         }
     }

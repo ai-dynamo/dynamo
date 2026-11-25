@@ -3,13 +3,15 @@
 
 //! Validation and frame building for one Generate request.
 
+use tonic_v14 as tonic;
+
 use std::time::Instant;
 
 use dynamo_mocker::common::protocols::DirectRequest;
 use dynamo_mocker::live::{deterministic_output_tokens, stable_request_uuid};
 use dynamo_mocker::sglang::{LogprobOptions, ResponseMetadata};
-use dynamo_sglang_sidecar::proto as pb;
 use serde_json::Value;
+use sglang_api_types::api::v1 as pb;
 use tonic::Status;
 use uuid::Uuid;
 

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -565,8 +566,8 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError;
     use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyProviderError;
     use tokio::sync::Mutex;
 
     use super::*;

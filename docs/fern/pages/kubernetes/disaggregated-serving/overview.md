@@ -123,7 +123,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           imagePullPolicy: IfNotPresent
 ```
 
@@ -151,7 +151,7 @@ rather than a plain worker:
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
           args:
@@ -188,7 +188,7 @@ rather than prompt load.
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
           args:
@@ -345,7 +345,7 @@ device plugin:
         hostPID: true                 # share the host PID namespace
         initContainers:
           - name: gpu-ids             # record the GPUs the device plugin allocated
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
             command: ["sh", "-c", "nvidia-smi --query-gpu=uuid --format=csv,noheader | paste -sd, > /gpu-alloc/uuids"]
             resources:
               limits:
@@ -357,7 +357,7 @@ device plugin:
           - name: gpu-alloc
             emptyDir: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           securityContext:
             privileged: true          # make every GPU on the node visible
           volumeMounts:

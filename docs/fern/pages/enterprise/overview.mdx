@@ -33,11 +33,11 @@ Dynamo Enterprise Support artifacts are published on NGC as public images. Downl
 
 ## Relationship to Open-Source Artifacts
 
-For the same release version, a Dynamo Enterprise Support artifact contains the same release binaries as its corresponding open-source artifact. The `-enterprise` suffix identifies the curated publication channel and the commercial support boundary; it does not identify a separately compiled or forked build.
+For the same release version, a Dynamo Enterprise Support artifact contains the same release binaries as its corresponding open-source artifact, with one exception. Starting with v1.7.0, `vllm-runtime-enterprise` is built on the certified NVIDIA NIM vLLM base image, so it is a separate build from the open-source `vllm-runtime` image. For every other artifact, the `-enterprise` suffix identifies the curated publication channel and the commercial support boundary; it does not identify a separately compiled or forked build.
 
 The open-source repositories can carry additional container tags for special-purpose builds, such as dated snapshots and nightly builds. Only the tags designated for commercial support are in the enterprise support scope.
 
-Binary equivalence does not extend commercial support to an unlisted artifact, tag, component, or configuration. When commercial support is required, pull the exact `-enterprise` artifact and version listed for the applicable release.
+Where binary equivalence holds, it does not extend commercial support to an unlisted artifact, tag, component, or configuration. When commercial support is required, pull the exact `-enterprise` artifact and version listed for the applicable release.
 
 ## Security Vulnerabilities in Open-Source Packages
 

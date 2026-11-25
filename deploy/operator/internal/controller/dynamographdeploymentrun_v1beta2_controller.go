@@ -916,6 +916,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 		)}
 	}
 
+	// Require publisher configuration only when freezing a new execution, not when observing an existing Run.
+	if r.OperatorImage == "" {
+		return dgdrRunExecution{}, errors.New("operator image is required for the DGDR Run publisher; set --operator-image")
+	}
+
 	// Resolve every execution value before creating the immutable artifact.
 	execution := dgdrRunExecution{
 		SnapshotPath:        dgdrRunSnapshotPath,
@@ -1840,9 +1845,6 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) SetupWithManager(mgr ctrl.Ma
 	}
 	if r.PlannerImage == "" {
 		return errors.New("planner image is required for the DGDR Run sweeper")
-	}
-	if r.OperatorImage == "" {
-		return errors.New("operator image is required for the DGDR Run publisher")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(), &batchv1.Job{}, dgdrRunJobControllerUIDIndex, dgdrRunJobControllerUIDs,

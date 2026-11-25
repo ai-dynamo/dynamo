@@ -137,6 +137,7 @@
 /components/src/dynamo/sglang/request_handlers/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
 
 # === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
+/lib/sidecar/triton/                                                                                    @ai-dynamo/dynamo-backend-triton-codeowners
 /components/src/dynamo/triton/**                                                                        @ai-dynamo/dynamo-backend-triton-codeowners
 
 # === sidecar  (@ai-dynamo/dynamo-sidecar-codeowners) ===
@@ -557,12 +558,14 @@ requirements.txt                                                                
 /components/src/dynamo/trtllm/request_handlers/diffusion/                                               @ai-dynamo/dynamo-diffusion-codeowners
 /docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md                                              @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/sglang/request_handlers/image_diffusion/                                         @ai-dynamo/dynamo-diffusion-codeowners
+/docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx                                        @ai-dynamo/dynamo-operator-codeowners
 /recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json                                        @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/pages/reference/components/pool-relay-configuration.md                                       @ai-dynamo/dynamo-global-router-codeowners
 /recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json                              @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/pages/reference/components/global-discovery-service-configuration.md                         @ai-dynamo/dynamo-global-router-codeowners
 /docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md                        @ai-dynamo/dynamo-global-router-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/                     @ai-dynamo/dynamo-backend-triton-codeowners
+/docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md                     @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md        @ai-dynamo/dynamo-global-router-codeowners
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
@@ -585,6 +588,7 @@ requirements.txt                                                                
 /lib/mocker/servers/                                                                                    @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/common/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/sglang/                                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/triton/                                                                                    @ai-dynamo/dynamo-backend-triton-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/trtllm/                                                                                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/serve/trtllm/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /container/deps/vllm/                                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
@@ -597,6 +601,7 @@ requirements.txt                                                                
 /.ai/metrics-review.md                                                                                  @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.devcontainer/sglang/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /.devcontainer/trtllm/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/lib/error/src/http.rs                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /lib/sidecar/README.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /dev/docker-compose.yml                                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /docs/fern/**/*sidecar*                                                                                 @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-sidecar-codeowners

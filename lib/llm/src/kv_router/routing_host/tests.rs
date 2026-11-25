@@ -13,10 +13,13 @@ use std::{
 use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
-    DispatchRecheck, RequestClassifier, WorkerView,
+use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
+};
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Client, Instance},
@@ -36,7 +39,6 @@ use tokio::sync::{Notify, mpsc, watch};
 use super::*;
 use crate::lora::{LoadEstimator, LoraFilter};
 use crate::{
-    http::service::metrics::Metrics,
     kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
@@ -47,6 +49,7 @@ use crate::{
         timing::RequestTracker,
     },
 };
+use dynamo_http_server::metrics::Metrics;
 
 fn request() -> PreprocessedRequest {
     PreprocessedRequest::builder()
@@ -1919,11 +1922,11 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 #[tokio::test]
 #[serial_test::serial]
 async fn decode_progress_collection_follows_picker_declaration() {
-    use dynamo_kv_router::plugins::prelude::{
-        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-    };
-    use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+    use dynamo_kv_router::plugins::experimental::decode_progress::{
         DECODE_PROGRESS, DecodeProgressByRow,
+    };
+    use dynamo_kv_router::plugins::worker_selection::{
+        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionRequest,
     };
     use dynamo_worker_selection::host::WorkerSelectionPolicyError;
 
@@ -1941,7 +1944,7 @@ async fn decode_progress_collection_follows_picker_declaration() {
         }
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             *self.seen.lock().unwrap() = input.decode_progress(0).map(|progress| {
@@ -1969,10 +1972,9 @@ async fn decode_progress_collection_follows_picker_declaration() {
             HashMap::from([(7, ModelRuntimeConfig::default())]),
             config,
             None::<RecordingClassifier>,
-            SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
+            SelectionPolicySource::Factory(Arc::new(move |context| {
                 WorkerSelectionPolicy::new(
-                    config.clone(),
-                    role.as_str(),
+                    context.worker_type().as_str(),
                     Vec::new(),
                     Box::new(Probe {
                         declare,
@@ -2816,7 +2818,7 @@ impl RequestClassifier for RecordingClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(request)
@@ -2845,7 +2847,7 @@ impl RequestClassifier for BackendPriorityClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         request.set_backend_priority(self.0);
         Ok(request)
@@ -2891,6 +2893,45 @@ async fn dispatch_keeps_the_request_priority_without_a_classifier_override() {
     );
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn classifier_reads_the_reply_end_recorded_through_the_requests_tracker() {
+    let (classified, mut progress_rx) = mpsc::unbounded_channel();
+    let (completed, _completed_rx) = mpsc::unbounded_channel();
+    // It keeps the progress handle of each request it classifies, as a plugin would.
+    let (router, _dispatch, _, runtime) = router_with_recorded_dispatch_affinity_and_classifier(
+        "kv-classifier-reply-end",
+        None,
+        Some(TokenContractClassifier {
+            classified,
+            completed,
+        }),
+    )
+    .await;
+    let tracker = Arc::new(RequestTracker::new());
+    // Twice on one tracker: a retry can begin a new classifier lifecycle.
+    for _ in 0..2 {
+        let mut input = request();
+        input.tracker = Some(Arc::clone(&tracker));
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        // The frontend looks for the handle as soon as dispatch returns.
+        assert!(tracker.classifier_progress().is_some());
+        while stream.next().await.is_some() {}
+    }
+    let (_, first) = progress_rx.try_recv().unwrap();
+    let (_, retry) = progress_rx.try_recv().unwrap();
+
+    // The frontend can see the reply end after the router's stream, and its lifecycle, are
+    // done. The lifecycle dispatched last gets it.
+    let progress = tracker.classifier_progress().unwrap();
+    progress.record_reply_end(true);
+    assert_eq!(first.reply_tool_call(), None);
+    assert_eq!(retry.reply_tool_call(), Some(true));
+
+    drop(router);
+    runtime.shutdown();
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("classifier rejected request")]
 struct ClassifierRejected;
@@ -2905,7 +2946,7 @@ impl RequestClassifier for RejectingClassifier {
     fn classify(
         &mut self,
         _request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Err(Box::new(ClassifierRejected) as Box<ClassifierError>)
@@ -2979,7 +3020,7 @@ impl RequestClassifier for TypedRejectingClassifier {
     fn classify(
         &mut self,
         _request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Err(Box::new(
@@ -3222,10 +3263,14 @@ impl RequestClassifier for PausingClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // Held heads must wait in their own lanes, as ThunderAgent keys them.
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        if let Some(session) = request
+            .info()
+            .session_context()
+            .map(|s| s.session_id().to_owned())
+        {
             request.set_lane_key(&session);
         }
         Ok(request)
@@ -3604,10 +3649,10 @@ impl RequestClassifier for TokenContractClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.classified
-            .send((request.isl_tokens(), request.progress().clone()))
+            .send((request.info().isl_tokens(), request.progress().clone()))
             .unwrap();
         Ok(request)
     }
@@ -4702,6 +4747,7 @@ async fn two_worker_migration_harness(
         None,
         load_context.scheduler_load_sender(),
         load_context.cancellation_token(),
+        false,
     )
     .await
     .unwrap();

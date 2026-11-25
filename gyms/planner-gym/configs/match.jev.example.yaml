@@ -18,7 +18,7 @@ backend:
     common:
       system: h200_sxm
       backend: vllm
-      backend_version: 0.24.0
+      backend_version: current
       tp_size: 1
       moe_tp_size: 1
       moe_ep_size: 1

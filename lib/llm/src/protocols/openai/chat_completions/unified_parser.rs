@@ -2417,6 +2417,26 @@ impl ChoiceState {
         self.finish_with_eos(false)
     }
 
+    fn finish_for_terminal(
+        &mut self,
+        terminal: Option<FinishReason>,
+        confirmed_eos: bool,
+    ) -> Vec<UnifiedParserEvent> {
+        let mut flushed = self.finish_with_eos(confirmed_eos);
+        if self.family == MISTRAL_UNIFIED_FAMILY
+            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
+            && matches!(
+                terminal,
+                Some(FinishReason::Length | FinishReason::ContentFilter)
+            )
+        {
+            // EOF can close a raw Mistral body without proving the model
+            // finished it. Calls closed before the flush remain intact.
+            flushed.retain(|event| !matches!(event, UnifiedParserEvent::ToolCall(_)));
+        }
+        flushed
+    }
+
     fn finish_with_eos(&mut self, confirmed_eos: bool) -> Vec<UnifiedParserEvent> {
         if self.failed {
             return Vec::new();
@@ -4161,7 +4181,7 @@ where
                         state
                             .pending_parsed_tool_calls
                             .clone_from(&record.pending_parsed_tool_calls);
-                        let deltas = state.finish();
+                        let deltas = state.finish_for_terminal(original.finish_reason, false);
                         if let Some(error) = state.parse_error.take() {
                             yield Annotated::from_error(error.to_string());
                             return;
@@ -4462,7 +4482,8 @@ where
                             && matches!(guided_tool_constraint, GuidedToolConstraint::BeamTurnGrammar { .. })
                             && terminal == Some(FinishReason::Stop)
                             && chat.model_eos.contains(&original.index);
-                        deltas.extend(state.finish_with_eos(confirmed_eos));
+                        let flushed = state.finish_for_terminal(terminal, confirmed_eos);
+                        deltas.extend(flushed);
                     }
                     records.entry(original.index).or_default().finished = true;
                 }
