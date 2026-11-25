@@ -39,7 +39,6 @@ use tokio::sync::{Notify, mpsc, watch};
 use super::*;
 use crate::lora::{LoadEstimator, LoraFilter};
 use crate::{
-    http::service::metrics::Metrics,
     kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
@@ -50,6 +49,7 @@ use crate::{
         timing::RequestTracker,
     },
 };
+use dynamo_http_server::metrics::Metrics;
 
 fn request() -> PreprocessedRequest {
     PreprocessedRequest::builder()
@@ -4747,6 +4747,7 @@ async fn two_worker_migration_harness(
         None,
         load_context.scheduler_load_sender(),
         load_context.cancellation_token(),
+        false,
     )
     .await
     .unwrap();

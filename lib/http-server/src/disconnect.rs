@@ -2,6 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Connection monitoring for HTTP and gRPC services.
+//!
+//! There are two potential phases in any request where we need to handle the disconnect.
+//!
+//! For unary, request-response, there is just a single phase where the primary task that axum kicks off
+//! to handle the request will be dropped if the client disconnects. In order for us to have a long running
+//! task, like an LLM request, we need to spawn our long running task in a separate task and then spawn
+//! a second task that will monitor for disconnects from the client. The primary task which spawned the
+//! two tasks will hold an "armed" [`ConnectionHandle`] which will issue a [`ConnectionStatus::ClosedUnexpectedly`]
+//! if the task is dropped before it is [`ConnectionHandle::disarm`]ed.
+//!
+//! For the streaming case, request in - stream out, we need a second [`ConnectionHandle`] which will be owned
+//! by the stream. A streaming response is when the [`axum::response::Response`] is a [`axum::response::Sse`] stream.
+//! This means the primary task handle will go out of scope when it returns the stream. When we create our
+//! SSE stream, we capture the second [`ConnectionHandle`] and arm it. If the stream closes gracefully, the
+//! second handle will be disarmed, otherwise, the stream was dropped and the [`Drop`] trait on the [`ConnectionHandle`]
+//! triggers a [`ConnectionStatus::ClosedUnexpectedly`] signal.
+//!
+//! The [`ConnectionHandle`] is a simple wrapper around a [`tokio::sync::oneshot::Sender`] which sends its
+//! [`ConnectionStatus`] when it is dropped. The receiver is the [`connection_monitor`] task that
+//! [`create_connection_monitor`] spawns; it kills the engine context when a handle reports
+//! [`ConnectionStatus::ClosedUnexpectedly`].
 
 use crate::metrics::{CancellationLabels, Metrics};
 use dynamo_runtime::engine::AsyncEngineContext;

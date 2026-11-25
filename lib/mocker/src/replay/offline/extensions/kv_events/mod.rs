@@ -279,13 +279,14 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aisim_core::engine::{KvBlock, KvEventData, KvEventTier, StoredBlocks};
+    use aisim_core::engine::{KvBlock, KvEventData, KvEventDomain, KvEventTier, StoredBlocks};
 
     fn stored(tier: KvEventTier, event_id: u64) -> KvEvent {
         KvEvent {
             event_id,
             dp_rank: 0,
             tier,
+            domain: KvEventDomain::Worker,
             data: KvEventData::Stored(StoredBlocks {
                 parent_hash: None,
                 start_position: Some(0),
@@ -305,6 +306,7 @@ mod tests {
             event_id,
             dp_rank: 0,
             tier,
+            domain: KvEventDomain::Worker,
             data: KvEventData::Removed {
                 block_hashes: vec![71],
             },

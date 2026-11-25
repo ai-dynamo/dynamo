@@ -640,6 +640,70 @@ fn map_scheduler_error(error: dynamo_scheduler::host::KvSchedulerError) -> anyho
     }
 }
 
+/// KV events from engines the frontend dials directly: the ZMQ ingress, with two
+/// differences. Its listeners feed the frontend's own index, built as the
+/// runtime ingress builds its own, so it has the component's indexer metrics
+/// and session updates; the index the selection core would create has
+/// neither. And an engine advertising no publishers at all stays schedulable
+/// without prefix-cache scoring, as it does behind a sidecar; the plain ZMQ
+/// ingress holds such a worker back as incomplete.
+struct DirectKvIngress {
+    listeners: dynamo_kv_router::services::selection::ZmqDirectIngress,
+    indexer: Indexer,
+}
+
+impl DirectKvIngress {
+    fn new(indexer: Indexer) -> Self {
+        Self {
+            listeners: Default::default(),
+            indexer,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
+    fn attach(
+        &self,
+        index: &Arc<dynamo_scheduler::host::IndexRegistry>,
+        cancel_token: CancellationToken,
+    ) {
+        self.listeners.attach(index, cancel_token);
+    }
+
+    fn open(
+        &self,
+        index: &dynamo_scheduler::host::IndexRegistry,
+        key: &dynamo_router_protocol::identity::RoutingPartitionId,
+        block_size: u32,
+    ) -> Indexer {
+        // The listeners claim the partition's index from the registry.
+        index.adopt_indexer(key.clone(), block_size, self.indexer.clone())
+    }
+
+    fn missing_metadata(
+        &self,
+        record: &dynamo_scheduler::host::WorkerCatalogRecord,
+    ) -> Vec<String> {
+        if record.listener_endpoints().is_empty() {
+            return Vec::new();
+        }
+        self.listeners.missing_metadata(record)
+    }
+
+    async fn reconcile(
+        &self,
+        previous: Option<&dynamo_scheduler::host::WorkerCatalogRecord>,
+        record: &dynamo_scheduler::host::WorkerCatalogRecord,
+    ) -> Result<(), SelectionError> {
+        self.listeners.reconcile(previous, record).await
+    }
+
+    async fn detach(&self, record: &dynamo_scheduler::host::WorkerCatalogRecord) {
+        self.listeners.detach(record).await;
+    }
+}
+
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
@@ -654,7 +718,7 @@ pub struct KvRouter {
     cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
-    ingress: Arc<indexer::RuntimeIngress>,
+    ingress: Option<Arc<indexer::RuntimeIngress>>,
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
     approximate_lru_ranks: ApproximateLruRanks,
@@ -755,6 +819,7 @@ impl KvRouter {
             lora_filter.map(crate::lora_routing::LoraKvPolicy::kv),
             scheduler_load,
             parent_token,
+            false,
         )
         .await
     }
@@ -777,6 +842,7 @@ impl KvRouter {
         admission_policy: Option<Arc<dyn crate::routing_policy::KvAdmissionPolicy>>,
         scheduler_load: SchedulerLoadSender,
         parent_token: CancellationToken,
+        has_direct_kv_events: bool,
     ) -> Result<Self> {
         let mut kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config
@@ -820,21 +886,54 @@ impl KvRouter {
             cache.attach_session_prefix_index(Arc::clone(index));
         }
 
-        let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
-            endpoint: &endpoint,
-            kv_router_config: &kv_router_config,
-            block_size,
-            model_name: model_name.as_deref(),
-            worker_role,
-            metric_worker_type,
-            worker_inputs: index_inputs,
-            kv_event_source_requirement,
-            kv_source_membership,
-            cancellation_token: cancellation_token.clone(),
-            session_prefix_index: session_prefix_index.clone(),
-        })
-        .await?;
-        let indexer = ingress.indexer().clone();
+        // Engines the frontend dials directly publish KV events on their own ZMQ
+        // sockets, which the selection core subscribes to per worker rank;
+        // otherwise the runtime ingress feeds the index from the event plane.
+        let (ingress, runtime_ingress, indexer): (
+            Arc<dyn dynamo_scheduler::host::KvEventIngress>,
+            Option<Arc<indexer::RuntimeIngress>>,
+            Indexer,
+        ) = if has_direct_kv_events {
+            // Other routers find a served index through discovery, and a
+            // frontend that dials its engines keeps a process-local one:
+            // nothing could reach the index. Say so, not start without it.
+            anyhow::ensure!(
+                !kv_router_config.serve_indexer,
+                "serve_indexer is not supported when the frontend dials its engines directly: \
+                 its discovery is process-local, so no other router could find the served index"
+            );
+            let indexer = indexer::build(
+                component,
+                &kv_router_config,
+                block_size,
+                model_name.as_deref(),
+                cancellation_token.child_token(),
+                session_prefix_index.clone(),
+            )
+            .await?;
+            (
+                Arc::new(DirectKvIngress::new(indexer.clone())),
+                None,
+                indexer,
+            )
+        } else {
+            let runtime_ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
+                endpoint: &endpoint,
+                kv_router_config: &kv_router_config,
+                block_size,
+                model_name: model_name.as_deref(),
+                worker_role,
+                metric_worker_type,
+                worker_inputs: index_inputs,
+                kv_event_source_requirement,
+                kv_source_membership,
+                cancellation_token: cancellation_token.clone(),
+                session_prefix_index: session_prefix_index.clone(),
+            })
+            .await?;
+            let indexer = runtime_ingress.indexer().clone();
+            (runtime_ingress.clone(), Some(runtime_ingress), indexer)
+        };
         let approximate_lru_metrics = metrics::ApproximateLruMetrics::from_component(component);
         let configured_policy = kv_router_config.router_approximate_cache_policy.to_string();
         let effective_policy = if matches!(indexer, Indexer::None) {
@@ -924,7 +1023,7 @@ impl KvRouter {
                 shared_cache: shared_cache.clone(),
                 // The availability provider refreshes LoRA eligibility at admission.
                 lora_worker_filter: None,
-                ingress: Arc::clone(&ingress) as Arc<dyn dynamo_scheduler::host::KvEventIngress>,
+                ingress,
                 scheduler_load,
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
@@ -937,6 +1036,7 @@ impl KvRouter {
         )
         .await?;
         request_leases.set_scheduler(selection.scheduler().booking_cleanup());
+
         // Inbound lifecycle events start only now that their consumer can
         // release bookings.
         replica_ingress.start().await;
@@ -954,7 +1054,7 @@ impl KvRouter {
             cancellation_token,
             client,
             is_eagle,
-            ingress,
+            ingress: runtime_ingress,
             tracking_hash,
             tracking_model_name,
             approximate_lru_ranks,
@@ -1016,7 +1116,9 @@ impl KvRouter {
         &mut self,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
     ) {
-        self.ingress.set_task_guard(task_guard.clone());
+        if let Some(ingress) = &self.ingress {
+            ingress.set_task_guard(task_guard.clone());
+        }
         self.teardown_task_guard = Some(task_guard);
     }
 
@@ -1999,7 +2101,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
         assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
         assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
-        assert!(crate::http::service::metrics::request_deadline_exceeded(
+        assert!(dynamo_http_server::metrics::request_deadline_exceeded(
             &decoded
         ));
     }
@@ -2356,7 +2458,12 @@ mod tests {
                         } else {
                             let router = result.unwrap();
                             assert_eq!(matches!(router.indexer, Indexer::None), !wants_cache);
-                            assert!(!router.ingress.has_subscription());
+                            assert!(
+                                !router
+                                    .ingress
+                                    .as_ref()
+                                    .is_some_and(|ingress| ingress.has_subscription())
+                            );
                             router.cancellation_token.cancel();
                         }
                     }
@@ -2392,7 +2499,12 @@ mod tests {
                     .contains(WorkerInputs::CACHE)
             );
             assert!(matches!(router.indexer, Indexer::None));
-            assert!(!router.ingress.has_subscription());
+            assert!(
+                !router
+                    .ingress
+                    .as_ref()
+                    .is_some_and(|ingress| ingress.has_subscription())
+            );
             let tokens = vec![11, 12, 13, 14];
             for _ in 0..2 {
                 router
@@ -2481,7 +2593,12 @@ mod tests {
 
         assert_eq!(router.required_worker_inputs(), WorkerInputs::LOAD);
         assert!(matches!(router.indexer, Indexer::None));
-        assert!(!router.ingress.has_subscription());
+        assert!(
+            !router
+                .ingress
+                .as_ref()
+                .is_some_and(|ingress| ingress.has_subscription())
+        );
         assert!(router.shared_cache.is_none());
         assert!(matches!(
             router.dump_events().await,
@@ -2633,6 +2750,175 @@ mod tests {
 
     #[rstest::rstest]
     #[case::single(1)]
+    #[case::concurrent(4)]
+    #[tokio::test]
+    async fn direct_kv_index_uses_the_configured_event_threads(#[case] threads: u32) {
+        let component = make_test_component(&format!("direct-kv-threads-{threads}")).await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let parent_token = component.drt().child_token();
+        let router = KvRouter::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                router_event_threads: threads,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            }),
+            None,
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+            SchedulerLoadSender::disabled(parent_token.child_token()),
+            parent_token,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(router.ingress.is_none());
+        // One thread is the single-threaded index, which the selection
+        // service's default of four would not build.
+        assert_eq!(
+            matches!(router.indexer, Indexer::Concurrent { .. }),
+            threads > 1
+        );
+        assert_eq!(
+            matches!(router.indexer, Indexer::Single { .. }),
+            threads == 1
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_kv_events_reject_a_served_index() {
+        let component = make_test_component("direct-kv-served").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let parent_token = component.drt().child_token();
+        let rejected = KvRouter::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(7)),
+            Some(KvRouterConfig {
+                serve_indexer: true,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            }),
+            None,
+            Some(WorkerType::Decode),
+            "decode",
+            Some("served-model".to_string()),
+            false,
+            None,
+            None,
+            SchedulerLoadSender::disabled(parent_token.child_token()),
+            parent_token,
+            true,
+        )
+        .await
+        .err()
+        .expect("a served index nothing can reach must be rejected");
+        assert!(rejected.to_string().contains("serve_indexer"), "{rejected}");
+    }
+
+    #[rstest::rstest]
+    #[case::single(1)]
+    #[case::concurrent(4)]
+    #[tokio::test]
+    async fn direct_kv_index_records_sessions_and_counts_events(#[case] threads: u32) {
+        use dynamo_kv_events::residency::StorageTier;
+        use dynamo_kv_indexer::host::{KvIndexerMetrics, METRIC_EVENT_STORED};
+        use indexer::KvIndexerMetricsExt as _;
+
+        let component = make_test_component(&format!("direct-kv-index-{threads}")).await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let parent_token = component.drt().child_token();
+        // The counters every frontend index in this process reports to.
+        let stored = KvIndexerMetrics::from_component(&component)
+            .kv_cache_events_applied
+            .with_label_values(&[METRIC_EVENT_STORED, dynamo_kv_indexer::METRIC_STATUS_OK]);
+        let router = KvRouter::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(7)),
+            Some(KvRouterConfig {
+                enable_session_prefix_index: true,
+                router_event_threads: threads,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            }),
+            None,
+            Some(WorkerType::Decode),
+            "decode",
+            None,
+            false,
+            None,
+            None,
+            SchedulerLoadSender::disabled(parent_token.child_token()),
+            parent_token,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(router.ingress.is_none());
+
+        // A store for a session, as a listener applies it to the index.
+        let session_index = router.session_prefix_index.as_ref().unwrap();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let hashes = compute_block_hash_for_seq(&[11, 12, 13, 14], 2, BlockHashOptions::default());
+        let stored_before = stored.get();
+        router
+            .indexer
+            .try_apply_event(
+                indexer::test_util::store_event(
+                    7,
+                    0,
+                    1,
+                    &[],
+                    &hashes.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+                    StorageTier::Device,
+                )
+                .with_session_id("seed"),
+            )
+            .await
+            .unwrap();
+
+        // The index records the session, which the selection core's own
+        // index does not.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while session_index
+                .get_session_block_lineage("seed", worker, None)
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the direct index must record the session's blocks");
+        // And it counts the store on the component's counters. Other tests in
+        // this process share them, so only a lower bound can be checked.
+        assert!(stored.get() > stored_before);
+    }
+
+    #[rstest::rstest]
+    #[case::single(1)]
     #[case::concurrent(2)]
     #[tokio::test]
     async fn session_prefix_tracking_survives_shared_core_selection(#[case] threads: u32) {
@@ -2674,7 +2960,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(router.ingress.has_subscription());
+        assert!(
+            router
+                .ingress
+                .as_ref()
+                .is_some_and(|ingress| ingress.has_subscription())
+        );
         let session_index = router.session_prefix_index.as_ref().unwrap();
         let worker = WorkerWithDpRank::new(7, 0);
         let tokens = [11, 12, 13, 14];

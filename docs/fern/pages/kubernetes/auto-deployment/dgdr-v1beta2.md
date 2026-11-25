@@ -20,6 +20,9 @@ independent DGD.
 > static and recorded-trace workloads, scalar and Pareto optimization, DGD overrides, and manual
 > Candidate-to-DGD creation.
 
+To run a recommendation outside the operator and export deployment files directly, see
+[Generate a DGD with AISim](aisimulate-dgd.mdx).
+
 ## Prerequisites
 
 Install the operator and matching DGDR v1beta2 CRDs as described in the

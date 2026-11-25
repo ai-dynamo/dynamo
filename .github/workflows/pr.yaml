@@ -197,8 +197,28 @@ jobs:
     if: always() && !cancelled()
     steps:
       - name: Check all deploy test jobs
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          {
+            echo "### Deploy job results"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<< "$NEEDS_JSON"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          errors=$(jq -r '
+            to_entries[]
+            | select(.value.result != "success" and .value.result != "skipped")
+            | "::error::Deploy dependency \(.key) finished with result: \(.value.result)"
+          ' <<< "$NEEDS_JSON")
+          if [[ -n "$errors" ]]; then
+            printf '%s\n' "$errors"
+            exit 1
+          fi
+
+          echo "All deploy dependencies succeeded or were skipped."
 
   dynamo-status-check:
     runs-on: ubuntu-slim
@@ -893,6 +913,8 @@ jobs:
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: pre_merge and sglang and gpu_1 and not sidecar
+      # Datadog attempt-to-fix repeats a selected test 20 times.
+      gpu_test_timeout_minutes: ${{ contains(github.event.head_commit.message, 'DD_') && 60 || 30 }}
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Keep the per-test cap compatible with the smallest GPU fallback.
       # Larger GPUs get more slots from the same markers.

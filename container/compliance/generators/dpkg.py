@@ -31,13 +31,12 @@ import subprocess
 from pathlib import Path
 
 from .. import overrides as license_overrides
-from .common import UNKNOWN, Component
+from .common import DEB_COPYRIGHT_DIR, UNKNOWN, Component, read_deb_copyright
 
 logger = logging.getLogger(__name__)
 
 ECOSYSTEM = "dpkg"
 
-_COPYRIGHT_DIR = Path("usr/share/doc")
 
 # dpkg states that do not mean "installed". In `not-installed`, no file of the
 # package is on disk. `config-files` means removed but not purged: dpkg deleted
@@ -400,7 +399,7 @@ def _resolve_license(pkg_name: str, version: str = "", root: Path = Path("/")) -
     if overridden:
         return overridden
 
-    copyright_path = root / _COPYRIGHT_DIR / pkg_name / "copyright"
+    copyright_path = root / DEB_COPYRIGHT_DIR / pkg_name / "copyright"
     if not copyright_path.is_file():
         return UNKNOWN
 
@@ -507,6 +506,7 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
                 version=version,
                 spdx=spdx,
                 source_url=None,  # apt-get source URL is the right answer; see source-archival
+                license_text=read_deb_copyright(root, name),
             )
         )
 
@@ -534,15 +534,19 @@ def generate(
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
     root: Path = Path("/"),
+    components: list[Component] | None = None,
 ) -> list[Component]:
     """Read dpkg state, write NOTICES-Apt.txt + dpkg-deps.csv.
+
+    `components` reuses an earlier collect_components(root) result.
 
     When `subtract` is provided, components matching (name, version) are
     filtered before writing — used to drop baseline-owned components.
     """
     from . import common
 
-    components = collect_components(root)
+    if components is None:
+        components = collect_components(root)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

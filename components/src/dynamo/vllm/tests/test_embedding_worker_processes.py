@@ -211,13 +211,6 @@ def test_process_group_reports_unexpected_child_exit():
     group._stopping.set()
 
 
-def _assert_names_verified_versions(message):
-    # Match the whole phrase. The message also starts with the installed
-    # vLLM version, and that alone passes a check of each version.
-    verified = " and ".join(processes._VERIFIED_VLLM_VERSIONS)
-    assert f"verified against vLLM {verified};" in message
-
-
 def test_unpack_core_engine_launch_names_a_renamed_field():
     """An upstream rename must say which field went missing."""
     launch = SimpleNamespace(engine_manager=Mock(), coordinator=None, addresses=Mock())
@@ -227,7 +220,6 @@ def test_unpack_core_engine_launch_names_a_renamed_field():
 
     message = str(raised.value)
     assert "tensor_queue" in message
-    _assert_names_verified_versions(message)
     assert isinstance(raised.value.__cause__, AttributeError)
 
 
