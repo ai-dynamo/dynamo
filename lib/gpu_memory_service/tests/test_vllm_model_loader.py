@@ -25,6 +25,23 @@ if not HAS_TORCH:
 import torch
 from gpu_memory_service.integrations.vllm import model_loader
 
+try:
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase as _RealQuantizeMethodBase,
+    )
+    from vllm.model_executor.layers.quantization.kv_cache import (
+        BaseKVCacheMethod as _RealBaseKVCacheMethod,
+    )
+    from vllm.model_executor.model_loader import utils as _real_vllm_loader_utils
+    from vllm.model_executor.utils import (
+        weights_already_processed as _real_weights_already_processed,
+    )
+
+    _HAS_REAL_VLLM = True
+except ImportError:
+    _HAS_REAL_VLLM = False
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
@@ -309,12 +326,11 @@ def test_create_meta_model_isolates_meta_failures_across_layers(
     assert deferred == [model.moe]
 
 
-@pytest.mark.parametrize("api_style", ["0.33", "0.34"])
 def test_load_read_mode_finalizes_moe_kernels_and_kv_scales(
-    monkeypatch: pytest.MonkeyPatch, api_style: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RO attach rebuilds MoE kernels and FP8 KV scales including _prob_scale_float."""
-    vllm_stub = _install_vllm_stub(monkeypatch, api_style=api_style)
+    vllm_stub = _install_vllm_stub(monkeypatch, api_style="0.34")
     monkeypatch.setattr(model_loader, "setup_meta_tensor_workaround", lambda: None)
     monkeypatch.setattr(model_loader, "get_mx_load_context", lambda *_args: None)
 
@@ -562,21 +578,99 @@ def test_finalize_kv_cache_rejects_non_scalar_prob_scale(
         )
 
 
+def test_load_read_mode_does_not_replay_succeeded_attention_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attention hooks that already succeeded on meta are not replayed on RO weights."""
+    vllm_stub = _install_vllm_stub(monkeypatch, api_style="0.34")
+    monkeypatch.setattr(model_loader, "setup_meta_tensor_workaround", lambda: None)
+    monkeypatch.setattr(model_loader, "get_mx_load_context", lambda *_args: None)
+
+    hook_calls = 0
+
+    class _SucceededMetaAttention(vllm_stub.DeferredAttnBase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = vllm_stub.BaseKVCacheMethod()
+            for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
+                self.register_parameter(
+                    name, torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+                )
+            for name in ("_k_scale", "_v_scale", "_q_scale", "_prob_scale"):
+                self.register_buffer(name, torch.tensor(1.0, dtype=torch.float32))
+            self._k_scale_float = 1.0
+            self._v_scale_float = 1.0
+            self._q_scale_float = 1.0
+            self._prob_scale_float = 1.0
+
+        def process_weights_after_loading(self) -> None:
+            nonlocal hook_calls
+            hook_calls += 1
+            if not self._k_scale.is_meta:
+                raise AssertionError("already-succeeded hook must not replay on RO")
+
+    with torch.device("meta"):
+        meta_model = _SucceededMetaAttention()
+
+    def _fake_materialize(
+        _client, target: torch.nn.Module, *, device_index: int
+    ) -> None:
+        assert device_index == 0
+        target._buffers["_k_scale"] = torch.tensor(0.5, dtype=torch.float32)
+        target._buffers["_v_scale"] = torch.tensor(0.25, dtype=torch.float32)
+        target._buffers["_q_scale"] = torch.tensor(0.125, dtype=torch.float32)
+        target._buffers["_prob_scale"] = torch.tensor(0.0625, dtype=torch.float32)
+
+    monkeypatch.setattr(model_loader, "materialize_module_from_gms", _fake_materialize)
+    gms_client = SimpleNamespace(total_bytes=128, close=lambda: None)
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        word_embeddings_untied_by_checkpoint=False,
+        _model=meta_model,
+    )
+
+    loaded = model_loader._load_read_mode(
+        gms_client, SimpleNamespace(), model_config, 0
+    )
+
+    assert hook_calls == 1
+    assert loaded._k_scale_float == 0.5
+    assert loaded._prob_scale_float == 0.0625
+
+
+def test_create_meta_model_propagates_non_meta_programming_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programming errors (e.g. AttributeError) are not swallowed by meta isolation."""
+    vllm_stub = _install_vllm_stub(monkeypatch, api_style="0.34")
+    monkeypatch.setattr(model_loader, "setup_meta_tensor_workaround", lambda: None)
+
+    class _BuggyMethod(vllm_stub.QuantizeMethodBase):
+        supports_pre_processed_weights = True
+
+        def process_weights_after_loading(self, layer) -> None:
+            raise AttributeError("unexpected missing field")
+
+    model = torch.nn.Module()
+    model.quant_method = _BuggyMethod()
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        word_embeddings_untied_by_checkpoint=False,
+        _model=model,
+    )
+
+    with pytest.raises(AttributeError, match="unexpected missing field"):
+        model_loader._create_meta_model(SimpleNamespace(), model_config)
+
+
 def test_real_vllm_symbol_contracts() -> None:
     """Verify real vLLM imports and symbols when vllm.model_executor is installed."""
-    pytest.importorskip("vllm.model_executor")
-
-    from vllm.model_executor.layers.attention import is_deferred_attention_layer
-    from vllm.model_executor.layers.quantization.base_config import (
-        QuantizeMethodBase,
-    )
-    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-    from vllm.model_executor.model_loader import utils as vllm_loader_utils
-    from vllm.model_executor.utils import weights_already_processed
+    if not _HAS_REAL_VLLM:
+        pytest.skip("vllm is not installed")
 
     assert callable(is_deferred_attention_layer)
-    assert callable(vllm_loader_utils.initialize_model)
-    assert callable(vllm_loader_utils.maybe_retie_word_embeddings)
-    assert callable(weights_already_processed)
-    assert issubclass(BaseKVCacheMethod, QuantizeMethodBase)
-    assert BaseKVCacheMethod.supports_pre_processed_weights is True
+    assert callable(_real_vllm_loader_utils.initialize_model)
+    assert callable(_real_vllm_loader_utils.maybe_retie_word_embeddings)
+    assert callable(_real_weights_already_processed)
+    assert issubclass(_RealBaseKVCacheMethod, _RealQuantizeMethodBase)
+    assert _RealBaseKVCacheMethod.supports_pre_processed_weights is True

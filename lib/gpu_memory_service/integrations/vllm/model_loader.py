@@ -260,6 +260,7 @@ _KV_SCALE_PLACEHOLDERS = (
 )
 _DEFERRED_QUANT_MODULES_ATTR = "_gms_deferred_quant_modules"
 _DEFERRED_HOOK_MODULES_ATTR = "_gms_deferred_hook_modules"
+_META_TENSOR_ERRORS = (NotImplementedError, RuntimeError)
 
 
 def _pop_attr_list(model: torch.nn.Module, attr: str) -> list[torch.nn.Module]:
@@ -354,7 +355,7 @@ def _run_deferred_module_hooks(
                 continue
         try:
             _call_post_load_hook(hook, dtype, is_attn=is_attn)
-        except Exception as e:
+        except _META_TENSOR_ERRORS as e:
             if fail_on_error:
                 raise
             failed_modules.append(module)
@@ -364,6 +365,12 @@ def _run_deferred_module_hooks(
                 "attention" if is_attn else "module",
                 e,
             )
+        except Exception:
+            logger.exception(
+                "[GMS] Unexpected error in post-processing hook for %s",
+                type(module).__name__,
+            )
+            raise
 
     return failed_modules
 
@@ -448,44 +455,28 @@ def _finalize_post_materialized_modules(
             quant_modules.append((mod, qm))
 
     with weights_already_processed():
-        # Phase 1: Finalize KV-cache scales first so deferred attention/model
-        # hooks observe calibrated host float copies instead of 1.0 defaults.
+        # Finalize KV-cache scales before any deferred hooks read host float copies.
         for mod, qm in kv_modules:
             _finalize_kv_cache_layer(mod, qm, BaseKVCacheMethod)
             rebuilt_kv += 1
 
-        # Phase 2: Finalize pre-processed quant methods (MoE kernels, etc.).
         for mod, qm in quant_modules:
             qm.process_weights_after_loading(mod)
             if hasattr(mod, "update_param_tp_status"):
                 mod.update_param_tp_status()
             rebuilt_quant += 1
 
-    # Phase 3: Re-run deferred attention/model hooks once KV scales and
-    # quantized sublayers are materialized and finalized.
-    if deferred_hook_ids or kv_modules or quant_modules:
-        is_deferred_attention = _import_is_deferred_attention_layer()
-        rebuilt_quant_set = {mod for mod, _ in quant_modules}
-        rerun_targets = set(deferred_hook_ids)
-        for mod in model.modules():
-            if is_deferred_attention(mod) and (
-                isinstance(getattr(mod, "quant_method", None), BaseKVCacheMethod)
-                or any(child in rebuilt_quant_set for child in mod.modules())
-            ):
-                rerun_targets.add(id(mod))
-        if (kv_modules or quant_modules) and callable(
-            getattr(model, "process_weights_after_loading", None)
-        ):
-            rerun_targets.add(id(model))
-        if rerun_targets:
-            with weights_already_processed():
-                _run_deferred_module_hooks(
-                    model,
-                    model_config,
-                    QuantizeMethodBase,
-                    fail_on_error=True,
-                    target_modules=rerun_targets,
-                )
+    # Replay only hooks that previously failed on meta tensors; re-running
+    # already-succeeded attention hooks would overwrite read-only GMS weights.
+    if deferred_hook_ids:
+        with weights_already_processed():
+            _run_deferred_module_hooks(
+                model,
+                model_config,
+                QuantizeMethodBase,
+                fail_on_error=True,
+                target_modules=deferred_hook_ids,
+            )
 
     if rebuilt_quant:
         logger.info(
@@ -635,8 +626,11 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     if callable(maybe_retie):
         try:
             maybe_retie(model, meta_config)
-        except Exception as e:
+        except _META_TENSOR_ERRORS as e:
             logger.debug("[GMS] Meta word-embedding retie skipped: %s", e)
+        except Exception:
+            logger.exception("[GMS] Unexpected error in meta word-embedding retie")
+            raise
 
     deferred_quant_modules: list[torch.nn.Module] = []
     skipped_non_preprocessed = 0
@@ -652,7 +646,7 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
             quant_method.process_weights_after_loading(module)
             if hasattr(module, "update_param_tp_status"):
                 module.update_param_tp_status()
-        except Exception as e:
+        except _META_TENSOR_ERRORS as e:
             if getattr(quant_method, "supports_pre_processed_weights", False):
                 deferred_quant_modules.append(module)
                 logger.debug(
@@ -668,6 +662,12 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
                         mod_name,
                         e,
                     )
+        except Exception:
+            logger.exception(
+                "[GMS] Unexpected error in meta quant post-processing for %s",
+                mod_name,
+            )
+            raise
 
     if skipped_non_preprocessed:
         logger.info(
