@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use self::capacity::CapacityUpdates;
+pub(crate) use self::capacity::RoomChanged;
 use super::filter::{RoutingEligibility, worker_config_for_rank};
 use super::overlap::SelectedWorkerTierSnapshot;
 use super::overlap_refresh::{
@@ -30,8 +31,8 @@ use super::selector::{
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
     KvSchedulerError, NonMaxOverlapSelection, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, SchedulingContext, SchedulingRequest, SchedulingResponse,
-    WorkerAvailabilityProvider, WorkerIdSet,
+    OverloadedWorkerProvider, PairedPoolRoom, SchedulingContext, SchedulingRequest,
+    SchedulingResponse, WorkerAvailabilityProvider, WorkerIdSet,
 };
 use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
@@ -660,6 +661,8 @@ enum AdmissionCommand {
         prepared: Option<Box<PreparedAdmission>>,
         queue_metadata: QueueMetadata,
         lease: Option<Box<RequestLifecycleLease>>,
+        /// An upstream hop's queue already admitted the request; book it directly.
+        admitted_upstream: bool,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
     },
     SelectWithoutAdmission {
@@ -1015,6 +1018,84 @@ impl Drop for RequestLifecycleLease {
     }
 }
 
+/// The actor's view of a paired pool (see [`PairedPoolRoom`]): which classes judge a
+/// limit there, the pool's answer within one gate pass, and its room-changed hint.
+struct PairedPoolGate {
+    pool: Arc<OnceLock<Arc<dyn PairedPoolRoom>>>,
+    /// Per class, the limits judged on the paired pool: its `decode_busy_threshold_frac`
+    /// alone. `None` for a class without one, which never consults the pool.
+    class_limits: Vec<Option<BusyThresholds>>,
+    /// Per class, the pool's answer for requests without a LoRA within the current gate
+    /// pass. Like the shared load projection, one answer serves a pass; the next pass
+    /// reads the pool again.
+    pass_room: Vec<Option<bool>>,
+    /// Subscribed when the pool is first consulted, before its first answer, so a
+    /// request held on that answer cannot miss the wake that releases it.
+    room_changed: Option<watch::Receiver<()>>,
+    room_changed_closed: bool,
+}
+
+impl PairedPoolGate {
+    fn new(profile: &PolicyProfile, pool: Arc<OnceLock<Arc<dyn PairedPoolRoom>>>) -> Self {
+        let class_limits: Vec<_> = profile
+            .classes()
+            .iter()
+            .map(|class| {
+                class
+                    .busy_thresholds
+                    .decode_busy_threshold_frac
+                    .map(|frac| BusyThresholds {
+                        decode_busy_threshold_frac: Some(frac),
+                        ..BusyThresholds::default()
+                    })
+            })
+            .collect();
+        Self {
+            pool,
+            pass_room: vec![None; class_limits.len()],
+            class_limits,
+            room_changed: None,
+            room_changed_closed: false,
+        }
+    }
+
+    fn begin_pass(&mut self) {
+        self.pass_room.fill(None);
+    }
+
+    /// Whether the paired pool has room for `request` in `class_index`. True when the
+    /// class judges nothing there or no pool is installed.
+    fn has_room(&mut self, class_index: usize, request: &SchedulingRequest) -> bool {
+        let Some(limits) = self.class_limits[class_index] else {
+            return true;
+        };
+        let Some(pool) = self.pool.get() else {
+            return true;
+        };
+        if self.room_changed.is_none() && !self.room_changed_closed {
+            self.room_changed = pool.room_changed();
+        }
+        if request.lora_name.is_some() {
+            return pool.has_room(request, &limits);
+        }
+        *self.pass_room[class_index].get_or_insert_with(|| pool.has_room(request, &limits))
+    }
+
+    /// Resolves when the pool may have gained room. Never resolves while unsubscribed.
+    async fn changed(room_changed: &mut Option<watch::Receiver<()>>) -> bool {
+        match room_changed {
+            Some(receiver) => receiver.changed().await.is_ok(),
+            None => std::future::pending().await,
+        }
+    }
+
+    /// The pool's signal is gone; stop watching it rather than spin on a closed channel.
+    fn close_room_changed(&mut self) {
+        self.room_changed = None;
+        self.room_changed_closed = true;
+    }
+}
+
 /// The actor's end of the admission channel. Commands leave the channel a batch at a time
 /// and are handed out in arrival order.
 struct CommandInbox {
@@ -1099,6 +1180,9 @@ struct SchedulerQueueActor<
     /// that declared RESIDENT_BLOCKS.
     resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
+    paired_pool: PairedPoolGate,
+    /// Hints this scheduler's own frees to a paired queue watching it.
+    room_changed: Arc<RoomChanged>,
     /// The request classifier's dispatch gate, installed once by the host.
     dispatch_gate: Arc<OnceLock<Arc<dyn DispatchGate>>>,
     /// Earliest recheck a held head asked for; cleared when its timer fires.
@@ -1142,6 +1226,10 @@ pub struct SchedulerQueue<
     /// that declared RESIDENT_BLOCKS.
     resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
+    /// The pool that serves requests after this scheduler admits them, installed once by
+    /// the host.
+    paired_pool: Arc<OnceLock<Arc<dyn PairedPoolRoom>>>,
+    room_changed: Arc<RoomChanged>,
     /// Read by callers to project their request's load before the actor selects.
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     /// The actor's write count; see `ActorWriteLog`.
@@ -1282,11 +1370,14 @@ impl<
         // wake it when a class queues on them or a gate is installed.
         let actor_wake = Arc::new(CapacityUpdates::new());
         let capacity_updates = queueing_enabled.then(|| Arc::clone(&actor_wake));
+        let room_changed = Arc::new(RoomChanged::new());
+        let paired_pool = Arc::new(OnceLock::new());
         let direct_release: DirectBookingRelease = {
             let slots = Arc::clone(&slots);
             let capacity_updates = capacity_updates.clone();
             let actor_wake = Arc::clone(&actor_wake);
             let dispatch_gate = Arc::clone(&dispatch_gate);
+            let room_changed = Arc::clone(&room_changed);
             Arc::new(move |booking| {
                 let outcome = slots.free_if_booking(
                     &booking.request_id,
@@ -1294,11 +1385,13 @@ impl<
                     booking.attempt_id,
                     Instant::now(),
                 )?;
-                if outcome.is_applied()
-                    && let Some(updates) =
+                if outcome.is_applied() {
+                    if let Some(updates) =
                         capacity_wake(&capacity_updates, &actor_wake, &dispatch_gate)
-                {
-                    updates.record(Some(booking.worker));
+                    {
+                        updates.record(Some(booking.worker));
+                    }
+                    room_changed.notify();
                 }
                 Ok(())
             })
@@ -1349,6 +1442,8 @@ impl<
             selection_trace: Arc::clone(&selection_trace),
             resident_blocks: Arc::clone(&resident_blocks),
             reject_thresholds: reject_thresholds.clone(),
+            paired_pool: PairedPoolGate::new(&profile, Arc::clone(&paired_pool)),
+            room_changed: Arc::clone(&room_changed),
             dispatch_gate: Arc::clone(&dispatch_gate),
             gate_recheck_at: None,
         };
@@ -1374,6 +1469,8 @@ impl<
             selection_trace,
             resident_blocks,
             reject_thresholds,
+            paired_pool,
+            room_changed,
             slots: caller_slots,
             actor_writes,
             load_maps,
@@ -1424,6 +1521,22 @@ impl<
         self.selection_trace.set(spec).is_ok()
     }
 
+    /// Install the pool that serves requests after this scheduler admits them. A class
+    /// with a `decode_busy_threshold_frac` then also waits for room under it in that pool,
+    /// and the queue rechecks whenever the pool signals room; classes without one ignore
+    /// it.
+    ///
+    /// Returns `false` when a pool is already installed.
+    pub fn set_paired_pool(&self, pool: Arc<dyn PairedPoolRoom>) -> bool {
+        self.paired_pool.set(pool).is_ok()
+    }
+
+    /// The hint fired whenever this scheduler releases booked load or its workers change,
+    /// for a paired queue judging room on these workers.
+    pub(crate) fn room_changed(&self) -> &Arc<RoomChanged> {
+        &self.room_changed
+    }
+
     /// Lend the partition's live resident block counts to every selection, for a policy that
     /// declared `WorkerInputs::RESIDENT_BLOCKS`.
     ///
@@ -1468,10 +1581,15 @@ impl<
             None,
             None,
             Instant::now(),
+            false,
         )
         .await
     }
 
+    /// `admitted_upstream` books the request directly: an upstream hop's queue already
+    /// judged its class limits, so this queue neither holds it nor expires its deadline.
+    /// Selection still applies the host's reject thresholds.
+    #[allow(clippy::too_many_arguments)]
     pub async fn enqueue_admitted_with_block_hashes_and_lease(
         &self,
         mut request: SchedulingRequest,
@@ -1480,6 +1598,7 @@ impl<
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         classified_request: Option<ClassifyRequest>,
         ingress_at: Instant,
+        admitted_upstream: bool,
     ) -> Option<Box<RequestLifecycleLease>> {
         if self.capacity_updates.is_some()
             && lease.is_none()
@@ -1523,6 +1642,7 @@ impl<
             prepared,
             queue_metadata,
             lease,
+            admitted_upstream,
             ack_tx,
         });
 
@@ -1593,6 +1713,7 @@ impl<
             prepared: None,
             queue_metadata,
             lease: None,
+            admitted_upstream: false,
             ack_tx,
         };
         self.admission_tx
@@ -1621,6 +1742,7 @@ impl<
             prepared: None,
             queue_metadata,
             lease: None,
+            admitted_upstream: false,
             ack_tx,
         };
         self.admission_tx
@@ -1855,6 +1977,7 @@ impl<
         ) {
             updates.record(worker);
         }
+        self.room_changed.notify();
     }
 
     pub(crate) fn ensure_running(&self) -> Result<(), KvSchedulerError> {
@@ -1989,6 +2112,7 @@ impl<
                 (class_due, gate_due) => class_due.or(gate_due),
             };
             let has_affinity_backlog = self.pending.has_affinity_backlog();
+            let paired_room_changed = self.paired_pool.room_changed.is_some();
             let command = tokio::select! {
                 command = self.commands.next() => command,
                 _ = affinity_recheck.tick(), if has_affinity_backlog => {
@@ -2017,6 +2141,16 @@ impl<
                         self.gate_recheck_at = None;
                     }
                     self.handle_update(None, gate_due.then_some(RecheckScope::All)).await;
+                    continue;
+                }
+                // The paired pool may have room for a request held only on it. Those lanes are
+                // blocked on capacity, so recheck every capacity-blocked lane.
+                open = PairedPoolGate::changed(&mut self.paired_pool.room_changed),
+                    if paired_room_changed => {
+                    if !open {
+                        self.paired_pool.close_room_changed();
+                    }
+                    self.handle_update(None, Some(RecheckScope::Capacity)).await;
                     continue;
                 }
             };
@@ -2086,6 +2220,7 @@ impl<
                 prepared,
                 queue_metadata,
                 lease,
+                admitted_upstream,
                 ack_tx,
             } => {
                 let lifecycle_transfer = lease
@@ -2100,6 +2235,7 @@ impl<
                     block_hashes,
                     prepared,
                     queue_metadata,
+                    admitted_upstream,
                 );
                 let drain = if cleanup_ready {
                     Drain::Full
@@ -2148,6 +2284,7 @@ impl<
 
     /// Returns whether ready work may have changed: the request entered the queue or was booked,
     /// or the expiry it ran exposed a class head.
+    #[allow(clippy::too_many_arguments)]
     fn handle_enqueue(
         &mut self,
         mut request: SchedulingRequest,
@@ -2156,12 +2293,27 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         prepared: Option<Box<PreparedAdmission>>,
         queue_metadata: QueueMetadata,
+        admitted_upstream: bool,
     ) -> bool {
         let class_index = queue_metadata.class_index;
         self.class_counters[class_index]
             .received_total
             .fetch_add(1, AtomicOrdering::Relaxed);
         let decay_now = Instant::now();
+        // An upstream hop's queue owns admission for this request: in disaggregated
+        // serving the prefill queue judges class limits on both pools, and a decode leg
+        // may complete a prefill that is already running. Holding or expiring it here
+        // would strand that work, so book it now, ahead of any backlog. Selection still
+        // sheds workers past the host's reject thresholds.
+        if admitted_upstream {
+            let context = AdmissionContext {
+                class_index,
+                due_at: None,
+                attempt_tx,
+                lifecycle_transfer,
+            };
+            return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
+        }
         let due_at = self.pending.enforced_due_at(&queue_metadata);
         if due_at.is_some_and(|due_at| due_at <= decay_now) {
             self.reject_due_time_passed(class_index, &mut request);
@@ -2188,30 +2340,36 @@ impl<
         // limit-zero rejection the queued path always has.
         if class.never_queues() {
             let should_queue = class.queueing_enabled()
-                && (self.pending.has_backlog(class_index) || {
-                    let reject = (self.eligibility.exclusive && request.affinity_target.is_some())
+                && (self.pending.has_backlog(class_index)
+                    || {
+                        self.paired_pool.begin_pass();
+                        !self.paired_pool.has_room(class_index, &request)
+                    }
+                    || {
+                        let reject = (self.eligibility.exclusive
+                            && request.affinity_target.is_some())
                         .then_some(self.reject_thresholds.as_ref())
                         .flatten();
-                    let full_ranks = reset_full_ranks(&mut self.gate_full_ranks, reject);
-                    if let Some(full_ranks) = full_ranks {
-                        self.slots
-                            .record_full_worker_ranks_at(decay_now, full_ranks);
-                    }
-                    self.eligibility.with(
-                        &request,
-                        &self.workers_with_configs,
-                        &self.gate_full_ranks,
-                        false,
-                        |configs, eligibility, _, _, _| {
-                            Self::all_eligible_workers_full(
-                                &self.slots.worker_load_reader(decay_now),
-                                configs,
-                                class.busy_thresholds,
-                                eligibility,
-                            )
-                        },
-                    )
-                });
+                        let full_ranks = reset_full_ranks(&mut self.gate_full_ranks, reject);
+                        if let Some(full_ranks) = full_ranks {
+                            self.slots
+                                .record_full_worker_ranks_at(decay_now, full_ranks);
+                        }
+                        self.eligibility.with(
+                            &request,
+                            &self.workers_with_configs,
+                            &self.gate_full_ranks,
+                            false,
+                            |configs, eligibility, _, _, _| {
+                                Self::all_eligible_workers_full(
+                                    &self.slots.worker_load_reader(decay_now),
+                                    configs,
+                                    class.busy_thresholds,
+                                    eligibility,
+                                )
+                            },
+                        )
+                    });
             if !should_queue {
                 return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
             }
@@ -2473,6 +2631,9 @@ impl<
                 }
             }
         }
+        if made_ready {
+            self.room_changed.notify();
+        }
         if !unmanaged_request_ids.is_empty() {
             for class_index in 0..self.profile.classes().len() {
                 let (removed, class_head_removed) =
@@ -2518,6 +2679,8 @@ impl<
         let class_room = &mut self.class_room;
         class_room.clear();
         class_room.resize(self.pending.class_count(), None);
+        let paired_pool = &mut self.paired_pool;
+        paired_pool.begin_pass();
         let dispatchable = self.pending.any_ready_head(|class_index, class, queued| {
             if let Some(gate) = gate
                 && !gate_allows(gate.as_ref(), &class.name, queued, &gate_recheck_at)
@@ -2526,6 +2689,9 @@ impl<
             }
             if !class.queueing_enabled() {
                 return LaneCheck::Dispatch;
+            }
+            if !paired_pool.has_room(class_index, &queued.request) {
+                return LaneCheck::Blocked(BlockReason::Capacity);
             }
             let shared_answer = unconstrained(&queued.request, exclusive);
             if shared_answer && let Some(room) = class_room[class_index] {
@@ -2673,6 +2839,8 @@ impl<
                     .flatten();
                 let mut gate_fresh = false;
                 let gate = gate.as_deref();
+                let paired_pool = &mut self.paired_pool;
+                paired_pool.begin_pass();
                 let class_room = &mut self.class_room;
                 class_room.clear();
                 class_room.resize(self.pending.class_count(), None);
@@ -2686,6 +2854,15 @@ impl<
                         return LaneCheck::Dispatch;
                     }
                     let shared_answer = unconstrained(&queued.request, exclusive);
+                    // Judged before the class room cache: a pass held on the paired pool skips
+                    // the load read. Every unconstrained head of the class shares the answer.
+                    if !paired_pool.has_room(class_index, &queued.request) {
+                        return LaneCheck::Blocked(if shared_answer {
+                            BlockReason::SharedCapacity
+                        } else {
+                            BlockReason::Capacity
+                        });
+                    }
                     if shared_answer && let Some(room) = class_room[class_index] {
                         return if room {
                             LaneCheck::Dispatch
@@ -5291,6 +5468,7 @@ mod tests {
                 prepared: None,
                 queue_metadata,
                 lease: None,
+                admitted_upstream: false,
                 ack_tx,
             })
             .await
@@ -5355,6 +5533,7 @@ mod tests {
                     None,
                     Some(classified),
                     ingress_at,
+                    false,
                 )
                 .await;
             receivers.push(queued_rx);
@@ -5497,12 +5676,13 @@ mod tests {
             None,
             None,
             head_metadata,
+            false,
         );
         let (mut next, _next_rx) = make_request("next", 64);
         in_session(&mut next, "a");
         let mut next_metadata = metadata(&next);
         next_metadata.lane_key = keyed_by_session(&next);
-        actor.handle_enqueue(next, None, None, None, None, next_metadata);
+        actor.handle_enqueue(next, None, None, None, None, next_metadata, false);
         actor.handle_update(None, Some(RecheckScope::All)).await;
         assert_eq!(actor.gate_recheck_at, None);
 
@@ -5575,6 +5755,8 @@ mod tests {
             selection_trace: Arc::clone(&queue.selection_trace),
             resident_blocks: Arc::clone(&queue.resident_blocks),
             reject_thresholds: queue.reject_thresholds.clone(),
+            paired_pool: PairedPoolGate::new(&queue.profile, Arc::clone(&queue.paired_pool)),
+            room_changed: Arc::clone(&queue.room_changed),
             dispatch_gate: Arc::clone(&queue.dispatch_gate),
             gate_recheck_at: None,
         }
@@ -5598,6 +5780,7 @@ mod tests {
                 prepared,
                 queue_metadata,
                 lease: None,
+                admitted_upstream: false,
                 ack_tx,
             })
             .await
@@ -6050,7 +6233,7 @@ mod tests {
             let metadata = queue
                 .default_queue_metadata(&active, Instant::now())
                 .unwrap();
-            assert!(actor.handle_enqueue(active, None, None, None, None, metadata));
+            assert!(actor.handle_enqueue(active, None, None, None, None, metadata, false));
             actor.handle_enqueued(None).await;
             assert_eq!(active_rx.try_recv().unwrap().unwrap().best_worker, worker);
 
@@ -6059,7 +6242,7 @@ mod tests {
             let metadata = queue
                 .default_queue_metadata(&older, Instant::now())
                 .unwrap();
-            assert!(actor.handle_enqueue(older, None, None, None, None, metadata));
+            assert!(actor.handle_enqueue(older, None, None, None, None, metadata, false));
             actor.handle_enqueued(None).await;
             assert!(older_rx.try_recv().is_err());
 
@@ -6071,7 +6254,7 @@ mod tests {
             let metadata = queue
                 .default_queue_metadata(&later, Instant::now())
                 .unwrap();
-            assert!(actor.handle_enqueue(later, None, None, None, None, metadata));
+            assert!(actor.handle_enqueue(later, None, None, None, None, metadata, false));
             // Force enqueue processing before the capacity select branch.
             actor.handle_enqueued(None).await;
             assert_eq!(older_rx.try_recv().unwrap().unwrap().best_worker, worker);
@@ -6981,6 +7164,249 @@ mod tests {
         assert_eq!(again_rx.await.unwrap().unwrap().best_worker, first);
     }
 
+    /// A paired pool whose room the test sets, recording the limits it is asked about.
+    struct TestPairedPool {
+        room: AtomicBool,
+        calls: AtomicUsize,
+        room_changed: watch::Sender<()>,
+    }
+
+    impl TestPairedPool {
+        fn new(room: bool) -> Arc<Self> {
+            Arc::new(Self {
+                room: AtomicBool::new(room),
+                calls: AtomicUsize::new(0),
+                room_changed: watch::Sender::new(()),
+            })
+        }
+    }
+
+    impl PairedPoolRoom for TestPairedPool {
+        fn has_room(&self, _request: &SchedulingRequest, limits: &BusyThresholds) -> bool {
+            // Only the class decode fraction is judged on the paired pool.
+            assert_eq!(
+                *limits,
+                BusyThresholds {
+                    decode_busy_threshold_frac: Some(0.5),
+                    ..BusyThresholds::default()
+                }
+            );
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.room.load(Ordering::Relaxed)
+        }
+
+        fn room_changed(&self) -> Option<watch::Receiver<()>> {
+            Some(self.room_changed.subscribe())
+        }
+    }
+
+    fn paired_decode_profile(request_queue_limit_per_worker: Option<usize>) -> PolicyProfile {
+        policy_profile(
+            None,
+            vec![PolicyClassConfig {
+                busy_thresholds: BusyThresholds {
+                    decode_busy_threshold_frac: Some(0.5),
+                    ..Default::default()
+                },
+                request_queue_limit_per_worker,
+                ..class("decode-bound", 1)
+            }],
+        )
+    }
+
+    async fn settle_actor() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn paired_pool_holds_until_its_room_signal_releases_the_request() {
+        // A prefill router's queue: its own workers report no KV capacity, so only the
+        // paired decode pool can hold the request.
+        let (queue, slots) = make_queue_with_profile(1, 16, 1_000_000, paired_decode_profile(None));
+        let decode = TestPairedPool::new(false);
+        assert!(queue.set_paired_pool(decode.clone()));
+        assert!(!queue.set_paired_pool(decode.clone()));
+
+        let (request, mut request_rx) = make_request("held-on-decode", 16);
+        queue.enqueue(request).await;
+        queue.update().await;
+        assert!(request_rx.try_recv().is_err());
+        assert_eq!(queue.pending_count(), 1);
+        assert!(decode.calls.load(Ordering::Relaxed) > 0);
+
+        // Room alone changes nothing until the pool signals it: no capacity of this
+        // queue changed, so nothing else wakes the actor.
+        decode.room.store(true, Ordering::Relaxed);
+        settle_actor().await;
+        assert!(request_rx.try_recv().is_err());
+        assert_eq!(queue.pending_count(), 1);
+
+        decode.room_changed.send_replace(());
+        tokio::time::timeout(Duration::from_secs(2), request_rx)
+            .await
+            .expect("the paired pool's room signal must release the request")
+            .unwrap()
+            .unwrap();
+        assert_eq!(queue.pending_count(), 0);
+        slots
+            .free(&"held-on-decode".to_string(), decay_now())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn paired_pool_rejects_a_never_queue_class_like_its_own_workers() {
+        let (queue, slots) =
+            make_queue_with_profile(1, 16, 1_000_000, paired_decode_profile(Some(0)));
+        let decode = TestPairedPool::new(true);
+        assert!(queue.set_paired_pool(decode.clone()));
+
+        let (admitted, admitted_rx) = make_request("direct", 16);
+        queue.enqueue(admitted).await;
+        admitted_rx.await.unwrap().unwrap();
+
+        // The direct path and the queue agree: without paired room the request would
+        // have to wait, and a zero limit rejects it instead.
+        decode.room.store(false, Ordering::Relaxed);
+        let (rejected, rejected_rx) = make_request("rejected", 16);
+        queue.enqueue(rejected).await;
+        assert!(matches!(
+            rejected_rx.await.unwrap(),
+            Err(KvSchedulerError::QueueRejected(_))
+        ));
+        assert_eq!(queue.pending_count(), 0);
+        slots.free(&"direct".to_string(), decay_now()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn paired_pool_is_ignored_by_classes_without_a_decode_limit() {
+        let profile = policy_profile(
+            None,
+            vec![PolicyClassConfig {
+                busy_thresholds: BusyThresholds {
+                    prefill_busy_threshold_frac: Some(0.5),
+                    ..Default::default()
+                },
+                ..class("prefill-bound", 1)
+            }],
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 100, profile);
+        let decode = TestPairedPool::new(false);
+        assert!(queue.set_paired_pool(decode.clone()));
+
+        let (request, request_rx) = make_request("prefill-only", 16);
+        queue.enqueue(request).await;
+        request_rx.await.unwrap().unwrap();
+        assert_eq!(decode.calls.load(Ordering::Relaxed), 0);
+
+        // The class still waits on its own prefill limit exactly as without a pool.
+        let (busy, busy_rx) = make_request("busy", 96);
+        queue.enqueue(busy).await;
+        busy_rx.await.unwrap().unwrap();
+        let (waiting, mut waiting_rx) = make_request("waiting", 16);
+        queue.enqueue(waiting).await;
+        queue.update().await;
+        assert!(waiting_rx.try_recv().is_err());
+        slots.free(&"busy".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        waiting_rx.await.unwrap().unwrap();
+        assert_eq!(decode.calls.load(Ordering::Relaxed), 0);
+        for request_id in ["prefill-only", "waiting"] {
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
+        }
+    }
+
+    async fn enqueue_admitted_upstream(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>,
+        request: SchedulingRequest,
+        classified: Option<ClassifyRequest>,
+    ) {
+        queue
+            .enqueue_admitted_with_block_hashes_and_lease(
+                request,
+                None,
+                None,
+                None,
+                classified,
+                Instant::now(),
+                true,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn admitted_upstream_skips_class_limits_but_not_reject_thresholds() {
+        let profile = policy_profile(
+            None,
+            vec![PolicyClassConfig {
+                busy_thresholds: BusyThresholds {
+                    prefill_busy_threshold_frac: Some(0.5),
+                    ..Default::default()
+                },
+                ..class("bounded", 1)
+            }],
+        );
+        let (queue, slots, _cfg_tx) = make_queue_with_profile_sender_and_reject(
+            1,
+            16,
+            100,
+            profile,
+            Some(Arc::new(|| BusyThresholds {
+                prefill_busy_threshold_frac: Some(0.9),
+                ..Default::default()
+            })),
+        );
+
+        // 60 of 100 prefill tokens: past the class wait limit, within the reject limit.
+        let (held, held_rx) = make_request("held", 60);
+        queue.enqueue(held).await;
+        held_rx.await.unwrap().unwrap();
+        let (waiting, mut waiting_rx) = make_request("waiting", 16);
+        queue.enqueue(waiting).await;
+        queue.update().await;
+        assert!(waiting_rx.try_recv().is_err());
+        assert_eq!(queue.pending_count(), 1);
+
+        // Admitted upstream: booked ahead of the backlog despite the class limit, and an
+        // already-passed deadline does not expire it.
+        let (decode, decode_rx) = make_request("decode-leg", 35);
+        let mut classified = queue
+            .build_classify_request(&decode, Instant::now(), WorkerInputs::NONE)
+            .0;
+        classified.set_due_at(Instant::now() - Duration::from_millis(1));
+        enqueue_admitted_upstream(&queue, decode, Some(classified)).await;
+        assert_eq!(
+            decode_rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(0, 0)
+        );
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.class_queue_stats(0).unwrap().received_total, 3);
+        assert_eq!(
+            queue
+                .class_queue_stats(0)
+                .unwrap()
+                .rejected_due_time_passed_total,
+            0
+        );
+
+        // 95 of 100 tokens: past the reject limit, so selection still sheds the worker.
+        let (rejected, rejected_rx) = make_request("decode-rejected", 16);
+        enqueue_admitted_upstream(&queue, rejected, None).await;
+        assert!(matches!(
+            rejected_rx.await.unwrap(),
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+        assert!(waiting_rx.try_recv().is_err());
+
+        for request_id in ["held", "decode-leg"] {
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
+        }
+        queue.update().await;
+        waiting_rx.await.unwrap().unwrap();
+        slots.free(&"waiting".to_string(), decay_now()).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_queueing_under_pressure() {
         let block_size = 16;
@@ -7409,7 +7835,7 @@ mod tests {
             });
             queue
                 .enqueue_admitted_with_block_hashes_and_lease(
-                    request, None, None, None, classified, ingress_at,
+                    request, None, None, None, classified, ingress_at, false,
                 )
                 .await;
             receivers.push((request_id, response_rx));
@@ -8330,6 +8756,7 @@ mod tests {
                 prepared: None,
                 queue_metadata,
                 lease,
+                admitted_upstream: false,
                 ack_tx,
             })
             .await
@@ -8452,6 +8879,7 @@ mod tests {
                 None,
                 classified,
                 ingress_at,
+                false,
             )
             .await;
         response_rx
@@ -8527,7 +8955,15 @@ mod tests {
         let mut metadata = queue.default_queue_metadata(&request, now).unwrap();
         metadata.due_at = due_at;
         metadata.lane_key = keyed_by_session(&request);
-        actor.handle_enqueue(request, None, lifecycle_transfer, None, None, metadata)
+        actor.handle_enqueue(
+            request,
+            None,
+            lifecycle_transfer,
+            None,
+            None,
+            metadata,
+            false,
+        )
     }
 
     /// Applies an enqueue of `request` as the actor loop applies a command, with an optional
@@ -8556,6 +8992,7 @@ mod tests {
                 prepared: None,
                 queue_metadata,
                 lease: None,
+                admitted_upstream: false,
                 ack_tx,
             },
             true,
@@ -8781,7 +9218,7 @@ mod tests {
 
         let (active, mut active_rx) = make_request("active", 64);
         let active_metadata = metadata(&active);
-        assert!(actor.handle_enqueue(active, None, None, None, None, active_metadata));
+        assert!(actor.handle_enqueue(active, None, None, None, None, active_metadata, false));
         actor.handle_update(None, Some(RecheckScope::All)).await;
         active_rx.try_recv().unwrap().unwrap();
         assert_eq!(actor.class_timers.armed[0], None);
@@ -8795,13 +9232,14 @@ mod tests {
             Some(Arc::clone(&head_transfer)),
             None,
             None,
-            head_metadata
+            head_metadata,
+            false
         ));
         assert_eq!(actor.class_timers.armed[0], at(100));
         tokio::time::advance(Duration::from_millis(50)).await;
         let (later, mut later_rx) = make_request("later", 64);
         let later_metadata = metadata(&later);
-        assert!(actor.handle_enqueue(later, None, None, None, None, later_metadata));
+        assert!(actor.handle_enqueue(later, None, None, None, None, later_metadata, false));
         assert_eq!(actor.class_timers.armed[0], at(100));
 
         // Cancelling the head moves the timer to its successor's due time.
@@ -8832,7 +9270,7 @@ mod tests {
 
         let (refill, _refill_rx) = make_request("refill", 64);
         let refill_metadata = metadata(&refill);
-        assert!(actor.handle_enqueue(refill, None, None, None, None, refill_metadata));
+        assert!(actor.handle_enqueue(refill, None, None, None, None, refill_metadata, false));
         assert_eq!(actor.class_timers.armed[0], at(250));
         // The cancelled head was never counted as a rejection.
         assert_eq!(class_outcomes(&queue, 0), (4, 1, 0));
@@ -9685,6 +10123,7 @@ mod tests {
                 None,
                 Some(classified),
                 start,
+                false,
             )
             .await;
         // An omitted class uses the default class. A name that matches no class is refused
@@ -9894,6 +10333,7 @@ mod tests {
                     None,
                     Some(classified),
                     start,
+                    false,
                 )
                 .await;
             moved.push(response_rx);
