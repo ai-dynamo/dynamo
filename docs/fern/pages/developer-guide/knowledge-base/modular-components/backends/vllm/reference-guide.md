@@ -154,6 +154,31 @@ disaggregation, speculative prefill, custom caching, SGLang, TensorRT-LLM,
 and native vLLM sidecars are unsupported. Extending these paths requires a
 separate qualification of plugin payload identity and lifecycle.
 
+## Structured-Output Validation Errors
+
+For Python `dynamo.vllm` workers, failures from vLLM's structured-output
+validator return safe client-facing reasons. Recognized failures include:
+
+- `Invalid JSON schema: enum array must not be empty`
+- `Invalid JSON schema: a required property is unsatisfiable`
+- `Invalid grammar: grammar must not be empty`
+
+Other failures from that validator return `Invalid structured-output constraint`.
+The original exception is retained in server diagnostics; arbitrary compiler
+details are not included in these public messages. Check the supplied
+`response_format` schema or guided-decoding constraint against the selected
+vLLM structured-output backend's supported constructs.
+
+Non-streaming requests return HTTP 400 for these errors. Streaming requests
+can return HTTP 200 followed by a server-sent event (SSE) error if the response
+headers have already been sent, for example:
+
+```text
+data: {"error":{"message":"Invalid JSON schema: enum array must not be empty","type":"invalid_request_error","code":400}}
+```
+
+Streaming clients must inspect SSE errors as well as the HTTP status.
+
 ## Hashing Consistency for KV Events
 
 When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:
