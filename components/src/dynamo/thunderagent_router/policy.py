@@ -36,7 +36,11 @@ class ResumeChoice(NamedTuple):
 
 @dataclass(kw_only=True)
 class ResumePlan:
-    """One ordered queue and its policy hooks; contains no placement decisions."""
+    """One ordered queue and its policy hooks; contains no placement decisions.
+
+    Native packing tries its capacity shortlist in decreasing footprint order,
+    then considers excluded programs in policy order for forced admission only.
+    """
 
     programs: list[Program]
     resume_ceiling: float
@@ -49,7 +53,7 @@ class ResumePlan:
         return self.resume_ceiling
 
     def may_force_admit(self, program: Program) -> bool:
-        """Consulted only after the host's normal capacity check fails."""
+        """Authorize an exception after failed fit, including shortlist exclusion."""
         return False
 
     def record_admission(
