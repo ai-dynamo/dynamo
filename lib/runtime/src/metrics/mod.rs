@@ -4,8 +4,9 @@
 //! Metrics of the runtime.
 //!
 //! The registry, the metric names, the typed helpers and the frontend pipeline instruments live
-//! in `dynamo-metrics` and are re-exported here by name. The rest of that crate (the request
-//! metrics, the load frames and its environment names) is not: take it from `dynamo_metrics`.
+//! in `dynamo-metrics` and are re-exported here by name. The request metrics and the load frames
+//! are not: take them from `dynamo_metrics`. The environment names are reachable through
+//! `crate::config::environment_names::llm::metrics`, which takes its values from that crate.
 //! This module adds what needs the runtime: the transport and Tokio instruments and the OTLP
 //! exporter.
 
