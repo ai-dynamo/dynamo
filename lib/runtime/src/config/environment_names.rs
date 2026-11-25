@@ -553,25 +553,30 @@ pub mod llm {
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
-        pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
+        pub const DYN_METRICS_PREFIX: &str = dynamo_metrics::environment_names::DYN_METRICS_PREFIX;
 
         /// Histogram bucket configuration prefixes. Each is suffixed with `_MIN`,
         /// `_MAX`, or `_COUNT` to form the variable that tunes one frontend
         /// histogram's log-spaced buckets, for example `DYN_METRICS_ITL_MAX`.
         /// Values are read once, when the frontend builds its metrics.
-        pub const DYN_METRICS_REQUEST_DURATION: &str = "DYN_METRICS_REQUEST_DURATION";
+        pub const DYN_METRICS_REQUEST_DURATION: &str =
+            dynamo_metrics::environment_names::DYN_METRICS_REQUEST_DURATION;
         /// See [`DYN_METRICS_REQUEST_DURATION`].
-        pub const DYN_METRICS_INPUT_SEQUENCE: &str = "DYN_METRICS_INPUT_SEQUENCE";
+        pub const DYN_METRICS_INPUT_SEQUENCE: &str =
+            dynamo_metrics::environment_names::DYN_METRICS_INPUT_SEQUENCE;
         /// See [`DYN_METRICS_REQUEST_DURATION`].
-        pub const DYN_METRICS_OUTPUT_SEQUENCE: &str = "DYN_METRICS_OUTPUT_SEQUENCE";
+        pub const DYN_METRICS_OUTPUT_SEQUENCE: &str =
+            dynamo_metrics::environment_names::DYN_METRICS_OUTPUT_SEQUENCE;
         /// See [`DYN_METRICS_REQUEST_DURATION`].
-        pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
+        pub const DYN_METRICS_TTFT: &str = dynamo_metrics::environment_names::DYN_METRICS_TTFT;
         /// See [`DYN_METRICS_REQUEST_DURATION`].
-        pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
+        pub const DYN_METRICS_ITL: &str = dynamo_metrics::environment_names::DYN_METRICS_ITL;
         /// Comma-separated inter-token latency histogram bucket boundaries.
-        pub const DYN_METRICS_ITL_BUCKETS: &str = "DYN_METRICS_ITL_BUCKETS";
+        pub const DYN_METRICS_ITL_BUCKETS: &str =
+            dynamo_metrics::environment_names::DYN_METRICS_ITL_BUCKETS;
         /// See [`DYN_METRICS_REQUEST_DURATION`].
-        pub const DYN_METRICS_EMBEDDING_LATENCY: &str = "DYN_METRICS_EMBEDDING_LATENCY";
+        pub const DYN_METRICS_EMBEDDING_LATENCY: &str =
+            dynamo_metrics::environment_names::DYN_METRICS_EMBEDDING_LATENCY;
 
         /// Deprecated prefix for the histogram bucket variables above.
         ///
@@ -579,7 +584,8 @@ pub mod llm {
         /// `DYN_METRICS_`, so the variables were read under doubled names such as
         /// `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`. The doubled form is still accepted
         /// as a fallback, with a warning, and will be removed in a future release.
-        pub const DEPRECATED_HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+        pub const DEPRECATED_HISTOGRAM_PREFIX: &str =
+            dynamo_metrics::environment_names::DEPRECATED_HISTOGRAM_PREFIX;
 
         /// Former name of [`DEPRECATED_HISTOGRAM_PREFIX`], kept so that code outside
         /// this workspace importing it keeps compiling. Remove together with the
