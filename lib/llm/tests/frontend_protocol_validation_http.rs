@@ -1733,24 +1733,53 @@ async fn chat_allowed_tools_blocks_disallowed_backend_calls() {
 
 #[tokio::test]
 #[serial]
-async fn chat_completions_reject_empty_tools() {
+async fn chat_completions_treat_empty_tools_as_omitted() {
     temp_env::async_with_vars(BASE_ENV, async {
-        let svc = HarnessService::start(Vec::new()).await;
+        let answer = vec![Annotated::from_data(
+            serde_json::from_value(json!({
+                "id": "chat-empty-tools", "object": "chat.completion.chunk", "created": 1, "model": MODEL,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "pong"},
+                             "finish_reason": "stop", "logprobs": null}]
+            }))
+            .unwrap(),
+        )];
+        let svc = HarnessService::start(vec![answer; 4]).await;
+
+        for tool_choice in [None, Some("auto"), Some("required"), Some("none")] {
+            let mut body = json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 10,
+                "tools": []
+            });
+            if let Some(tool_choice) = tool_choice {
+                body["tool_choice"] = json!(tool_choice);
+            }
+            let response = post_json(&svc, "/v1/chat/completions", body).await;
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::OK,
+                "tool_choice={tool_choice:?}"
+            );
+
+            let captured = svc.engine.take_requests().await;
+            assert_eq!(captured.len(), 1);
+            let forwarded = serde_json::to_value(&captured[0]).unwrap();
+            assert!(forwarded.get("tools").is_none_or(Value::is_null));
+            if tool_choice.is_some() {
+                assert_eq!(forwarded["tool_choice"], "none");
+            }
+        }
 
         let body = json!({
             "model": MODEL,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 10,
-            "tools": []
+            "tools": [],
+            "tool_choice": {"type": "function", "function": {"name": "lookup"}}
         });
         let response = post_json(&svc, "/v1/chat/completions", body).await;
-        assert_openai_error(
-            response,
-            ExpectedError::Validation,
-            "tools array cannot be empty; omit the field entirely to disable tool use",
-        )
-        .await;
-
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
         assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
     })

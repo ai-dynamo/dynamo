@@ -8989,6 +8989,7 @@ impl
             .inner
             .normalize_custom_tools()
             .map_err(|error| invalid_argument_error(error.to_string()))?;
+        crate::protocols::openai::validate::normalize_empty_tools(&mut request.inner);
         request.normalize_responses_history_phases(tool_choice::uses_muse_spark_parser(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),

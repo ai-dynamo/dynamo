@@ -4,8 +4,8 @@
 use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionObject,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_protocols::validation;
 
@@ -515,8 +515,41 @@ fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow:
     Ok(())
 }
 
+/// True when an explicit `tools: []` should be treated as an omitted field.
+///
+/// Matches vLLM `ChatCompletionRequest.check_tool_usage` and the OpenAI API:
+/// an empty list means "no tools" unless `tool_choice` names a function, which
+/// keeps the list so validation reports the missing tool. System-message tools
+/// still make an explicit `tools: []` usable, so the request is left alone.
+pub(crate) fn needs_empty_tools_normalization(request: &CreateChatCompletionRequest) -> bool {
+    request.tools.as_ref().is_some_and(|tools| tools.is_empty())
+        && !matches!(
+            request.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Named(_))
+        )
+        && request.dynamic_system_tools().next().is_none()
+}
+
+/// Treats an explicit `tools: []` as an omitted `tools` field. `"auto"` and
+/// `"required"` have nothing to call, so they fall back to `"none"`.
+/// Returns whether the request changed.
+pub(crate) fn normalize_empty_tools(request: &mut CreateChatCompletionRequest) -> bool {
+    if !needs_empty_tools_normalization(request) {
+        return false;
+    }
+    request.tools = None;
+    if matches!(
+        request.tool_choice,
+        Some(ChatCompletionToolChoiceOption::Auto | ChatCompletionToolChoiceOption::Required)
+    ) {
+        request.tool_choice = Some(ChatCompletionToolChoiceOption::None);
+    }
+    true
+}
+
 /// Merges and validates request tools and tools declared in system messages.
-/// An explicitly empty request list is invalid unless system messages supply tools.
+/// An explicitly empty request list left after [`normalize_empty_tools`] (a
+/// named `tool_choice`) is invalid unless system messages supply tools.
 pub(crate) fn validated_effective_tools(
     request: &CreateChatCompletionRequest,
 ) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
@@ -688,8 +721,6 @@ pub fn validate_tool_choice(
     tool_choice: &Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
     tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
-    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
-
     match validate_openai_tool_choice(tool_choice.as_ref(), tools) {
         Ok(()) => Ok(()),
         Err(ToolChoiceError::EmptyTools) => {

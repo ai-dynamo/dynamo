@@ -4291,6 +4291,9 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    // An explicit `tools: []` means "no tools", as in vLLM and the OpenAI API.
+    crate::protocols::openai::validate::normalize_empty_tools(&mut request.inner);
+
     // Retain API identity here while all engine/parser paths receive functions.
     let mut custom_tools =
         crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
