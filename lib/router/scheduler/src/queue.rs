@@ -1523,10 +1523,8 @@ impl<
         }
     }
 
-    /// Build the classifier's input and the rows for its declared worker inputs. Uses
-    /// `request.isl_tokens` — the routing-token basis the queue's bucketing, limits, and DRR
-    /// cost already use — so a pass-through classifier is behavior-identical to no
-    /// classifier.
+    /// Build the classifier's input and the rows for its declared worker inputs, through
+    /// [`classify_inputs`], over the workers this queue's eligibility admits.
     pub fn build_classify_request(
         &self,
         request: &SchedulingRequest,
@@ -1534,34 +1532,20 @@ impl<
         worker_inputs: WorkerInputs,
     ) -> (ClassifyRequest, WorkerInputRows) {
         self.with_queue_eligibility(request, |workers, eligibility, base| {
-            let cached_tokens = SchedulingContext::new(request, workers)
-                .with_eligibility(eligibility)
-                .best_cached_tokens();
             let reject_thresholds = self
                 .reject_thresholds
                 .as_ref()
                 .map(|provider| provider())
                 .unwrap_or_default();
-            let mut classification =
-                ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
-                    .with_pinned_worker(request.pinned_worker)
-                    .with_sequence_hashes(request.token_seq.as_deref())
-                    .with_busy_thresholds(reject_thresholds);
-            if let Some(request_id) = request.mode.request_id() {
-                classification = classification.with_request_id(request_id);
-            }
-            if let Some(policy_class) = request.policy_class.as_deref() {
-                classification = classification.with_initial_policy_class(policy_class);
-            }
-            if let Some(session_context) = request.session_context.clone() {
-                classification = classification.with_session_context(session_context);
-            }
-            let rows = if worker_inputs == WorkerInputs::NONE {
-                WorkerInputRows::empty()
-            } else {
-                worker_input_rows(workers, request, base, worker_inputs)
-            };
-            (classification, rows)
+            classify_inputs(
+                workers,
+                request,
+                eligibility,
+                base,
+                ingress_at,
+                reject_thresholds,
+                worker_inputs,
+            )
         })
     }
 
@@ -3520,6 +3504,49 @@ impl<
             .pending_cached_tokens
             .fetch_sub(snapshot.cached_tokens, AtomicOrdering::Relaxed);
     }
+}
+
+/// Build the request a classifier reads and the rows for its declared worker inputs from one
+/// scheduling request, so the two agree: the request's pin is the pin that narrows the rows,
+/// and its cached tokens are the best that an eligible worker holds. Uses
+/// `request.isl_tokens`, the routing-token basis the queue's bucketing, limits, and DRR cost
+/// already use, so a pass-through classifier is behavior-identical to no classifier.
+///
+/// `eligibility` decides which workers count toward the cached tokens; `base` decides which
+/// ranks the rows hold. The queue passes its own two views; a caller with one view passes it
+/// twice.
+pub fn classify_inputs<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    base: RoutingEligibility<'_>,
+    ingress_at: Instant,
+    reject_thresholds: BusyThresholds,
+    worker_inputs: WorkerInputs,
+) -> (ClassifyRequest, WorkerInputRows) {
+    let cached_tokens = SchedulingContext::new(request, workers)
+        .with_eligibility(eligibility)
+        .best_cached_tokens();
+    let mut classification =
+        ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
+            .with_pinned_worker(request.pinned_worker)
+            .with_sequence_hashes(request.token_seq.as_deref())
+            .with_busy_thresholds(reject_thresholds);
+    if let Some(request_id) = request.mode.request_id() {
+        classification = classification.with_request_id(request_id);
+    }
+    if let Some(policy_class) = request.policy_class.as_deref() {
+        classification = classification.with_initial_policy_class(policy_class);
+    }
+    if let Some(session_context) = request.session_context.clone() {
+        classification = classification.with_session_context(session_context);
+    }
+    let rows = if worker_inputs == WorkerInputs::NONE {
+        WorkerInputRows::empty()
+    } else {
+        worker_input_rows(workers, request, base, worker_inputs)
+    };
+    (classification, rows)
 }
 
 #[cfg(test)]

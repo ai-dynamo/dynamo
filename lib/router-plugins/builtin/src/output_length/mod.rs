@@ -298,9 +298,9 @@ mod tests {
             )
         };
 
-        assert!(build(serde_json::Value::Null).is_ok());
+        assert!(build("").is_ok());
         assert!(matches!(
-            build(serde_json::json!({ "predictor": "ridge" })),
+            build("predictor: ridge"),
             Err(RequestClassifierRegistryError::Provider { .. })
         ));
     }

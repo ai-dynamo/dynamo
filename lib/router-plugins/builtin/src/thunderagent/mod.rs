@@ -37,21 +37,12 @@ mod tests {
         let mut registry = RouterPluginRegistry::default();
         register(&mut registry).unwrap();
 
-        let no_parameters = serde_json::Value::Null;
-        assert!(
-            registered_policy(
-                &registry,
-                "thunderagent",
-                no_parameters.clone(),
-                WorkerType::Aggregated,
-            )
-            .is_ok()
-        );
+        assert!(registered_policy(&registry, "thunderagent", "", WorkerType::Aggregated).is_ok());
         assert!(
             registered_classifier(
                 &registry,
                 "thunderagent",
-                no_parameters,
+                "",
                 RequestClassifierContext::new(16, Vec::new),
             )
             .is_ok()

@@ -51,9 +51,10 @@
 //! [`registered_policy`] builds a policy from a registered type name and parameters, for a
 //! registration test, and [`registered_classifier`] does the same for a request classifier.
 //!
-//! For a request classifier, [`classify_request`] builds the request, [`classify`] runs the
-//! classifier with no worker rows, and [`SelectionCase::classify`] runs it over the case's
-//! workers when it declares worker inputs. [`request_progress`] builds a progress reading.
+//! For a request classifier, [`SelectionCase::classify`] runs it on the case: it builds the
+//! request and the worker rows from the case, as the router builds both from one request.
+//! Without a case, [`classify_request`] builds a request and [`classify`] runs the classifier
+//! on it with no worker rows. [`request_progress`] builds a progress reading.
 //!
 //! This module follows the stability of the plugin API ([`super`]).
 
@@ -66,17 +67,16 @@ use dynamo_admission::{
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::TieredMatchDetails;
 use dynamo_router_protocol::WorkerType;
-use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{
     AccountingAttribution, CacheHitWeights, KvSchedulerError, OverlapAnalysis, OverlapSignals,
     RoutingConstraints, ScheduleMode, SchedulingRequest, WorkerConfigLike, WorkerSelectionInput,
-    WorkerSelector, worker_input_rows,
+    WorkerSelector, classify_inputs,
 };
 use dynamo_session_affinity::WorkerAffinityTarget;
-use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_slot_tracker::{BusyThresholds, WorkerLoadProjection};
 use dynamo_worker_selection::{
     SelectionConfig, WorkerInputRows, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
     WorkerSelectionPolicyError,
@@ -84,8 +84,12 @@ use dynamo_worker_selection::{
 use rustc_hash::FxHashMap;
 
 use crate::plugins::RouterPluginRegistry;
-use crate::plugins::request_classifier::RequestClassifierRegistryError;
-use crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError;
+use crate::plugins::request_classifier::{
+    RequestClassifierProviderError, RequestClassifierRegistryError,
+};
+use crate::plugins::worker_selection::{
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
+};
 
 /// The signals one worker reports in a [`SelectionCase`]. Every value starts at zero or
 /// unreported; set the ones the policy under test reads.
@@ -308,20 +312,19 @@ impl SelectionCase {
             OverlapAnalysis::new(&CacheHitWeights::default(), self.block_size, &matches).signals();
         let overlap = &mut self.request.overlap;
         let tiers = &mut overlap.tier_overlap_blocks;
-        for (blocks, reported) in [
-            (&mut tiers.device, signals.tier_overlap_blocks.device),
-            (
-                &mut tiers.host_pinned,
-                signals.tier_overlap_blocks.host_pinned,
-            ),
-            (&mut tiers.disk, signals.tier_overlap_blocks.disk),
-            (
-                &mut overlap.effective_cached_tokens,
-                signals.effective_cached_tokens,
-            ),
-        ] {
-            set_rank(blocks, rank, reported.get(&rank).copied());
-        }
+        let reported = signals.tier_overlap_blocks;
+        set_rank(&mut tiers.device, rank, reported.device.get(&rank).copied());
+        set_rank(
+            &mut tiers.host_pinned,
+            rank,
+            reported.host_pinned.get(&rank).copied(),
+        );
+        set_rank(&mut tiers.disk, rank, reported.disk.get(&rank).copied());
+        set_rank(
+            &mut overlap.effective_cached_tokens,
+            rank,
+            signals.effective_cached_tokens.get(&rank).copied(),
+        );
         set_rank(
             &mut overlap.effective_overlap_blocks,
             rank,
@@ -337,24 +340,25 @@ impl SelectionCase {
         );
     }
 
-    /// Run `classifier` on `request` with this case's workers as its worker view, built for
-    /// the input groups the classifier declares. The view holds every worker in the case.
+    /// Run `classifier` on this case. The request it classifies and the worker rows it reads
+    /// are both built from the case, as the router builds both from one request: the case's
+    /// request ID, session, and pinned worker are the request's, the rows hold the workers
+    /// that pin admits with the input groups the classifier declares, and the request's cached
+    /// tokens are the best cache estimate among those workers.
     pub fn classify<C: RequestClassifier + ?Sized>(
         &self,
         classifier: &mut C,
-        request: ClassifyRequest,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-        let inputs = classifier.required_worker_inputs();
-        let rows = if inputs == WorkerInputs::NONE {
-            WorkerInputRows::empty()
-        } else {
-            worker_input_rows(
-                &self.workers,
-                &self.request,
-                self.request.eligibility(),
-                inputs,
-            )
-        };
+        let eligibility = self.request.eligibility();
+        let (request, rows) = classify_inputs(
+            &self.workers,
+            &self.request,
+            eligibility,
+            eligibility,
+            tokio::time::Instant::now(),
+            BusyThresholds::default(),
+            classifier.required_worker_inputs(),
+        );
         rows.read(|workers| classifier.classify(request, workers))
     }
 
@@ -391,16 +395,22 @@ fn set_rank<V>(map: &mut FxHashMap<WorkerWithDpRank, V>, rank: WorkerWithDpRank,
 }
 
 /// Build the policy that `registry` registers under `policy_type`, for workers of
-/// `worker_type`, from `parameters`: the mapping a policy file would give that type. Use it to
-/// test that a plugin registers under its name and that its provider accepts or rejects
-/// parameters, without resolving a policy file.
+/// `worker_type`, from `parameters`: the YAML a policy file would give that type, such as
+/// `"max_idle_secs: 600"`, or `""` for none. Use it to test that a plugin registers under its
+/// name and that its provider accepts or rejects parameters, without resolving a policy file.
 pub fn registered_policy(
     registry: &RouterPluginRegistry,
     policy_type: &str,
-    parameters: serde_json::Value,
+    parameters: &str,
     worker_type: WorkerType,
 ) -> Result<WorkerSelectionPolicy, WorkerSelectionPolicyRegistryError> {
-    let factory = registry.resolve_type_with(policy_type, policy_file_parameters(parameters))?;
+    let parameters = policy_file_parameters(parameters).map_err(|error| {
+        WorkerSelectionPolicyRegistryError::Provider {
+            policy_type: policy_type.to_owned(),
+            source: WorkerSelectionPolicyProviderError::new(error.to_string()),
+        }
+    })?;
+    let factory = registry.resolve_type_with(policy_type, parameters)?;
     Ok(factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::default(),
         worker_type,
@@ -409,25 +419,31 @@ pub fn registered_policy(
 }
 
 /// Build the classifier that `registry` registers under `classifier_type` from `parameters`,
-/// the mapping a policy file would give that type, for the router `context` describes. Use it
-/// to test that a classifier registers under its name and that its provider accepts or
-/// rejects parameters, without resolving a policy file.
+/// the YAML a policy file would give that type or `""` for none, for the router `context`
+/// describes. Use it to test that a classifier registers under its name and that its provider
+/// accepts or rejects parameters, without resolving a policy file.
 pub fn registered_classifier(
     registry: &RouterPluginRegistry,
     classifier_type: &str,
-    parameters: serde_json::Value,
+    parameters: &str,
     context: RequestClassifierContext,
 ) -> Result<Box<dyn RequestClassifier>, RequestClassifierRegistryError> {
-    let parameters = policy_file_parameters(parameters);
+    let parameters = policy_file_parameters(parameters).map_err(|error| {
+        RequestClassifierRegistryError::Provider {
+            classifier_type: classifier_type.to_owned(),
+            source: RequestClassifierProviderError::new(error.to_string()),
+        }
+    })?;
     let factory = registry.resolve_classifier_type_with(classifier_type, parameters)?;
     Ok(factory(context))
 }
 
-/// The parameter mapping a policy file hands a provider; no parameters is an empty mapping.
-fn policy_file_parameters(parameters: serde_json::Value) -> serde_yaml::Value {
-    match parameters {
-        serde_json::Value::Null => serde_yaml::Value::Mapping(Default::default()),
-        parameters => serde_yaml::to_value(parameters).expect("JSON converts to YAML"),
+/// Parse `parameters` as the mapping a policy file hands a provider. Empty text is no
+/// parameters, which a provider receives as an empty mapping.
+fn policy_file_parameters(parameters: &str) -> Result<serde_yaml::Value, serde_yaml::Error> {
+    match serde_yaml::from_str(parameters)? {
+        serde_yaml::Value::Null => Ok(serde_yaml::Value::Mapping(Default::default())),
+        parameters => Ok(parameters),
     }
 }
 
@@ -454,9 +470,7 @@ pub fn classify_request(
 /// A progress reading fixed at `context_tokens`, as `ClassifyRequest::progress` returns one
 /// for a request the router has not updated.
 pub fn request_progress(context_tokens: usize) -> RequestProgress {
-    classify_request(context_tokens, None, None, None)
-        .progress()
-        .clone()
+    dynamo_admission::host::request_progress(context_tokens).0
 }
 
 /// Run `classifier` on `request` with no worker rows, as the router does for a classifier that
@@ -664,26 +678,19 @@ mod tests {
             rows_seen: 0,
         };
         let busy = SelectionCase::new(160, 16)
+            .request_id("r1")
             .worker(29, CaseWorker::new().active_requests(4))
             .worker(41, CaseWorker::new().active_requests(9));
-        let classified = busy
-            .classify(
-                &mut classifier,
-                classify_request(160, Some("r1"), None, None),
-            )
-            .unwrap();
+        let classified = busy.classify(&mut classifier).unwrap();
         assert_eq!(classifier.rows_seen, 2);
         assert_eq!(classified.policy_class(), Some("batch"));
+        assert_eq!(classified.info().request_id(), Some("r1"));
 
         let idle = SelectionCase::new(160, 16)
+            .request_id("r2")
             .worker(29, CaseWorker::new().active_requests(4))
             .worker(41, CaseWorker::new().active_requests(1));
-        let classified = idle
-            .classify(
-                &mut classifier,
-                classify_request(160, Some("r2"), None, None),
-            )
-            .unwrap();
+        let classified = idle.classify(&mut classifier).unwrap();
         assert_eq!(classified.policy_class(), None);
 
         // Without a case the classifier is lent no rows.
@@ -691,6 +698,38 @@ mod tests {
             classify(&mut classifier, classify_request(160, None, None, None)).unwrap();
         assert_eq!(classifier.rows_seen, 0);
         assert_eq!(classified.policy_class(), None);
+    }
+
+    #[test]
+    fn a_case_builds_the_classifier_request_and_its_rows_from_one_request() {
+        const PINNED: WorkerWithDpRank = WorkerWithDpRank {
+            worker_id: 41,
+            dp_rank: 0,
+        };
+        let mut classifier = LoadAwareClassifier {
+            max_active_requests: 4,
+            rows_seen: 0,
+        };
+        // Worker 29 holds half of the prompt's ten blocks; worker 41 holds none.
+        let case = SelectionCase::new(160, 16)
+            .worker(29, CaseWorker::new().device_overlap_blocks(5))
+            .worker(41, CaseWorker::new());
+
+        // No pin: both workers are rows, and the cost leaves out the best cached prefix.
+        let classified = case.classify(&mut classifier).unwrap();
+        assert_eq!(classifier.rows_seen, 2);
+        assert_eq!(classified.info().pinned_worker(), None);
+        assert!(classified.scheduling_cost_tokens() < 160);
+
+        // Pinned to the worker with no cache: the pin narrows the rows and is the request's
+        // pin, and the cost is the whole prompt.
+        let classified = case
+            .pinned_worker(PINNED)
+            .classify(&mut classifier)
+            .unwrap();
+        assert_eq!(classifier.rows_seen, 1);
+        assert_eq!(classified.info().pinned_worker(), Some(PINNED));
+        assert_eq!(classified.scheduling_cost_tokens(), 160);
     }
 
     #[test]
@@ -789,13 +828,8 @@ mod tests {
             )
             .unwrap();
 
-        let policy = registered_policy(
-            &registry,
-            "prefer",
-            serde_json::json!({ "prefer": 41 }),
-            WorkerType::Aggregated,
-        )
-        .unwrap();
+        let policy =
+            registered_policy(&registry, "prefer", "prefer: 41", WorkerType::Aggregated).unwrap();
         let selected = SelectionCase::new(16, 16)
             .worker(29, CaseWorker::new())
             .worker(41, CaseWorker::new())
@@ -804,21 +838,16 @@ mod tests {
         assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
 
         assert!(matches!(
-            registered_policy(
-                &registry,
-                "prefer",
-                serde_json::json!({ "unknown": 1 }),
-                WorkerType::Aggregated,
-            ),
+            registered_policy(&registry, "prefer", "unknown: 1", WorkerType::Aggregated,),
+            Err(WorkerSelectionPolicyRegistryError::Provider { .. })
+        ));
+        // Text that is not YAML is reported as bad parameters, not a panic.
+        assert!(matches!(
+            registered_policy(&registry, "prefer", "prefer: [", WorkerType::Aggregated),
             Err(WorkerSelectionPolicyRegistryError::Provider { .. })
         ));
         assert!(matches!(
-            registered_policy(
-                &registry,
-                "absent",
-                serde_json::Value::Null,
-                WorkerType::Aggregated,
-            ),
+            registered_policy(&registry, "absent", "", WorkerType::Aggregated,),
             Err(WorkerSelectionPolicyRegistryError::UnknownType { .. })
         ));
     }
@@ -858,13 +887,8 @@ mod tests {
             .unwrap();
         let context = || RequestClassifierContext::new(16, Vec::new);
 
-        let mut classifier = registered_classifier(
-            &registry,
-            "one-class",
-            serde_json::json!({ "class": "batch" }),
-            context(),
-        )
-        .unwrap();
+        let mut classifier =
+            registered_classifier(&registry, "one-class", "class: batch", context()).unwrap();
         let classified = classify(
             classifier.as_mut(),
             classify_request(160, Some("r1"), None, None),
@@ -873,16 +897,11 @@ mod tests {
         assert_eq!(classified.policy_class(), Some("batch"));
 
         assert!(matches!(
-            registered_classifier(
-                &registry,
-                "one-class",
-                serde_json::json!({ "unknown": 1 }),
-                context(),
-            ),
+            registered_classifier(&registry, "one-class", "unknown: 1", context(),),
             Err(RequestClassifierRegistryError::Provider { .. })
         ));
         assert!(matches!(
-            registered_classifier(&registry, "absent", serde_json::Value::Null, context()),
+            registered_classifier(&registry, "absent", "", context()),
             Err(RequestClassifierRegistryError::UnknownType { .. })
         ));
     }
