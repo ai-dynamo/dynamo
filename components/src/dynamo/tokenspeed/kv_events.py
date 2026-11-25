@@ -39,12 +39,12 @@ def validate_kv_events(server_args: Any, kv_block_size: int | None) -> None:
             "TokenSpeed KV events need prefix caching; remove "
             "--disable-prefix-caching or disable KV events"
         )
-    if attention_dp_size(server_args) != 1:
-        # Each rank publishes its own KV events (on its own node); the worker
-        # subscribes to one publisher and tags no DP rank.
+    if attention_dp_size(server_args) > 1 and int(server_args.mapping.nnodes) > 1:
+        # Each attention-DP rank publishes on its own node; the worker, on the
+        # first node, subscribes over loopback only.
         raise ValueError(
-            "TokenSpeed KV events currently require attention DP=1; with "
-            "attention DP > 1, route without --router-kv-events"
+            "TokenSpeed KV events with attention DP > 1 require a single node; "
+            "across nodes, route without --router-kv-events"
         )
     if kv_block_size is None:
         raise ValueError(
@@ -53,7 +53,9 @@ def validate_kv_events(server_args: Any, kv_block_size: int | None) -> None:
         )
 
 
-def kv_event_source(config: dict[str, Any]) -> ZmqSource:
+def kv_event_sources(config: dict[str, Any], dp_size: int = 1) -> list[ZmqSource]:
+    """One source per attention-DP rank: TokenSpeed's rank ``r`` publishes on
+    the endpoint's TCP port plus ``r`` (ts-control ``offset_endpoint_port``)."""
     if config.get("replay_endpoint") is not None:
         raise ValueError(
             "Dynamo TokenSpeed KV events do not support replay_endpoint; "
@@ -74,4 +76,16 @@ def kv_event_source(config: dict[str, Any]) -> ZmqSource:
         raise ValueError(
             "TokenSpeed KV events require a binding endpoint: ipc://... or tcp://*:PORT"
         )
-    return ZmqSource(endpoint=endpoint, topic=config.get("topic", ""), dp_rank=0)
+    topic = config.get("topic", "")
+    if dp_size == 1:
+        return [ZmqSource(endpoint=endpoint, topic=topic, dp_rank=0)]
+    if endpoint.startswith("ipc://"):
+        raise ValueError(
+            "TokenSpeed KV events with attention DP > 1 need a tcp://*:PORT "
+            "endpoint: each rank publishes on PORT + its rank"
+        )
+    base, port = endpoint.rsplit(":", 1)
+    return [
+        ZmqSource(endpoint=f"{base}:{int(port) + rank}", topic=topic, dp_rank=rank)
+        for rank in range(dp_size)
+    ]

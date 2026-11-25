@@ -522,9 +522,9 @@ def test_follower_node_runs_its_ranks_against_the_leader(monkeypatch):
         (
             {
                 "kv_events_config": '{"enable_kv_cache_events":true}',
-                "mapping": SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=1),
+                "mapping": SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=2),
             },
-            "attention DP=1",
+            "single node",
         ),
         ({"kv_events_config": '{"enable_kv_cache_events":true}'}, "--kv-block-size"),
         (
@@ -863,6 +863,50 @@ async def test_kv_source_matches_native_bind_and_topic(native, native_config, ex
         assert source.endpoint == expected
         assert source.topic == "kv"
         assert json.loads(engine.server_args.kv_events_config) == native_config
+    finally:
+        await engine.cleanup()
+
+
+@pytest.mark.parametrize(
+    "endpoint,expected_base",
+    [("tcp://*:19000", "tcp://127.0.0.1:19000"), (None, None)],
+)
+async def test_kv_sources_one_per_attention_dp_rank(native, endpoint, expected_base):
+    # TokenSpeed's rank r publishes on the endpoint's port plus r.
+    native_config = {"enable_kv_cache_events": True}
+    if endpoint is not None:
+        native_config["endpoint"] = endpoint
+    engine = make_engine(
+        kv_block_size=64,
+        kv_events_config=json.dumps(native_config),
+        mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=4), nnodes=1),
+    )
+    try:
+        await engine.start(worker_id=1)
+        sources = await engine.kv_event_sources()
+        published = json.loads(engine.server_args.kv_events_config)["endpoint"]
+        assert published.startswith("tcp://*:")
+        base = expected_base or published.replace("tcp://*:", "tcp://127.0.0.1:")
+        base_host, base_port = base.rsplit(":", 1)
+        assert [(s.endpoint, s.dp_rank) for s in sources] == [
+            (f"{base_host}:{int(base_port) + rank}", rank) for rank in range(4)
+        ]
+    finally:
+        await engine.cleanup()
+
+
+async def test_kv_events_with_attention_dp_reject_ipc(native, tmp_path):
+    engine = make_engine(
+        kv_block_size=64,
+        kv_events_config=json.dumps(
+            {"enable_kv_cache_events": True, "endpoint": f"ipc://{tmp_path}/ev"}
+        ),
+        mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=1),
+    )
+    try:
+        with pytest.raises(ValueError, match="tcp://"):
+            await engine.start(worker_id=1)
+        assert native.launches == []
     finally:
         await engine.cleanup()
 
