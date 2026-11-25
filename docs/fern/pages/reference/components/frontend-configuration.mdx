@@ -694,8 +694,9 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
 </ParamField>
 
 <ParamField path="--request-plane" type="string" default="tcp">
-  Request distribution transport. `tcp` is the default. `velo` sends requests
-  over the Velo response listener and requires `--response-plane velo`; see
+  Request distribution transport. `tcp` is the default and is recommended for
+  production. `velo` is opt-in: it sends requests over the Velo response
+  listener, requires `--response-plane velo`, and must match the workers; see
   [Velo Request Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#velo-request-plane).
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>velo</Badge></span>

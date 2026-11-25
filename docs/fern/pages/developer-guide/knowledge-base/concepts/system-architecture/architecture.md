@@ -100,19 +100,75 @@ DYN_REQUEST_PLANE=velo DYN_RESPONSE_PLANE=velo python3 -m dynamo.frontend
 - Both planes share the Velo listener. `DYN_VELO_RESPONSE_PORT` sets its port.
 - Bidirectional endpoints, whose requests stream input, still use the TCP
   request-callback stream.
-- A pool must not mix Velo and non-Velo workers. A foreign transport in a Velo
-  pool is a local configuration error; the router does not inhibit or migrate
-  around it.
 - An older runtime skips Velo metadata it cannot read. In Kubernetes pod mode
   that covers the whole pod; in container mode, compatible sibling containers
-  can still be discovered. A separate Dynamo namespace isolates routing only
-  when the frontend selects that exact namespace or disjoint prefixes: a
-  `--namespace-prefix` that matches both pools still selects both, and Dynamo
-  namespaces do not filter raw Kubernetes watches.
-- In the closed-loop mock-worker comparison run for this option, `tcp` requests
-  with Velo responses had lower median latency than Velo requests with Velo
-  responses across three interleaved runs per arm. This is a result for that
-  workload, not a general ordering.
+  can still be discovered.
+
+##### Shared Settings and Limits
+
+The Velo request plane reads the `DYN_TCP_*` request settings instead of adding
+its own:
+
+| Setting | Effect on the Velo request plane |
+|---|---|
+| `DYN_TCP_REQUEST_TIMEOUT` | Bounds the send and the worker's acknowledgment, including first contact with a worker. |
+| `DYN_TCP_WORKER_POOL_SIZE` | Maximum requests a worker runs at once. |
+| `DYN_TCP_WORK_QUEUE_SIZE` | Maximum requests a worker queues beyond the pool. A request beyond both is refused as overloaded. |
+| `DYN_TCP_MAX_MESSAGE_SIZE` | Maximum request size, and maximum size of one response item. |
+| `DYN_TCP_RESPONSE_STREAM_HOST` | Host the Velo listener binds and advertises for both planes. `DYN_TCP_RPC_HOST` and `DYN_TCP_RPC_PORT` are not used. |
+
+- Set the same `DYN_TCP_MAX_MESSAGE_SIZE` on every frontend and worker in the
+  pool. When a worker's limit is lower than the frontend's, the worker refuses
+  the larger requests, and the frontend treats each refusal as a connection
+  failure and marks the worker down. A response item above the limit ends its
+  own stream.
+- Each request header value is limited to 1024 bytes, and the encoded header
+  map to 15,872 bytes. A request over either limit fails at the frontend and is
+  not sent. The `tcp` request plane has no such limit, so a long `x-request-id`
+  or `tracestate` that works on `tcp` fails on `velo`.
+- A frontend keeps at most four requests larger than 256 KiB unacknowledged at
+  one worker. Further large requests to that worker wait their turn within
+  `DYN_TCP_REQUEST_TIMEOUT`. A request that waits the whole timeout fails, and
+  the worker stays eligible. Smaller requests are not limited this way.
+
+##### Pools and Rollout
+
+A pool must not mix Velo and non-Velo workers. A foreign transport in a pool is
+a local configuration error: the router fails each request it routes to that
+worker and does not inhibit the worker or migrate the request.
+
+- Do not change `DYN_REQUEST_PLANE` in place on a running pool. During the
+  rollout the frontends and workers disagree, and requests routed across the
+  two planes fail until every process has restarted.
+- A separate Dynamo namespace isolates routing only when the frontend selects
+  that exact namespace or disjoint prefixes. A `--namespace-prefix` that
+  matches both pools still selects both, and Dynamo namespaces do not filter
+  raw Kubernetes watches.
+
+To move a pool from `tcp` to `velo`:
+
+1. Upgrade every frontend in the discovery domain to a release that supports
+   the `velo` request plane, and leave it on `tcp`. An earlier release skips
+   Velo workers instead of reporting them.
+2. Deploy a second pool, frontend and workers, with both planes set to `velo`.
+   Choose Dynamo namespaces so that neither pool's namespace is a prefix of
+   the other's, for example `prod-llm-tcp` and `prod-llm-velo`.
+3. On each frontend, list the instances in discovery:
+
+   ```bash
+   curl -s "http://<frontend-host>:<port>/health?instances=true"
+   ```
+
+   Every instance in a namespace that the frontend selects must advertise the
+   frontend's request plane. The key of each instance's `transport` field names
+   it: `tcp`, `nats_tcp`, or `velo`.
+
+4. Shift traffic from the `tcp` frontend to the `velo` frontend.
+5. Keep the `tcp` pool running until the `velo` pool has proven itself, then
+   remove it.
+
+To roll back, shift traffic to the `tcp` pool again. The two pools share no
+workers, so nothing else changes.
 
 ### Event Plane
 
