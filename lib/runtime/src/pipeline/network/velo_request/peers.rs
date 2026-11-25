@@ -42,8 +42,9 @@ pub(in crate::pipeline::network) struct PeerState {
     pub(in crate::pipeline::network) route: RouteState,
     pub(in crate::pipeline::network) retired: AtomicBool,
     pub(in crate::pipeline::network) registered_address: parking_lot::Mutex<Option<WorkerAddress>>,
-    /// Limits staged sends in flight at the caller.
-    pub(in crate::pipeline::network) staged: Semaphore,
+    /// Limits staged sends in flight at the caller. A send owns its permit,
+    /// so the permit outlives a caller that stops waiting for the ACK.
+    pub(in crate::pipeline::network) staged: Arc<Semaphore>,
 }
 
 impl Default for PeerState {
@@ -58,7 +59,7 @@ impl Default for PeerState {
             route: RouteState::default(),
             retired: AtomicBool::new(false),
             registered_address: parking_lot::Mutex::new(None),
-            staged: Semaphore::new(STAGED_WINDOW),
+            staged: Arc::new(Semaphore::new(STAGED_WINDOW)),
         }
     }
 }

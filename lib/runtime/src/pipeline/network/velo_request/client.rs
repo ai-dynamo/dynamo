@@ -6,22 +6,27 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::{sync::TryAcquireError, time::Instant};
+use tokio::{
+    sync::{OwnedSemaphorePermit, TryAcquireError},
+    time::Instant,
+};
+use tracing::Instrument;
+use velo::InstanceId;
 
 use crate::{
-    error::ErrorType,
+    error::{DynamoError, ErrorType},
     pipeline::network::{
         VELO_SCHEME,
         egress::unified_client::{Headers, RequestPlaneClient},
         get_tcp_max_message_size,
-        velo_response::VeloResponseService,
+        velo_response::{RuntimeService, VeloResponseService},
     },
 };
 
 use super::{
     REQUEST_HANDLER, decode_address,
     discovery::DiscoveryReady,
-    peers::{by_deadline, error, establish_route, transport_error},
+    peers::{PeerState, by_deadline, error, establish_route, transport_error},
     server::ENDPOINT_PATH_HEADER,
 };
 
@@ -34,6 +39,7 @@ pub(in crate::pipeline::network) struct VeloRequestClient {
     service: Arc<VeloResponseService>,
     ack_timeout: Duration,
     discovery_ready: Option<Arc<DiscoveryReady>>,
+    owner: Option<Arc<RuntimeService>>,
 }
 
 impl VeloRequestClient {
@@ -45,7 +51,19 @@ impl VeloRequestClient {
             service,
             ack_timeout,
             discovery_ready: None,
+            owner: None,
         }
+    }
+
+    /// Ties the client to the runtime that created it. Another runtime in the
+    /// process can keep the shared service alive after this one shuts down.
+    pub(in crate::pipeline::network) fn with_owner(mut self, owner: Arc<RuntimeService>) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
+    fn owner_released(&self) -> bool {
+        self.owner.as_ref().is_some_and(|owner| owner.is_released())
     }
 
     pub(in crate::pipeline::network) fn with_discovery(
@@ -73,6 +91,9 @@ impl RequestPlaneClient for VeloRequestClient {
                     "DYN_TCP_REQUEST_TIMEOUT exceeds the timer range",
                 )
             })?;
+        if self.owner_released() {
+            return Err(error(ErrorType::Unavailable, "Velo request runtime is shut down").into());
+        }
         if !address.starts_with(VELO_SCHEME) {
             return Err(error(
                 ErrorType::Internal,
@@ -111,67 +132,87 @@ impl RequestPlaneClient for VeloRequestClient {
                 )
             })?;
         }
-        let (peer, epoch) = establish_route(
+        let (mut peer, mut epoch) = establish_route(
             &self.service,
             target.instance_id,
             target.worker_address,
             deadline,
         )
         .await?;
+        if payload.len() <= self.service.velo.staging_threshold() {
+            let _slot = self
+                .service
+                .ack_slots
+                .try_acquire()
+                .map_err(|_| ack_slots_full())?;
+            let ack = send(
+                &self.service,
+                target.instance_id,
+                payload,
+                headers,
+                deadline,
+            )
+            .await;
+            if ack.is_err() {
+                peer.route.invalidate(epoch);
+            }
+            return Ok(ack?);
+        }
+
         // The staged window bounds local capacity at each peer. Only requests
         // that wait for a permit spend part of their ACK budget on this queue.
-        let (_staged, queued) = if payload.len() > self.service.velo.staging_threshold() {
-            match peer.staged.try_acquire() {
-                Ok(permit) => (Some(permit), false),
-                Err(TryAcquireError::Closed) => {
-                    return Err(error(ErrorType::Internal, "staged window closed").into());
-                }
-                Err(TryAcquireError::NoPermits) => {
-                    let permit = by_deadline(deadline, peer.staged.acquire())
-                        .await
-                        .map_err(|_| {
-                            error(
-                                ErrorType::ResourceExhausted,
-                                "staged window to worker stayed full until the request deadline",
-                            )
-                        })?
-                        .map_err(|_| error(ErrorType::Internal, "staged window closed"))?;
-                    if deadline.saturating_duration_since(Instant::now()) < MIN_STAGED_SEND_BUDGET {
-                        return Err(error(
-                            ErrorType::ResourceExhausted,
-                            "staged window wait left too little time to send the Velo request",
-                        )
-                        .into());
-                    }
-                    (Some(permit), true)
-                }
+        let mut waited = false;
+        let permit = loop {
+            let (permit, queued) = staged_permit(&peer, deadline).await?;
+            waited |= queued;
+            // The route can change during the wait: the worker left discovery,
+            // or another request found the route broken or renewed it.
+            if !queued || peer.route.confirmed_epoch() == Some(epoch) {
+                break permit;
             }
-        } else {
-            (None, false)
+            drop(permit);
+            (peer, epoch) = establish_route(
+                &self.service,
+                target.instance_id,
+                target.worker_address,
+                deadline,
+            )
+            .await?;
         };
-        let _slot = self.service.ack_slots.try_acquire().map_err(|_| {
-            error(
+        if waited && deadline.saturating_duration_since(Instant::now()) < MIN_STAGED_SEND_BUDGET {
+            return Err(error(
                 ErrorType::ResourceExhausted,
-                "Velo request ACK slots are full",
+                "staged window wait left too little time to send the Velo request",
+            )
+            .into());
+        }
+        let slot = Arc::clone(&self.service.ack_slots)
+            .try_acquire_owned()
+            .map_err(|_| ack_slots_full())?;
+        // Velo keeps a staged payload until the worker fetches it or the send
+        // times out, whatever the caller does. The send therefore runs in its
+        // own task and keeps its place in the window if the caller goes away.
+        let service = self.service.clone();
+        let id = target.instance_id;
+        let ack = tokio::spawn(
+            async move {
+                let _held = (permit, slot);
+                send(&service, id, payload, headers, deadline).await
+            }
+            .in_current_span(),
+        )
+        .await
+        .map_err(|cause| {
+            error(
+                ErrorType::Internal,
+                format!("staged Velo send failed: {cause}"),
             )
         })?;
-        let ack = by_deadline(deadline, async {
-            self.service
-                .velo
-                .unary(REQUEST_HANDLER)?
-                .raw_payload(payload)
-                .headers(headers)
-                .timeout(deadline.saturating_duration_since(Instant::now()))
-                .send_to(target.instance_id)
-                .await
-        })
-        .await
-        .and_then(|ack| ack.map_err(transport_error));
         match ack {
             Ok(ack) => Ok(ack),
             // The deadline includes time spent waiting for local capacity.
             // A timeout with that reduced budget leaves the peer route valid.
-            Err(cause) if queued && cause.error_type() == ErrorType::ConnectionTimeout => {
+            Err(cause) if waited && cause.error_type() == ErrorType::ConnectionTimeout => {
                 Err(error(
                     ErrorType::ResourceExhausted,
                     "Velo request timed out after waiting for the staged window",
@@ -190,8 +231,61 @@ impl RequestPlaneClient for VeloRequestClient {
     }
 
     fn is_healthy(&self) -> bool {
-        !self.service.is_closing()
+        !self.service.is_closing() && !self.owner_released()
     }
+}
+
+/// Takes a place in the peer's staged window, waiting until the deadline for
+/// one. The flag says whether the caller had to wait.
+async fn staged_permit(
+    peer: &PeerState,
+    deadline: Instant,
+) -> Result<(OwnedSemaphorePermit, bool), DynamoError> {
+    let closed = || error(ErrorType::Internal, "staged window closed");
+    match Arc::clone(&peer.staged).try_acquire_owned() {
+        Ok(permit) => Ok((permit, false)),
+        Err(TryAcquireError::Closed) => Err(closed()),
+        Err(TryAcquireError::NoPermits) => {
+            let permit = by_deadline(deadline, Arc::clone(&peer.staged).acquire_owned())
+                .await
+                .map_err(|_| {
+                    error(
+                        ErrorType::ResourceExhausted,
+                        "staged window to worker stayed full until the request deadline",
+                    )
+                })?
+                .map_err(|_| closed())?;
+            Ok((permit, true))
+        }
+    }
+}
+
+async fn send(
+    service: &VeloResponseService,
+    id: InstanceId,
+    payload: Bytes,
+    headers: Headers,
+    deadline: Instant,
+) -> Result<Bytes, DynamoError> {
+    by_deadline(deadline, async {
+        service
+            .velo
+            .unary(REQUEST_HANDLER)?
+            .raw_payload(payload)
+            .headers(headers)
+            .timeout(deadline.saturating_duration_since(Instant::now()))
+            .send_to(id)
+            .await
+    })
+    .await
+    .and_then(|ack| ack.map_err(transport_error))
+}
+
+fn ack_slots_full() -> DynamoError {
+    error(
+        ErrorType::ResourceExhausted,
+        "Velo request ACK slots are full",
+    )
 }
 
 fn check_headers(headers: &Headers) -> Result<()> {
@@ -462,6 +556,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_at_the_size_limit_reaches_the_worker() {
+        let frontend = service().await;
+        let worker = service().await;
+        let seen = Arc::new(AtomicUsize::new(0));
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, {
+                    let seen = seen.clone();
+                    move |ctx| {
+                        seen.store(ctx.payload.len(), Ordering::Relaxed);
+                        Ok(Some(Bytes::new()))
+                    }
+                })
+                .build(),
+            )
+            .unwrap();
+        let client = VeloRequestClient::new(frontend.clone(), Duration::from_secs(10));
+        let limit = get_tcp_max_message_size();
+        let result = client
+            .send_request(
+                address(&worker.velo.peer_info()),
+                Bytes::from(vec![0; limit]),
+                Headers::new(),
+            )
+            .await;
+        assert!(result.unwrap().is_empty());
+        assert_eq!(seen.load(Ordering::Relaxed), limit);
+    }
+
+    #[tokio::test]
     async fn ack_slot_budget() {
         let frontend = service().await;
         let worker = service().await;
@@ -538,6 +663,48 @@ mod tests {
             assert!(result.unwrap().is_empty());
         }
         assert_eq!(frontend.velo.response_slots_in_use(), baseline);
+    }
+
+    #[tokio::test]
+    async fn cancelling_staged_sends_preserves_the_per_worker_buffer_limit() {
+        let frontend = service().await;
+        let worker = service().await;
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, |_| Ok(Some(Bytes::new()))).build(),
+            )
+            .unwrap();
+        let info = worker.velo.peer_info();
+        let target = address(&info);
+        let timeout = Duration::from_secs(3);
+        establish_route(
+            &frontend,
+            info.instance_id(),
+            &encode_worker_address(info.worker_address()).unwrap(),
+            Instant::now() + timeout,
+        )
+        .await
+        .unwrap();
+        let client = VeloRequestClient::new(frontend, timeout);
+        let mut payloads = Vec::new();
+        // Keep the current-thread executor in this poll until all callers have cancelled.
+        for _ in 0..5 {
+            let bytes: Arc<[u8]> = vec![0; 300 * 1024].into();
+            payloads.push(Arc::downgrade(&bytes));
+            let mut send =
+                client.send_request(target.clone(), Bytes::from_owner(bytes), Headers::new());
+            assert!(futures::poll!(&mut send).is_pending());
+            drop(send);
+        }
+        let live = payloads
+            .iter()
+            .filter(|bytes| bytes.strong_count() > 0)
+            .count();
+        assert!(
+            live <= super::super::STAGED_WINDOW,
+            "{live} distinct staged payloads still live after cancellation"
+        );
     }
 
     #[tokio::test]
@@ -626,6 +793,61 @@ mod tests {
         for result in calls.join_all().await {
             assert_eq!(result.unwrap(), "ack");
         }
+    }
+
+    #[tokio::test]
+    async fn staged_waiter_refuses_a_retired_request_route() {
+        use crate::{engine::AsyncEngineContextProvider, pipeline::Context};
+
+        let frontend = service().await;
+        let worker = service().await;
+        let received = Arc::new(AtomicUsize::new(0));
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, {
+                    let received = received.clone();
+                    move |_| {
+                        received.fetch_add(1, Ordering::Relaxed);
+                        Ok(Some(Bytes::new()))
+                    }
+                })
+                .build(),
+            )
+            .unwrap();
+
+        let info = worker.velo.peer_info();
+        let id = info.instance_id();
+        let target = address(&info);
+        let timeout = Duration::from_secs(3);
+        let (peer, _) = establish_route(
+            &frontend,
+            id,
+            &encode_worker_address(info.worker_address()).unwrap(),
+            Instant::now() + timeout,
+        )
+        .await
+        .unwrap();
+        let response = frontend
+            .register_response(Context::new(()).context(), false)
+            .unwrap();
+        frontend.hold_request_peer(response.registration_id().unwrap(), &target);
+        let reserved = peer.staged.try_acquire_many(4).unwrap();
+        let client = VeloRequestClient::new(frontend.clone(), timeout);
+        let mut send =
+            client.send_request(target, Bytes::from(vec![0; 300 * 1024]), Headers::new());
+        assert!(futures::poll!(&mut send).is_pending());
+
+        frontend.unregister_request_peer(id);
+        assert!(frontend.confirmed_peer(id).is_none());
+        drop(reserved);
+        let result = send.await;
+        assert_eq!(
+            received.load(Ordering::Relaxed),
+            0,
+            "queued request reached the retired worker, caller received {result:?}"
+        );
+        assert_eq!(error_type(result), ErrorType::WorkerUnavailable);
     }
 
     #[tokio::test]

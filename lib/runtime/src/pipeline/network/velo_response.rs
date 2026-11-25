@@ -369,12 +369,13 @@ impl RuntimeService {
             .map(|lease| lease.service.clone())
     }
 
+    /// Another owner can keep a cached service alive after this lease ends.
+    pub(super) fn is_released(&self) -> bool {
+        self.lease_released.load(Ordering::Acquire)
+    }
+
     pub(super) fn check_ingress_lease(&self) -> Result<()> {
-        // Another owner can keep a cached service alive after this lease ends.
-        ensure!(
-            !self.lease_released.load(Ordering::Acquire),
-            "Velo response runtime is shut down"
-        );
+        ensure!(!self.is_released(), "Velo response runtime is shut down");
         Ok(())
     }
 
@@ -556,7 +557,7 @@ pub struct VeloResponseService {
     peer_address: String,
     registrations: Mutex<Registrations>,
     peers: dashmap::DashMap<InstanceId, Arc<PeerState>>,
-    pub(super) ack_slots: Semaphore,
+    pub(super) ack_slots: Arc<Semaphore>,
     pub(super) request_identity: Option<Bytes>,
     pub(super) request_slot: Arc<RequestSlot>,
     pub(super) discovered_request_peers: Mutex<super::velo_request::discovery::DiscoveryPeers>,
@@ -641,7 +642,7 @@ impl VeloResponseService {
             heartbeat,
             registrations: Mutex::new(Registrations::default()),
             peers: dashmap::DashMap::new(),
-            ack_slots: Semaphore::new(ACK_SLOTS),
+            ack_slots: Arc::new(Semaphore::new(ACK_SLOTS)),
             request_identity,
             request_slot: Arc::new(RequestSlot::default()),
             discovered_request_peers: Mutex::default(),
@@ -1916,6 +1917,14 @@ mod tests {
             .await;
         assert!(response.unwrap_err().is::<velo::RequestTimeout>());
         assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 1);
+        // Check the pin itself: a sweep at the end of time would also expire a
+        // pin that was left in place.
+        assert_eq!(
+            worker
+                .peer(id)
+                .map(|peer| peer.reverse_pin_until.load(Ordering::Acquire)),
+            Some(0)
+        );
         assert_eq!(worker.evict_idle_peers(u64::MAX), 1);
         assert!(worker.peer(id).is_none());
     }
@@ -1963,6 +1972,74 @@ mod tests {
         drop(lease);
         assert_eq!(frontend.evict_idle_peers(u64::MAX), 1);
         assert_eq!(frontend.velo.primary_transport_key(id), None);
+    }
+
+    #[tokio::test]
+    async fn released_frontend_cannot_send_through_a_second_owners_lease() {
+        use crate::{
+            DistributedRuntime, Runtime,
+            component::TransportType,
+            discovery::DiscoverySpec,
+            distributed::{DistributedConfig, RequestPlaneMode},
+            pipeline::network::ResponsePlaneMode,
+            protocols::EndpointId,
+        };
+        let runtime = Runtime::from_current().unwrap();
+        let owner = runtime.velo_response_service();
+        let frontend = DistributedRuntime::new(
+            runtime,
+            DistributedConfig {
+                request_plane: RequestPlaneMode::Velo,
+                response_plane: Some(ResponsePlaneMode::Velo),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
+        let second = Runtime::from_current().unwrap().velo_response_service();
+        second.set_options(*owner.options.get().unwrap()).unwrap();
+        assert!(Arc::ptr_eq(
+            &second.service().await.unwrap(),
+            &owner.service().await.unwrap()
+        ));
+        let (_, worker) = request_pair().await;
+        let calls = stub_request_handler(&worker, Bytes::from_static(b"ack"));
+        let endpoint = EndpointId {
+            namespace: "test".into(),
+            component: "worker".into(),
+            name: "generate".into(),
+        };
+        let discovery = frontend.discovery();
+        let address = super::super::velo_request::encode_address(
+            &worker.velo.peer_info(),
+            &endpoint,
+            discovery.instance_id(),
+        )
+        .unwrap();
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint.namespace,
+                component: endpoint.component,
+                endpoint: endpoint.name,
+                transport: TransportType::Velo(address.clone()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let client = frontend.network_manager().create_client().unwrap();
+        let send = || client.send_request(address.clone(), Bytes::new(), Default::default());
+        owner.close();
+        assert_eq!(send().await.unwrap(), "ack");
+        owner.shutdown().await;
+        assert!(owner.existing_service().await.is_none());
+        let result = send().await;
+        let count = calls.load(Ordering::Relaxed);
+        second.shutdown().await;
+        assert!(
+            result.is_err() && count == 1,
+            "released owner's send returned {result:?}, handler calls {count}"
+        );
     }
 
     #[tokio::test]

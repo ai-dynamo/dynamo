@@ -299,7 +299,8 @@ impl NetworkManager {
                         velo.service.clone(),
                         self.config.tcp_client_config.request_timeout,
                     )
-                    .with_discovery(watch.ready.clone()),
+                    .with_discovery(watch.ready.clone())
+                    .with_owner(velo.owner.clone()),
                 ))
             }
         }
