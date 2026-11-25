@@ -292,13 +292,17 @@ impl PublisherInput {
     }
 }
 
-/// Waits until the processor and index have finished every batch sent before it.
+const BARRIER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Waits, for at most `BARRIER_TIMEOUT`, until the processor and index have
+/// finished every batch sent before it.
 async fn barrier(tx: &mpsc::UnboundedSender<PublisherInput>) -> Result<()> {
     let (done, result) = tokio::sync::oneshot::channel();
     tx.send(PublisherInput::Barrier(done))
         .map_err(|_| anyhow::anyhow!("KV publisher stopped"))?;
-    result
+    tokio::time::timeout(BARRIER_TIMEOUT, result)
         .await
+        .map_err(|_| anyhow::anyhow!("KV index barrier timed out"))?
         .map_err(|_| anyhow::anyhow!("KV index barrier dropped"))?
 }
 
@@ -764,8 +768,8 @@ impl KvEventPublisher {
             })
     }
 
-    /// Waits until the local index, if any, has applied every event published
-    /// before this call. An error means the publisher has stopped.
+    /// Waits, for at most 30 seconds, until the local index, if any, has applied
+    /// every event published before this call. An error means it has not.
     pub async fn flush(&self) -> Result<()> {
         barrier(&self.tx).await
     }

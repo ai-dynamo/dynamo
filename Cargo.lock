@@ -3489,6 +3489,7 @@ dependencies = [
  "futures",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "rmp-serde",
  "serde_json",
  "sglang-api-types",
  "sglang-kv-types",
@@ -3515,10 +3516,7 @@ dependencies = [
  "hyper-util",
  "prost-types 0.13.5",
  "prost-types 0.14.3",
- "rmp-serde",
- "serde_bytes",
  "serde_json",
- "sglang-kv-types",
  "temp-env",
  "tempfile",
  "tikv-jemallocator",
@@ -3531,7 +3529,6 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "url",
- "vllm-proto",
 ]
 
 [[package]]
@@ -3775,7 +3772,9 @@ dependencies = [
  "pep440_rs",
  "prost-types 0.14.3",
  "reqwest 0.12.28",
+ "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "tempfile",
  "tokio",
@@ -9472,7 +9471,7 @@ dependencies = [
 [[package]]
 name = "sglang-api-types"
 version = "0.1.1"
-source = "git+https://github.com/JulienDarve/sglang?rev=420412bf23a4f093ea2da19a2cb79e22daaa9c8c#420412bf23a4f093ea2da19a2cb79e22daaa9c8c"
+source = "git+https://github.com/JulienDarve/sglang?rev=ef454920791486338b470ebf20ecdf48e1367492#ef454920791486338b470ebf20ecdf48e1367492"
 dependencies = [
  "bytes",
  "prost 0.14.3",
@@ -9485,7 +9484,7 @@ dependencies = [
 [[package]]
 name = "sglang-kv-types"
 version = "0.1.0"
-source = "git+https://github.com/JulienDarve/sglang?rev=420412bf23a4f093ea2da19a2cb79e22daaa9c8c#420412bf23a4f093ea2da19a2cb79e22daaa9c8c"
+source = "git+https://github.com/JulienDarve/sglang?rev=ef454920791486338b470ebf20ecdf48e1367492#ef454920791486338b470ebf20ecdf48e1367492"
 dependencies = [
  "prost 0.14.3",
  "tonic 0.14.6",
@@ -11487,7 +11486,7 @@ dependencies = [
 [[package]]
 name = "vllm-proto"
 version = "0.7.0"
-source = "git+https://github.com/JulienDarve/vllm?rev=958219c0c9172a1bcaac12371126cbf920adffd5#958219c0c9172a1bcaac12371126cbf920adffd5"
+source = "git+https://github.com/JulienDarve/vllm?rev=1c31d3673a4061e9c266415fd6affbd79765ed5e#1c31d3673a4061e9c266415fd6affbd79765ed5e"
 dependencies = [
  "prost 0.14.3",
  "prost-types 0.14.3",

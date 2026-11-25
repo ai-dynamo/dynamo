@@ -13,12 +13,13 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, RawKvEvent, WorkerType,
 };
 use dynamo_mocker::live::{
     LiveEngine, LiveEngineConfig, RequestOutputBuffering, stable_request_uuid,
 };
 use dynamo_mocker::scheduler::MockerMetrics;
+use dynamo_mocker::services::grpc_kv_events::KvCacheEventData;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use futures::Stream;
 use sglang_api_types::api::v1 as pb;
@@ -31,9 +32,76 @@ mod request;
 mod kv_events {
     dynamo_mocker::grpc_kv_events!(
         sglang_kv_types::kv::v1,
-        |hash: u64| sglang_kv_types::kv::v1::block_hash::Value::SignedValue(hash.cast_signed()),
-        None
+        attn_dp_rank,
+        super::kv_event,
+        super::kv_stream_start,
+        super::kv_snapshot_end
     );
+}
+
+/// SGLang's stream starts with its id; without a buffer, the Mocker replays nothing.
+fn kv_stream_start(
+    request: &sglang_kv_types::kv::v1::SubscribeKvEventsRequest,
+    stream_id: &str,
+) -> Result<Option<sglang_kv_types::kv::v1::SubscribeKvEventsResponse>, Status> {
+    use sglang_kv_types::kv::v1 as kv;
+    if request.resume.is_some() {
+        return Err(Status::out_of_range("the Mocker keeps no KV event buffer"));
+    }
+    let start = kv::KvEventStreamStart {
+        stream_id: stream_id.to_string(),
+        data_parallel_rank: request.data_parallel_rank,
+    };
+    let item = Some(kv::subscribe_kv_events_response::Item::Start(start));
+    Ok(Some(kv::SubscribeKvEventsResponse { item }))
+}
+
+fn kv_snapshot_end(
+    stream_id: &str,
+    next_sequence_number: u64,
+) -> sglang_kv_types::kv::v1::KvSnapshotEnd {
+    use sglang_kv_types::kv::v1 as kv;
+    kv::KvSnapshotEnd {
+        resume: Some(kv::KvEventCursor {
+            stream_id: stream_id.to_string(),
+            next_sequence_number,
+        }),
+        complete: true,
+    }
+}
+
+/// The fields the Mocker's ZMQ sink publishes for the same event.
+fn kv_event(raw: &RawKvEvent, block_size: u32) -> sglang_kv_types::kv::v1::KvCacheEvent {
+    use sglang_kv_types::kv::v1 as kv;
+    use sglang_kv_types::kv::v1::kv_cache_event::Event;
+    let medium = raw.storage_tier.to_kv_medium().map(str::to_string);
+    let event = match &raw.event.data {
+        KvCacheEventData::Stored(data) => Event::BlockStored(kv::BlockStored {
+            block_hashes: (data.blocks.iter())
+                .map(|block| block.block_hash.0.cast_signed())
+                .collect(),
+            parent_block_hash: data.parent_hash.map(|parent| parent.0.cast_signed()),
+            token_ids: Some(kv::block_stored::TokenIds::Single(kv::TokenIdList {
+                token_ids: (raw.block_token_ids.iter().flatten().flatten())
+                    .map(|&token| u64::from(token))
+                    .collect(),
+            })),
+            block_size,
+            medium,
+            session_id: raw.session_id.clone(),
+            ..Default::default()
+        }),
+        KvCacheEventData::Removed(data) => Event::BlockRemoved(kv::BlockRemoved {
+            block_hashes: data
+                .block_hashes
+                .iter()
+                .map(|block| block.0.cast_signed())
+                .collect(),
+            medium,
+        }),
+        KvCacheEventData::Cleared => Event::AllBlocksCleared(kv::AllBlocksCleared {}),
+    };
+    kv::KvCacheEvent { event: Some(event) }
 }
 
 use kv_events::{KvEventResponses, KvEventStream, KvSnapshotResponses};

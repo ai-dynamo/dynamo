@@ -50,3 +50,4 @@ tonic-v14 = { workspace = true }
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }
+rmp-serde = { workspace = true }

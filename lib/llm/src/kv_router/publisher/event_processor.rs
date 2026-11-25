@@ -54,7 +54,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                     super::PublisherInput::Barrier(done) => {
                         let mut output = Vec::new();
                         batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
-                        // Recovery applies events like live ingestion, then waits for the index to finish them.
+                        // A barrier's sender waits for the index to finish the events sent before it.
                         let result = tokio::select! {
                             biased;
                             _ = cancellation_token.cancelled() => Err(anyhow::anyhow!("KV event publisher cancelled during a barrier")),

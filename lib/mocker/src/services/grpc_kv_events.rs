@@ -4,19 +4,20 @@
 //! The Mocker's KV events as an engine's gRPC `KvEvents` service.
 
 #[doc(hidden)]
-pub use dynamo_kv_events::event::KvCacheEventData;
+pub use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, KvCacheStoreData};
 
 /// Defines `KvEventStream`, a KV event sink that publishes each batch on the
 /// Mocker's ZMQ sink and to the subscribers of the `KvEvents` service of proto
 /// package `$pb`, and serves that service's snapshot of the device blocks held.
-/// vLLM's `vllm` and SGLang's `sglang.kv.v1` packages define the
-/// same messages. `$hash` builds the engine's block hash value from a `u64`,
-/// and `$group_idx` is the group index it reports. Invoke it in a module of its
-/// own, in a crate with `anyhow`, `async_stream`, `futures`, `tokio`,
-/// `tonic_v14` and `uuid`.
+/// `$rank` names the rank field of the engine's batch, and `$event` converts a
+/// `RawKvEvent` and the block size into the engine's `KvCacheEvent`. `$start`
+/// checks a subscription and gives the stream's first response, for an engine
+/// that sends one before its batches; `$end` gives a snapshot's last response.
+/// Both receive the stream's id. Invoke it in a module of its own, in a crate
+/// with `anyhow`, `async_stream`, `futures`, `tokio`, `tonic_v14` and `uuid`.
 #[macro_export]
 macro_rules! grpc_kv_events {
-    ($pb:path, $hash:expr, $group_idx:expr) => {
+    ($pb:path, $rank:ident, $event:path, $start:path, $end:path) => {
         use std::collections::HashMap;
         use std::pin::Pin;
         use std::sync::Mutex;
@@ -26,7 +27,7 @@ macro_rules! grpc_kv_events {
         use ::tokio::sync::broadcast;
         use ::tonic_v14::Status;
         use $crate::common::protocols::{RawKvEvent, RawKvEventSink};
-        use $crate::services::grpc_kv_events::KvCacheEventData;
+        use $crate::services::grpc_kv_events::{KvCacheEvent, KvCacheEventData, KvCacheStoreData};
         use $crate::services::zmq_events::ZmqKvEventSink;
         use $pb as pb;
 
@@ -37,7 +38,7 @@ macro_rules! grpc_kv_events {
         pub(crate) type KvSnapshotResponses =
             Pin<Box<dyn Stream<Item = Result<pb::GetKvSnapshotResponse, Status>> + Send>>;
 
-        /// Live batches and the blocks held: the Mocker keeps no replay buffer.
+        /// The stream's live batches and the device blocks held.
         pub(crate) struct KvEventStream {
             zmq: ZmqKvEventSink,
             state: Mutex<State>,
@@ -46,12 +47,12 @@ macro_rules! grpc_kv_events {
             block_size: u32,
         }
 
-        /// Changed under one lock, so a snapshot and its cursor are one cut of the stream.
+        /// Changed under one lock, so a snapshot is one cut of the stream.
         struct State {
             batches: broadcast::Sender<pb::KvEventBatch>,
             next_sequence: u64,
             /// The device blocks held, by hash: each one's parent and the store that recreates it.
-            held: HashMap<u64, (Option<u64>, pb::BlockStored)>,
+            held: HashMap<u64, (Option<u64>, RawKvEvent)>,
         }
 
         impl KvEventStream {
@@ -83,25 +84,13 @@ macro_rules! grpc_kv_events {
                 request: pb::SubscribeKvEventsRequest,
             ) -> Result<KvEventResponses, Status> {
                 self.check_rank(request.data_parallel_rank)?;
-                let mut batches = {
-                    let state = self.state.lock().unwrap();
-                    // Without a buffer, only the batch still to be published can be resumed from.
-                    if let Some(resume) = request.resume
-                        && (resume.next_sequence_number != state.next_sequence
-                            || !(resume.stream_id.is_empty() || resume.stream_id == self.stream_id))
-                    {
-                        return Err(Status::out_of_range("the Mocker keeps no KV event buffer"));
-                    }
-                    state.batches.subscribe()
-                };
-                let start = pb::KvEventStreamStart {
-                    stream_id: self.stream_id.clone(),
-                    data_parallel_rank: self.dp_rank,
-                };
+                let start = $start(&request, &self.stream_id)?;
+                let mut batches = self.state.lock().unwrap().batches.subscribe();
                 Ok(Box::pin(::async_stream::stream! {
                     use pb::subscribe_kv_events_response::Item;
-                    let item = Some(Item::Start(start));
-                    yield Ok(pb::SubscribeKvEventsResponse { item });
+                    if let Some(start) = start {
+                        yield Ok(start);
+                    }
                     loop {
                         match batches.recv().await {
                             Ok(batch) => {
@@ -124,6 +113,7 @@ macro_rules! grpc_kv_events {
                 request: pb::GetKvSnapshotRequest,
             ) -> Result<KvSnapshotResponses, Status> {
                 use pb::get_kv_snapshot_response::Item;
+                use pb::kv_cache_event::Event;
                 self.check_rank(request.data_parallel_rank)?;
                 let state = self.state.lock().unwrap();
                 let mut children: HashMap<Option<u64>, Vec<u64>> = HashMap::new();
@@ -134,17 +124,14 @@ macro_rules! grpc_kv_events {
                 let mut next = children.remove(&None).unwrap_or_default();
                 let mut items = Vec::new();
                 while let Some(hash) = next.pop() {
-                    let stored = vec![state.held[&hash].1.clone()];
-                    items.push(Item::Blocks(pb::KvSnapshotBlocks { stored }));
+                    let store = $event(&state.held[&hash].1, self.block_size);
+                    if let Some(Event::BlockStored(stored)) = store.event {
+                        let stored = vec![stored];
+                        items.push(Item::Blocks(pb::KvSnapshotBlocks { stored }));
+                    }
                     next.extend(children.remove(&Some(hash)).unwrap_or_default());
                 }
-                items.push(Item::End(pb::KvSnapshotEnd {
-                    resume: Some(pb::KvEventCursor {
-                        stream_id: self.stream_id.clone(),
-                        next_sequence_number: state.next_sequence,
-                    }),
-                    complete: true,
-                }));
+                items.push(Item::End($end(&self.stream_id, state.next_sequence)));
                 let responses = items
                     .into_iter()
                     .map(|item| Ok(pb::GetKvSnapshotResponse { item: Some(item) }));
@@ -181,91 +168,48 @@ macro_rules! grpc_kv_events {
                 let _ = state.batches.send(pb::KvEventBatch {
                     sequence_number: state.next_sequence,
                     ts,
-                    data_parallel_rank: Some(self.dp_rank),
+                    $rank: Some(self.dp_rank),
                     events,
                 });
                 state.next_sequence += 1;
             }
+        }
 
+        impl State {
             /// Follows the device blocks an event stores or removes.
-            fn track(&self, state: &mut State, raw: &RawKvEvent) {
+            fn track(&mut self, raw: &RawKvEvent) {
                 match &raw.event.data {
                     KvCacheEventData::Stored(data) if raw.storage_tier.is_gpu() => {
-                        let mut parent = data.parent_hash.map(|parent| parent.0);
+                        let mut parent = data.parent_hash;
                         let tokens = raw.block_token_ids.iter().flatten();
                         for (block, tokens) in data.blocks.iter().zip(tokens) {
-                            let hash = block.block_hash.0;
-                            let stored = || (parent, self.stored(&[hash], parent, tokens));
-                            state.held.entry(hash).or_insert_with(stored);
-                            parent = Some(hash);
+                            // The block's own store; a snapshot's store has no session.
+                            let held = || {
+                                let data = KvCacheEventData::Stored(KvCacheStoreData {
+                                    parent_hash: parent,
+                                    start_position: None,
+                                    blocks: vec![block.clone()],
+                                });
+                                let store = RawKvEvent {
+                                    event: KvCacheEvent { data, ..raw.event },
+                                    block_token_ids: Some(vec![tokens.clone()]),
+                                    storage_tier: raw.storage_tier,
+                                    session_id: None,
+                                };
+                                (parent.map(|parent| parent.0), store)
+                            };
+                            self.held.entry(block.block_hash.0).or_insert_with(held);
+                            parent = Some(block.block_hash);
                         }
                     }
                     KvCacheEventData::Removed(data) if raw.storage_tier.is_gpu() => {
                         for hash in &data.block_hashes {
-                            state.held.remove(&hash.0);
+                            self.held.remove(&hash.0);
                         }
                     }
-                    KvCacheEventData::Cleared => state.held.clear(),
+                    KvCacheEventData::Cleared => self.held.clear(),
                     _ => {}
                 }
-            }
-
-            fn hash(value: u64) -> pb::BlockHash {
-                pb::BlockHash {
-                    value: Some(($hash)(value)),
-                }
-            }
-
-            fn stored(
-                &self,
-                hashes: &[u64],
-                parent: Option<u64>,
-                tokens: &[u32],
-            ) -> pb::BlockStored {
-                pb::BlockStored {
-                    block_hashes: hashes.iter().map(|&value| Self::hash(value)).collect(),
-                    parent_block_hash: parent.map(Self::hash),
-                    token_ids: Some(pb::BlockTokenIds {
-                        ids: Some(pb::block_token_ids::Ids::Single(pb::TokenIdList {
-                            token_ids: tokens.iter().map(|&token| u64::from(token)).collect(),
-                        })),
-                    }),
-                    block_size: self.block_size,
-                    group_idx: $group_idx,
-                    ..Default::default()
-                }
-            }
-
-            /// The fields the Mocker's ZMQ sink publishes for the same event.
-            fn event(&self, raw: &RawKvEvent) -> pb::KvCacheEvent {
-                use pb::kv_cache_event::Event;
-                let medium = raw.storage_tier.to_kv_medium().map(str::to_string);
-                let event = match &raw.event.data {
-                    KvCacheEventData::Stored(data) => {
-                        let hashes: Vec<_> =
-                            data.blocks.iter().map(|block| block.block_hash.0).collect();
-                        let tokens = raw.block_token_ids.iter().flatten().flatten();
-                        let tokens: Vec<_> = tokens.copied().collect();
-                        let parent = data.parent_hash.map(|parent| parent.0);
-                        Event::BlockStored(pb::BlockStored {
-                            medium,
-                            session_id: raw.session_id.clone(),
-                            ..self.stored(&hashes, parent, &tokens)
-                        })
-                    }
-                    KvCacheEventData::Removed(data) => Event::BlockRemoved(pb::BlockRemoved {
-                        block_hashes: data
-                            .block_hashes
-                            .iter()
-                            .map(|block| Self::hash(block.0))
-                            .collect(),
-                        medium,
-                        group_idx: $group_idx,
-                        ..Default::default()
-                    }),
-                    KvCacheEventData::Cleared => Event::AllBlocksCleared(pb::AllBlocksCleared {}),
-                };
-                pb::KvCacheEvent { event: Some(event) }
             }
         }
 
@@ -278,9 +222,13 @@ macro_rules! grpc_kv_events {
                 {
                     let mut state = self.state.lock().unwrap();
                     for event in &events {
-                        self.track(&mut state, event);
+                        state.track(event);
                     }
-                    let events = events.iter().map(|event| self.event(event)).collect();
+                    let block_size = self.block_size;
+                    let events = events
+                        .iter()
+                        .map(|event| $event(event, block_size))
+                        .collect();
                     self.send(&mut state, events);
                 }
                 self.zmq.publish_batch(events)

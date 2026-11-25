@@ -104,7 +104,7 @@ bootstrap server, which the Rust server serves on its HTTP port; the prefill
 sidecar auto-detects and advertises its pod IP. For KV routing, the sidecar
 reads each listener's `sglang.kv.v1.KvEvents` gRPC stream when SGLang serves
 one, and otherwise subscribes to the ZMQ endpoints SGLang reports in its
-discovery metadata. Before it reads a gRPC stream, it loads the blocks the
+discovery metadata. When it opens a gRPC stream, it loads the blocks the
 listener's cache holds from the same service's `GetKvSnapshot`, so a sidecar
 that restarts next to a running engine reports them again.
 Restrict pod-network gRPC, HTTP, and ZMQ ports with NetworkPolicy.

@@ -297,8 +297,8 @@ pub async fn check_kv_snapshot(
         .await
         .expect("the engine's blocks did not reach the router index");
 
-    // Stores on the stream that resumed from the snapshot's cursor reload nothing.
-    // A stream resumed from another position reloads after the first of them.
+    // The stream continues the snapshot, so live stores reload nothing. A sidecar
+    // that expected another batch number would reload after the first of them.
     for live_prompt in [[21, 22, 23, 24], [31, 32, 33, 34]] {
         generate(engine, live_prompt.to_vec()).await;
         let is_reloaded = tokio::time::timeout(deadline, index_holds(&live_prompt, false))

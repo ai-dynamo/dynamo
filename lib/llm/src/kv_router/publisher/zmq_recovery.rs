@@ -157,7 +157,6 @@ const MAX_LIVE_DRAIN: usize = 4096;
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const ROUND_TIMEOUT: Duration = Duration::from_secs(120);
-const BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn wait_for_handshake(monitor: &mut tmq::pair::Pair) -> Result<()> {
     let event = monitor
@@ -473,8 +472,7 @@ async fn recovery_session(
                             next_replay = Some(Instant::now());
                         } else {
                             // Report success only after the index has finished every batch.
-                            tokio::time::timeout(BARRIER_TIMEOUT, barrier(ingest.tx)).await
-                                .map_err(fatal)?.map_err(fatal)?;
+                            barrier(ingest.tx).await.map_err(fatal)?;
                             is_success = true;
                             *deadline = None;
                             set_status(&config.status, KvStreamStatus::Success);

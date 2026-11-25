@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
-use dynamo_sidecar_common::kv_events::KvEventCalls;
+use dynamo_sidecar_common::kv_events::{KvEventCalls, grpc_batches, grpc_snapshot};
 use dynamo_sidecar_common::v14::GrpcChannelPool;
 use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use tokio::time::error::Elapsed;
@@ -441,13 +441,40 @@ impl Pool {
 
     /// This listener's `KvEvents` calls for `dp_rank`.
     pub(crate) fn kv_event_calls(&self, dp_rank: u32) -> KvEventCalls {
-        kv_event_proto::calls(self.kv_events.clone(), dp_rank)
+        use sglang_kv_types::kv::v1 as kv;
+        let channel = self.kv_events.clone();
+        let client = move || {
+            kv::kv_events_client::KvEventsClient::new(channel.clone())
+                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+        };
+        let subscriber = client.clone();
+        KvEventCalls {
+            subscribe: Box::new(move || {
+                let mut client = subscriber();
+                Box::pin(async move {
+                    let request = kv::SubscribeKvEventsRequest {
+                        data_parallel_rank: dp_rank,
+                        resume: None,
+                    };
+                    let responses = client.subscribe_kv_events(request).await?;
+                    Ok(grpc_batches(responses.into_inner(), kv_event_proto::batch))
+                })
+            }),
+            snapshot: Box::new(move || {
+                let mut client = client();
+                Box::pin(async move {
+                    let request = kv::GetKvSnapshotRequest {
+                        data_parallel_rank: dp_rank,
+                    };
+                    let responses = client.get_kv_snapshot(request).await?;
+                    grpc_snapshot(responses.into_inner(), kv_event_proto::snapshot_item).await
+                })
+            }),
+        }
     }
 }
 
-mod kv_event_proto {
-    dynamo_sidecar_common::kv_event_proto!(sglang_kv_types::kv::v1);
-}
+mod kv_event_proto;
 
 /// GetServerInfo, GetModelInfo and ListModels, mapped to typed discovery.
 /// An engine that answers any of them UNIMPLEMENTED does not serve the

@@ -8,7 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
-use dynamo_sidecar_common::kv_events::KvEventCalls;
+use dynamo_sidecar_common::kv_events::{KvEventCalls, grpc_batches, grpc_snapshot};
 use dynamo_sidecar_common::v14::GrpcChannelPool;
 use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use tokio::time::{Instant, sleep_until, timeout_at};
@@ -24,9 +24,7 @@ pub(crate) use dynamo_sidecar_common::{
 
 use crate::proto as pb;
 
-mod kv_event_proto {
-    dynamo_sidecar_common::kv_event_proto!(crate::proto);
-}
+mod kv_event_proto;
 
 pub(crate) const CONTROL_SERVICE: &str = "vllm.Control";
 pub(crate) const INFERENCE_SERVICE: &str = "vllm.Inference";
@@ -203,7 +201,34 @@ impl VllmClient {
 
     /// Rank `dp_rank`'s `KvEvents` calls.
     pub(crate) fn kv_event_calls(&self, dp_rank: u32) -> KvEventCalls {
-        kv_event_proto::calls(self.pool.next_channel(), dp_rank)
+        let channel = self.pool.next_channel();
+        let client = move || {
+            pb::kv_events_client::KvEventsClient::new(channel.clone())
+                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+        };
+        let subscriber = client.clone();
+        KvEventCalls {
+            subscribe: Box::new(move || {
+                let mut client = subscriber();
+                Box::pin(async move {
+                    let request = pb::SubscribeKvEventsRequest {
+                        data_parallel_rank: dp_rank,
+                    };
+                    let responses = client.subscribe_kv_events(request).await?;
+                    Ok(grpc_batches(responses.into_inner(), kv_event_proto::batch))
+                })
+            }),
+            snapshot: Box::new(move || {
+                let mut client = client();
+                Box::pin(async move {
+                    let request = pb::GetKvSnapshotRequest {
+                        data_parallel_rank: dp_rank,
+                    };
+                    let responses = client.get_kv_snapshot(request).await?;
+                    grpc_snapshot(responses.into_inner(), kv_event_proto::snapshot_item).await
+                })
+            }),
+        }
     }
 
     /// Abort by caller request ID. vLLM's GenerateStream producer does not

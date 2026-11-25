@@ -5,6 +5,8 @@
 //! batches in, from the engine's gRPC stream or, for older engines, its ZMQ
 //! publisher; Dynamo events out, through the publisher's push input.
 
+use tonic_v14 as tonic;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,11 +19,7 @@ use futures::stream::{BoxStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 #[doc(hidden)]
-pub use anyhow;
-#[doc(hidden)]
 pub use dynamo_kv_events::zmq_wire as wire;
-#[doc(hidden)]
-pub use tonic_v14 as tonic;
 
 #[cfg(test)]
 mod tests;
@@ -34,26 +32,19 @@ pub type KvBatch = anyhow::Result<(u64, KvEventBatch)>;
 /// Engine batches; the stream continues after a batch that could not be decoded.
 pub type KvBatchStream = BoxStream<'static, KvBatch>;
 
-/// The first batch a snapshot does not include, and where its stream resumes.
-#[derive(Clone)]
-pub struct KvCursor {
-    pub stream_id: String,
-    pub next_sequence_number: u64,
-}
-
 /// What `GetKvSnapshot` returned for one rank.
 pub struct KvSnapshot {
     /// The stores that recreate the blocks the engine holds, parents first.
     pub stores: Vec<RawKvEvent>,
-    pub resume: KvCursor,
+    /// The sequence number of the first batch the snapshot does not include.
+    pub next_sequence: u64,
     /// False when the engine missed KV events, so blocks may be missing or stale.
     pub is_complete: bool,
 }
 
-/// Opens one rank's `SubscribeKvEvents` stream, from the cursor if any.
-pub type Subscribe = Box<
-    dyn FnMut(Option<KvCursor>) -> BoxFuture<'static, Result<KvBatchStream, tonic::Status>> + Send,
->;
+/// Opens one rank's `SubscribeKvEvents` stream; resolves once the engine has accepted it.
+pub type Subscribe =
+    Box<dyn FnMut() -> BoxFuture<'static, Result<KvBatchStream, tonic::Status>> + Send>;
 
 /// Calls one rank's `GetKvSnapshot`.
 pub type GetSnapshot =
@@ -65,18 +56,12 @@ pub struct KvEventCalls {
     pub snapshot: GetSnapshot,
 }
 
-/// One rank's stream, and the snapshot it follows when the engine served one.
-pub struct OpenedKvEvents {
-    snapshot: Option<KvSnapshot>,
-    /// The sequence number of the first batch, for a stream that resumes from the snapshot.
-    next_sequence: Option<u64>,
-    batches: KvBatchStream,
-}
-
 /// Where one rank's engine KV events come from.
 pub enum KvEventFeed {
     Grpc {
-        opened: OpenedKvEvents,
+        stream: KvBatchStream,
+        /// The snapshot `stream` continues, when the engine served one.
+        snapshot: Option<KvSnapshot>,
         calls: KvEventCalls,
     },
     /// The engine's ZMQ publisher, for engines without the gRPC stream.
@@ -106,8 +91,8 @@ impl SidecarKvSource {
             on_ready: Box::new(move |publisher| {
                 let mut translator = Translator::new(publisher.clone(), dp_rank, image_token_id);
                 // Before the worker registers: a router's first query must find these blocks.
-                if let KvEventFeed::Grpc { opened, .. } = &mut feed {
-                    translator.load(opened, false);
+                if let KvEventFeed::Grpc { snapshot, .. } = &mut feed {
+                    translator.load(snapshot.take(), false);
                 }
                 let feed = tokio::spawn(cancel.run_until_cancelled_owned(translator.run(feed)));
                 tokio::spawn(async move {
@@ -122,7 +107,7 @@ impl SidecarKvSource {
     }
 }
 
-/// One feed per rank: the engine's gRPC streams, each after a snapshot of the
+/// One feed per rank: the engine's gRPC streams, each with a snapshot of the
 /// rank's cache when the engine serves one, or `zmq` for an engine without the
 /// `KvEvents` service (no stream listed, or UNIMPLEMENTED). No feeds when it
 /// cannot serve KV events (FAILED_PRECONDITION).
@@ -133,7 +118,14 @@ pub async fn kv_event_feeds(
     let mut feeds = Vec::new();
     for (dp_rank, mut calls) in grpc {
         match open(&mut calls, dp_rank).await {
-            Ok(opened) => feeds.push((dp_rank, KvEventFeed::Grpc { opened, calls })),
+            Ok((snapshot, stream)) => {
+                let feed = KvEventFeed::Grpc {
+                    stream,
+                    snapshot,
+                    calls,
+                };
+                feeds.push((dp_rank, feed));
+            }
             Err(status) if status.code() == tonic::Code::Unimplemented => return zmq(),
             Err(status) if status.code() == tonic::Code::FailedPrecondition => {
                 tracing::warn!(
@@ -154,9 +146,14 @@ pub async fn kv_event_feeds(
     if feeds.is_empty() { zmq() } else { Ok(feeds) }
 }
 
-/// Takes a snapshot of the rank's cache and opens the stream from its cursor,
-/// or without a cursor when the engine serves no snapshot or the snapshot fails.
-async fn open(calls: &mut KvEventCalls, dp_rank: u32) -> Result<OpenedKvEvents, tonic::Status> {
+/// Opens the rank's stream, then takes a snapshot of its cache: an engine's
+/// snapshot holds every batch it sent a subscriber before the call, so the
+/// stream has every later one.
+async fn open(
+    calls: &mut KvEventCalls,
+    dp_rank: u32,
+) -> Result<(Option<KvSnapshot>, KvBatchStream), tonic::Status> {
+    let batches = (calls.subscribe)().await?;
     let snapshot = match (calls.snapshot)().await {
         Ok(snapshot) => {
             if !snapshot.is_complete {
@@ -178,29 +175,22 @@ async fn open(calls: &mut KvEventCalls, dp_rank: u32) -> Result<OpenedKvEvents, 
             None
         }
     };
-    let resume = snapshot.as_ref().map(|snapshot| snapshot.resume.clone());
-    let mut next_sequence = resume.as_ref().map(|cursor| cursor.next_sequence_number);
-    let batches = match (calls.subscribe)(resume).await {
-        // For example an engine without a replay buffer: one live subscription, not another snapshot.
-        Err(status) if next_sequence.is_some() => {
-            tracing::warn!(
-                dp_rank,
-                %status,
-                "The engine cannot replay from the KV snapshot; KV events published since it are lost"
-            );
-            next_sequence = None;
-            (calls.subscribe)(None).await?
+    let batches = match &snapshot {
+        Some(snapshot) => {
+            let next = snapshot.next_sequence;
+            // The batches the stream delivered while the snapshot was taken are in the snapshot.
+            let is_in_snapshot =
+                move |batch: &KvBatch| matches!(batch, Ok((sequence, _)) if *sequence < next);
+            batches
+                .filter(move |batch| future::ready(!is_in_snapshot(batch)))
+                .boxed()
         }
-        batches => batches?,
+        None => batches,
     };
-    Ok(OpenedKvEvents {
-        snapshot,
-        next_sequence,
-        batches,
-    })
+    Ok((snapshot, batches))
 }
 
-/// A `SubscribeKvEvents` response stream as engine batches; `batch` is `None` for its start.
+/// A `SubscribeKvEvents` response stream as engine batches; `batch` is `None` for a response without one.
 pub fn grpc_batches<T: Send + 'static>(
     stream: tonic::Streaming<T>,
     batch: fn(T) -> Option<KvBatch>,
@@ -217,6 +207,43 @@ pub fn grpc_batches<T: Send + 'static>(
         })
         .filter_map(future::ready)
         .boxed()
+}
+
+/// One response of a `GetKvSnapshot` stream.
+pub enum KvSnapshotItem {
+    Stores(Vec<RawKvEvent>),
+    /// The last response; see [`KvSnapshot`].
+    End {
+        next_sequence: u64,
+        is_complete: bool,
+    },
+}
+
+/// A `GetKvSnapshot` response stream as a snapshot; `item` is `None` for a
+/// response without an item. A stream that ends without its end is an error.
+pub async fn grpc_snapshot<T>(
+    mut responses: tonic::Streaming<T>,
+    item: fn(T) -> Option<anyhow::Result<KvSnapshotItem>>,
+) -> Result<KvSnapshot, tonic::Status> {
+    let mut stores = Vec::new();
+    while let Some(response) = responses.message().await? {
+        match item(response).transpose() {
+            Ok(Some(KvSnapshotItem::Stores(more))) => stores.extend(more),
+            Ok(Some(KvSnapshotItem::End {
+                next_sequence,
+                is_complete,
+            })) => {
+                return Ok(KvSnapshot {
+                    stores,
+                    next_sequence,
+                    is_complete,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => return Err(tonic::Status::internal(format!("{error:#}"))),
+        }
+    }
+    Err(tonic::Status::internal("the KV snapshot has no end"))
 }
 
 /// The engine's ZMQ publisher as engine batches, through lib/llm's ZMQ listener's decoder.
@@ -266,9 +293,9 @@ impl Translator {
     async fn run(mut self, feed: KvEventFeed) {
         let dp_rank = self.worker.dp_rank;
         let (mut stream, mut calls) = match feed {
-            KvEventFeed::Grpc { opened, calls } => {
+            KvEventFeed::Grpc { stream, calls, .. } => {
                 tracing::info!(dp_rank, "KV events over gRPC");
-                (opened.batches, Some(calls))
+                (stream, Some(calls))
             }
             KvEventFeed::Zmq { endpoint, topic } => match zmq_batches(&endpoint, &topic).await {
                 Ok(stream) => {
@@ -307,7 +334,7 @@ impl Translator {
                     if !self.publish(batch) {
                         return;
                     }
-                    delivered |= is_next;
+                    delivered = true;
                     // After a snapshot, a stream that skips a batch is lost, like one that ends.
                     !is_next && self.has_snapshot
                 }
@@ -329,8 +356,8 @@ impl Translator {
             };
             tracing::warn!(dp_rank, "KV event stream lost; reopening it");
             // At once only after a delivered batch and with no snapshot to reload: reloads are spaced.
-            let wait = !delivered || self.has_snapshot;
-            let Some(reopened) = self.reopen(calls, wait).await else {
+            let needs_wait = !delivered || self.has_snapshot;
+            let Some(reopened) = self.reopen(calls, needs_wait).await else {
                 return;
             };
             stream = reopened;
@@ -338,18 +365,22 @@ impl Translator {
         }
     }
 
-    /// Reopens a lost stream, at once unless `wait`, and replaces what the
+    /// Reopens a lost stream, at once unless `needs_wait`, and replaces what the
     /// worker holds with the engine's snapshot when it serves one. `None` once
     /// the engine serves no KV events or the publisher has stopped.
-    async fn reopen(&mut self, calls: &mut KvEventCalls, mut wait: bool) -> Option<KvBatchStream> {
+    async fn reopen(
+        &mut self,
+        calls: &mut KvEventCalls,
+        mut needs_wait: bool,
+    ) -> Option<KvBatchStream> {
         let dp_rank = self.worker.dp_rank;
         loop {
-            if wait {
+            if needs_wait {
                 tokio::time::sleep(RESUBSCRIBE_DELAY).await;
             }
-            wait = true;
+            needs_wait = true;
             match open(calls, dp_rank).await {
-                Ok(mut opened) => return self.load(&mut opened, true).then_some(opened.batches),
+                Ok((snapshot, stream)) => return self.load(snapshot, true).then_some(stream),
                 Err(status)
                     if matches!(
                         status.code(),
@@ -366,12 +397,12 @@ impl Translator {
         }
     }
 
-    /// Publishes the opened stream's snapshot, if it has one, after a clear of
+    /// Publishes a newly opened stream's snapshot, if it has one, after a clear of
     /// the worker's blocks when `needs_clear`. False once the publisher has stopped.
-    fn load(&mut self, opened: &mut OpenedKvEvents, needs_clear: bool) -> bool {
-        self.next_sequence = opened.next_sequence;
-        self.has_snapshot = opened.snapshot.is_some();
-        let Some(snapshot) = opened.snapshot.take() else {
+    fn load(&mut self, snapshot: Option<KvSnapshot>, needs_clear: bool) -> bool {
+        self.next_sequence = snapshot.as_ref().map(|snapshot| snapshot.next_sequence);
+        self.has_snapshot = snapshot.is_some();
+        let Some(snapshot) = snapshot else {
             return true;
         };
         let blocks = snapshot.stores.iter().map(|store| match store {
@@ -381,7 +412,7 @@ impl Translator {
         tracing::info!(
             dp_rank = self.worker.dp_rank,
             blocks = blocks.sum::<usize>(),
-            next_sequence = snapshot.resume.next_sequence_number,
+            next_sequence = snapshot.next_sequence,
             "Loading the engine's KV snapshot"
         );
         let clear = needs_clear.then_some(RawKvEvent::AllBlocksCleared { ownership: None });
@@ -411,222 +442,4 @@ impl Translator {
             .publish_batch_with_session_ids(events)
             .is_ok()
     }
-}
-
-/// Defines `calls`, one rank's calls to an engine's `KvEvents` service, and
-/// `batch`, which converts one response of its stream into the batch the ZMQ
-/// decoder returns for the same events, through the decoder's own helpers.
-/// vLLM's `vllm` and SGLang's `sglang.kv.v1` packages define the same messages.
-/// Invoke it in a module of its own.
-#[macro_export]
-macro_rules! kv_event_proto {
-    ($pb:path) => {
-        use $crate::kv_events::anyhow::{Context as _, Result, bail};
-        use $crate::kv_events::wire::{
-            BlockHashValue, ExtraKeyItem, KvCacheSpecKind, KvEventBatch, KvTokenIds, Locality,
-            RawKvEvent, extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace,
-            mark_first_raw_key_block, normalize_medium, normalize_token_ids,
-        };
-        use $pb as pb;
-
-        /// Rank `dp_rank`'s `SubscribeKvEvents` and `GetKvSnapshot` over `channel`.
-        pub(crate) fn calls(
-            channel: $crate::kv_events::tonic::transport::Channel,
-            dp_rank: u32,
-        ) -> $crate::kv_events::KvEventCalls {
-            let client = move || {
-                pb::kv_events_client::KvEventsClient::new(channel.clone())
-                    .max_decoding_message_size($crate::DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-            };
-            let subscriber = client.clone();
-            $crate::kv_events::KvEventCalls {
-                subscribe: Box::new(move |resume| {
-                    let mut client = subscriber();
-                    Box::pin(async move {
-                        let request = pb::SubscribeKvEventsRequest {
-                            data_parallel_rank: dp_rank,
-                            resume: resume.map(|cursor| pb::KvEventCursor {
-                                stream_id: cursor.stream_id,
-                                next_sequence_number: cursor.next_sequence_number,
-                            }),
-                        };
-                        let responses = client.subscribe_kv_events(request).await?;
-                        Ok($crate::kv_events::grpc_batches(
-                            responses.into_inner(),
-                            batch,
-                        ))
-                    })
-                }),
-                snapshot: Box::new(move || {
-                    let mut client = client();
-                    Box::pin(async move {
-                        use pb::get_kv_snapshot_response::Item;
-                        use $crate::kv_events::tonic::Status;
-                        let request = pb::GetKvSnapshotRequest {
-                            data_parallel_rank: dp_rank,
-                        };
-                        let mut responses = client.get_kv_snapshot(request).await?.into_inner();
-                        let mut stores = Vec::new();
-                        while let Some(response) = responses.message().await? {
-                            match response.item {
-                                Some(Item::Blocks(blocks)) => {
-                                    for stored in blocks.stored {
-                                        let store = block_stored(stored);
-                                        stores.push(store.map_err(|error| {
-                                            Status::internal(format!("{error:#}"))
-                                        })?);
-                                    }
-                                }
-                                Some(Item::End(end)) => {
-                                    let Some(resume) = end.resume else {
-                                        return Err(Status::internal(
-                                            "KV snapshot without a cursor",
-                                        ));
-                                    };
-                                    return Ok($crate::kv_events::KvSnapshot {
-                                        stores,
-                                        resume: $crate::kv_events::KvCursor {
-                                            stream_id: resume.stream_id,
-                                            next_sequence_number: resume.next_sequence_number,
-                                        },
-                                        is_complete: end.complete,
-                                    });
-                                }
-                                None => {}
-                            }
-                        }
-                        Err(Status::internal("the KV snapshot has no end"))
-                    })
-                }),
-            }
-        }
-
-        /// The batch of a stream response; `None` for the stream's start.
-        pub(crate) fn batch(
-            response: pb::SubscribeKvEventsResponse,
-        ) -> Option<$crate::kv_events::KvBatch> {
-            let pb::subscribe_kv_events_response::Item::Batch(batch) = response.item? else {
-                return None;
-            };
-            let events = batch.events.into_iter().map(event).collect::<Result<_>>();
-            Some(events.map(|events| {
-                (
-                    batch.sequence_number,
-                    KvEventBatch {
-                        ts: batch.ts,
-                        events,
-                        data_parallel_rank: batch.data_parallel_rank.map(u32::cast_signed),
-                    },
-                )
-            }))
-        }
-
-        fn event(event: pb::KvCacheEvent) -> Result<RawKvEvent> {
-            use pb::kv_cache_event::Event;
-            Ok(
-                match event.event.context("KV cache event without a type")? {
-                    Event::BlockStored(stored) => block_stored(stored)?,
-                    Event::BlockRemoved(removed) => RawKvEvent::BlockRemoved {
-                        block_hashes: hashes(removed.block_hashes)?,
-                        medium: normalize_medium(removed.medium),
-                        group_idx: removed.group_idx,
-                        kv_cache_spec_kind: None,
-                        kv_cache_spec_sliding_window: None,
-                        locality: removed.locality.as_deref().map(Locality::from_wire),
-                        ownership: removed.ownership,
-                    },
-                    Event::AllBlocksCleared(_) => RawKvEvent::AllBlocksCleared { ownership: None },
-                },
-            )
-        }
-
-        fn block_stored(stored: pb::BlockStored) -> Result<RawKvEvent> {
-            use pb::block_token_ids::Ids;
-            let token_ids = match stored
-                .token_ids
-                .and_then(|token_ids| token_ids.ids)
-                .context("BlockStored without token_ids")?
-            {
-                Ids::Single(list) => KvTokenIds::Single(list.token_ids),
-                Ids::Pairs(list) => KvTokenIds::Bigram(
-                    list.pairs
-                        .into_iter()
-                        .map(|pair| (pair.first, pair.second))
-                        .collect(),
-                ),
-            };
-            let (mut token_ids, is_eagle) = normalize_token_ids(token_ids);
-            let block_size = stored.block_size as usize;
-            // The decoder's helpers read an empty entry as they read `None`.
-            let extra_keys: Vec<Option<Vec<ExtraKeyItem>>> = stored
-                .extra_keys
-                .into_iter()
-                .map(|block| {
-                    let keys = block.keys.into_iter().map(extra_key);
-                    keys.collect::<Result<_>>().map(Some)
-                })
-                .collect::<Result<_>>()?;
-            mark_first_raw_key_block(&mut token_ids, block_size, Some(&extra_keys));
-            let cache_namespace = stored.cache_salt.or_else(|| {
-                extra_keys_to_cache_namespace(Some(&extra_keys), stored.lora_name.as_deref())
-            });
-            Ok(RawKvEvent::BlockStored {
-                block_hashes: hashes(stored.block_hashes)?,
-                parent_block_hash: stored.parent_block_hash.map(hash).transpose()?,
-                token_ids,
-                block_size,
-                medium: normalize_medium(stored.medium),
-                lora_name: stored.lora_name,
-                cache_namespace,
-                block_mm_infos: extra_keys_to_block_mm_infos(Some(extra_keys)),
-                is_eagle: Some(is_eagle),
-                group_idx: stored.group_idx,
-                kv_cache_spec_kind: stored
-                    .kv_cache_spec_kind
-                    .as_deref()
-                    .map(KvCacheSpecKind::from_wire),
-                kv_cache_spec_sliding_window: stored.kv_cache_spec_sliding_window,
-                locality: stored.locality.as_deref().map(Locality::from_wire),
-                ownership: stored.ownership,
-                session_id: stored.session_id,
-            })
-        }
-
-        fn hashes(hashes: Vec<pb::BlockHash>) -> Result<Vec<BlockHashValue>> {
-            hashes.into_iter().map(hash).collect()
-        }
-
-        fn hash(hash: pb::BlockHash) -> Result<BlockHashValue> {
-            use pb::block_hash::Value;
-            match hash.value {
-                Some(Value::UnsignedValue(value)) => Ok(BlockHashValue::Unsigned(value)),
-                Some(Value::SignedValue(value)) => Ok(BlockHashValue::Signed(value)),
-                // The ZMQ decoder rejects byte hashes as well.
-                Some(Value::Digest(_)) => bail!("byte block hashes are not supported"),
-                None => bail!("block hash without a value"),
-            }
-        }
-
-        fn extra_key(key: pb::ExtraKeyValue) -> Result<ExtraKeyItem> {
-            use pb::extra_key_value::Value;
-            Ok(match key.value.context("extra key without a value")? {
-                Value::Text(text) => ExtraKeyItem::Hash(text),
-                Value::Data(data) => ExtraKeyItem::Bytes(data.into()),
-                Value::Integer(value) => ExtraKeyItem::Signed(value),
-                Value::Tuple(tuple) => match <[pb::ExtraKeyValue; 2]>::try_from(tuple.items) {
-                    Ok(
-                        [
-                            pb::ExtraKeyValue {
-                                value: Some(Value::Text(hash)),
-                            },
-                            pb::ExtraKeyValue {
-                                value: Some(Value::Integer(offset)),
-                            },
-                        ],
-                    ) => ExtraKeyItem::HashWithSignedOffset((hash, offset)),
-                    _ => bail!("unsupported extra key tuple"),
-                },
-            })
-        }
-    };
 }
