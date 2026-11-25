@@ -68,13 +68,39 @@ The request plane carries RPC traffic between Dynamo components. `DYN_REQUEST_PL
 
 - `tcp` is the default and uses direct pooled connections.
 - `nats` uses brokered request transport.
+- `velo` sends requests over the Velo response listeners. It requires `DYN_RESPONSE_PLANE=velo`.
 
 When the runtime reads this setting from its environment, an absent value selects
-`tcp`. Every present value, including an empty value, must be `tcp` or `nats`
-(case-insensitive); any other value stops startup instead of silently selecting
-`tcp`.
+`tcp`. Every present value, including an empty value, must be `tcp`, `nats`, or
+`velo` (case-insensitive); any other value stops startup instead of silently
+selecting `tcp`.
 
 `DYN_REQUEST_PLANE_CODEC` selects `msgpack` or `json`. The destination endpoint advertises its codec, so one client can communicate with endpoints that use different codecs.
+
+#### Velo Request Plane
+
+Set both planes to `velo` on every frontend and worker in the pool:
+
+```bash
+DYN_REQUEST_PLANE=velo DYN_RESPONSE_PLANE=velo python3 -m dynamo.frontend
+```
+
+- A `velo` request plane requires a `velo` response plane. Any other effective
+  response plane is a local configuration error and stops startup.
+- Velo has no TLS. While any `DYN_TCP_TLS_*` setting is present, Dynamo uses the
+  `tcp` response plane instead; a `velo` request plane then stops startup because
+  its response plane is no longer `velo`.
+- The Velo request plane supports only Velo's TCP transport. Setting
+  `DYN_VELO_RESPONSE_TRANSPORT=ucx` with `DYN_REQUEST_PLANE=velo` stops startup.
+- Both planes share the Velo listener. `DYN_VELO_RESPONSE_PORT` sets its port.
+- Bidirectional endpoints, whose requests stream input, still use the TCP
+  request-callback stream.
+- A pool must not mix Velo and non-Velo workers. A foreign transport in a Velo
+  pool is a local configuration error; the router does not inhibit or migrate
+  around it.
+- An older runtime skips Velo workers it does not understand, and on Kubernetes
+  it skips the whole pod. During a rolling update, keep a Velo pool in its own
+  namespace so an older frontend or worker never discovers a peer it cannot read.
 
 ### Event Plane
 

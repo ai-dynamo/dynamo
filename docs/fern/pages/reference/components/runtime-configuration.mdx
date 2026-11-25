@@ -123,11 +123,21 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--request-plane" type="string" default="tcp">
-  Transport used to distribute requests from routers to workers. `tcp` provides the lowest latency and is recommended for production. `nats` uses NATS messaging. See [Request Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#request-plane) for design details.
+  Transport used to distribute requests from routers to workers. `tcp` provides the lowest latency and is recommended for production. `nats` uses NATS messaging. `velo` sends requests over the Velo response listener and requires `--response-plane velo`. See [Request Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#request-plane) for design details.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>velo</Badge></span>
 
   Environment variable: `DYN_REQUEST_PLANE`
+</ParamField>
+
+<ParamField path="--response-plane" type="string" default="null">
+  Response transport. Frontends and workers must use the same value. When unset, the runtime uses `tcp`.
+
+  `velo` has no TLS. While any `DYN_TCP_TLS_*` setting is present, Dynamo uses `tcp` instead, and a `velo` request plane then stops startup. The Velo request plane also refuses `DYN_VELO_RESPONSE_TRANSPORT=ucx`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>quic</Badge> <Badge intent="note" minimal>velo</Badge></span>
+
+  Environment variable: `DYN_RESPONSE_PLANE`
 </ParamField>
 
 <ParamField path="DYN_REQUEST_PLANE_CODEC" type="string" default="msgpack">

@@ -694,11 +694,25 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
 </ParamField>
 
 <ParamField path="--request-plane" type="string" default="tcp">
-  Request distribution transport. `tcp` is the fastest.
+  Request distribution transport. `tcp` is the fastest. `velo` sends requests
+  over the Velo response listener and requires `--response-plane velo`; see
+  [Velo Request Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#velo-request-plane).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>velo</Badge></span>
 
   Environment variable: `DYN_REQUEST_PLANE`
+</ParamField>
+
+<ParamField path="--response-plane" type="string" default="null">
+  Response transport. The frontend and its workers must use the same value. When
+  unset, the runtime uses `tcp`.
+
+  `velo` has no TLS. While any `DYN_TCP_TLS_*` setting is present, Dynamo uses
+  `tcp` instead, and a `velo` request plane then stops startup.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>quic</Badge> <Badge intent="note" minimal>velo</Badge></span>
+
+  Environment variable: `DYN_RESPONSE_PLANE`
 </ParamField>
 
 <ParamField path="--event-plane" type="string" default="zmq">
