@@ -682,8 +682,9 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 530_432_000
             ),  # KV cache cap (2x safety over profiled min=265_216_000)
-            # Startup (~150 s with CI model download) plus the first request
-            # at its 180 s timeout and two more at 60 s.
+            # Startup (~150 s with CI model download), one cold FA2 compile
+            # (~90 s) in the first request, and ~14 s per request after that.
+            # Each request has its own 180 s read timeout.
             pytest.mark.timeout(480),
             pytest.mark.post_merge,
         ],
