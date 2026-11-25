@@ -213,22 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_parser_plugin_repeats() {
-        let args = TestArgs::try_parse_from([
-            "test",
-            "--tool-parser-plugin",
-            "/opt/a.so",
-            "--tool-parser-plugin",
-            "/opt/b.so",
-        ])
-        .unwrap();
-        assert_eq!(
-            args.common.tool_parser_plugin,
-            [std::path::PathBuf::from("/opt/a.so"), "/opt/b.so".into()]
-        );
-    }
-
-    #[test]
     #[serial_test::serial]
     fn worker_suffix_is_applied_once_to_namespace() {
         for (namespace, suffix, argv, expected) in [

@@ -224,7 +224,9 @@ Plugins are Unified V2 parsers. Under `DYN_PARSER_VERSION=1`, a plugin name is r
 A parser can declare that `required` or named choices need its structural tag (`require_tag_for_forced` or `require_tag_for_named`; built-in Muse Spark is one). For such a choice the request fails with HTTP 400 before generation when:
 
 - The parser cannot build the tag: its builder fails, or returns no tag.
-- The worker reports that its backend does not enforce `structural_tag`. vLLM reports enforcement for the `auto` and `xgrammar` structured-output backends only. SGLang reports it for `--grammar-backend xgrammar` without `--skip-tokenizer-init` only. TensorRT-LLM and the Rust sidecar workers report nothing, and a worker that reports nothing is treated as enforcing the tag.
+- The worker reports that its backend does not enforce `structural_tag`. vLLM reports enforcement for the `auto` and `xgrammar` structured-output backends only. SGLang reports it for the default or `xgrammar` grammar backend, without `--skip-tokenizer-init`, only. TensorRT-LLM and the Rust sidecar workers report nothing, and a worker that reports nothing is treated as enforcing the tag.
+
+Optional tags, such as those for `tool_choice: auto`, still go to a backend that reports it does not enforce `structural_tag`, and that backend may reject the request. Built-in builders return no tag when the request has no tools and no response schema; a plugin's guide should do the same.
 
 See [Structural Tags](structural-tag.md) for backend activation.
 
