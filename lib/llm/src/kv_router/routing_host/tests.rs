@@ -1944,12 +1944,21 @@ async fn decode_progress_collection_follows_picker_declaration() {
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            *self.seen.lock().unwrap() = input.decode_progress(0).map(|progress| {
+            let complete = input.decode_progress(0).map(|progress| {
                 (
                     progress.observed_requests(),
                     progress.remaining_token_budget(),
                 )
             });
+            let partial = input.partial_decode_progress(0).map(|progress| {
+                assert_eq!(progress.unknown_requests(), 0);
+                (
+                    progress.observed_requests(),
+                    progress.observed_remaining_token_budget(),
+                )
+            });
+            assert_eq!(partial, complete);
+            *self.seen.lock().unwrap() = complete;
             Ok(0)
         }
     }

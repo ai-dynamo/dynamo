@@ -3103,6 +3103,7 @@ impl<
                     None
                 };
                 let progress = |worker| self.slots.decode_progress_for(worker);
+                let partial_progress = |worker| self.slots.partial_decode_progress_for(worker);
                 // Held for this selection, so the snapshot the policy reads borrows live counters.
                 let resident_blocks = self
                     .resident_blocks
@@ -3117,7 +3118,8 @@ impl<
                             self.block_size,
                         )
                         .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts))
-                        .with_decode_progress(Some(&progress)),
+                        .with_decode_progress(Some(&progress))
+                        .with_partial_decode_progress(Some(&partial_progress)),
                         prepared,
                         trace,
                     )
@@ -5659,8 +5661,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepared_rows_read_decode_progress_at_actor_selection() {
-        use dynamo_slot_tracker::host::DecodeProgressUpdate;
+    async fn prepared_rows_read_partial_decode_progress_at_actor_selection() {
+        use dynamo_slot_tracker::host::{DecodeProgressUpdate, SequenceRequest};
         use dynamo_worker_selection::{
             WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
         };
@@ -5683,10 +5685,13 @@ mod tests {
                     .iter()
                     .position(|row| row.worker().worker_id == 0)
                     .unwrap();
+                assert!(input.decode_progress(row).is_none());
+                let progress = input.partial_decode_progress(row).unwrap();
                 assert_eq!(
-                    input.decode_progress(row).unwrap().remaining_token_budget(),
-                    48
+                    (progress.observed_requests(), progress.unknown_requests()),
+                    (8, 1)
                 );
+                assert_eq!(progress.observed_remaining_token_budget(), 7 * 120 + 48);
                 Ok(input
                     .candidates()
                     .iter()
@@ -5706,43 +5711,52 @@ mod tests {
         };
         let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, None, policy());
         let mut actor = actor_with_selector_for_test(&queue, &slots, policy());
-        let request_id = "background".to_string();
         let worker = WorkerWithDpRank::new(0, 0);
-        let attempt = slots
-            .add_request_if_registered_admitted(
-                dynamo_slot_tracker::host::SequenceRequest {
-                    request_id: request_id.clone(),
-                    token_sequence: None,
-                    expected_output_tokens: None,
-                    track_prefill_tokens: false,
-                    prefill_load_hint: None,
+        let book = |request_id: &str| {
+            slots
+                .add_request_if_registered_admitted(
+                    SequenceRequest {
+                        request_id: request_id.to_owned(),
+                        token_sequence: None,
+                        expected_output_tokens: Some(128),
+                        track_prefill_tokens: false,
+                        prefill_load_hint: None,
+                        worker,
+                        lora_name: None,
+                    },
+                    Instant::now(),
+                )
+                .unwrap()
+        };
+        let mut backgrounds = Vec::new();
+        for index in 0..8 {
+            let request_id = format!("background-{index}");
+            let attempt = book(&request_id);
+            slots
+                .mark_prefill_completed(&request_id, Instant::now())
+                .unwrap();
+            slots
+                .update_output_if_booking(
+                    &request_id,
                     worker,
-                    lora_name: None,
-                },
-                Instant::now(),
-            )
-            .unwrap();
-        slots
-            .mark_prefill_completed(&request_id, Instant::now())
-            .unwrap();
-        slots
-            .update_output_if_booking(
-                &request_id,
-                worker,
-                attempt,
-                0,
-                None,
-                Some(DecodeProgressUpdate::observed(128, 8)),
-            )
-            .unwrap();
+                    attempt,
+                    0,
+                    None,
+                    Some(DecodeProgressUpdate::observed(128, 8)),
+                )
+                .unwrap();
+            backgrounds.push((request_id, attempt));
+        }
         let (request, mut rx) = make_request("prepared-progress", 16);
         let prepared = queue.prepare_candidates(&request);
         assert!(prepared.is_some());
+        book("prefilling-sibling");
+        let (request_id, attempt) = &backgrounds[0];
         slots
             .update_output_if_booking(
-                &request_id,
+                request_id,
                 worker,
-                attempt,
+                *attempt,
                 0,
                 None,
                 Some(DecodeProgressUpdate::observed(128, 80)),

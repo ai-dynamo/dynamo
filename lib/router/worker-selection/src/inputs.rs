@@ -431,6 +431,7 @@ pub struct WorkerInputView<'a> {
     // Set only on the KV path, for a picker that declared RESIDENT_BLOCKS.
     resident_blocks: Option<&'a dyn ResidentBlockSource>,
     decode_progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
+    partial_decode_progress: Option<&'a crate::host::PartialDecodeProgressSource<'a>>,
 }
 
 /// Where a picker's rows come from.
@@ -655,6 +656,7 @@ impl<'a> WorkerInputView<'a> {
             load,
             resident_blocks,
             decode_progress: None,
+            partial_decode_progress: None,
         }
     }
 
@@ -675,6 +677,7 @@ impl<'a> WorkerInputView<'a> {
             load: None,
             resident_blocks: None,
             decode_progress: None,
+            partial_decode_progress: None,
         }
     }
 
@@ -686,15 +689,35 @@ impl<'a> WorkerInputView<'a> {
         self
     }
 
+    pub(crate) fn with_partial_decode_progress(
+        mut self,
+        progress: Option<&'a crate::host::PartialDecodeProgressSource<'a>>,
+    ) -> Self {
+        self.partial_decode_progress = progress;
+        self
+    }
+
     pub(crate) fn decode_progress_for_row(
         self,
         row: usize,
     ) -> Option<dynamo_slot_tracker::host::DecodeProgress> {
         let lookup = self.decode_progress?;
+        lookup(self.progress_worker_for_row(row)?)
+    }
+
+    pub(crate) fn partial_decode_progress_for_row(
+        self,
+        row: usize,
+    ) -> Option<dynamo_slot_tracker::host::PartialDecodeProgress> {
+        let lookup = self.partial_decode_progress?;
+        lookup(self.progress_worker_for_row(row)?)
+    }
+
+    fn progress_worker_for_row(self, row: usize) -> Option<WorkerWithDpRank> {
         let PickerRows::Materialized { candidates, .. } = self.rows else {
             return None;
         };
-        lookup(candidates.get(row)?.worker)
+        Some(candidates.get(row)?.worker)
     }
 
     /// Number of rows, equal to the length of [`Self::candidates`].

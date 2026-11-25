@@ -48,10 +48,13 @@ fn remaining_budget(input: WorkerInputView<'_>, row: usize, max_age: Duration) -
 
 `None` requires a fallback. This frontend-local signal covers supported aggregated,
 single-choice requests with a positive effective output limit. That can come
-from the request or from the frontend's remaining-context default. A rank has
-no summary while any active request is prefilling or lacks a valid observation.
-Use the budget as a raw-token upper bound. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
-for fields and missing-data behavior.
+from the request or from the frontend's remaining-context default.
+`decode_progress(row)` requires completed prefill and valid observations for every
+active request. Use `partial_decode_progress(row)` to read the observed subset
+and its unknown request count when a rank also has unobserved requests. The raw
+token budget then bounds the observed requests. Apply a freshness limit and
+account for the unknown requests in your policy. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
+for field semantics.
 
 ## Pick a Starting Point
 

@@ -29,7 +29,10 @@ use rustc_hash::FxHashSet;
 use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::decode_progress::{DecodeProgressAggregate, DecodeProgressUpdate, Observation};
+use crate::decode_progress::{
+    DecodeProgress, DecodeProgressAggregate, DecodeProgressUpdate, Observation,
+    PartialDecodeProgress,
+};
 use crate::wire::PrefillLoadHint;
 
 /// Shared active-request liveness duration (5 minutes).
@@ -396,11 +399,15 @@ impl ActiveSequences {
         outcome
     }
 
-    pub(super) fn decode_progress_summary(&self) -> Option<crate::decode_progress::DecodeProgress> {
+    pub(super) fn decode_progress_summary(&self) -> Option<DecodeProgress> {
         if self.prefill_requests != 0 {
             return None;
         }
         self.decode_progress.summary(self.requests.len())
+    }
+
+    pub(super) fn partial_decode_progress_summary(&self) -> Option<PartialDecodeProgress> {
+        self.decode_progress.partial_summary(self.requests.len())
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {

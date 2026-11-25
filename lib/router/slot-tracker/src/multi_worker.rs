@@ -35,7 +35,7 @@ use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTo
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::booking::SchedulerBookingDescriptor;
 use crate::busy::FullRankCounts;
-use crate::decode_progress::{DecodeProgress, DecodeProgressUpdate};
+use crate::decode_progress::{DecodeProgress, DecodeProgressUpdate, PartialDecodeProgress};
 use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
 use dynamo_router_protocol::attempt::AttemptId;
 use dynamo_router_protocol::worker::{WorkerCapacity, WorkerId, WorkerWithDpRank};
@@ -1306,14 +1306,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Read this rank's complete decoding-owner summary on demand.
     pub fn decode_progress_for(&self, worker: WorkerWithDpRank) -> Option<DecodeProgress> {
+        self.read_decode_progress(worker, ActiveSequences::decode_progress_summary)
+    }
+
+    /// Read this rank's observed subset on demand.
+    pub fn partial_decode_progress_for(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Option<PartialDecodeProgress> {
+        self.read_decode_progress(worker, ActiveSequences::partial_decode_progress_summary)
+    }
+
+    fn read_decode_progress<T>(
+        &self,
+        worker: WorkerWithDpRank,
+        read: impl FnOnce(&ActiveSequences) -> Option<T>,
+    ) -> Option<T> {
         let table = self.workers.read();
         let &index = table.index.get(&worker)?;
-        table
-            .slots
-            .get(index)?
-            .sequences
-            .read()
-            .decode_progress_summary()
+        read(&table.slots.get(index)?.sequences.read())
     }
 
     /// Get the number of workers.
@@ -4203,9 +4214,28 @@ mod tests {
         assert!(sequences.decode_progress_for(worker).is_some());
         sequences.apply_replica_batch(vec![replica_add("mirrored", worker, vec![10])]);
         assert!(sequences.decode_progress_for(worker).is_none());
+        let progress = sequences.partial_decode_progress_for(worker).unwrap();
+        assert_eq!(
+            (progress.observed_requests(), progress.unknown_requests()),
+            (1, 1)
+        );
         sequences.apply_replica_batch(vec![replica_mark("mirrored", worker)]);
         assert!(sequences.decode_progress_for(worker).is_none());
+        assert_eq!(
+            sequences
+                .partial_decode_progress_for(worker)
+                .unwrap()
+                .unknown_requests(),
+            1
+        );
         sequences.apply_replica_batch(vec![replica_free("mirrored", worker)]);
         assert!(sequences.decode_progress_for(worker).is_some());
+        assert_eq!(
+            sequences
+                .partial_decode_progress_for(worker)
+                .unwrap()
+                .unknown_requests(),
+            0
+        );
     }
 }

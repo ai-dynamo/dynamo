@@ -717,8 +717,24 @@ effective limit, or lacks a valid observation. An undeclared input or unsupporte
 host, including the standalone EPP, also returns `None`. Choose a fallback for
 those cases.
 
-Observations are local to one frontend. LOAD and progress are advisory reads and
-can differ during concurrent updates.
+Use `input.partial_decode_progress(row)` with the same declaration to read an
+observed subset. For example, a rank with eight observed requests and one new
+prefilling request returns eight observed requests and one unknown request.
+
+| Method | Value |
+|---|---|
+| `observed_requests()` | Number of active requests with valid output observations |
+| `unknown_requests()` | Number of active requests without a valid observation from this frontend |
+| `observed_remaining_token_budget()` | Remaining output budget in raw tokens, summed over observed requests |
+| `observed_age()` | `Duration` since the oldest valid observation |
+
+The partial accessor returns `None` when zero valid observations are available
+or the candidate, input, or host is unavailable. Apply your policy's freshness
+limit and account for unknown requests before using the budget.
+
+Observations are local to one frontend. Each accessor reads the current state of
+the rank. LOAD and progress are advisory reads and can differ during concurrent
+updates.
 
 ## Policy Contract
 

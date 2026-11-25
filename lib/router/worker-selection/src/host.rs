@@ -27,3 +27,9 @@ pub type DecodeProgressSource<'a> = dyn Fn(
         dynamo_router_protocol::worker::WorkerWithDpRank,
     ) -> Option<dynamo_slot_tracker::host::DecodeProgress>
     + 'a;
+
+/// A live lookup for the observed subset of requests on one rank.
+pub type PartialDecodeProgressSource<'a> = dyn Fn(
+        dynamo_router_protocol::worker::WorkerWithDpRank,
+    ) -> Option<dynamo_slot_tracker::host::PartialDecodeProgress>
+    + 'a;

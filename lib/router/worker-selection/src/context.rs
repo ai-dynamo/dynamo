@@ -14,6 +14,7 @@ use super::shared_cache::SharedCacheHits;
 /// request it owns, so a policy sees exactly the fields the accessors expose.
 pub struct WorkerSelectionContext<'a> {
     pub(crate) decode_progress: Option<&'a super::host::DecodeProgressSource<'a>>,
+    pub(crate) partial_decode_progress: Option<&'a super::host::PartialDecodeProgressSource<'a>>,
     pub(crate) request_id: Option<&'a str>,
     pub(crate) isl_tokens: usize,
     pub(crate) request_blocks: u64,
@@ -44,6 +45,7 @@ impl<'a> WorkerSelectionContext<'a> {
     pub fn new(isl_tokens: usize, block_size: u32) -> Self {
         Self {
             decode_progress: None,
+            partial_decode_progress: None,
             request_id: None,
             isl_tokens,
             request_blocks: match block_size {
@@ -160,6 +162,15 @@ impl<'a> WorkerSelectionContext<'a> {
         progress: Option<&'a super::host::DecodeProgressSource<'a>>,
     ) -> Self {
         self.decode_progress = progress;
+        self
+    }
+
+    /// Lend a live lookup for partial observations to a picker declaring decode progress.
+    pub fn with_partial_decode_progress(
+        mut self,
+        progress: Option<&'a super::host::PartialDecodeProgressSource<'a>>,
+    ) -> Self {
+        self.partial_decode_progress = progress;
         self
     }
 
