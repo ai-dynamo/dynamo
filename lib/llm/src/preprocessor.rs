@@ -2144,6 +2144,8 @@ impl EmbeddingTokenizerState {
 }
 
 pub struct OpenAIPreprocessor {
+    /// Vocabulary ID of a standalone reasoning opener, when the model has one.
+    think_opener_id: Option<TokenIdType>,
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
@@ -3544,6 +3546,7 @@ impl OpenAIPreprocessor {
         };
 
         Ok(Arc::new(Self {
+            think_opener_id: tokenizer.token_to_id("<think>").ok().flatten(),
             formatter,
             tokenizer,
             embedding_tokenizers,
@@ -6625,6 +6628,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata,
             mm_counts,
             None,
+            None,
         )
     }
 
@@ -6639,6 +6643,7 @@ impl OpenAIPreprocessor {
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         mm_counts: MultimodalCounts,
         image_tokens: Option<usize>,
+        think_opener_id: Option<TokenIdType>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + Unpin + 'static,
@@ -6688,6 +6693,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
             mm_counts: MultimodalCounts,
             image_tokens: Option<usize>,
+            think_opener_id: Option<TokenIdType>,
         }
 
         let tracker = generator.tracker();
@@ -6707,6 +6713,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata,
             mm_counts,
             image_tokens,
+            think_opener_id,
         };
 
         /// The response stream. `state` is `None` once the stream has ended, so the state,
@@ -6826,16 +6833,16 @@ impl OpenAIPreprocessor {
 
                     let current_osl = self.cumulative_output_tokens;
                     let text_after_think_opener = response.data.as_ref().and_then(|output| {
-                        if chunk_tokens > 1 && output.tokens.first()?.as_deref() == Some("<think>")
-                        {
-                            output
-                                .text
-                                .as_deref()?
-                                .strip_prefix("<think>")
-                                .map(Box::from)
-                        } else {
-                            None
+                        if chunk_tokens <= 1 {
+                            return None;
                         }
+                        let tail = output.text.as_deref()?.strip_prefix("<think>")?;
+                        // Per-token text is optional when logprobs are disabled.
+                        let starts_with_opener = match self.think_opener_id {
+                            Some(id) => output.token_ids.first() == Some(&id),
+                            None => output.tokens.first()?.as_deref() == Some("<think>"),
+                        };
+                        starts_with_opener.then(|| Box::from(tail))
                     });
 
                     let mut response = response.map_data(|data| {
@@ -9203,6 +9210,7 @@ impl
             trace_finish_reason_metadata,
             mm_counts,
             image_tokens,
+            self.think_opener_id,
         );
 
         let transformed_stream = self.postprocessor_parsing_stream_with_constraint(
@@ -9433,6 +9441,7 @@ impl
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             MultimodalCounts::default(),
+            None,
             None,
         );
 
@@ -13119,64 +13128,6 @@ mod tests {
             ..Default::default()
         });
         chunk
-    }
-
-    #[tokio::test]
-    async fn reasoning_usage_estimator_counts_coalesced_qwen3_opener_like_split_tokens() {
-        let mut request = chat_request_with_args(None);
-        request.enable_usage_for_nonstreaming(false);
-        const IDS: [u32; 4] = [151667, 198, 151668, 9217];
-        const TOKENS: [&str; 4] = ["<think>", "\n", "</think>", "answer"];
-        for ranges in [vec![0..1, 1..2, 2..3, 3..4], vec![0..2, 2..3, 3..4]] {
-            let opener_size = ranges[0].len();
-            let backend = ranges.into_iter().map(|range| {
-                let tokens = &TOKENS[range.clone()];
-                let output: BackendOutput = serde_json::from_value(serde_json::json!({
-                    "token_ids": &IDS[range.clone()],
-                    "text": tokens.concat(),
-                    "tokens": tokens,
-                    "finish_reason": (range.end == IDS.len()).then_some("stop"),
-                }))
-                .unwrap();
-                Annotated::from_data(output)
-            });
-            let stream = OpenAIPreprocessor::transform_postprocessor_stream(
-                stream::iter(backend),
-                Box::new(request.response_generator("test".into())),
-                PipelineContext::new(()).context(),
-                false,
-                false,
-                None,
-                MultimodalCounts::default(),
-            );
-            let parsed = OpenAIPreprocessor::parse_reasoning_content_from_stream(
-                stream,
-                "qwen3".into(),
-                false,
-            );
-            let chunks = annotate_reasoning_usage(parsed).collect::<Vec<_>>().await;
-            let usage = chunks
-                .last()
-                .unwrap()
-                .data
-                .as_ref()
-                .unwrap()
-                .inner
-                .usage
-                .as_ref()
-                .unwrap();
-            assert_eq!(usage.completion_tokens, 4);
-            // The newline and the closing token count in both streams.
-            assert_eq!(
-                usage
-                    .completion_tokens_details
-                    .as_ref()
-                    .unwrap()
-                    .reasoning_tokens,
-                Some(2),
-                "opener chunk size {opener_size}"
-            );
-        }
     }
 
     #[tokio::test]

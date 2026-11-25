@@ -543,6 +543,109 @@ mod tests {
         }
     }
 
+    struct TokenChunks(Vec<Vec<u32>>);
+
+    #[dynamo_runtime::pipeline::async_trait]
+    impl
+        dynamo_runtime::pipeline::AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for TokenChunks
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            use dynamo_runtime::pipeline::{AsyncEngineContextProvider, ResponseStream};
+
+            let mut chunks: Vec<_> = self
+                .0
+                .iter()
+                .map(|ids| LLMEngineOutput {
+                    token_ids: ids.clone(),
+                    ..Default::default()
+                })
+                .collect();
+            chunks.last_mut().unwrap().finish_reason =
+                Some(crate::protocols::common::llm_backend::FinishReason::Stop);
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(
+                    chunks.into_iter().map(Annotated::from_data),
+                )),
+                request.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_counts_coalesced_qwen3_opener_like_split_tokens() {
+        use dynamo_runtime::pipeline::AsyncEngine;
+        use futures::StreamExt;
+
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.runtime_config.reasoning_parser = Some("qwen3".into());
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "decoder": {"type": "Fuse"},
+            "model": {"type": "WordLevel", "unk_token": "<unk>",
+                      "vocab": {"<unk>": 0, "<think>": 1, "\n": 2, "</think>": 3, "answer": 4, "<think>\n": 5}}
+        })).unwrap();
+        let tokenizer: Arc<dyn crate::tokenizers::traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+
+        for (case, chunks, expected) in [
+            ("split opener", vec![vec![1], vec![2], vec![3], vec![4]], 2),
+            ("coalesced opener", vec![vec![1, 2], vec![3], vec![4]], 2),
+            // The first token itself contains reasoning, even though the text starts with <think>.
+            (
+                "opener and newline in one token",
+                vec![vec![5, 2], vec![3], vec![4]],
+                3,
+            ),
+        ] {
+            let pipeline = build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(
+                &card,
+                Arc::new(TokenChunks(chunks)),
+                tokenizer.clone().into(),
+            )
+            .await
+            .unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+                "logprobs": false
+            }))
+            .unwrap();
+            let responses = pipeline
+                .generate(Context::new(request))
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let usage = responses
+                .iter()
+                .rev()
+                .find_map(|chunk| chunk.data.as_ref()?.inner.usage.as_ref())
+                .unwrap();
+            assert_eq!(usage.completion_tokens, 4);
+            assert_eq!(
+                usage
+                    .completion_tokens_details
+                    .as_ref()
+                    .unwrap()
+                    .reasoning_tokens,
+                Some(expected),
+                "{case}"
+            );
+        }
+    }
+
     // The `mistral` parser needs `[ARGS]` unless DYN_PARSER_VERSION=1 selects the v1
     // parsers, which read the pre-v11 call format.
     #[tokio::test]
