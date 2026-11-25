@@ -106,6 +106,27 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### Unreleased
 
+#### API Availability
+
+##### DGDR v1beta2 Available by Default
+
+**Change:** The operator installs and serves the DGDR v1beta2 Request, Run, and Candidate APIs
+and starts their controllers without a feature gate. The API is available but not feature complete.
+Existing v1beta1 Requests retain their API and behavior; the Request storage version and conversion
+contract are unchanged.
+
+**Affected:** All operator installations, including those that previously left
+`dynamo-operator.dgdrV1Beta2.enabled` unset or set it to `false`. Installations with
+`dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, require the matching
+CRDs to be installed before upgrading the operator.
+
+**Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
+Ordinary Helm upgrades remove the flag automatically. Remove `dynamo-operator.dgdrV1Beta2.enabled`
+and `dynamo-operator.dgdrV1Beta2.plannerLiveRetune` from your Helm overrides. On install or
+upgrade, every Planner ServiceAccount can create DGDR Requests, read Runs and Candidates, and
+get, create, update, or delete any Lease in its namespace, even when the old values are `false`.
+Enable experimental live retune per deployment with `retune.executor: dgdr` in the Planner config.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract
@@ -150,6 +171,145 @@ workload for that bundle.
 
 **Existing deployments:** An LPX workload that the old operator created does not continue across
 this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
+
+#### Dependency compatibility
+
+##### AISimulate 0.15.0.dev202611230000000114
+
+**Change:** Dynamo now pins AISimulate `0.15.0.dev202611230000000114`, replacing
+`0.15.0.dev202611130000000104`. Planner, the DGDR profiler, and mocker workers run the AISimulate
+that their image installs. On `b200_sxm`, `b300_sxm`, `gb200`, `gb300`, `h100_sxm`, `h200_sxm`,
+`l40s`, and `rtx_pro_6000_server`, the new release accepts these backend versions:
+
+| Backend | Accepted versions | No longer accepted |
+|---|---|---|
+| vLLM | 0.30.0, 0.32.0 (current) | 0.24.0, 0.31.0 |
+| SGLang | 0.5.21, 0.5.23 (current) | 0.5.14 |
+| TensorRT-LLM | 1.3.0rc29, 1.4.0rc2 (current) | 1.3.0rc20 |
+
+`a100_sxm` and `b60` keep their versions. The profiler writes the current version into
+`--ais-perf-model`, so newly generated deployments move to the versions marked current. An
+execution profile loads only when the pinned release compiles the same engine as the one recorded in
+the profile, so profiles generated with the old pin can fail to load, although both releases use
+engine spec schema version 30.
+
+**Affected:**
+
+- Planner configurations whose `ais_perf_model` entries set a `backend_version` that the new
+  release no longer accepts. They fail with `UnlistedQueryVersionError`.
+- Planner configurations that load an execution-profile dataset generated with the old pin. Loading
+  can fail with `compiled baseline differs from the profile basis`.
+- Mocker workers whose `--ais-perf-model` sets a version that the new release no longer accepts.
+
+**Action:**
+
+1. Download or generate each execution-profile dataset again with the new pin. Then restart
+   Planner, which prepares a dataset only when its configured source changes.
+2. Set each explicit `backend_version` to a version that the new release accepts and that matches
+   your workers. If your workers run the current version, you can use `current`:
+
+   ```diff
+    ais_perf_model:
+      - worker_type: prefill
+        model: Qwen/Qwen3-0.6B
+        system: b200_sxm
+        backend: vllm
+   -    backend_version: 0.24.0
+   +    backend_version: current
+   ```
+
+   This field selects AISimulate performance data. It does not upgrade the inference engine. The
+   new release has no data for the versions that it no longer accepts. If your workers keep such a
+   version, select the accepted version that is closest to it.
+
+**Existing deployments:** A running DGD keeps the AISimulate version of the images that it names
+until you change those images. An operator upgrade alone moves new profiling work to the new pin:
+v1beta2 Runs, and v1beta1 Requests created without `spec.image`, use
+`dynamo-operator.controllerManager.manager.dgdrDefaultImage`, or `dynamo-planner:<chart appVersion>`
+when that value is empty. v1beta1 Requests that set `spec.image` keep that image.
+
+### v1.8.0
+
+#### Operator behavior breaking changes
+
+##### Environment variable order in newly created DGDs
+
+**Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.8.0 or later,
+the operator preserves source-list order and topologically orders references between environment
+layers. Precedence is operator defaults, DGD-level `spec.env`, then the selected component or role
+PodTemplate's container `env`. A specific definition replaces the entire general definition,
+including `valueFrom`, without emitting duplicate names for a cross-layer override. Existing
+operator-owned topology, GMS, and per-engine failover bindings remain authoritative.
+
+Layers may be interleaved: a general variable referencing a component override follows that
+override. Independent entries use their original input order, not alphabetical name order.
+Cycles and conflicts with local list order fail rendering with a source-path diagnostic.
+Generated DCDs now retain graph defaults in a separate `spec.env`, supported natively in both
+served DCD API versions. Previously these defaults were flattened into each PodTemplate.
+
+**Affected:** Newly created DGDs whose environment lists depend on alphabetical sorting or contain
+cross-layer overrides or references. Within one input list, Kubernetes still leaves a forward
+reference literal unless an external value is available; those entries are not reordered.
+The operator does not fetch ConfigMaps or Secrets for sorting.
+
+Order-only environment edits propagate to workloads for these origins. The NIXL exporter-port lookup
+replays known references without rewriting the manifest or requiring runtime inputs to be
+resolvable. SGLang keeps existing port declarations when the NIXL exporter base port is unknown;
+automatic scrape-port alignment is not guaranteed in that case. Known invalid ports still fail.
+
+**Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
+variable before dependent variables within the same list. Use component entries to override graph
+defaults; dependent entries in other layers will reference the effective override. Do not depend
+on retaining a lower-layer definition to expand a same-named self-reference. For example:
+
+```yaml
+spec:
+  env:
+    - name: MODEL_ROOT
+      value: /models
+    - name: MODEL_PATH
+      value: "$(MODEL_ROOT)/model"
+  components:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: MODEL_ROOT
+                  value: /fast/models
+```
+
+The effective `MODEL_ROOT` precedes `MODEL_PATH`, which expands to `/fast/models/model`.
+
+**Root-list validation:** DGD `spec.env` (`spec.envs` in `v1alpha1`) requires unique names on
+create and whenever that list changes, regardless of origin. DCD root `spec.env` applies this
+rule only when its effective operator origin is 1.8.0 or later. **For origins 1.8.0 and later,
+both resources reject duplicates even on updates that leave the list unchanged.** Repair stored
+duplicates before unrelated updates; the operator does not silently de-duplicate them. Earlier
+or missing DGD origins retain a pre-existing duplicate list only when the complete ordered list
+is unchanged; changing a value, source, order, or member requires unique names throughout.
+Overrides between layers remain allowed. The root OpenAPI list schema is unchanged so it does
+not reject unchanged legacy-origin duplicates before webhook ratcheting runs.
+
+New or changed root entries must not combine a non-empty `value` with `valueFrom`. Alpha
+component `envs` lists also require unique names and valid value/source combinations on create
+or list changes. Only earlier or missing origins can retain an unchanged existing list with
+duplicates; origins 1.8.0 and later reject it. Cross-layer overrides remain valid.
+
+**Existing deployments:** DGDs created by an operator older than 1.8.0, or without the origin
+annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not
+reorder their rendered environment lists or roll their workloads for this change. Deleting and
+recreating a DGD under 1.8.0 or later opts it into the new behavior and causes workload downtime.
+To preserve availability, create a new DGD under a different name and migrate traffic before
+deleting the old DGD.
+
+**Before downgrading to 1.7:** Standalone DCD root `spec.env` is new in 1.8 in both served API
+versions; 1.7 cannot retain this field. While 1.8 is still running, move required defaults into
+each consuming `main` and `runtime` container's `env`, including role templates, preserving
+container-specific overrides. Remove root `spec.env` and verify the resulting workloads before
+downgrading. Also remove dependencies on the new ordering contract: 1.7 sorts and de-duplicates
+environment lists. Do not edit graph-generated child DCDs; configure their parent DGD instead.
 
 ### v1.7.0
 
@@ -770,6 +930,7 @@ Kubernetes: `>=1.30.0-0`
 | global.nats.install | bool | `false` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. NATS is optional because the default request and event planes use TCP and ZMQ, respectively. |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
+| global.kai-scheduler.schedulerName | string | `"kai-scheduler"` | Scheduler name the operator sets on Grove pods when KAI integration is enabled. A custom name requires install=false and a Grove version that maps the name to its KAI backend; this setting does not reconfigure Grove or KAI. |
 | global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
@@ -792,8 +953,6 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
-| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
-| dynamo-operator.dgdrV1Beta2.plannerLiveRetune | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs: create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates, and read, create, update and delete any Lease in the namespace. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
@@ -954,6 +1113,48 @@ global:
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```
+
+To use a KAI-compatible scheduler under a different name (for example, Run:ai),
+install it separately and set its name:
+
+```yaml
+global:
+  kai-scheduler:
+    install: false        # A custom name requires an externally managed scheduler
+    enabled: true
+    schedulerName: runai-scheduler
+  grove:
+    enabled: true
+```
+
+> [!WARNING]
+> This setting changes only the scheduler name in Dynamo's pod templates. It does not
+> rename or reconfigure KAI or Grove. Before using a custom name, confirm that your Grove
+> version maps that name to its KAI backend and that the scheduler reads Grove's PodGroups
+> and queue metadata. The bundled Grove `v0.2.0-beta1` KAI profile is named `kai-scheduler`
+> and does not support a custom name. Changing this value alone does not enable Run:ai.
+> Custom KAI scheduler identity support is tracked in
+> [Grove PR #962](https://github.com/ai-dynamo/grove/pull/962); verify release availability
+> before choosing an external Grove version.
+
+The default is `kai-scheduler`. An empty value also uses that default. For a directly
+managed `OperatorConfiguration`, set `orchestrators.kaiScheduler.schedulerName` instead.
+Names must be DNS subdomains, like `PodSpec.schedulerName`: lowercase letters, digits,
+`-` and `.`, at most 253 characters, with each dot-separated part starting and ending
+in a letter or digit. An invalid name such as `Runai_Scheduler` stops the operator at
+startup with an error on `orchestrators.kaiScheduler.schedulerName`.
+
+The operator sets `schedulerName` and the `kai.scheduler/queue` label when a component
+omits `schedulerName` or sets it to the configured name. A component that sets a
+different scheduler name is left unchanged, without injecting a KAI queue label.
+The queue comes from the DGD's `nvidia.com/kai-scheduler-queue` annotation (default
+`dynamo`), and the operator checks that the KAI Queue exists.
+
+> [!NOTE]
+> Changing the configured scheduler name can change the pod templates and roll Grove
+> workloads using the KAI integration. Explicit component overrides selecting another
+> scheduler stay unchanged. Coordinate the change with your scheduler and Grove
+> configuration. Leaving the value unset keeps current templates.
 
 Volcano:
 

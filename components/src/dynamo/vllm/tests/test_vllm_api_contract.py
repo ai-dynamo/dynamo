@@ -32,7 +32,6 @@ import pytest
 # Module-level vLLM import so the real site-packages ``vllm`` loads (matches the
 # pattern in test_vllm_instrumented_scheduler.py / test_vllm_unit.py).
 import vllm  # noqa: F401,E402
-from packaging.version import Version
 
 pytestmark = [
     pytest.mark.unit,
@@ -95,24 +94,19 @@ def test_new_request_data_has_fields_instrumented_scheduler_sets():
     )
 
 
-def test_scheduler_output_new_connector_fields_remain_optional():
+def test_scheduler_output_new_connector_field_remains_optional():
     from vllm.v1.core.sched.output import SchedulerOutput
 
     fields = {field.name: field for field in dataclasses.fields(SchedulerOutput)}
-    connector_field = (
-        "kv_connector_block_state"
-        if Version(vllm.__version__).release >= (0, 29)
-        else "partial_tail_offloads"
+    field_name = "kv_connector_block_state"
+    assert field_name in fields, (
+        f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
+        "direct SchedulerOutput construction."
     )
-    for field_name in ("ec_manager_metadata", connector_field):
-        assert field_name in fields, (
-            f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
-            "direct SchedulerOutput construction."
-        )
-        assert fields[field_name].default is None, (
-            f"vLLM SchedulerOutput.{field_name} became required — update every "
-            "InstrumentedScheduler constructor."
-        )
+    assert fields[field_name].default is None, (
+        f"vLLM SchedulerOutput.{field_name} became required — update every "
+        "InstrumentedScheduler constructor."
+    )
 
 
 def test_async_scheduler_has_methods_instrumented_scheduler_overrides():

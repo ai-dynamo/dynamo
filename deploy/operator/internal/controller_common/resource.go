@@ -85,10 +85,10 @@ type syncOptions struct {
 	preserveListOrder bool
 }
 
-// WithPreservedListOrder makes authored list ordering significant in spec hashes.
-func WithPreservedListOrder() SyncOption {
+// WithPreservedListOrder selects whether authored list order is significant in spec hashes.
+func WithPreservedListOrder(enabled bool) SyncOption {
 	return func(options *syncOptions) {
-		options.preserveListOrder = true
+		options.preserveListOrder = enabled
 	}
 }
 

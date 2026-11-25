@@ -14,6 +14,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -220,7 +221,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		_, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 
 		Expect(current.Annotations[consts.KubeAnnotationWorkloadProvider]).To(Equal(consts.WorkloadProviderComponent))
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
 	})
 
 	It("fails the graph while a non-DisaggregatedSet DCD reports a crash-looping container", func() {
@@ -382,7 +383,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(eligibility.Reason).To(Equal("UnsupportedIntent"))
 		Expect(eligibility.Message).To(ContainSubstring("scalingAdapter"))
 		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(BeEmpty())
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject())).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(current), Namespace: current.Namespace}, newDisaggregatedSetObject())).To(Succeed())
 	})
 
 	It("rejects mixed DS and single-node DCD workers without changing existing workloads", func() {
@@ -406,7 +407,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		rollingUpdateCtx := dynamo.RollingUpdateContext{}
 		normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(current, nil, nil, rollingUpdateCtx)
 		Expect(err).NotTo(HaveOccurred())
-		selection, reason := selectDisaggregatedSetComponents(current)
+		selection, reason := disaggregatedset.Select(current)
 		Expect(reason).To(BeEmpty())
 		componentRenderer := newDCDWorkloadRenderer(
 			k8sClient,
@@ -562,7 +563,7 @@ func fetchTypedDisaggregatedSet(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) *disaggregatedsetv1.DisaggregatedSet {
 	raw := newDisaggregatedSetObject()
-	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, raw)).To(Succeed())
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(dgd), Namespace: dgd.Namespace}, raw)).To(Succeed())
 	typed := &disaggregatedsetv1.DisaggregatedSet{}
 	Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(raw.Object, typed)).To(Succeed())
 	return typed
@@ -573,7 +574,7 @@ func markDisaggregatedSetReady(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) {
 	ds := newDisaggregatedSetObject()
-	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)).To(Succeed())
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(dgd), Namespace: dgd.Namespace}, ds)).To(Succeed())
 	typedDS := &disaggregatedsetv1.DisaggregatedSet{}
 	Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(ds.Object, typedDS)).To(Succeed())
 	revision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)

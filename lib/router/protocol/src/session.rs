@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 /// The event that caused an agent request to enter worker selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkerSelectionInputTrigger {
     /// A user message started the turn.
     UserMessage,

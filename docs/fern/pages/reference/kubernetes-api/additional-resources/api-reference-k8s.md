@@ -368,6 +368,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm") |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Env supplies general environment defaults, distinct from component Envs<br />and extraPodSpec.mainContainer.env. It maps directly to v1beta1 spec.env.<br />Container-specific definitions take precedence. Semantic ordering is<br />selected by the immutable operator origin; older origins retain legacy<br />composition. No default is applied.<br />For origins >= 1.8.0, admission requires unique names within this list,<br />even when the list is unchanged on update. Component overrides remain allowed. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  | Optional: \{\} <br /> |
 | `serviceName` _string_ | The name of the component |  | Optional: \{\} <br /> |
@@ -665,7 +666,7 @@ _Appears in:_
 | `priorityClassName` _string_ | PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
 | `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | MaxItems: 100 <br />Optional: \{\} <br /> |
 | `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
-| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration.<br />Names must be unique within this list. For origins >= 1.8.0, admission<br />rejects duplicates even on unchanged updates. Earlier or missing origins<br />permit only a completely unchanged pre-existing duplicate list; changing<br />the list requires unique names. Same-named service overrides remain allowed. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | TopologyConstraint is the deployment-level topology constraint.<br />When set, topologyProfile is required and names the ClusterTopology CR to use.<br />packDomain is optional here — it can be omitted when only services carry constraints.<br />Services without their own topologyConstraint inherit from this value. |  | Optional: \{\} <br /> |
@@ -2054,6 +2055,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env supplies general environment defaults for main and declared runtime<br />containers. Container-specific env overrides entries with the same name.<br />For origins using semantic environment composition, source-list order is<br />preserved and cross-layer references are topologically ordered; cycles<br />fail rendering. Graph-generated DCDs carry the DGD spec.env here so the<br />original layers remain separate until operator defaults are available.<br />Older origins retain legacy sorted composition. No default is applied.<br />For origins >= 1.8.0, admission requires unique names within this list,<br />even when the list is unchanged on update. Container overrides remain allowed. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride overrides the Dynamo runtime compatibility version<br />inferred from podTemplate.spec.containers[name=main].image.<br />In sidecar mode, it instead overrides the version inferred from<br />podTemplate.spec.initContainers[name=runtime].image.<br />The same rules apply to roles[].podTemplate. For non-LPX components in<br />sidecar mode, main container images are not used to infer Dynamo versions,<br />including for roles without a runtime init container.<br />This field does not change container images.<br />For frontend, worker, prefill, decode, planner, and epp components, DGD<br />admission requires this field when any runtime image tag lacks a parseable<br />semantic version. Components without a type and controller-generated DCDs<br />may omit it. An override is also needed when the parsed tag differs from<br />the Dynamo runtime version.<br />The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",<br />and match the Dynamo version in every affected runtime container.<br />Setting or changing an override of 1.5.0 or later may trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
@@ -2352,7 +2354,7 @@ _Appears in:_
 | `labels` _object (keys:string, values:string)_ | labels to propagate to all child resources. Same precedence rules as `annotations`. |  | Optional: \{\} <br /> |
 | `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
 | `components` _[DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env supplies general environment defaults for main and declared runtime<br />containers. Container-specific definitions with the same name take<br />precedence. For operator origins >= 1.8.0, relative order is preserved<br />within each source list and cross-layer references are topologically<br />ordered; cycles fail rendering. Earlier or missing origins retain legacy<br />sorted composition. Generated DCDs preserve this list as spec.env.<br />Names must be unique within this list. For origins >= 1.8.0, admission<br />rejects duplicates even on unchanged updates. Earlier or missing origins<br />permit only a completely unchanged pre-existing duplicate list; changing<br />the list requires unique names. Same-named container overrides remain allowed. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
@@ -3417,6 +3419,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3454,6 +3457,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3488,6 +3492,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
@@ -3531,6 +3536,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 | `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 spec while this object is<br />represented through v1beta2. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta1 API. |  | Type: object <br />Optional: \{\} <br /> |
 
@@ -3560,6 +3566,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3599,6 +3606,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
@@ -3684,6 +3692,23 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers<br />to AISimulate's num_gpus_per_node input.<br />An explicit value is authoritative. In a nonempty hardware object, admission discovers<br />an omitted value from the selected cluster node shape. The Run controller never discovers<br />this value. An exactly empty hardware object opts out of all operator hardware discovery<br />and typed hardware defaults, leaving AISimulate input and defaults authoritative. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `interconnect` _[InterconnectSpec](#interconnectspec)_ | Interconnect describes the links between candidate workers. Like gpu, it makes the<br />hardware object nonempty, so admission still discovers omitted GPU fields. |  | Optional: \{\} <br /> |
+
+
+#### InterconnectSpec
+
+
+
+InterconnectSpec describes the links that move data between candidate workers.
+
+
+
+_Appears in:_
+- [HardwareSpec](#v1beta2-hardwarespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kvTransferBandwidthGBps` _float_ | KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that<br />one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU<br />value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's<br />engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation<br />(https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)<br />describes how candidates use it, including link sharing. When omitted, no bandwidth is<br />lowered and AISimulate's default applies, which models the transfer as instantaneous. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### KVCapacityFractionRange
@@ -3762,6 +3787,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `rerun` _[RerunSpec](#rerunspec)_ | Rerun intentionally creates a new Request generation when the search inputs otherwise<br />remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry<br />the same immutable Run. |  | Optional: \{\} <br /> |
 | `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
@@ -3875,6 +3901,25 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `maxCandidates` _integer_ | MaxCandidates is the maximum number of DGDCs owned by one run. Scalar<br />candidates are ordered best first.<br />This field does not limit internal trials. |  | Maximum: 100 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### RerunSpec
+
+
+
+RerunSpec records explicit intent to create another Run without changing search inputs.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec)
+- [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
+- [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)
+- [NativeSearchInput](#nativesearchinput)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `reason` _string_ | Reason records why the user requested another Run. Changing this value creates a new<br />Request generation and the value is frozen into that generation's immutable Run. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### ResourceReference
@@ -4293,6 +4338,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `schedulerName` _string_ | SchedulerName is the pod scheduler name used by the KAI integration.<br />Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend. | kai-scheduler | Optional: \{\} <br /> |
 | `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
 
 
