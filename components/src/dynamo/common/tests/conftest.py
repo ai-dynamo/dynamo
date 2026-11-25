@@ -36,15 +36,17 @@ def hw_video_encoder(monkeypatch) -> Tuple[str, str]:
     """Select the hardware encoder declared for this run; skip if there is none.
 
     Returns ``(ffmpeg, render_node)``. Hardware is never probed for: the tests
-    run only where ``DYN_XPU_FFMPEG_PATH`` was set on purpose.
+    run only where ``DYN_XPU_FFMPEG_PATH`` was set on purpose. Once it is set,
+    an encoder that cannot be used fails the test instead of skipping it: a
+    run that asked for hardware must not pass without having started it.
     """
     if not _DECLARED_HW_FFMPEG:
         pytest.skip(f"{ENV_XPU_FFMPEG_PATH} is not set: no hardware encoder declared")
     device = _DECLARED_HW_DEVICE or DEFAULT_XPU_VIDEO_DEVICE
     if not os.access(_DECLARED_HW_FFMPEG, os.X_OK):
-        pytest.skip(f"{ENV_XPU_FFMPEG_PATH}={_DECLARED_HW_FFMPEG!r} is not executable")
+        pytest.fail(f"{ENV_XPU_FFMPEG_PATH}={_DECLARED_HW_FFMPEG!r} is not executable")
     if not os.path.exists(device):
-        pytest.skip(f"render node {device} does not exist")
+        pytest.fail(f"render node {device} does not exist")
     monkeypatch.setenv(ENV_XPU_FFMPEG_PATH, _DECLARED_HW_FFMPEG)
     monkeypatch.setenv(ENV_XPU_VIDEO_DEVICE, device)
     return _DECLARED_HW_FFMPEG, device
