@@ -2101,9 +2101,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
         assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
         assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
-        assert!(dynamo_http_server::metrics::request_deadline_exceeded(
-            &decoded
-        ));
+        assert!(dynamo_metrics::request::request_deadline_exceeded(&decoded));
     }
 
     #[test]

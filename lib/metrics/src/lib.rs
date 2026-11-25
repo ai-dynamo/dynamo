@@ -8,8 +8,10 @@
 
 pub mod environment_names;
 pub mod frontend_perf;
+pub mod load;
 pub mod prom_typed;
 pub mod prometheus_names;
+pub mod request;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;

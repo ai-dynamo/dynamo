@@ -5,7 +5,6 @@ use anyhow::Error;
 use async_stream::stream;
 use base64::Engine as _;
 use dynamo_error::http::HttpError;
-use dynamo_http_server::metrics::{Endpoint, ErrorType, Metrics, RequestType, Status};
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -24,6 +23,7 @@ use dynamo_llm::{
     http::service::service_v2::{BackendErrorCheck, HttpService},
     model_card::ModelDeploymentCard,
 };
+use dynamo_metrics::request::{Endpoint, ErrorType, Metrics, RequestType, Status};
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -2704,7 +2704,7 @@ async fn assert_pre_commit_disconnect_is_recorded_once(on_kill: OnKill) {
         1,
         "one disconnect must be recorded once"
     );
-    let cancellation_labels = dynamo_http_server::metrics::CancellationLabels {
+    let cancellation_labels = dynamo_metrics::request::CancellationLabels {
         model: MODEL.to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: RequestType::Stream.as_str().to_string(),

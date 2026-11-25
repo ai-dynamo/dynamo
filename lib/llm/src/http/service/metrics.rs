@@ -26,7 +26,7 @@ use crate::protocols::{
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 
 use super::RouteDoc;
-use dynamo_http_server::metrics::{
+use dynamo_metrics::request::{
     HttpQueueGuard, Metrics, Registry, ResponseMetricCollector, ServingLoadCollector,
 };
 
@@ -548,7 +548,7 @@ pub(crate) fn router(
 mod tests {
     use super::*;
     use crate::discovery::UNKNOWN_METRIC_MODEL;
-    use dynamo_http_server::metrics::*;
+    use dynamo_metrics::request::*;
     use std::time::Duration;
     const STATE_AWAITING_FIRST_TOKEN: &str = "awaiting_first_token";
     const STATE_GENERATING: &str = "generating";
@@ -812,7 +812,7 @@ mod tests {
                 .frontend_load(
                     0,
                     true,
-                    vec![dynamo_http_server::load::ModelLoadView {
+                    vec![dynamo_metrics::load::ModelLoadView {
                         name: model.into(),
                         is_ready: true,
                         aliases: vec![],

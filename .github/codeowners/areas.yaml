@@ -23,6 +23,7 @@ areas:
   - lib/llm/src/grpc/service.rs
   - lib/llm/src/grpc/service/
   - lib/http-server/
+  - lib/metrics/src/load.rs
   - lib/llm/src/http.rs
   - lib/llm/src/http/
   - lib/llm/src/http/service.rs
@@ -1088,7 +1089,7 @@ shared:
   owners:
   - frontend
   - observability
-- glob: lib/http-server/src/metrics.rs
+- glob: lib/metrics/src/request.rs
   owners:
   - frontend
   - observability

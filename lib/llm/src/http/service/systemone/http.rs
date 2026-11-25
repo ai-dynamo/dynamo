@@ -11,7 +11,7 @@ use axum::{
     routing::post,
 };
 use dynamo_decisions::{Route, parse_request};
-use dynamo_http_server::metrics::ErrorType;
+use dynamo_metrics::request::ErrorType;
 
 const BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 

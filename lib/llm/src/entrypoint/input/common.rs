@@ -32,7 +32,7 @@ use crate::{
         },
     },
 };
-use dynamo_http_server::metrics::Metrics;
+use dynamo_metrics::request::Metrics;
 
 use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_lora::policy::validate_router_mode_for_lora;

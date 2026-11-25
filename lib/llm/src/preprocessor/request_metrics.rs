@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use dynamo_http_server::metrics::RequestMetrics;
+use dynamo_metrics::request::RequestMetrics;
 use dynamo_runtime::{engine::Data, pipeline::Context};
 
 const REQUEST_METRICS_KEY: &str = "frontend.request_metrics";
@@ -24,7 +24,7 @@ pub fn from_context<T: Data>(context: &Context<T>) -> Option<Arc<RequestMetrics>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_http_server::metrics::{Endpoint, Metrics};
+    use dynamo_metrics::request::{Endpoint, Metrics};
 
     #[test]
     fn the_attached_handle_is_read_back() {

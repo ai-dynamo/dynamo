@@ -16,6 +16,7 @@ name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
 
 [dependencies]
+dynamo-metrics = { workspace = true }
 dynamo-router-policies = { workspace = true }
 async-trait = { workspace = true }
 dynamo-kv-events = { workspace = true }
@@ -29,7 +30,6 @@ dynamo-router-protocol = { workspace = true }
 dynamo-scheduler = { workspace = true }
 dynamo-session-affinity = { workspace = true }
 dynamo-protocols = { workspace = true }
-dynamo-http-server = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }

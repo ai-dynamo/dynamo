@@ -1,16 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::environment_names as env_metrics;
 use crate::load::{
     FrontendLoadFrame, FrontendModelLoad, ModelLoadView, RequestGauges, RequestTotals,
 };
-use dynamo_runtime::metrics::prometheus_names::{
+use crate::prometheus_names::{
     clamp_u64_to_i64, frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
 };
-use dynamo_runtime::{
-    config::environment_names::llm::metrics as env_metrics,
-    error::{DynamoError, ErrorType as DynamoErrorType},
-};
+use dynamo_error::{DynamoError, ErrorType as DynamoErrorType};
 use prometheus::{
     GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
     core::{Collector, Desc},
@@ -68,7 +66,7 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
         DynamoErrorType::WorkerOverloaded,
     ];
     const NON_REJECTION: &[DynamoErrorType] = &[];
-    dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+    dynamo_error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
 /// User-facing body for a request whose caller-supplied deadline elapsed
@@ -104,21 +102,21 @@ pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool 
         DynamoErrorType::WorkerUnavailable,
     ];
     const AVAILABLE: &[DynamoErrorType] = &[];
-    dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
+    dynamo_error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
 }
 
 /// Check whether an error chain indicates the request was cancelled.
 pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     const CANCELLATION: &[DynamoErrorType] = &[
         DynamoErrorType::Cancelled,
-        DynamoErrorType::Backend(dynamo_runtime::error::BackendError::Cancelled),
+        DynamoErrorType::Backend(dynamo_error::BackendError::Cancelled),
     ];
     const NON_CANCELLATION: &[DynamoErrorType] = &[];
-    dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
+    dynamo_error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
 }
 
 pub fn request_was_timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
-    use dynamo_runtime::error::BackendError;
+    use dynamo_error::BackendError;
 
     const TIMEOUT: &[DynamoErrorType] = &[
         DynamoErrorType::ResponseTimeout,
@@ -127,7 +125,7 @@ pub fn request_was_timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
         DynamoErrorType::Backend(BackendError::ConnectionTimeout),
     ];
     const NON_TIMEOUT: &[DynamoErrorType] = &[];
-    dynamo_runtime::error::match_error_chain(err, TIMEOUT, NON_TIMEOUT)
+    dynamo_error::match_error_chain(err, TIMEOUT, NON_TIMEOUT)
 }
 
 pub use prometheus::Registry;
@@ -4096,7 +4094,7 @@ mod tests {
 
     #[test]
     fn semantic_failure_metric_has_only_class_and_reason_labels() {
-        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+        use dynamo_error::{DynamoError, ErrorClass, ErrorReason};
 
         let registry = prometheus::Registry::new();
         let counter = new_failure_counter(None);

@@ -203,7 +203,7 @@ mod tests {
             .finish();
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let registry = prometheus::Registry::new();
-        dynamo_http_server::metrics::Metrics::new()
+        dynamo_metrics::request::Metrics::new()
             .register(&registry)
             .unwrap();
         assert!(

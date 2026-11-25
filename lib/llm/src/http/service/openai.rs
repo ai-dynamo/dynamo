@@ -101,10 +101,8 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
-use dynamo_http_server::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, ErrorType},
-};
+use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
+use dynamo_metrics::request::{CancellationLabels, Endpoint, ErrorType};
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
@@ -367,7 +365,7 @@ pub(super) fn record_local_failure(class: ErrorClass) {
     if class == ErrorClass::Cancelled {
         return;
     }
-    dynamo_http_server::metrics::record_failure(&DynamoError::builder().class(class).build());
+    dynamo_metrics::request::record_failure(&DynamoError::builder().class(class).build());
 }
 
 fn sanitized_error_class(error: SanitizedError) -> ErrorClass {
@@ -541,7 +539,7 @@ fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
 }
 
 fn stream_error_type(error: &dynamo_runtime::error::DynamoError) -> ErrorType {
-    use dynamo_http_server::metrics::{
+    use dynamo_metrics::request::{
         request_was_cancelled, request_was_rejected, request_was_timed_out, request_was_unavailable,
     };
 
@@ -922,7 +920,7 @@ impl ErrorMessage {
         };
 
         if record_failure {
-            dynamo_http_server::metrics::record_failure(error);
+            dynamo_metrics::request::record_failure(error);
         }
 
         if matches!(
@@ -991,14 +989,13 @@ impl ErrorMessage {
             );
         }
 
-        if let Some(error) = dynamo_http_server::metrics::queue_deadline_error(err.as_ref()) {
-            dynamo_http_server::metrics::record_failure(error);
+        if let Some(error) = dynamo_metrics::request::queue_deadline_error(err.as_ref()) {
+            dynamo_metrics::request::record_failure(error);
             let code = StatusCode::TOO_MANY_REQUESTS;
             return (
                 code,
                 Json(ErrorMessage {
-                    message: dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE
-                        .to_string(),
+                    message: dynamo_metrics::request::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
@@ -1008,7 +1005,7 @@ impl ErrorMessage {
             );
         }
 
-        if dynamo_http_server::metrics::request_was_cancelled(err.as_ref()) {
+        if dynamo_metrics::request::request_was_cancelled(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Cancelled,
                 format!("{err:#}"),
@@ -1024,7 +1021,7 @@ impl ErrorMessage {
         }
 
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
-        if dynamo_http_server::metrics::request_was_rejected(err.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
                 format!("{err:#}"),
@@ -1032,7 +1029,7 @@ impl ErrorMessage {
         }
 
         // No backend workers are currently routable → HTTP 503.
-        if dynamo_http_server::metrics::request_was_unavailable(err.as_ref()) {
+        if dynamo_metrics::request::request_was_unavailable(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Unavailable,
                 format!("{err:#}"),
@@ -1510,10 +1507,10 @@ async fn completions_single(
     // Covers preprocessing, routing and the wire handoff to the worker.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
+                .inc_rejection(&model, dynamo_metrics::request::Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1857,10 +1854,10 @@ async fn completions_batch(
         // prompt's preprocessing, routing and wire handoff.
         let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
+                    .inc_rejection(&model, dynamo_metrics::request::Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2114,11 +2111,10 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(
-                &model_name,
-                dynamo_http_server::metrics::Endpoint::Embeddings,
-            );
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, dynamo_metrics::request::Endpoint::Embeddings);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2257,10 +2253,10 @@ async fn classify(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Classify);
+                .inc_rejection(&model_name, dynamo_metrics::request::Endpoint::Classify);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2343,7 +2339,7 @@ async fn rerank(
     let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
     let stream = engine.generate(request).await.map_err(|error| {
-        if dynamo_http_server::metrics::request_was_rejected(error.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(error.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, Endpoint::Rerank);
@@ -2623,10 +2619,10 @@ async fn pooling(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Pooling);
+                .inc_rejection(&model_name, dynamo_metrics::request::Endpoint::Pooling);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3235,11 +3231,11 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let overloaded = event
             .error
             .as_ref()
-            .is_some_and(|error| dynamo_http_server::metrics::request_was_rejected(error));
+            .is_some_and(|error| dynamo_metrics::request::request_was_rejected(error));
         let metric_error_type = event
             .error
             .as_ref()
-            .filter(|error| dynamo_http_server::metrics::request_was_timed_out(*error))
+            .filter(|error| dynamo_metrics::request::request_was_timed_out(*error))
             .map(|_| ErrorType::ResponseTimeout);
 
         // Parse the status-bearing node's own message. The diagnostic string
@@ -3543,7 +3539,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             && let Some(error) = &semantic
             && error.class().normalized() == sanitized_error_class(variant)
         {
-            dynamo_http_server::metrics::record_failure(error);
+            dynamo_metrics::request::record_failure(error);
             render_record_failure = false;
         }
         return ErrorMessage::sanitized_with_details_recording(
@@ -4441,11 +4437,10 @@ async fn chat_completions(
     // between the validated request and a live response stream.
     let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(
-                &model,
-                dynamo_http_server::metrics::Endpoint::ChatCompletions,
-            );
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, dynamo_metrics::request::Endpoint::ChatCompletions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -5257,10 +5252,10 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Responses);
+                .inc_rejection(&model, dynamo_metrics::request::Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -6152,10 +6147,10 @@ async fn images_with_request(
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
         connection_handle.disarm();
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, dynamo_metrics::request::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6285,10 +6280,10 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_metrics::request::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6413,10 +6408,10 @@ async fn video_stream(
     let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_metrics::request::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6708,10 +6703,10 @@ async fn audio_speech(
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
     let stream = engine.generate(request).await.map_err(|e| {
-        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_metrics::request::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, dynamo_metrics::request::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -8274,7 +8269,7 @@ mod tests {
         ] {
             let err = delivered_refusal(error_type);
             assert!(
-                dynamo_http_server::metrics::request_was_rejected(err.as_ref()),
+                dynamo_metrics::request::request_was_rejected(err.as_ref()),
                 "{error_type:?}"
             );
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
@@ -8452,7 +8447,7 @@ mod tests {
 
         // The legacy shape has no capacity signal, so the overload override does
         // not engage.
-        assert!(!dynamo_http_server::metrics::request_was_rejected(
+        assert!(!dynamo_metrics::request::request_was_rejected(
             event.error.as_ref().expect("error is set")
         ));
 
@@ -8903,7 +8898,7 @@ mod tests {
             .message("internal deadline detail")
             .build()
             .into();
-        assert!(!dynamo_http_server::metrics::request_was_rejected(
+        assert!(!dynamo_metrics::request::request_was_rejected(
             error.as_ref()
         ));
 

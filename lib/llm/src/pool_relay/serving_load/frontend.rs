@@ -29,9 +29,7 @@ use super::super::topology::TopologySnapshot;
 use super::{ModelServingLoad, SOURCE_RETENTION, freshness};
 use crate::frontend_load::{FRONTEND_LOAD_PUBLISH_INTERVAL, FRONTEND_LOAD_TOPIC};
 use crate::utils::retry::{Backoff, FailureStreak};
-use dynamo_http_server::load::{
-    FrontendLoadFrame, FrontendModelLoad, RequestGauges, RequestTotals,
-};
+use dynamo_metrics::load::{FrontendLoadFrame, FrontendModelLoad, RequestGauges, RequestTotals};
 
 /// How long a frontend's frame counts as observed.
 pub(super) const FRONTEND_FRESHNESS: Duration = freshness(FRONTEND_LOAD_PUBLISH_INTERVAL);

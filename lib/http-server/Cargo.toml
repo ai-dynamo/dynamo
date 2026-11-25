@@ -12,6 +12,7 @@ repository.workspace = true
 description = "Plane-independent production HTTP server for Dynamo services"
 
 [dependencies]
+dynamo-metrics = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 http-body = "1"
@@ -19,8 +20,6 @@ hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"
 tokio-rustls = { workspace = true }
 tower = { workspace = true }
 parking_lot = { workspace = true }
-rand = { workspace = true }
-serde = { workspace = true }
 dynamo-runtime = { workspace = true }
 futures = { workspace = true }
 prometheus = { workspace = true }

@@ -36,11 +36,8 @@ use super::{
 use crate::protocols::openai::transcriptions::{
     NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest,
 };
-use dynamo_http_server::{
-    disconnect::create_connection_monitor,
-    metrics::{CancellationLabels, Endpoint, ErrorType, request_was_rejected},
-    request::get_body_limit,
-};
+use dynamo_http_server::{disconnect::create_connection_monitor, request::get_body_limit};
+use dynamo_metrics::request::{CancellationLabels, Endpoint, ErrorType, request_was_rejected};
 
 #[derive(Default)]
 struct TranscriptionForm {

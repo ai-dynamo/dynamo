@@ -60,7 +60,7 @@ use crate::{
     utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
-use dynamo_http_server::metrics::Metrics;
+use dynamo_metrics::request::Metrics;
 
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{

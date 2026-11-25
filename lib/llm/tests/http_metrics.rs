@@ -3,7 +3,6 @@
 
 use anyhow::Error;
 use async_stream::stream;
-use dynamo_http_server::metrics::Endpoint;
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
     http::service::service_v2::HttpService,
@@ -17,6 +16,7 @@ use dynamo_llm::{
         openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_metrics::request::Endpoint;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::METRICS_PREFIX_ENV;
 use dynamo_runtime::{
     CancellationToken,

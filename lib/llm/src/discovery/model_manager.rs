@@ -13,10 +13,10 @@ use std::{
 use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_http_server::load::ModelLoadView;
 use dynamo_kv_hints::KvTransferEnforcement;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_metrics::load::ModelLoadView;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
@@ -3772,7 +3772,7 @@ mod tests {
 
     #[test]
     fn alias_requests_publish_frontend_load_under_the_primary_model() {
-        use dynamo_http_server::metrics::{Endpoint, Metrics};
+        use dynamo_metrics::request::{Endpoint, Metrics};
 
         let mm = ModelManager::new();
         let worker_set = Arc::new(make_worker_set("ns1", "abc"));

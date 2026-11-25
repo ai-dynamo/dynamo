@@ -3,8 +3,6 @@
 
 pub mod disconnect;
 pub mod lifecycle;
-pub mod load;
-pub mod metrics;
 pub mod request;
 pub mod scrape;
 pub mod server;

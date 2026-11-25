@@ -17310,10 +17310,10 @@ mod tests {
             "model": "test-model", "input": [[1, 2, 3], [4, 5]],
         }))
         .unwrap();
-        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_metrics::request::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            dynamo_http_server::metrics::Endpoint::Embeddings,
+            dynamo_metrics::request::Endpoint::Embeddings,
             false,
             "",
         );
@@ -17331,8 +17331,8 @@ mod tests {
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
     }
 
-    fn awaiting_first_token_input_tokens(metrics: &dynamo_http_server::metrics::Metrics) -> u64 {
-        let view = dynamo_http_server::load::ModelLoadView {
+    fn awaiting_first_token_input_tokens(metrics: &dynamo_metrics::request::Metrics) -> u64 {
+        let view = dynamo_metrics::load::ModelLoadView {
             name: "test-model".to_string(),
             is_ready: true,
             aliases: Vec::new(),
@@ -17359,10 +17359,10 @@ mod tests {
             "messages": [{"role": "user", "content": "What is the weather?"}],
         }))
         .unwrap();
-        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_metrics::request::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            dynamo_http_server::metrics::Endpoint::ChatCompletions,
+            dynamo_metrics::request::Endpoint::ChatCompletions,
             false,
             "",
         );

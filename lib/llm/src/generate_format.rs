@@ -91,7 +91,7 @@ impl From<JsonRejection> for ClientError {
     fn from(error: JsonRejection) -> Self {
         // vLLM used Axum's extractor plus the OpenAI 422-to-400 middleware.
         if error.status() == StatusCode::UNPROCESSABLE_ENTITY {
-            dynamo_http_server::metrics::record_failure(
+            dynamo_metrics::request::record_failure(
                 &DynamoError::builder()
                     .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
                     .build(),

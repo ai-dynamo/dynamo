@@ -12,9 +12,13 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+dynamo-error = { workspace = true }
+
 anyhow = { workspace = true }
 once_cell = { version = "1" }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
+rand = { workspace = true }
 regex = { version = "1" }
+serde = { workspace = true }
 tracing = { workspace = true }

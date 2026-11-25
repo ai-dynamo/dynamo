@@ -3,7 +3,7 @@
 
 //! Frontend metric snapshots published on the event plane.
 //!
-//! The frame types and their wire rule are in [`dynamo_http_server::load`].
+//! The frame types and their wire rule are in [`dynamo_metrics::load`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::discovery::ModelManager;
 use crate::utils::retry::{Backoff, FailureStreak};
-use dynamo_http_server::metrics::Metrics;
+use dynamo_metrics::request::Metrics;
 
 pub(crate) const FRONTEND_LOAD_TOPIC: &str = "frontend_load";
 pub(crate) const FRONTEND_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
@@ -102,7 +102,7 @@ pub(crate) fn start_frontend_load_publisher(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_http_server::load::FrontendLoadFrame;
+    use dynamo_metrics::load::FrontendLoadFrame;
 
     /// A Relay decodes frames from newer frontends that carry fields it does not
     /// know, but never invents identity or zero load for a frame missing them.

@@ -39,10 +39,10 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
-use dynamo_http_server::metrics::{
+use dynamo_http_server::request::get_body_limit;
+use dynamo_metrics::request::{
     CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector,
 };
-use dynamo_http_server::request::get_body_limit;
 
 pub(super) const DEFAULT_PATH: &str = "/generate";
 
@@ -297,7 +297,7 @@ async fn handler(
     let (mut inflight_guard, collector) = dispatch_span.in_scope(|| {
         let inflight = state.metrics_clone().create_inflight_guard(
             metric_model,
-            dynamo_http_server::metrics::Endpoint::Generate,
+            dynamo_metrics::request::Endpoint::Generate,
             streaming,
             &request_id,
         );
@@ -373,7 +373,7 @@ async fn handler(
         };
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
-        endpoint: dynamo_http_server::metrics::Endpoint::Generate.to_string(),
+        endpoint: dynamo_metrics::request::Endpoint::Generate.to_string(),
         request_type: if streaming { "streaming" } else { "unary" }.to_string(),
     };
     let (mut connection_handle, stream_handle) = create_connection_monitor(
@@ -456,7 +456,7 @@ fn events(
 }
 
 struct Dispatch {
-    inflight_guard: dynamo_http_server::metrics::InflightGuard,
+    inflight_guard: dynamo_metrics::request::InflightGuard,
     collector: GenerateMetricCollector,
     request_id: String,
     model: String,
@@ -484,7 +484,7 @@ impl Dispatch {
             mut exchange,
             format,
         } = self;
-        let cancelled = |inflight_guard: &mut dynamo_http_server::metrics::InflightGuard| {
+        let cancelled = |inflight_guard: &mut dynamo_metrics::request::InflightGuard| {
             inflight_guard.mark_error(ErrorType::Cancelled);
             error_response(&format, CANCELLED, "request was cancelled")
         };
@@ -513,7 +513,7 @@ impl Dispatch {
                     error_type = ErrorType::Unavailable;
                     state
                         .metrics_clone()
-                        .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Generate);
+                        .inc_rejection(&model, dynamo_metrics::request::Endpoint::Generate);
                 }
                 if error_type == ErrorType::Internal {
                     tracing::error!(%request_id, error = %format!("{error:#}"), "generate engine call failed");

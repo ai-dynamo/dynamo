@@ -805,10 +805,13 @@ name = "dynamo-metrics"
 version = "1.8.0"
 dependencies = [
  "anyhow",
+ "dynamo-error",
  "once_cell",
  "parking_lot",
  "prometheus",
+ "rand 0.9.4",
  "regex",
+ "serde",
  "tracing",
 ]
 
