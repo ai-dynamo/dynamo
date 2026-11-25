@@ -3,7 +3,9 @@
 
 #![allow(dead_code)]
 
+pub(super) mod admission;
 pub(super) mod peers;
+pub(super) mod server;
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};

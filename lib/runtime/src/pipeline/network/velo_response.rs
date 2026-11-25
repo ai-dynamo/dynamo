@@ -38,8 +38,11 @@ use super::{
     StreamPrologueError, StreamReceiver,
     tombstones::InstanceTombstones,
     velo_request::{
-        ACK_SLOTS, encode_identity,
+        ACK_SLOTS,
+        admission::RequestWork,
+        encode_identity,
         peers::{PeerState, register_peer_handler},
+        server::RequestSlot,
     },
 };
 use crate::{
@@ -88,6 +91,7 @@ const RESPONSE_TCP_LANES: u16 = 4;
 /// frontend that has had no open stream for this long.
 const PEER_IDLE_TTL: Duration = Duration::from_secs(600);
 const PEER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+const JOIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Per-stream heartbeat, in place of Velo's 5 s. Velo does not report a closed
 /// connection to its streams, so a frontend sees a lost worker only after
@@ -305,7 +309,8 @@ pub(crate) struct RuntimeService {
     runtime: crate::runtime::RuntimeType,
     owner: tokio::sync::Mutex<Option<Arc<SharedService>>>,
     options: OnceLock<VeloServiceOptions>,
-    closed: AtomicBool,
+    request_work: Arc<RequestWork>,
+    lease_released: AtomicBool,
 }
 
 impl std::fmt::Debug for RuntimeService {
@@ -322,18 +327,40 @@ impl RuntimeService {
             runtime,
             owner: tokio::sync::Mutex::new(None),
             options: OnceLock::new(),
-            closed: AtomicBool::new(false),
+            request_work: Arc::new(RequestWork::default()),
+            lease_released: AtomicBool::new(false),
         }
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+        self.request_work.is_closed()
     }
 
     /// Refuses new acquisitions. Callers that already hold the service can
     /// still register responses, so migration retries work during a drain.
     pub(crate) fn close(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.request_work.close();
+    }
+
+    pub(super) fn request_work(&self) -> &Arc<RequestWork> {
+        &self.request_work
+    }
+
+    pub(super) async fn existing_service(&self) -> Option<Arc<VeloResponseService>> {
+        self.owner
+            .lock()
+            .await
+            .as_ref()
+            .map(|lease| lease.service.clone())
+    }
+
+    pub(super) fn check_ingress_lease(&self) -> Result<()> {
+        // Another owner can keep a cached service alive after this lease ends.
+        ensure!(
+            !self.lease_released.load(Ordering::Acquire),
+            "Velo response runtime is shut down"
+        );
+        Ok(())
     }
 
     #[allow(dead_code)] // Runtime configuration sets this before acquiring the service.
@@ -345,17 +372,13 @@ impl RuntimeService {
     /// requests that have yet to register, then waits up to `headroom` more
     /// for its response streams to finish.
     pub(crate) async fn drain(&self, window: Duration, headroom: Duration) {
-        let Some(service) = self
-            .owner
-            .lock()
-            .await
-            .as_ref()
-            .map(|lease| lease.service.clone())
-        else {
+        self.close();
+        let Some(service) = self.existing_service().await else {
             return;
         };
         tokio::time::sleep(window).await;
         let _ = tokio::time::timeout(headroom, async {
+            self.request_work.wait_idle().await;
             while !service.registrations.lock().requests.is_empty() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -416,11 +439,39 @@ impl RuntimeService {
     }
 
     pub(crate) async fn shutdown(&self) {
-        let mut owner = self.owner.lock().await;
-        self.closed.store(true, Ordering::Release);
-        let Some(lease) = owner.take() else {
+        self.close();
+        self.request_work.cancel();
+        let joined = tokio::time::timeout(JOIN_GRACE, self.request_work.tasks.wait())
+            .await
+            .is_ok();
+        let lease = {
+            let mut owner = self.owner.lock().await;
+            self.lease_released.store(true, Ordering::Release);
+            owner.take()
+        };
+        let Some(lease) = lease else {
             return;
         };
+        if joined {
+            Self::release_lease(lease).await;
+        } else {
+            tracing::warn!(
+                remaining = self.request_work.tasks.len(),
+                "Velo request tasks are still exiting"
+            );
+            let runtime = lease.service.velo.runtime().clone();
+            let work = self.request_work.clone();
+            self.request_work.finalizers.spawn_on(
+                async move {
+                    work.tasks.wait().await;
+                    Self::release_lease(lease).await;
+                },
+                &runtime,
+            );
+        }
+    }
+
+    async fn release_lease(lease: Arc<SharedService>) {
         let mut shared = PROCESS_SERVICES.lock().await;
         if let Some(lease) = Arc::into_inner(lease) {
             shared.remove(&service_key(&lease.runtime));
@@ -491,6 +542,7 @@ pub struct VeloResponseService {
     peers: dashmap::DashMap<InstanceId, Arc<PeerState>>,
     pub(super) ack_slots: Semaphore,
     pub(super) request_identity: Option<Bytes>,
+    pub(super) request_slot: Arc<RequestSlot>,
     options: VeloServiceOptions,
     #[cfg(test)]
     sweep_hook: Mutex<Option<SweepHook>>,
@@ -577,6 +629,7 @@ impl VeloResponseService {
             peers: dashmap::DashMap::new(),
             ack_slots: Semaphore::new(ACK_SLOTS),
             request_identity,
+            request_slot: Arc::new(RequestSlot::default()),
             options,
             #[cfg(test)]
             sweep_hook: Mutex::new(None),
@@ -725,11 +778,16 @@ impl VeloResponseService {
         self.peers.get(&peer_id).map(|peer| Arc::clone(&peer))
     }
 
+    pub(super) fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+
     async fn shutdown(&self) {
         self.closed
             .get_or_init(|| async {
                 self.closing.store(true, Ordering::Release);
                 self.stop_sweep.cancel();
+                self.request_slot.shutdown(JOIN_GRACE).await;
                 let requests = {
                     let mut state = self.registrations.lock();
                     state.instance_requests.clear();
