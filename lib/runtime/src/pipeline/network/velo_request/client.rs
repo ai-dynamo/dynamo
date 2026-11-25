@@ -10,8 +10,6 @@ use tokio::{
     sync::{OwnedSemaphorePermit, TryAcquireError},
     time::Instant,
 };
-use tracing::Instrument;
-use velo::InstanceId;
 
 use crate::{
     error::{DynamoError, ErrorType},
@@ -92,7 +90,7 @@ impl RequestPlaneClient for VeloRequestClient {
                 )
             })?;
         if self.owner_released() {
-            return Err(error(ErrorType::Unavailable, "Velo request runtime is shut down").into());
+            return Err(runtime_shut_down().into());
         }
         if !address.starts_with(VELO_SCHEME) {
             return Err(error(
@@ -139,85 +137,71 @@ impl RequestPlaneClient for VeloRequestClient {
             deadline,
         )
         .await?;
-        if payload.len() <= self.service.velo.staging_threshold() {
-            let _slot = self
-                .service
-                .ack_slots
-                .try_acquire()
-                .map_err(|_| ack_slots_full())?;
-            let ack = send(
-                &self.service,
-                target.instance_id,
-                payload,
-                headers,
-                deadline,
-            )
-            .await;
-            if ack.is_err() {
-                peer.route.invalidate(epoch);
-            }
-            return Ok(ack?);
-        }
 
-        // The staged window bounds local capacity at each peer. Only requests
-        // that wait for a permit spend part of their ACK budget on this queue.
+        // The staged window bounds the large requests callers are waiting on at
+        // one worker. A caller that stops waiting gives its place back at once,
+        // although Velo keeps the staged payload until the worker fetches it or
+        // the send times out, so this is not a hard bound on staged bytes.
         let mut waited = false;
-        let permit = loop {
-            let (permit, queued) = staged_permit(&peer, deadline).await?;
-            waited |= queued;
-            // The route can change during the wait: the worker left discovery,
-            // or another request found the route broken or renewed it.
-            if !queued || peer.route.confirmed_epoch() == Some(epoch) {
-                break permit;
-            }
-            drop(permit);
-            (peer, epoch) = establish_route(
-                &self.service,
-                target.instance_id,
-                target.worker_address,
-                deadline,
-            )
-            .await?;
+        let _staged = if payload.len() > self.service.velo.staging_threshold() {
+            Some(loop {
+                let (permit, queued) = staged_permit(&peer, deadline).await?;
+                if !queued {
+                    break permit;
+                }
+                // The wait spent part of the ACK budget, and everything checked
+                // before it can have changed.
+                waited = true;
+                if self.owner_released() {
+                    return Err(runtime_shut_down().into());
+                }
+                if deadline.saturating_duration_since(Instant::now()) < MIN_STAGED_SEND_BUDGET {
+                    return Err(error(
+                        ErrorType::ResourceExhausted,
+                        "staged window wait left too little time to send the Velo request",
+                    )
+                    .into());
+                }
+                let (current, current_epoch) = establish_route(
+                    &self.service,
+                    target.instance_id,
+                    target.worker_address,
+                    deadline,
+                )
+                .await
+                .map_err(after_staged_wait)?;
+                epoch = current_epoch;
+                if Arc::ptr_eq(&current, &peer) {
+                    break permit;
+                }
+                // The peer's state was replaced during the wait, and its window with it.
+                peer = current;
+            })
+        } else {
+            None
         };
-        if waited && deadline.saturating_duration_since(Instant::now()) < MIN_STAGED_SEND_BUDGET {
-            return Err(error(
-                ErrorType::ResourceExhausted,
-                "staged window wait left too little time to send the Velo request",
-            )
-            .into());
-        }
-        let slot = Arc::clone(&self.service.ack_slots)
-            .try_acquire_owned()
-            .map_err(|_| ack_slots_full())?;
-        // Velo keeps a staged payload until the worker fetches it or the send
-        // times out, whatever the caller does. The send therefore runs in its
-        // own task and keeps its place in the window if the caller goes away.
-        let service = self.service.clone();
-        let id = target.instance_id;
-        let ack = tokio::spawn(
-            async move {
-                let _held = (permit, slot);
-                send(&service, id, payload, headers, deadline).await
-            }
-            .in_current_span(),
-        )
-        .await
-        .map_err(|cause| {
+        let _slot = self.service.ack_slots.try_acquire().map_err(|_| {
             error(
-                ErrorType::Internal,
-                format!("staged Velo send failed: {cause}"),
+                ErrorType::ResourceExhausted,
+                "Velo request ACK slots are full",
             )
         })?;
+        let ack = by_deadline(deadline, async {
+            self.service
+                .velo
+                .unary(REQUEST_HANDLER)?
+                .raw_payload(payload)
+                .headers(headers)
+                .timeout(deadline.saturating_duration_since(Instant::now()))
+                .send_to(target.instance_id)
+                .await
+        })
+        .await
+        .and_then(|ack| ack.map_err(transport_error));
         match ack {
             Ok(ack) => Ok(ack),
-            // The deadline includes time spent waiting for local capacity.
-            // A timeout with that reduced budget leaves the peer route valid.
             Err(cause) if waited && cause.error_type() == ErrorType::ConnectionTimeout => {
-                Err(error(
-                    ErrorType::ResourceExhausted,
-                    "Velo request timed out after waiting for the staged window",
-                )
-                .into())
+                Err(after_staged_wait(cause).into())
             }
             Err(cause) => {
                 peer.route.invalidate(epoch);
@@ -260,32 +244,21 @@ async fn staged_permit(
     }
 }
 
-async fn send(
-    service: &VeloResponseService,
-    id: InstanceId,
-    payload: Bytes,
-    headers: Headers,
-    deadline: Instant,
-) -> Result<Bytes, DynamoError> {
-    by_deadline(deadline, async {
-        service
-            .velo
-            .unary(REQUEST_HANDLER)?
-            .raw_payload(payload)
-            .headers(headers)
-            .timeout(deadline.saturating_duration_since(Instant::now()))
-            .send_to(id)
-            .await
-    })
-    .await
-    .and_then(|ack| ack.map_err(transport_error))
-}
-
-fn ack_slots_full() -> DynamoError {
+/// A request that waited for the staged window has less than its full ACK
+/// budget left. Running out of it is local: the worker's route stays valid and
+/// the worker is not reported down.
+fn after_staged_wait(cause: DynamoError) -> DynamoError {
+    if cause.error_type() != ErrorType::ConnectionTimeout {
+        return cause;
+    }
     error(
         ErrorType::ResourceExhausted,
-        "Velo request ACK slots are full",
+        "Velo request timed out after waiting for the staged window",
     )
+}
+
+fn runtime_shut_down() -> DynamoError {
+    error(ErrorType::Unavailable, "Velo request runtime is shut down")
 }
 
 fn check_headers(headers: &Headers) -> Result<()> {
@@ -663,48 +636,6 @@ mod tests {
             assert!(result.unwrap().is_empty());
         }
         assert_eq!(frontend.velo.response_slots_in_use(), baseline);
-    }
-
-    #[tokio::test]
-    async fn cancelling_staged_sends_preserves_the_per_worker_buffer_limit() {
-        let frontend = service().await;
-        let worker = service().await;
-        worker
-            .velo
-            .register_handler(
-                Handler::unary_handler(REQUEST_HANDLER, |_| Ok(Some(Bytes::new()))).build(),
-            )
-            .unwrap();
-        let info = worker.velo.peer_info();
-        let target = address(&info);
-        let timeout = Duration::from_secs(3);
-        establish_route(
-            &frontend,
-            info.instance_id(),
-            &encode_worker_address(info.worker_address()).unwrap(),
-            Instant::now() + timeout,
-        )
-        .await
-        .unwrap();
-        let client = VeloRequestClient::new(frontend, timeout);
-        let mut payloads = Vec::new();
-        // Keep the current-thread executor in this poll until all callers have cancelled.
-        for _ in 0..5 {
-            let bytes: Arc<[u8]> = vec![0; 300 * 1024].into();
-            payloads.push(Arc::downgrade(&bytes));
-            let mut send =
-                client.send_request(target.clone(), Bytes::from_owner(bytes), Headers::new());
-            assert!(futures::poll!(&mut send).is_pending());
-            drop(send);
-        }
-        let live = payloads
-            .iter()
-            .filter(|bytes| bytes.strong_count() > 0)
-            .count();
-        assert!(
-            live <= super::super::STAGED_WINDOW,
-            "{live} distinct staged payloads still live after cancellation"
-        );
     }
 
     #[tokio::test]

@@ -557,7 +557,7 @@ pub struct VeloResponseService {
     peer_address: String,
     registrations: Mutex<Registrations>,
     peers: dashmap::DashMap<InstanceId, Arc<PeerState>>,
-    pub(super) ack_slots: Arc<Semaphore>,
+    pub(super) ack_slots: Semaphore,
     pub(super) request_identity: Option<Bytes>,
     pub(super) request_slot: Arc<RequestSlot>,
     pub(super) discovered_request_peers: Mutex<super::velo_request::discovery::DiscoveryPeers>,
@@ -642,7 +642,7 @@ impl VeloResponseService {
             heartbeat,
             registrations: Mutex::new(Registrations::default()),
             peers: dashmap::DashMap::new(),
-            ack_slots: Arc::new(Semaphore::new(ACK_SLOTS)),
+            ack_slots: Semaphore::new(ACK_SLOTS),
             request_identity,
             request_slot: Arc::new(RequestSlot::default()),
             discovered_request_peers: Mutex::default(),
@@ -1972,6 +1972,98 @@ mod tests {
         drop(lease);
         assert_eq!(frontend.evict_idle_peers(u64::MAX), 1);
         assert_eq!(frontend.velo.primary_transport_key(id), None);
+    }
+
+    #[tokio::test]
+    async fn queued_staged_request_stops_at_owner_release() {
+        use crate::{
+            DistributedRuntime, Runtime,
+            component::TransportType,
+            discovery::DiscoverySpec,
+            distributed::{DistributedConfig, RequestPlaneMode},
+            pipeline::network::ResponsePlaneMode,
+            protocols::EndpointId,
+        };
+        let runtime = Runtime::from_current().unwrap();
+        let owner = runtime.velo_response_service();
+        let frontend = DistributedRuntime::new(
+            runtime,
+            DistributedConfig {
+                request_plane: RequestPlaneMode::Velo,
+                response_plane: Some(ResponsePlaneMode::Velo),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
+        let second = Runtime::from_current().unwrap().velo_response_service();
+        second.set_options(*owner.options.get().unwrap()).unwrap();
+        assert!(Arc::ptr_eq(
+            &second.service().await.unwrap(),
+            &owner.service().await.unwrap()
+        ));
+        let (_, worker) = request_pair().await;
+        let calls = stub_request_handler(&worker, Bytes::from_static(b"ack"));
+        let endpoint = EndpointId {
+            namespace: "test".into(),
+            component: "worker".into(),
+            name: "generate".into(),
+        };
+        let discovery = frontend.discovery();
+        let address = super::super::velo_request::encode_address(
+            &worker.velo.peer_info(),
+            &endpoint,
+            discovery.instance_id(),
+        )
+        .unwrap();
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint.namespace,
+                component: endpoint.component,
+                endpoint: endpoint.name,
+                transport: TransportType::Velo(address.clone()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let client = frontend.network_manager().create_client().unwrap();
+        let service = owner.existing_service().await.unwrap();
+        assert_eq!(
+            client
+                .send_request(address.clone(), Bytes::new(), Default::default())
+                .await
+                .unwrap(),
+            "ack"
+        );
+        let peer = service.confirmed_peer(worker.velo.instance_id()).unwrap().0;
+        let full = peer
+            .staged
+            .try_acquire_many(peer.staged.available_permits() as u32)
+            .unwrap();
+        let mut queued = client.send_request(
+            address,
+            Bytes::from(vec![0; 300 * 1024]),
+            Default::default(),
+        );
+        assert!(futures::poll!(&mut queued).is_pending());
+
+        owner.shutdown().await;
+        assert!(owner.is_released());
+        assert!(!client.is_healthy());
+        drop(full);
+        let result = queued.await;
+        let count = calls.load(Ordering::Relaxed);
+        second.shutdown().await;
+        assert_eq!(count, 1, "dispatched after owner release: {result:?}");
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<DynamoError>()
+                .unwrap()
+                .error_type(),
+            ErrorType::Unavailable
+        );
     }
 
     #[tokio::test]

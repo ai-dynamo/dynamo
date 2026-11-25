@@ -439,6 +439,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staged_queue_exhaustion_during_route_renewal_is_local() {
+        use crate::{
+            pipeline::network::{
+                egress::unified_client::RequestPlaneClient,
+                velo_request::{client::VeloRequestClient, encode_address},
+            },
+            protocols::EndpointId,
+        };
+
+        let frontend = request_peer().await;
+        let worker = request_peer().await;
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, |_| Ok(Some(Bytes::new()))).build(),
+            )
+            .unwrap();
+        let info = worker.velo.peer_info();
+        let id = info.instance_id();
+        let address = encode_worker_address(info.worker_address()).unwrap();
+        let target = encode_address(
+            &info,
+            &EndpointId {
+                namespace: "ns".into(),
+                component: "worker".into(),
+                name: "generate".into(),
+            },
+            1,
+        )
+        .unwrap();
+        let timeout = Duration::from_secs(2);
+        let client = VeloRequestClient::new(frontend.clone(), timeout);
+        client
+            .send_request(target.clone(), Bytes::new(), Default::default())
+            .await
+            .unwrap();
+        let (peer, _) = frontend.confirmed_peer(id).unwrap();
+        let reserved = peer.staged.try_acquire_many(STAGED_WINDOW as u32).unwrap();
+        tokio::time::pause();
+        let until_refresh = peer.confirmed_until.load(Ordering::Acquire) - frontend.peer_clock();
+        tokio::time::advance(Duration::from_secs(until_refresh - 1)).await;
+        let mut staged = client.send_request(
+            target.clone(),
+            Bytes::from(vec![0; 300 * 1024]),
+            Default::default(),
+        );
+        assert!(futures::poll!(&mut staged).is_pending());
+        tokio::time::advance(timeout - Duration::from_millis(5)).await;
+
+        // Another caller starts the periodic handshake while this request is still queued.
+        let mut renewal = std::pin::pin!(establish_route(
+            &frontend,
+            id,
+            &address,
+            Instant::now() + timeout
+        ));
+        assert!(futures::poll!(&mut renewal).is_pending());
+        assert!(peer.route.confirmed_epoch().is_none());
+        drop(reserved);
+        let result = match futures::poll!(&mut staged) {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => {
+                tokio::time::advance(Duration::from_millis(10)).await;
+                staged.await
+            }
+        };
+        tokio::time::resume();
+        renewal.await.unwrap();
+        client
+            .send_request(target, Bytes::new(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast::<DynamoError>()
+                .unwrap()
+                .error_type(),
+            ErrorType::ResourceExhausted,
+            "the staged window consumed the send budget while the healthy route was renewing"
+        );
+    }
+
+    #[tokio::test]
     async fn silent_hello_obeys_a_request_deadline_shorter_than_the_cap() {
         assert_contact_timeout("_hello", Duration::from_millis(200), Duration::from_secs(2)).await;
     }
@@ -490,5 +574,88 @@ mod tests {
                 .all(|result| result.err().is_some_and(|cause| cause == error))
         );
         assert_eq!(seen.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_staged_waiter_renews_a_reverse_pin_that_expired_in_the_queue() {
+        use crate::{
+            engine::AsyncEngineContextProvider,
+            pipeline::{
+                Context,
+                network::{
+                    egress::unified_client::RequestPlaneClient,
+                    velo_request::{client::VeloRequestClient, encode_address},
+                },
+            },
+            protocols::EndpointId,
+        };
+
+        let frontend = request_peer().await;
+        let worker = request_peer().await;
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, |_| Ok(Some(Bytes::new()))).build(),
+            )
+            .unwrap();
+        let info = worker.velo.peer_info();
+        let worker_id = info.instance_id();
+        let frontend_id = frontend.velo.instance_id();
+        let target = encode_address(
+            &info,
+            &EndpointId {
+                namespace: "ns".into(),
+                component: "worker".into(),
+                name: "generate".into(),
+            },
+            1,
+        )
+        .unwrap();
+        let registration = frontend
+            .register_response(Context::new(()).context(), false)
+            .unwrap();
+        frontend.hold_request_peer(registration.registration_id().unwrap(), &target);
+        let client =
+            VeloRequestClient::new(frontend.clone(), PEER_IDLE_TTL + Duration::from_secs(5));
+        client
+            .send_request(target.clone(), Bytes::new(), Default::default())
+            .await
+            .unwrap();
+        let (peer, _) = frontend.confirmed_peer(worker_id).unwrap();
+        let reserved = peer.staged.try_acquire_many(STAGED_WINDOW as u32).unwrap();
+        tokio::time::pause();
+        let mut staged = client.send_request(
+            target.clone(),
+            Bytes::from(vec![0; 300 * 1024]),
+            Default::default(),
+        );
+        assert!(futures::poll!(&mut staged).is_pending());
+        assert!(worker.velo.primary_transport_key(frontend_id).is_some());
+        tokio::time::advance(PEER_IDLE_TTL + Duration::from_secs(2)).await;
+        for _ in 0..32 {
+            if worker.velo.primary_transport_key(frontend_id).is_none() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(worker.velo.primary_transport_key(frontend_id).is_none());
+        assert!(frontend.confirmed_peer(worker_id).is_none());
+        assert!(frontend.velo.primary_transport_key(worker_id).is_some());
+
+        tokio::time::resume();
+        drop(reserved);
+        let result = staged.await;
+        let pin_calls_at_ack = worker.peer_pin_calls.load(Ordering::Relaxed);
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            client.send_request(target, Bytes::new(), Default::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            result.is_ok() && pin_calls_at_ack == 2,
+            "the worker's reverse pin expired during the queue: staged result {result:?}, pin calls {pin_calls_at_ack}"
+        );
     }
 }
