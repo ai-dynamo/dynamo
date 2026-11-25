@@ -138,21 +138,27 @@ fn invalid(message: impl Into<String>) -> SystemOneError {
     SystemOneError::CandidateScores(message.into())
 }
 
-/// Neutralize special and control tokens (marker, separator, sentinel) in untrusted
-/// text so user input cannot forge control tokens or extra readout positions.
-pub fn escape_special_tokens(text: &str, special_tokens: &[String], extra: &[&str]) -> String {
-    let mut tokens: Vec<&str> = special_tokens
-        .iter()
-        .map(String::as_str)
-        .chain(extra.iter().copied())
-        .filter(|tok| !tok.is_empty())
-        .collect();
-    tokens.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-    tokens.dedup();
+struct TokenEscaper<'a>(Vec<&'a str>);
 
-    let mut escaped = text.to_string();
-    for token in tokens {
-        if escaped.contains(token) {
+impl<'a> TokenEscaper<'a> {
+    fn new(special_tokens: &'a [String], extra: &[&'a str]) -> Self {
+        let mut tokens: Vec<&str> = special_tokens
+            .iter()
+            .map(String::as_str)
+            .chain(extra.iter().copied())
+            .filter(|tok| !tok.is_empty())
+            .collect();
+        tokens.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        tokens.dedup();
+        Self(tokens)
+    }
+
+    fn escape(&self, text: &str) -> String {
+        let mut escaped = text.to_string();
+        for &token in &self.0 {
+            if !escaped.contains(token) {
+                continue;
+            }
             let mut replacement = token.replace('<', "＜").replace('>', "＞");
             if replacement == token {
                 replacement = token.replace('[', "［").replace(']', "］");
@@ -165,8 +171,14 @@ pub fn escape_special_tokens(text: &str, special_tokens: &[String], extra: &[&st
             }
             escaped = escaped.replace(token, &replacement);
         }
+        escaped
     }
-    escaped
+}
+
+/// Neutralize special and control tokens (marker, separator, sentinel) in untrusted
+/// text so user input cannot forge control tokens or extra readout positions.
+pub fn escape_special_tokens(text: &str, special_tokens: &[String], extra: &[&str]) -> String {
+    TokenEscaper::new(special_tokens, extra).escape(text)
 }
 
 fn value_as_text(value: &serde_json::Value) -> String {
@@ -186,18 +198,19 @@ fn format_option_descriptions(
 ) -> Result<Vec<String>, SystemOneError> {
     match question.kind {
         QuestionKind::Predicate => {
-            if question.candidates.len() != 2 {
+            let [true_cand, false_cand] = question.candidates.as_slice() else {
                 return Err(invalid(
                     "predicate question must have exactly two candidates",
                 ));
-            }
+            };
             // CanonicalQuestion lists true first and false second; pooling readout
             // protocols assign column 0 to false and column 1 to true.
-            let true_desc = non_null_text(question.candidates[0].description.as_ref())
-                .unwrap_or_else(|| "Yes / true".to_string());
-            let false_desc = non_null_text(question.candidates[1].description.as_ref())
-                .unwrap_or_else(|| "No / false".to_string());
-            Ok(vec![false_desc, true_desc])
+            Ok(vec![
+                non_null_text(false_cand.description.as_ref())
+                    .unwrap_or_else(|| "No / false".to_string()),
+                non_null_text(true_cand.description.as_ref())
+                    .unwrap_or_else(|| "Yes / true".to_string()),
+            ])
         }
         QuestionKind::Choice => Ok(question
             .candidates
@@ -224,17 +237,14 @@ fn format_option_descriptions(
         QuestionKind::Score => Ok(question
             .candidates
             .iter()
-            .map(|candidate| {
-                match (
-                    candidate.label.as_deref(),
-                    non_null_text(candidate.description.as_ref()),
-                ) {
+            .map(
+                |c| match (c.label.as_deref(), non_null_text(c.description.as_ref())) {
                     (Some(label), Some(d)) if d != label => format!("{label}: {d}"),
                     (Some(label), _) => label.to_string(),
                     (None, Some(d)) => d,
                     (None, None) => String::new(),
-                }
-            })
+                },
+            )
             .collect()),
     }
 }
@@ -244,8 +254,7 @@ fn format_question_section(
     question: &CanonicalQuestion,
     dialect: Dialect,
     config: &PoolingDecisionConfig,
-    special_tokens: &[String],
-    extra: &[&str],
+    escaper: &TokenEscaper<'_>,
     trailing_marker: Option<&str>,
 ) -> Result<String, SystemOneError> {
     let descriptions = format_option_descriptions(question, dialect)?;
@@ -260,15 +269,10 @@ fn format_question_section(
         .codes
         .iter()
         .zip(&descriptions)
-        .map(|(code, desc)| {
-            format!(
-                "{code}: {}",
-                escape_special_tokens(desc, special_tokens, extra)
-            )
-        })
+        .map(|(code, desc)| format!("{code}: {}", escaper.escape(desc)))
         .collect();
     let instructions = match non_null_text(question.instructions.as_ref()) {
-        Some(raw) if !raw.is_empty() => escape_special_tokens(&raw, special_tokens, extra),
+        Some(raw) if !raw.is_empty() => escaper.escape(&raw),
         _ => "Choose the best matching option.".to_string(),
     };
     let mut section = format!("{header}:\n{instructions}\nOptions:\n{}", lines.join("\n"));
@@ -288,16 +292,16 @@ pub fn format_joint_user_prompt(
     special_tokens: &[String],
 ) -> Result<String, SystemOneError> {
     let extra = config.control_tokens();
+    let escaper = TokenEscaper::new(special_tokens, &extra);
     let mut sections = Vec::with_capacity(questions.len() + 1);
-    sections.push(format_pooling_state_text(input, config, special_tokens));
+    sections.push(format!("State:\n{}", escaper.escape(&value_as_text(input))));
     for (index, question) in questions.iter().enumerate() {
         sections.push(format_question_section(
             &format!("Question {index}"),
             question,
             dialect,
             config,
-            special_tokens,
-            &extra,
+            &escaper,
             Some(&config.marker),
         )?);
     }
@@ -313,7 +317,7 @@ pub fn format_pooling_state_text(
     let extra = config.control_tokens();
     format!(
         "State:\n{}",
-        escape_special_tokens(&value_as_text(input), special_tokens, &extra)
+        TokenEscaper::new(special_tokens, &extra).escape(&value_as_text(input))
     )
 }
 
@@ -326,15 +330,8 @@ pub fn format_chunked_question_text(
     special_tokens: &[String],
 ) -> Result<String, SystemOneError> {
     let extra = config.control_tokens();
-    format_question_section(
-        "Question",
-        question,
-        dialect,
-        config,
-        special_tokens,
-        &extra,
-        None,
-    )
+    let escaper = TokenEscaper::new(special_tokens, &extra);
+    format_question_section("Question", question, dialect, config, &escaper, None)
 }
 
 /// Build an in-process pooling request for raw float32 classifier logits.
@@ -388,13 +385,8 @@ pub fn extract_marker_logits(
     let is_1d_last = is_last_token_single
         && matches!(
             item.shape.as_deref(),
-            Some([w]) if *w == width as u64
-        )
-        || (is_last_token_single
-            && matches!(
-                item.shape.as_deref(),
-                Some([1, w]) if *w == width as u64
-            ));
+            Some([w]) | Some([1, w]) if *w == width as u64
+        );
     if item.index != 0
         || (!is_1d_last && item.shape.as_deref() != Some(&[seq_len as u64, width as u64][..]))
     {
@@ -463,29 +455,35 @@ pub fn reduce_head_logits(
     is_predicate: bool,
     temperature: f64,
 ) -> Result<Distribution, SystemOneError> {
-    if candidate_count == 0 || row.len() < candidate_count {
-        return Err(invalid("classifier head row smaller than candidate count"));
-    }
+    let slice = row
+        .get(..candidate_count)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| invalid("classifier head row smaller than candidate count"))?;
     if !temperature.is_finite() || temperature <= 0.0 {
         return Err(invalid("temperature must be finite and positive"));
     }
     if is_predicate && candidate_count != 2 {
         return Err(invalid("predicate requires exactly two candidates"));
     }
-    let scaled: Vec<f64> = row[..candidate_count]
-        .iter()
-        .map(|&v| f64::from(v) / temperature)
-        .collect();
-    if scaled.iter().any(|v| !v.is_finite()) {
-        return Err(invalid("non-finite classifier head logit"));
+    let mut peak = f64::NEG_INFINITY;
+    for &v in slice {
+        let scaled = f64::from(v) / temperature;
+        if !scaled.is_finite() {
+            return Err(invalid("non-finite classifier head logit"));
+        }
+        peak = peak.max(scaled);
     }
-    let peak = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let weights: Vec<f64> = scaled.iter().map(|v| (v - peak).exp()).collect();
-    let total: f64 = weights.iter().sum();
+    let mut probabilities: Vec<f64> = slice
+        .iter()
+        .map(|&v| ((f64::from(v) / temperature) - peak).exp())
+        .collect();
+    let total: f64 = probabilities.iter().sum();
     if !total.is_finite() || total <= 0.0 {
         return Err(invalid("degenerate classifier softmax normalizer"));
     }
-    let mut probabilities: Vec<f64> = weights.into_iter().map(|w| w / total).collect();
+    for p in &mut probabilities {
+        *p /= total;
+    }
     if is_predicate {
         // Head column 0 is false, column 1 is true; CanonicalQuestion puts true first.
         probabilities.swap(0, 1);
@@ -545,6 +543,14 @@ mod tests {
         }
     }
 
+    fn cand(value: ChoiceValue, desc: Option<&str>) -> Candidate {
+        Candidate {
+            value,
+            description: desc.map(|s| serde_json::json!(s)),
+            label: None,
+        }
+    }
+
     #[test]
     fn config_validation_rejects_bad_inputs() {
         assert!(sample_config(255).validate().is_ok());
@@ -559,9 +565,9 @@ mod tests {
         assert!(chunked.validate().is_ok());
         assert!(chunked.uses_last_classify());
 
-        let mut bad = sample_config(4);
-        bad.temperature = 0.0;
-        assert!(bad.validate().is_err());
+        let mut bad_temp = sample_config(4);
+        bad_temp.temperature = 0.0;
+        assert!(bad_temp.validate().is_err());
 
         let mut dup = sample_config(4);
         dup.codes[1] = dup.codes[0].clone();
@@ -636,16 +642,8 @@ mod tests {
             kind: QuestionKind::Predicate,
             instructions: Some(serde_json::json!("Is it down?")),
             candidates: vec![
-                Candidate {
-                    value: ChoiceValue::Bool(true),
-                    description: None,
-                    label: None,
-                },
-                Candidate {
-                    value: ChoiceValue::Bool(false),
-                    description: None,
-                    label: None,
-                },
+                cand(ChoiceValue::Bool(true), None),
+                cand(ChoiceValue::Bool(false), None),
             ],
         };
         let q1 = CanonicalQuestion {
@@ -654,16 +652,8 @@ mod tests {
             kind: QuestionKind::Choice,
             instructions: Some(serde_json::json!("Pick one")),
             candidates: vec![
-                Candidate {
-                    value: ChoiceValue::Bool(true),
-                    description: Some(serde_json::json!("bool true")),
-                    label: None,
-                },
-                Candidate {
-                    value: ChoiceValue::String("true".into()),
-                    description: Some(serde_json::json!("str true")),
-                    label: None,
-                },
+                cand(ChoiceValue::Bool(true), Some("bool true")),
+                cand(ChoiceValue::String("true".into()), Some("str true")),
             ],
         };
         let prompt = format_joint_user_prompt(
@@ -689,9 +679,8 @@ mod tests {
         );
         assert!(!state.contains("<|fim_middle|>"));
         assert!(!state.contains(CHUNKED_CONTEXT_END_SENTINEL));
-        let jev_q = format_chunked_question_text(&q1, Dialect::Jev, &config, &[]).unwrap();
         assert_eq!(
-            jev_q,
+            format_chunked_question_text(&q1, Dialect::Jev, &config, &[]).unwrap(),
             "Question:\nPick one\nOptions:\nA: true: bool true\nB: true: str true"
         );
     }

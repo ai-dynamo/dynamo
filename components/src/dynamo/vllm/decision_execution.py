@@ -185,13 +185,13 @@ def _load_pooling_decision_descriptor(decision_path: Path, joint_path: Path) -> 
         raise ValueError(
             "decision_config.json and joint_config.json must be JSON objects"
         )
-    if decision.get("format_version") != 2:
+    if (
+        decision.get("format_version") != 2
+        or decision.get("attention_mode") != "noncausal_full_attention"
+    ):
         raise ValueError(
-            f"unsupported decision format_version: {decision.get('format_version')!r}"
-        )
-    if decision.get("attention_mode") != "noncausal_full_attention":
-        raise ValueError(
-            f"unsupported decision attention_mode: {decision.get('attention_mode')!r}"
+            f"unsupported decision_config format/attention_mode: "
+            f"{decision.get('format_version')!r}/{decision.get('attention_mode')!r}"
         )
 
     joint_version, template = joint.get("version"), joint.get("template")
@@ -238,7 +238,7 @@ def _load_pooling_decision_descriptor(decision_path: Path, joint_path: Path) -> 
         "template": template,
         "marker": marker,
         "readout_offset": readout_offset,
-        "codes": list(codes),
+        "codes": codes,
         "temperature": float(temperature),
         "max_questions": _optional_positive_int(joint, "max_questions"),
         "max_length": _optional_positive_int(joint, "max_length"),
@@ -263,10 +263,10 @@ def publish_vllm_pooling_decision_capability(
         or not model_type.supports_pooling()
     ):
         return False
-
     metadata_files = _resolve_pooling_metadata_files(config, vllm_config)
     if metadata_files is None:
         return False
+
     decision_path, joint_path = metadata_files
     model_label = getattr(config, "model", decision_path.parent)
     try:
@@ -282,7 +282,7 @@ def publish_vllm_pooling_decision_capability(
     dp_size = getattr(
         getattr(vllm_config, "parallel_config", None), "data_parallel_size", None
     )
-    uses_last_classify = (
+    uses_last = (
         descriptor["template"] == _POOLING_CHUNKED_TEMPLATE
         and descriptor["readout_offset"] == 0
     )
@@ -301,7 +301,7 @@ def publish_vllm_pooling_decision_capability(
         ),
         (
             "requires pooler_config.pooling_type=LAST",
-            not uses_last_classify
+            not uses_last
             or getattr(pooler_cfg, "pooling_type", None) in (None, "LAST", "last"),
         ),
         ("requires aggregated worker", worker_type == WorkerType.Aggregated),
