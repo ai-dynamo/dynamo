@@ -170,14 +170,11 @@ mod tests {
 
     #[tokio::test]
     async fn well_formed_velo_address_is_rejected_before_publish() {
-        let mut broker = FakeNats::start().await;
-        let client = async_nats::ConnectOptions::new()
-            .ping_interval(std::time::Duration::from_millis(50))
-            .connect(&broker.url)
-            .await
-            .unwrap();
-        let nats = NatsRequestClient::new(client);
-        broker.drain_pings();
+        const SENTINEL_SUBJECT: &str = "dynamo.test.sentinel";
+
+        let broker = FakeNats::start().await;
+        let client = async_nats::connect(&broker.url).await.unwrap();
+        let nats = NatsRequestClient::new(client.clone());
         let err = nats
             .send_request(
                 "velo://3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab/AA/1/ns/c/e".to_string(),
@@ -192,25 +189,35 @@ mod tests {
             &[ErrorType::WorkerUnavailable]
         ));
 
-        broker.wait_for_ping().await;
+        let sentinel = uuid::Uuid::new_v4().to_string();
+        let reply = client
+            .request_with_headers(
+                SENTINEL_SUBJECT,
+                async_nats::HeaderMap::new(),
+                Bytes::copy_from_slice(sentinel.as_bytes()),
+            )
+            .await
+            .expect("the sentinel request must round-trip through the broker");
+        assert_eq!(reply.payload, Bytes::copy_from_slice(sentinel.as_bytes()));
+
         let commands = broker.commands();
         assert!(
-            commands.iter().any(|command| command == "PING"),
-            "the broker must see the synchronization PING: {commands:?}"
-        );
-        assert!(
-            commands.iter().any(|command| command == "PONG"),
-            "the broker must answer the synchronization PING: {commands:?}"
-        );
-        assert!(
-            !commands
+            commands
                 .iter()
-                .any(|command| command.starts_with("PUB ") || command.starts_with("HPUB ")),
-            "{commands:?}"
+                .any(|command| command.starts_with(&format!("PUB {SENTINEL_SUBJECT} "))),
+            "the broker must see the sentinel request: {commands:?}"
         );
         assert!(
-            !commands.iter().any(|command| command.contains("velo://")),
-            "{commands:?}"
+            commands
+                .iter()
+                .any(|command| command == &format!("BODY {sentinel}")),
+            "the broker must echo the sentinel payload: {commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|command| (command.starts_with("PUB ")
+                || command.starts_with("HPUB "))
+                && command.contains("velo://")),
+            "no publish may carry the well-formed velo address: {commands:?}"
         );
     }
 
@@ -228,7 +235,7 @@ mod tests {
             )
             .await
             .expect("a velo:// prefix alone is a valid NATS subject");
-        assert!(response.is_empty());
+        assert_eq!(response, Bytes::from_static(b"request"));
         assert!(
             broker
                 .commands()
@@ -240,11 +247,10 @@ mod tests {
     }
 
     /// A minimal NATS broker: enough of the protocol to complete the client
-    /// handshake and to answer a request, recording every command it reads.
+    /// handshake, echo a request, and record every command it reads.
     struct FakeNats {
         url: String,
         commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        pings: tokio::sync::mpsc::UnboundedReceiver<()>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -256,7 +262,6 @@ mod tests {
             let addr = listener.local_addr().unwrap();
             let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let recorded = commands.clone();
-            let (ping_tx, pings) = tokio::sync::mpsc::unbounded_channel();
             let server = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let (read_half, mut write_half) = stream.into_split();
@@ -281,7 +286,6 @@ mod tests {
                         Some("PING") => {
                             write_half.write_all(b"PONG\r\n").await.unwrap();
                             recorded.lock().unwrap().push("PONG".to_string());
-                            let _ = ping_tx.send(());
                         }
                         Some("PUB") => {
                             let size: usize = fields.last().unwrap().parse().unwrap();
@@ -294,9 +298,11 @@ mod tests {
                             if fields.len() == 4 {
                                 let reply = fields[2];
                                 write_half
-                                    .write_all(format!("MSG {reply} 0 0\r\n\r\n").as_bytes())
+                                    .write_all(format!("MSG {reply} 0 {size}\r\n").as_bytes())
                                     .await
                                     .unwrap();
+                                write_half.write_all(&body[..size]).await.unwrap();
+                                write_half.write_all(b"\r\n").await.unwrap();
                             }
                         }
                         Some("HPUB") => {
@@ -310,9 +316,11 @@ mod tests {
                             if fields.len() == 5 {
                                 let reply = fields[2];
                                 write_half
-                                    .write_all(format!("MSG {reply} 0 0\r\n\r\n").as_bytes())
+                                    .write_all(format!("MSG {reply} 0 {total}\r\n").as_bytes())
                                     .await
                                     .unwrap();
+                                write_half.write_all(&body[..total]).await.unwrap();
+                                write_half.write_all(b"\r\n").await.unwrap();
                             }
                         }
                         _ => {}
@@ -323,26 +331,12 @@ mod tests {
             Self {
                 url: format!("nats://{addr}"),
                 commands,
-                pings,
                 server,
             }
         }
 
         fn commands(&self) -> Vec<String> {
             self.commands.lock().unwrap().clone()
-        }
-
-        fn drain_pings(&mut self) {
-            while self.pings.try_recv().is_ok() {}
-        }
-
-        /// Wait for the broker to read a PING and answer it with PONG, so every
-        /// command written before that round trip has reached the broker.
-        async fn wait_for_ping(&mut self) {
-            tokio::time::timeout(std::time::Duration::from_secs(5), self.pings.recv())
-                .await
-                .expect("the client sent no PING")
-                .expect("the broker stopped before answering a PING");
         }
     }
 
