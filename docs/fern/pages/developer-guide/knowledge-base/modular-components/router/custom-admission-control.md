@@ -204,6 +204,9 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/session-ids.mdx#agent-headers) |
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `pinned_worker()` | Exact worker and rank the caller requires, if any. A classifier's soft selection target cannot override it |
+| `expected_output_tokens()` | Output length the caller expects, if the request supplies one (`nvext.agent_hints.osl`) |
+| `priority_jump()` | The caller's priority as a head start in the router queue, in seconds; zero when the caller sent none. Queue policies treat a negative value as zero |
+| `strict_priority()` | The caller's strict priority tier; zero when the caller sent none. The queue serves a larger value first |
 
 What exists only while a request is classified is on the `ClassifyRequest` itself:
 

@@ -34,7 +34,7 @@ impl WorkerFilter for ContractPolicy {
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let _: Option<&SessionContext> = request.info().session_context();
-        let _: Option<u32> = request.expected_output_tokens();
+        let _: Option<u32> = request.info().expected_output_tokens();
         let _: WorkerWithDpRank = candidate.worker();
         let cache = candidate.cache().expect("requested cache inputs");
         Ok(cache.device_overlap_blocks() + cache.host_overlap_blocks() >= 0.0)

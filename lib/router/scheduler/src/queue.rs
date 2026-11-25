@@ -25,7 +25,7 @@ use super::overlap_refresh::{
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{
     CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerLoadInputExt,
-    WorkerSelectionInput, WorkerSelector, worker_input_rows,
+    WorkerSelectionInput, WorkerSelector, request_info_of, worker_input_rows,
 };
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
@@ -37,7 +37,7 @@ use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
 use dynamo_admission::QueueLane;
-use dynamo_admission::host::ClassifyRequestHostExt;
+use dynamo_admission::host::{ClassifyRequestHostExt, dispatch_head};
 use dynamo_admission::{
     BlockReason, ClassificationOverrides, ClassifyRequest, DispatchDecision, DispatchGate,
     DispatchHead, DispatchRecheck, LaneCheck, LaneKey, RecheckScope,
@@ -122,11 +122,8 @@ struct QueuedRequest {
 
 impl QueuedRequest {
     fn dispatch_head<'a>(&'a self, policy_class: &'a str) -> DispatchHead<'a> {
-        DispatchHead::new(
-            self.request.mode.request_id(),
-            self.request.session_context.as_ref(),
-            self.request.isl_tokens,
-            self.request.pinned_worker,
+        dispatch_head(
+            request_info_of(&self.request, self.request.pinned_worker),
             policy_class,
             self.enqueue_at,
         )
@@ -3548,6 +3545,11 @@ pub fn classify_inputs<C: WorkerConfigLike>(
     let mut classification =
         ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
             .with_pinned_worker(request.pinned_worker)
+            .with_caller_hints(
+                request.expected_output_tokens,
+                request.priority_jump,
+                request.strict_priority,
+            )
             .with_sequence_hashes(request.token_seq.as_deref())
             .with_busy_thresholds(reject_thresholds);
     if let Some(request_id) = request.mode.request_id() {

@@ -41,6 +41,9 @@ pub struct ClassifyRequest {
     progress: RequestProgress,
     session_context: Option<SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
+    expected_output_tokens: Option<u32>,
+    priority_jump: f64,
+    strict_priority: u32,
     reject_thresholds: Option<BusyThresholds>,
 }
 
@@ -72,13 +75,17 @@ impl ClassifyRequest {
     }
 
     /// The request facts every stage reads: the request id, the input length, the session,
-    /// and the pinned worker. A view over this request's own fields; nothing is copied.
+    /// the pinned worker, and the caller's expected output length and priorities. A view over
+    /// this request's own fields; nothing is copied.
     pub fn info(&self) -> RequestInfo<'_> {
         request_info(
             self.request_id.as_deref(),
             self.input_tokens,
             self.session_context.as_ref(),
             self.pinned_worker,
+            self.expected_output_tokens,
+            self.priority_jump,
+            self.strict_priority,
         )
     }
 
@@ -194,6 +201,9 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
             pinned_worker: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
             reject_thresholds: None,
         }
     }
@@ -215,6 +225,18 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
 
     fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
         self.pinned_worker = pinned_worker;
+        self
+    }
+
+    fn with_caller_hints(
+        mut self,
+        expected_output_tokens: Option<u32>,
+        priority_jump: f64,
+        strict_priority: u32,
+    ) -> Self {
+        self.expected_output_tokens = expected_output_tokens;
+        self.priority_jump = priority_jump;
+        self.strict_priority = strict_priority;
         self
     }
 
@@ -346,7 +368,9 @@ pub struct DispatchHead<'a> {
 }
 
 impl<'a> DispatchHead<'a> {
-    /// Builds a head view. Hosts build one per queue head; plugin tests build them directly.
+    /// Builds a head view for a plugin's tests, with no expected output length and no
+    /// priority from the caller. The router builds each head from the queued request through
+    /// `host::dispatch_head`.
     pub fn new(
         request_id: Option<&'a str>,
         session_context: Option<&'a SessionContext>,
@@ -356,7 +380,27 @@ impl<'a> DispatchHead<'a> {
         queued_at: Instant,
     ) -> Self {
         Self {
-            info: request_info(request_id, isl_tokens, session_context, pinned_worker),
+            info: request_info(
+                request_id,
+                isl_tokens,
+                session_context,
+                pinned_worker,
+                None,
+                0.0,
+                0,
+            ),
+            policy_class,
+            queued_at,
+        }
+    }
+
+    pub(crate) fn from_info(
+        info: RequestInfo<'a>,
+        policy_class: &'a str,
+        queued_at: Instant,
+    ) -> Self {
+        Self {
+            info,
             policy_class,
             queued_at,
         }

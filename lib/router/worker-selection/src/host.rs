@@ -68,10 +68,6 @@ pub trait WorkerSelectionRequestHostExt<'a>: sealed::Sealed + Sized {
 
     fn with_affinity_target(self, affinity_target: Option<WorkerAffinityTarget>) -> Self;
 
-    fn with_expected_output_tokens(self, expected_output_tokens: Option<u32>) -> Self;
-
-    fn with_priority(self, priority_jump: f64, strict_priority: u32) -> Self;
-
     fn with_shared_cache_hits(self, shared_cache_hits: Option<&'a SharedCacheHits>) -> Self;
 
     /// Whether any rank reported per-tier overlap, so cache columns read device overlap
@@ -166,8 +162,19 @@ pub fn request_info<'a>(
     isl_tokens: usize,
     session_context: Option<&'a SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
+    expected_output_tokens: Option<u32>,
+    priority_jump: f64,
+    strict_priority: u32,
 ) -> RequestInfo<'a> {
-    RequestInfo::new(request_id, isl_tokens, session_context, pinned_worker)
+    RequestInfo::new(
+        request_id,
+        isl_tokens,
+        session_context,
+        pinned_worker,
+        expected_output_tokens,
+        priority_jump,
+        strict_priority,
+    )
 }
 
 /// The `LOAD` row for one rank from its load projection. `observed` is false for a rank

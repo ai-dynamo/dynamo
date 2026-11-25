@@ -1008,9 +1008,9 @@ fn custom_picker_receives_session_metadata() {
                 session.input_trigger(),
                 Some(WorkerSelectionInputTrigger::ToolResult)
             );
-            assert_eq!(request.expected_output_tokens(), Some(128));
-            assert_eq!(request.priority_jump(), 3.0);
-            assert_eq!(request.strict_priority(), 2);
+            assert_eq!(request.info().expected_output_tokens(), Some(128));
+            assert_eq!(request.info().priority_jump(), 3.0);
+            assert_eq!(request.info().strict_priority(), 2);
             Ok(0)
         }
     }

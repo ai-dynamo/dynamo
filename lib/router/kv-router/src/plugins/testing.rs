@@ -275,9 +275,18 @@ impl SelectionCase {
         self
     }
 
-    /// The output length `WorkerSelectionRequest::expected_output_tokens` returns.
+    /// The output length `RequestInfo::expected_output_tokens` returns, to a policy and to a
+    /// classifier.
     pub fn expected_output_tokens(mut self, tokens: u32) -> Self {
         self.request.expected_output_tokens = Some(tokens);
+        self
+    }
+
+    /// The caller's priorities: `RequestInfo::priority_jump` in seconds and
+    /// `RequestInfo::strict_priority` as a tier.
+    pub fn priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
+        self.request.priority_jump = priority_jump;
+        self.request.strict_priority = strict_priority;
         self
     }
 
@@ -679,12 +688,19 @@ mod tests {
         };
         let busy = SelectionCase::new(160, 16)
             .request_id("r1")
+            .expected_output_tokens(64)
+            .priority(2.5, 3)
             .worker(29, CaseWorker::new().active_requests(4))
             .worker(41, CaseWorker::new().active_requests(9));
         let classified = busy.classify(&mut classifier).unwrap();
         assert_eq!(classifier.rows_seen, 2);
         assert_eq!(classified.policy_class(), Some("batch"));
-        assert_eq!(classified.info().request_id(), Some("r1"));
+        // A classifier reads the request facts a policy reads, the caller's hints included.
+        let info = classified.info();
+        assert_eq!(info.request_id(), Some("r1"));
+        assert_eq!(info.expected_output_tokens(), Some(64));
+        assert_eq!(info.priority_jump(), 2.5);
+        assert_eq!(info.strict_priority(), 3);
 
         let idle = SelectionCase::new(160, 16)
             .request_id("r2")
@@ -755,7 +771,9 @@ mod tests {
                 assert_eq!(session.session_id(), "s1");
                 assert_eq!(info.pinned_worker(), Some(PINNED));
                 assert_eq!(request.affinity_target(), Some(PINNED.into()));
-                assert_eq!(request.expected_output_tokens(), Some(64));
+                assert_eq!(info.expected_output_tokens(), Some(64));
+                assert_eq!(info.priority_jump(), 2.5);
+                assert_eq!(info.strict_priority(), 3);
 
                 // A pinned request is offered its pin alone.
                 assert_eq!(input.len(), 1);
@@ -774,6 +792,7 @@ mod tests {
             .pinned_worker(PINNED)
             .affinity_target(PINNED)
             .expected_output_tokens(64)
+            .priority(2.5, 3)
             .worker(29, CaseWorker::new())
             .worker(
                 41,
