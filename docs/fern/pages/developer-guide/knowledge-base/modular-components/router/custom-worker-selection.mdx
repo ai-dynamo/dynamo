@@ -430,7 +430,7 @@ Filters, scorers, and pickers receive each request as a `WorkerSelectionRequest`
 | `session_context()` | Optional session metadata described below |
 | `pinned_worker()` | Exact worker and rank the request must run on, if any, such as an explicit request target, a hard session binding to one rank, or the worker Dynamo chose when it previewed the route. Read-only: Dynamo offers the policy only this worker. A session binding that Dynamo passes only as `affinity_target()` is not a pin |
 | `expected_output_tokens()` | Output length the caller expects, if the request supplies one (`nvext.agent_hints.osl`) |
-| `priority_jump()` | The caller's priority as a head start in the router queue, in seconds; zero when the caller sent none. Queue policies treat a negative value as zero |
+| `priority_jump()` | The caller's priority within its strict tier of the router queue; zero when the caller sent none. A larger value is served sooner under the `fcfs`, `lcfs`, and `wspt` queue policies (under `fcfs` it is a head start in seconds); `edf` does not use it. The queue treats a negative value as zero |
 | `strict_priority()` | The caller's strict priority tier; zero when the caller sent none. The queue serves a larger value first |
 
 What exists only at worker selection is on the `WorkerSelectionRequest` itself:

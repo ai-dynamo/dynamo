@@ -86,9 +86,10 @@ impl<'a> RequestInfo<'a> {
         self.expected_output_tokens
     }
 
-    /// The caller's priority as a head start in the router queue, in seconds: a positive
-    /// value orders the request as if it had arrived that much earlier. Zero when the caller
-    /// sent none.
+    /// The caller's priority within its strict tier of the router queue. A larger value is
+    /// served sooner under the `fcfs`, `lcfs`, and `wspt` queue policies (under `fcfs` it is
+    /// a head start in seconds); `edf` does not use it. Zero when the caller sent none, and
+    /// the queue treats a negative value as zero.
     #[inline]
     pub fn priority_jump(&self) -> f64 {
         self.priority_jump

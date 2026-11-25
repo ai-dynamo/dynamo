@@ -283,8 +283,8 @@ impl SelectionCase {
         self
     }
 
-    /// The caller's priorities: `RequestInfo::priority_jump` in seconds and
-    /// `RequestInfo::strict_priority` as a tier.
+    /// The caller's priorities, as `RequestInfo::priority_jump` and
+    /// `RequestInfo::strict_priority` return them.
     pub fn priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
         self.request.priority_jump = priority_jump;
         self.request.strict_priority = strict_priority;

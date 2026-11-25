@@ -205,7 +205,7 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `pinned_worker()` | Exact worker and rank the caller requires, if any. A classifier's soft selection target cannot override it |
 | `expected_output_tokens()` | Output length the caller expects, if the request supplies one (`nvext.agent_hints.osl`) |
-| `priority_jump()` | The caller's priority as a head start in the router queue, in seconds; zero when the caller sent none. Queue policies treat a negative value as zero |
+| `priority_jump()` | The caller's priority within its strict tier of the router queue; zero when the caller sent none. A larger value is served sooner under the `fcfs`, `lcfs`, and `wspt` queue policies (under `fcfs` it is a head start in seconds); `edf` does not use it. The queue treats a negative value as zero |
 | `strict_priority()` | The caller's strict priority tier; zero when the caller sent none. The queue serves a larger value first |
 
 What exists only while a request is classified is on the `ClassifyRequest` itself:
