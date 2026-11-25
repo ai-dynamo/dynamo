@@ -41,7 +41,9 @@ pub use dynamo_worker_selection::{
 use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
-use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
+use super::types::{
+    KvSchedulerError, SchedulingRequest, SchedulingResponse, tier_blocks_to_tokens,
+};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
 use dynamo_kv_indexer::{CacheOwnerBlockCounts, ResidentBlockCounts};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -492,19 +494,24 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> CandidateData {
-        let mut row = worker_input_row(
-            self.request,
-            worker,
-            preferred_taint_multiplier,
-            inputs,
-            select_device_overlap,
-        );
         if self.tracked {
-            row.raw_cached_tokens = raw_cached_tokens_column(
-                self.request.raw_cached_tokens_for(worker, self.block_size),
-            );
+            tracked_worker_input_row(
+                self.request,
+                worker,
+                preferred_taint_multiplier,
+                inputs,
+                self.block_size,
+                select_device_overlap,
+            )
+        } else {
+            worker_input_row(
+                self.request,
+                worker,
+                preferred_taint_multiplier,
+                inputs,
+                select_device_overlap,
+            )
         }
-        row
     }
 }
 
@@ -669,6 +676,66 @@ fn worker_input_row(
         worker,
         inputs,
         raw_cached_tokens: 0,
+        cache,
+        load,
+        transfer: None,
+        preferred_taint_multiplier,
+        dp_size: 0,
+    }
+}
+
+/// A tracked row: raw reuse plus the cache columns, from one tier-map read.
+/// Query-only rows keep the parent builder unchanged.
+#[inline(always)]
+fn tracked_worker_input_row(
+    request: &SchedulingRequest,
+    worker: WorkerWithDpRank,
+    preferred_taint_multiplier: Option<f64>,
+    inputs: WorkerInputs,
+    block_size: u32,
+    select_device_overlap: impl FnOnce(f64, f64) -> f64,
+) -> CandidateData {
+    let cached_tokens = if inputs.contains(WorkerInputs::CACHE) {
+        request.effective_cached_tokens_for(worker)
+    } else {
+        0
+    };
+    // Raw reuse is tracked even when the policy omits CACHE.
+    let (device_blocks, host_blocks, disk_blocks) =
+        request.overlap.tier_overlap_blocks.counts_for(worker);
+    let cache = if inputs.contains(WorkerInputs::CACHE) {
+        let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
+        let reported_device_overlap_blocks = device_blocks as f64;
+        let device_overlap_blocks =
+            select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
+        WorkerCacheData {
+            effective_overlap_blocks,
+            estimated_cached_tokens: cached_tokens,
+            device_overlap_blocks,
+            host_overlap_blocks: host_blocks as f64,
+            disk_overlap_blocks: disk_blocks as f64,
+        }
+    } else {
+        WorkerCacheData::default()
+    };
+    let raw_cached_tokens = raw_cached_tokens_column(tier_blocks_to_tokens(
+        device_blocks,
+        host_blocks,
+        disk_blocks,
+        block_size,
+    ));
+    let load = if inputs.contains(WorkerInputs::LOAD) {
+        WorkerLoadInput::for_worker(&request.worker_loads, worker, || {
+            request.unobserved_worker_load()
+        })
+    } else {
+        WorkerLoadInput::default()
+    };
+
+    CandidateData {
+        worker,
+        inputs,
+        raw_cached_tokens,
         cache,
         load,
         transfer: None,
@@ -1191,5 +1258,80 @@ mod cache_reuse_tests {
                 .is_err()
         );
         assert_eq!(source.max_raw_cached_tokens(), Some(0));
+    }
+
+    #[test]
+    fn tracked_row_raw_tokens_match_the_tier_sum_formula() {
+        let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        // Sparse, dense, missing, and saturating layouts.
+        let layouts = [
+            (Some(1), Some(2), Some(3), 16),
+            (Some(4), None, None, 16),
+            (None, Some(5), None, 8),
+            (None, None, Some(6), 32),
+            (None, None, None, 16),
+            (Some(usize::MAX), Some(1), Some(1), 16),
+            (Some(2), Some(3), Some(5), u32::MAX),
+            (Some(1), Some(1), Some(1), 7),
+        ];
+        for (device, host_pinned, disk, block_size) in layouts {
+            let mut request = base_request(128);
+            request.mode = crate::ScheduleMode::Tracked {
+                request_id: "test".into(),
+            };
+            {
+                let tiers = &mut request.overlap.tier_overlap_blocks;
+                tiers.device.extend(device.map(|blocks| (worker, blocks)));
+                tiers
+                    .host_pinned
+                    .extend(host_pinned.map(|blocks| (worker, blocks)));
+                tiers.disk.extend(disk.map(|blocks| (worker, blocks)));
+                // Another rank's larger counts must not leak into this rank's row.
+                let other_rank = WorkerWithDpRank::new(worker.worker_id, 1);
+                tiers.device.insert(other_rank, usize::MAX);
+                tiers.host_pinned.insert(other_rank, usize::MAX);
+                tiers.disk.insert(other_rank, usize::MAX);
+            }
+            let source =
+                SelectionRowSource::new(&request, &workers, request.eligibility(), block_size);
+
+            // Independent oracle: the documented per-tier saturating sum, not the helper under test.
+            let expected = device
+                .unwrap_or(0)
+                .saturating_add(host_pinned.unwrap_or(0))
+                .saturating_add(disk.unwrap_or(0))
+                .saturating_mul(block_size as usize);
+            let expected_column = u32::try_from(expected).unwrap_or(u32::MAX);
+            for inputs in [WorkerInputs::NONE, WorkerInputs::CACHE, WorkerInputs::ALL] {
+                let row = source.row_for(worker, &workers[&1], inputs);
+                assert_eq!(
+                    row.raw_cached_tokens, expected_column,
+                    "layout {device:?}/{host_pinned:?}/{disk:?} block_size={block_size} inputs={inputs:?}"
+                );
+                if inputs.contains(WorkerInputs::CACHE) {
+                    assert_eq!(row.cache.device_overlap_blocks, device.unwrap_or(0) as f64);
+                    assert_eq!(
+                        row.cache.host_overlap_blocks,
+                        host_pinned.unwrap_or(0) as f64
+                    );
+                    assert_eq!(row.cache.disk_overlap_blocks, disk.unwrap_or(0) as f64);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn query_only_rows_keep_raw_cached_tokens_zero() {
+        let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        let mut request = base_request(128);
+        request.overlap.tier_overlap_blocks.device.insert(worker, 3);
+        let source = SelectionRowSource::new(&request, &workers, request.eligibility(), 16);
+
+        let row = source.row_for(worker, &workers[&1], WorkerInputs::ALL);
+
+        assert_eq!(row.raw_cached_tokens, 0);
+        assert_eq!(row.cache.device_overlap_blocks, 3.0);
     }
 }
