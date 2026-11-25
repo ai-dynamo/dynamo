@@ -14,10 +14,13 @@ use crate::common::protocols::ForwardPassSnapshot;
 
 /// Router storage tier of a native KV event. `HostPinned` events describe a
 /// G2 host pool (per-rank or cluster-shared) and must never enter the device (G1) index.
+/// `Disk` events describe a KVCR disk cache (G3). The event's `domain` is not
+/// carried: Dynamo indexes every native event under the publishing worker.
 pub(crate) fn dynamo_storage_tier(tier: KvEventTier) -> StorageTier {
     match tier {
         KvEventTier::Device => StorageTier::Device,
         KvEventTier::HostPinned => StorageTier::HostPinned,
+        KvEventTier::Disk => StorageTier::Disk,
     }
 }
 
@@ -117,6 +120,7 @@ mod tests {
     ) -> KvEvent {
         KvEvent {
             tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id,
             dp_rank,
             data: KvEventData::Stored(StoredBlocks {
@@ -162,6 +166,7 @@ mod tests {
 
         let (event, token_ids, session_id) = dynamo_kv_event(KvEvent {
             tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id: 18,
             dp_rank: 3,
             data: KvEventData::Removed {
@@ -214,6 +219,7 @@ mod tests {
 
         let removed = dynamo_kv_event(KvEvent {
             tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id: 3,
             dp_rank: 3,
             data: KvEventData::Removed {

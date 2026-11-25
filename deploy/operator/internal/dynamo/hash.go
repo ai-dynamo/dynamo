@@ -26,8 +26,10 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/utils/ptr"
 )
@@ -74,12 +76,18 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 			if _, exists := workerDCDs[componentName]; exists {
 				return "", fmt.Errorf("duplicate generated worker DCD component name %q", componentName)
 			}
+
+			// Keep all source layers on the child, but hash only consumed defaults.
+			spec := workerHashSpec(dcd)
+			if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) && !spec.IsLPX() {
+				spec.Env = workerHashGeneralEnvironment(&spec)
+			}
 			workerDCDs[componentName] = workerTemplate{
 				Labels:              GetDCDKubeLabels(dcd),
 				Annotations:         GetDCDKubeAnnotations(dcd),
 				RuntimeVersion:      resolvedRuntimeVersionForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
 				RoleRuntimeVersions: resolvedRoleRuntimeVersionsForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
-				Spec:                workerHashSpec(dcd),
+				Spec:                spec,
 			}
 		}
 	}
@@ -166,6 +174,40 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	}
 
 	return *spec
+}
+
+// workerHashGeneralEnvironment omits general definitions shadowed in every
+// consuming main/runtime container. spec must not be nil and is not mutated.
+func workerHashGeneralEnvironment(spec *v1beta1.DynamoComponentDeploymentSpec) []corev1.EnvVar {
+	templates := ComponentPodTemplates(&spec.DynamoComponentDeploymentSharedSpec)
+	if len(templates) == 0 {
+		return spec.Env
+	}
+
+	// An omitted main is later supplied by rendering and can consume all defaults.
+	var consumers []*corev1.Container
+	for _, template := range templates {
+		main := GetMainContainerFromPodSpec(&template.Spec)
+		if main == nil {
+			return spec.Env
+		}
+		consumers = append(consumers, main)
+		if runtime := findRuntimeInitContainer(&template.Spec); runtime != nil {
+			consumers = append(consumers, runtime)
+		}
+	}
+
+	// Cross-layer references use the winning local binding, not its hidden default.
+	var retained []corev1.EnvVar
+	for _, variable := range spec.Env {
+		for _, container := range consumers {
+			if findEnvVar(container.Env, variable.Name) == nil {
+				retained = append(retained, variable)
+				break
+			}
+		}
+	}
+	return retained
 }
 
 func resolvedRoleRuntimeVersionsForHash(component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {

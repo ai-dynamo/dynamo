@@ -11,7 +11,7 @@ pub(crate) fn _is_kimi_k3_prompt_hint(hint: &str) -> bool {
     llm_rs::preprocessor::prompt::is_kimi_k3_prompt_hint(hint)
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct MediaDecoder {
     pub(crate) inner: RsMediaDecoder,
@@ -44,7 +44,7 @@ impl MediaDecoder {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct MediaFetcher {
     pub(crate) inner: RsMediaFetcher,

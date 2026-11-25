@@ -11,7 +11,6 @@ use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
-    http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
     migration::Migration,
@@ -32,6 +31,7 @@ use crate::{
         },
     },
 };
+use dynamo_http_server::metrics::Metrics;
 
 use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_lora::policy::validate_router_mode_for_lora;
@@ -393,7 +393,7 @@ where
         tokenizer.as_ref(),
     )?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_model_formatter(card.clone(), tokenizer.clone(), None)?;
+        OpenAIPreprocessor::new_with_model_formatter(card.clone(), tokenizer.clone(), None, None)?;
     link_pipeline(engine, tokenizer, preprocessor)
 }
 

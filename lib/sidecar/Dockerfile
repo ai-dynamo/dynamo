@@ -121,12 +121,13 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
         -p dynamo-vllm-sidecar \
         -p dynamo-sglang-sidecar \
         -p dynamo-trtllm-sidecar \
+        -p dynamo-triton-sidecar \
         -p dynamo-lpx-sidecar; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-triton-sidecar dynamo-lpx-sidecar; do \
         strip "target/release/${pkg}"; \
         install -D "target/release/${pkg}" "/out/bin/${pkg}"; \
     done; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-triton-sidecar dynamo-lpx-sidecar; do \
         manifest="lib/sidecar/${pkg#dynamo-}"; \
         manifest="${manifest%-sidecar}/Cargo.toml"; \
         cargo cyclonedx \
@@ -226,6 +227,7 @@ ARG TARGETARCH
 
 USER root
 COPY container/compliance/ /src/container/compliance/
+COPY pyproject.toml /src/pyproject.toml
 
 # Scan the filesystem that actually ships, rather than the build-tool packages
 # present in this helper stage. The Rust SBOM contains only dependencies linked
@@ -244,6 +246,7 @@ RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \
         --output-dir /legal \
         --policy /src/container/compliance/policy/licenses.toml \
         --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
+        --source-version "$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' /src/pyproject.toml | head -n1)" \
         --verbose \
     && python3 -m compliance.policy.validate \
         --policy /src/container/compliance/policy/licenses.toml \

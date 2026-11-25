@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_llm::local_model::runtime_config::RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::{
