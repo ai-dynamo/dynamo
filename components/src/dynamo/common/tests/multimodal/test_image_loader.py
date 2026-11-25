@@ -21,7 +21,7 @@ import errno
 import logging
 import struct
 from io import BytesIO
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
 
 import numpy as np
@@ -82,6 +82,77 @@ _SIGNED_URL = (
     "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
     f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
 )
+
+
+async def test_hard_pixel_limit_rejects_before_decode(monkeypatch) -> None:
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    load = Mock(side_effect=AssertionError("pixel loading must not run"))
+    monkeypatch.setattr(Image.Image, "load", load)
+    with pytest.raises(HttpStatusError) as caught:
+        await ImageLoader._open_image(BytesIO(PNG_BYTES))
+    assert caught.value.status == 413
+    assert caught.value.message == "Image exceeds the decoded pixel limit"
+    assert isinstance(caught.value.__cause__, Image.DecompressionBombError)
+    load.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["inline", "fetched", "shared"])
+async def test_hard_pixel_limit_across_sources(monkeypatch, loader, source) -> None:
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    url = "https://example.com/image.png"
+    fetch = _mock_fetch_bytes()
+    if source == "inline":
+        url = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+    elif source == "shared":
+        loader._shared_image_cache = AsyncMock()
+        loader._shared_image_cache.get.return_value = PNG_BYTES
+    with patch(_FETCH_BYTES_PATH, fetch), pytest.raises(HttpStatusError) as caught:
+        await loader.load_image(url)
+    assert caught.value.status == 413
+    assert caught.value.message == "Image exceeds the decoded pixel limit"
+    if source == "fetched":
+        fetch.assert_awaited_once()
+    else:
+        fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "order", [(False,), (False, False), (True, False), (False, True)]
+)
+async def test_hard_pixel_limit_batches(monkeypatch, loader, order) -> None:
+    small = BytesIO()
+    Image.new("RGB", (1, 1)).save(small, format="PNG")
+    urls = [
+        {
+            URL_VARIANT_KEY: "data:image/png;base64,"
+            + base64.b64encode(small.getvalue() if valid else PNG_BYTES).decode()
+        }
+        for valid in order
+    ]
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    with pytest.raises(HttpStatusError) as caught:
+        await loader.load_image_batch(urls)
+    assert caught.value.status == 413
+    assert caught.value.message == "Image exceeds the decoded pixel limit"
+
+
+async def test_pillow_soft_pixel_warning_keeps_decoding(monkeypatch) -> None:
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 3)
+    with pytest.warns(Image.DecompressionBombWarning):
+        image = await ImageLoader._open_image(BytesIO(PNG_BYTES))
+    assert image.size == (2, 2)
+    assert image.mode == "RGB"
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("decoder fault"), MemoryError("host exhaustion")]
+)
+async def test_image_open_preserves_unexpected_faults(monkeypatch, error) -> None:
+    with patch.object(Image, "open", side_effect=error), pytest.raises(
+        type(error)
+    ) as caught:
+        await ImageLoader._open_image(BytesIO(PNG_BYTES))
+    assert caught.value is error
 
 
 def _permissive_policy(
@@ -322,15 +393,25 @@ async def test_http_connection_error_raises_400(loader: ImageLoader) -> None:
         assert "https://example.com/img.png" in exc_info.value.url
 
 
-async def test_http_status_error_propagated(loader: ImageLoader) -> None:
-    """HTTP 4xx/5xx should propagate as HttpStatusError."""
-    error = HttpStatusError(404, "Not Found", "https://example.com/img.png")
+@pytest.mark.parametrize("status", [403, 404, 503])
+async def test_http_status_error_propagated(loader: ImageLoader, status: int) -> None:
+    url = "https://example.com/img.png?signature=SECRET"
+    error = HttpStatusError(status, "private origin details: SECRET", url)
     mock_fetch = _mock_fetch_bytes(side_effect=error)
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         with pytest.raises(HttpStatusError) as exc_info:
-            await loader.load_image("https://example.com/img.png")
-        assert exc_info.value.status == 404
-        assert exc_info.value is error
+            await loader.load_image(url)
+    raised = exc_info.value
+    if status == 503:
+        assert raised.status == status
+        assert raised is error
+    else:
+        assert raised.status == 400
+        assert raised.__cause__ is error
+        assert raised.url == url
+        assert raised.message.startswith(f"Image download returned HTTP {status}.")
+        assert "resend the image data before retrying" in raised.message
+        assert "SECRET" not in raised.message
 
 
 @pytest.mark.parametrize(

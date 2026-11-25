@@ -7,6 +7,19 @@ See [docs/backends/sglang/](../../../../docs/fern/pages/developer-guide/knowledg
 
 ## KVCR-owned inventory
 
+> [!IMPORTANT]
+> Dynamo 1.7.0 uses [KVCR 0.1.1](https://github.com/ai-dynamo/kvcr/tree/v0.1.1)
+> as its KVCR baseline. KVCR 0.1.1 does not support the SGLang HiCacheStorage or
+> direct linker engine integration described in this section. KVCR 0.1.1 supports
+> SGLang only for the KV hint protocol, and hint protocol support does not provide
+> engine integration. SGLang engine integration is proposed in SGLang pull requests
+> [#45647](https://github.com/sgl-project/sglang/pull/45647) and
+> [#45650](https://github.com/sgl-project/sglang/pull/45650).
+> The instructions below are preview instructions. No KVCR version that Dynamo
+> pins includes SGLang engine integration, and no qualified Dynamo, SGLang, and
+> KVCR version combination is recorded for them.
+> Ordinary SGLang serving without KVCR is not affected.
+
 KVCR inventory publication is opt-in for the in-process `python -m dynamo.sglang`
 HiCacheStorage and direct linker paths. It requires a matching SGLang backend that
 reports the `kvcr_inventory` capability and engine-lifetime cache-owner metadata.

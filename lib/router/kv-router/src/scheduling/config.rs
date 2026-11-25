@@ -8,36 +8,29 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::plugins::worker_selection::selection_config::{
-    OVERLAP_SCORE_CREDIT_RANGE_ERROR, SelectionConfig, SharedCacheType,
-    overlap_score_credit_error_message,
+use crate::plugins::worker_selection::config::{
+    WorkerSelectionConfig, WorkerSelectionPolicySelection,
 };
-use crate::plugins::worker_selection::selection_config::{
-    default_decode_active_request_weight, default_disk_cache_hit_weight,
-    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
-    validate_finite_non_negative, validate_overlap_score_credit, validate_range,
-};
-use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionPolicySelection};
 use crate::tracking_hash::{
     TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
 };
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_kv_hashing::routing::{
-    BlockHashOptions, complete_block_count, compute_block_hash_for_seq, compute_seq_hash_for_block,
-};
+use dynamo_kv_hashing::routing::BlockHashOptions;
 use dynamo_router_protocol::WorkerType;
+use dynamo_worker_selection::host::SelectionConfigHostExt;
 pub use dynamo_worker_selection::{ConditionalDisaggConfig, ConditionalDisaggPolicyKind};
+pub use dynamo_worker_selection::{SelectionConfig, SharedCacheType};
 use dynamo_worker_selection::{
     default_conditional_disagg_eff_isl_ratio_threshold,
     default_conditional_disagg_eff_isl_threshold,
 };
+use dynamo_worker_selection::{
+    default_decode_active_request_weight, default_disk_cache_hit_weight,
+    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
+    validate_finite_non_negative, validate_overlap_score_credit, validate_range,
+};
 
 pub use dynamo_scheduler::{RouterConfigOverride, RouterPrefillLoadModel};
-// Pre-split paths kept through 1.9 and removed in 1.10; the named list is the inventory in compat.rs.
-#[allow(deprecated)]
-pub use crate::compat::scheduling::config::{
-    RouterConfigOverrideBuilder, RouterConfigOverrideBuilderError,
-};
 
 const fn default_track_prefill_tokens() -> bool {
     true
@@ -127,17 +120,6 @@ pub fn apply_deprecated_overlap_score_weight_override(
 }
 
 /// Build a [`KvRouterConfig`] from defaults and standard Dynamo environment variables.
-///
-/// # Panics
-///
-/// Panics when `DYN_ROUTER_TRACKING_HASH` is not a supported algorithm. Startup
-/// paths should use [`try_kv_router_config_from_dynamo_env`] to report the error.
-pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
-    try_kv_router_config_from_dynamo_env()
-        .unwrap_or_else(|error| panic!("invalid Dynamo router environment configuration: {error}"))
-}
-
-/// Build a [`KvRouterConfig`] from standard Dynamo environment variables.
 pub fn try_kv_router_config_from_dynamo_env() -> Result<KvRouterConfig, String> {
     let config = kv_router_config_from_lookup(|key| env::var(key).ok())?;
     log_env_config(&config);
@@ -888,6 +870,17 @@ impl KvRouterConfig {
         Ok(())
     }
 
+    /// Apply the policy file's `router` settings for the last time: later
+    /// [`Self::apply_policy_config`] calls leave this config alone. For a caller that
+    /// overrides one of those settings and hands the config to code that applies again.
+    pub fn finalize_policy_config(&mut self) -> Result<(), String> {
+        self.apply_policy_config()?;
+        if let Some(policy) = self.policy_config_cache.get_mut() {
+            policy.drop_router_settings();
+        }
+        Ok(())
+    }
+
     fn loaded_policy_config(
         &self,
     ) -> Result<
@@ -925,10 +918,7 @@ impl KvRouterConfig {
     /// Return the custom worker-selection configuration from `router_policy_config`, if any.
     pub fn worker_selection_config(
         &self,
-    ) -> Result<
-        Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
-        super::policy_config::RouterPolicyConfigError,
-    > {
+    ) -> Result<Option<&WorkerSelectionConfig>, super::policy_config::RouterPolicyConfigError> {
         Ok(self
             .loaded_policy_config()?
             .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
@@ -938,7 +928,7 @@ impl KvRouterConfig {
     pub fn request_classifier_config(
         &self,
     ) -> Result<
-        Option<&crate::plugins::request_classifier::RequestClassifierConfig>,
+        Option<&crate::plugins::request_classifier::config::RequestClassifierConfig>,
         super::policy_config::RouterPolicyConfigError,
     > {
         Ok(self
@@ -1039,14 +1029,6 @@ impl KvRouterConfig {
             .map(|selection| selection.label().to_owned()))
     }
 
-    #[cfg_attr(
-        not(all(
-            feature = "ingest-zmq",
-            feature = "replica-sync-zmq",
-            feature = "peer-recovery"
-        )),
-        allow(dead_code)
-    )]
     pub(crate) fn selected_worker_selection_policy_instances(
         &self,
     ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
@@ -1118,10 +1100,6 @@ impl KvRouterConfig {
         self.policy_profile(self.policy_model_name.as_deref())
     }
 
-    pub fn validate_config(&self) -> Result<(), String> {
-        self.validate()
-    }
-
     pub fn validate(&self) -> Result<(), String> {
         validate_overlap_score_credit(self.overlap_score_credit)?;
         validate_finite_non_negative(
@@ -1178,7 +1156,7 @@ impl KvRouterConfig {
         const DEFAULT_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
         const PREFILL_LOAD_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 
-        // `validate_config` parses router_policy_config at startup. Preserve the old
+        // `validate` parses router_policy_config at startup. Preserve the old
         // conservative behavior if this helper is called before validation, but do
         // not treat a worker-selection-only document as a queue policy profile.
         let has_routing_profiles = self.policy_config_cache.get().map_or(
@@ -1227,58 +1205,6 @@ impl KvRouterConfig {
         config_override
             .and_then(|cfg| cfg.track_prefill_tokens)
             .unwrap_or(self.router_track_prefill_tokens)
-    }
-
-    /// Compute sequence hashes for active block tracking based on configuration.
-    ///
-    /// Returns:
-    /// - `None` if `router_track_active_blocks` is false
-    /// - Random hashes if `router_track_active_blocks` is true but `router_assume_kv_reuse` is false
-    /// - Actual sequence hashes if both are true
-    /// # Panics
-    ///
-    /// Panics in keyed mode because the legacy interface has no initialized
-    /// [`TrackingHashContext`]. Keyed callers must use
-    /// [`Self::compute_seq_hashes_for_tracking_with_context`].
-    pub fn compute_seq_hashes_for_tracking(
-        &self,
-        tokens: &[u32],
-        block_size: u32,
-        config_override: Option<&RouterConfigOverride>,
-        hash_options: BlockHashOptions<'_>,
-        precomputed_block_hashes: Option<&[LocalBlockHash]>,
-    ) -> Option<Vec<u64>> {
-        assert_eq!(
-            self.router_tracking_hash,
-            TrackingHashAlgorithm::PublicXxh3V1,
-            "compute_seq_hashes_for_tracking cannot be used with keyed tracking; initialize a TrackingHashContext and call compute_seq_hashes_for_tracking_with_context"
-        );
-
-        if !self.router_track_active_blocks {
-            return None;
-        }
-
-        let num_blocks = complete_block_count(
-            tokens.len(),
-            block_size,
-            hash_options.is_eagle.unwrap_or(false),
-        );
-        if num_blocks == 0 {
-            return Some(Vec::new());
-        }
-
-        if self.assume_kv_reuse(config_override) {
-            let block_hashes = match precomputed_block_hashes {
-                Some(block_hashes) => block_hashes,
-                None => {
-                    let computed = compute_block_hash_for_seq(tokens, block_size, hash_options);
-                    return Some(compute_seq_hash_for_block(&computed));
-                }
-            };
-            Some(compute_seq_hash_for_block(block_hashes))
-        } else {
-            Some(random_sequence_hashes(num_blocks))
-        }
     }
 
     /// Generate non-reusable sequence identities for a known number of full
@@ -1339,18 +1265,18 @@ impl From<&KvRouterConfig> for dynamo_kv_indexer::IndexerConfig {
 
 impl From<&KvRouterConfig> for SelectionConfig {
     fn from(config: &KvRouterConfig) -> Self {
-        Self {
-            overlap_score_credit: config.overlap_score_credit,
-            overlap_score_credit_decay: config.overlap_score_credit_decay,
-            prefill_load_scale: config.prefill_load_scale,
-            decode_active_request_weight: config.decode_active_request_weight,
-            host_cache_hit_weight: config.host_cache_hit_weight,
-            disk_cache_hit_weight: config.disk_cache_hit_weight,
-            router_temperature: config.router_temperature,
-            shared_cache_multiplier: config.shared_cache_multiplier,
-            shared_cache_type: config.shared_cache_type,
-            conditional_disagg_enabled: config.conditional_disagg_enabled,
-        }
+        // One builder per `SelectionConfig` field, in declaration order.
+        Self::default()
+            .with_overlap_score_credit(config.overlap_score_credit)
+            .with_overlap_score_credit_decay(config.overlap_score_credit_decay)
+            .with_prefill_load_scale(config.prefill_load_scale)
+            .with_decode_active_request_weight(config.decode_active_request_weight)
+            .with_host_cache_hit_weight(config.host_cache_hit_weight)
+            .with_disk_cache_hit_weight(config.disk_cache_hit_weight)
+            .with_router_temperature(config.router_temperature)
+            .with_shared_cache_multiplier(config.shared_cache_multiplier)
+            .with_shared_cache_type(config.shared_cache_type)
+            .with_conditional_disagg_enabled(config.conditional_disagg_enabled)
     }
 }
 
@@ -1675,7 +1601,49 @@ mod tests {
 
         let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
         assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));
-        assert!(predicted.validate_config().is_ok());
+        assert!(predicted.validate().is_ok());
+    }
+
+    #[test]
+    fn env_lookup_applies_conditional_disagg_value_overrides() {
+        // The Rust ext-proc path (`EppState::from_discovery` ->
+        // `try_kv_router_config_from_dynamo_env`) has no other way to set these;
+        // `DYN_ROUTER_CONDITIONAL_DISAGG_CONFIG` is parsed only by the Python CLI.
+        let defaults = config_from_values(&[("DYN_ROUTER_CONDITIONAL_DISAGG", "true")]);
+        assert!(defaults.conditional_disagg_enabled);
+        assert_eq!(
+            defaults.conditional_disagg_policy,
+            ConditionalDisaggPolicyKind::IslBounding
+        );
+        assert_eq!(defaults.conditional_disagg_eff_isl_threshold, 2048);
+        assert_eq!(defaults.conditional_disagg_eff_isl_ratio_threshold, 0.7);
+        assert_eq!(defaults.conditional_disagg_prefill_busy_threshold, None);
+        assert_eq!(defaults.conditional_disagg_decode_busy_threshold, None);
+
+        let config = config_from_values(&[
+            ("DYN_ROUTER_CONDITIONAL_DISAGG", "true"),
+            ("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY", "prefill_load"),
+            ("DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD", "8192"),
+            (
+                "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
+                "0.25",
+            ),
+            (
+                "DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
+                "0.9",
+            ),
+            ("DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD", "0.1"),
+        ]);
+        assert!(config.conditional_disagg_enabled);
+        assert_eq!(
+            config.conditional_disagg_policy,
+            ConditionalDisaggPolicyKind::PrefillLoad
+        );
+        assert_eq!(config.conditional_disagg_eff_isl_threshold, 8192);
+        assert_eq!(config.conditional_disagg_eff_isl_ratio_threshold, 0.25);
+        assert_eq!(config.conditional_disagg_prefill_busy_threshold, Some(0.9));
+        assert_eq!(config.conditional_disagg_decode_busy_threshold, Some(0.1));
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1728,7 +1696,7 @@ mod tests {
         );
 
         let amplified = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
-        assert!(amplified.validate_config().is_ok());
+        assert!(amplified.validate().is_ok());
 
         for value in ["-0.5", "NaN", "inf"] {
             for key in [
@@ -1739,7 +1707,7 @@ mod tests {
                 "DYN_ROUTER_TEMPERATURE",
             ] {
                 let invalid = config_from_values(&[(key, value)]);
-                assert!(invalid.validate_config().is_err(), "{key}={value}");
+                assert!(invalid.validate().is_err(), "{key}={value}");
             }
         }
 
@@ -1771,12 +1739,12 @@ mod tests {
         ] {
             for value in ["-1", "NaN", "inf", "1e100"] {
                 let config = config_from_values(&[(variable, value)]);
-                let error = config.validate_config().unwrap_err();
+                let error = config.validate().unwrap_err();
                 assert!(error.contains(field), "{variable}={value}: {error}");
             }
             for value in ["0", "0.125", "120"] {
                 let config = config_from_values(&[(variable, value)]);
-                assert!(config.validate_config().is_ok(), "{variable}={value}");
+                assert!(config.validate().is_ok(), "{variable}={value}");
             }
         }
     }
@@ -1794,6 +1762,7 @@ mod tests {
     #[test]
     fn compute_seq_hashes_for_tracking_uses_mm_hashes() {
         let cfg = KvRouterConfig::default();
+        let context = tracking_hash_context(&cfg).unwrap();
         let tokens = vec![1, 2, 3, 4];
         let mm_infos = vec![
             Some(BlockExtraInfo {
@@ -1806,12 +1775,20 @@ mod tests {
         ];
 
         let without_mm = cfg
-            .compute_seq_hashes_for_tracking(&tokens, 2, None, BlockHashOptions::default(), None)
+            .compute_seq_hashes_for_tracking_with_context(
+                &context,
+                test_tracking_scope(2),
+                &tokens,
+                None,
+                BlockHashOptions::default(),
+                None,
+            )
             .unwrap();
         let with_mm = cfg
-            .compute_seq_hashes_for_tracking(
+            .compute_seq_hashes_for_tracking_with_context(
+                &context,
+                test_tracking_scope(2),
                 &tokens,
-                2,
                 None,
                 BlockHashOptions {
                     block_mm_infos: Some(&mm_infos),
@@ -1827,12 +1804,14 @@ mod tests {
     #[test]
     fn compute_seq_hashes_for_tracking_uses_precomputed_block_hashes() {
         let config = KvRouterConfig::default();
+        let context = tracking_hash_context(&config).unwrap();
         let tokens: Vec<u32> = (0..8).collect();
         let precomputed = vec![LocalBlockHash(11), LocalBlockHash(29)];
 
-        let seq_hashes = config.compute_seq_hashes_for_tracking(
+        let seq_hashes = config.compute_seq_hashes_for_tracking_with_context(
+            &context,
+            test_tracking_scope(4),
             &tokens,
-            4,
             None,
             BlockHashOptions::default(),
             Some(&precomputed),
@@ -1851,48 +1830,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(disabled.random_seq_hashes_for_tracking(3), None);
-    }
-
-    #[test]
-    fn context_aware_tracking_matches_public_legacy_api() {
-        let config = KvRouterConfig::default();
-        let context = tracking_hash_context(&config).unwrap();
-        let tokens: Vec<u32> = (0..8).collect();
-
-        let legacy = config.compute_seq_hashes_for_tracking(
-            &tokens,
-            4,
-            None,
-            BlockHashOptions::default(),
-            None,
-        );
-        let context_aware = config.compute_seq_hashes_for_tracking_with_context(
-            &context,
-            test_tracking_scope(4),
-            &tokens,
-            None,
-            BlockHashOptions::default(),
-            None,
-        );
-
-        assert_eq!(legacy, context_aware);
-    }
-
-    #[test]
-    #[should_panic(expected = "cannot be used with keyed tracking")]
-    fn legacy_tracking_api_does_not_fall_back_in_keyed_mode() {
-        let config = KvRouterConfig {
-            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
-            ..Default::default()
-        };
-
-        let _ = config.compute_seq_hashes_for_tracking(
-            &[1, 2, 3, 4],
-            4,
-            None,
-            BlockHashOptions::default(),
-            None,
-        );
     }
 
     #[test]
@@ -2333,7 +2270,7 @@ worker_selection:
             ..Default::default()
         };
 
-        config.validate_config().unwrap();
+        config.validate().unwrap();
         std::fs::write(policy_file.path(), "not: [valid").unwrap();
 
         let profile = config.policy_profile(None).unwrap();
@@ -2350,7 +2287,7 @@ worker_selection:
             ..Default::default()
         };
 
-        let error = config.validate_config().unwrap_err();
+        let error = config.validate().unwrap_err();
         assert!(
             error.contains(policy_file.path().to_str().unwrap()),
             "{error}"
@@ -2393,7 +2330,7 @@ worker_selection:
             ..Default::default()
         };
 
-        config.validate_config().unwrap();
+        config.validate().unwrap();
         assert_eq!(
             config.router_queue_recheck_interval(),
             Duration::from_secs(60)
@@ -2692,6 +2629,34 @@ models:
                 );
             }
         }
+    }
+
+    #[test]
+    fn selection_config_carries_every_selection_field() {
+        let config = KvRouterConfig {
+            overlap_score_credit: 2.0,
+            overlap_score_credit_decay: 0.5,
+            prefill_load_scale: 3.0,
+            decode_active_request_weight: 4.0,
+            host_cache_hit_weight: 0.6,
+            disk_cache_hit_weight: 0.1,
+            router_temperature: 0.7,
+            shared_cache_multiplier: Some(0.4),
+            shared_cache_type: SharedCacheType::Hicache,
+            conditional_disagg_enabled: true,
+            ..Default::default()
+        };
+        let selection = SelectionConfig::from(&config);
+        assert_eq!(selection.overlap_score_credit(), 2.0);
+        assert_eq!(selection.overlap_score_credit_decay(), 0.5);
+        assert_eq!(selection.prefill_load_scale(), 3.0);
+        assert_eq!(selection.decode_active_request_weight(), 4.0);
+        assert_eq!(selection.host_cache_hit_weight(), 0.6);
+        assert_eq!(selection.disk_cache_hit_weight(), 0.1);
+        assert_eq!(selection.router_temperature(), 0.7);
+        assert_eq!(selection.shared_cache_multiplier(), Some(0.4));
+        assert_eq!(selection.shared_cache_type(), SharedCacheType::Hicache);
+        assert!(selection.conditional_disagg_enabled());
     }
 
     #[test]

@@ -83,13 +83,6 @@ pub trait AsyncShardHandle: Send + Sync + 'static {
 
     /// Shut down the shard, terminating any background threads or tasks.
     fn shutdown(&self);
-
-    /// Return per-node edge-length histogram for bench/diagnostic tooling.
-    ///
-    /// In-process shard handles delegate to the underlying trie.  Remote
-    /// shard handles should return an empty `Vec` — the data lives on the
-    /// remote host and is not available locally.
-    fn node_edge_lengths(&self) -> Vec<usize>;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +138,6 @@ impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
                 shard_idx: 0,
                 worker_count: 0,
                 block_count: 0,
-                node_count: 0,
             })
     }
 
@@ -155,10 +147,6 @@ impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
 
     fn shutdown(&self) {
         KvIndexerInterface::shutdown(self);
-    }
-
-    fn node_edge_lengths(&self) -> Vec<usize> {
-        KvIndexerInterface::node_edge_lengths(self)
     }
 }
 

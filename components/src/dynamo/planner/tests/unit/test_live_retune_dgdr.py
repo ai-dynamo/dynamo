@@ -28,7 +28,7 @@ from typing import Any, Optional
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 

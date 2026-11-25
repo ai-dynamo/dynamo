@@ -875,6 +875,8 @@ func dgdrRunPublisherRules(runName string) []rbacv1.PolicyRule {
 	}
 }
 
+// reconcileInput reuses a Run's frozen input or creates it before the Job starts.
+// run must not be nil; job is nil before the Run has a Job.
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
@@ -914,6 +916,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 		)}
 	}
 
+	// Require publisher configuration only when freezing a new execution, not when observing an existing Run.
+	if r.OperatorImage == "" {
+		return dgdrRunExecution{}, errors.New("operator image is required for the DGDR Run publisher; set --operator-image")
+	}
+
 	// Resolve every execution value before creating the immutable artifact.
 	execution := dgdrRunExecution{
 		SnapshotPath:        dgdrRunSnapshotPath,
@@ -942,7 +949,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
-	contents, err := yaml.Marshal(input)
+	contents, err := aisimulate.MarshalInput(input)
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf("encode AISimulate input: %w", err)}
 	}
@@ -1838,9 +1845,6 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) SetupWithManager(mgr ctrl.Ma
 	}
 	if r.PlannerImage == "" {
 		return errors.New("planner image is required for the DGDR Run sweeper")
-	}
-	if r.OperatorImage == "" {
-		return errors.New("operator image is required for the DGDR Run publisher")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(), &batchv1.Job{}, dgdrRunJobControllerUIDIndex, dgdrRunJobControllerUIDs,

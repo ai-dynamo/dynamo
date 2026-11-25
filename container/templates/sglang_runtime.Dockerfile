@@ -10,9 +10,8 @@
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
@@ -40,6 +39,8 @@ RUN apt-get update && \
         libturbojpeg \
         libjemalloc2 && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -50,9 +51,21 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/* && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
@@ -89,19 +102,18 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 
 {% if device == "xpu" %}
 {# XPU runtime: NIXL + UCX are needed for P2P transport on Intel GPUs.
-   CUDA sglang runtime does NOT include NIXL/UCX (matching upstream main);
-   those are only added in the dev stage for build-time linking. #}
+   CUDA sglang runtime uses the NIXL wheel from upstream lmsysorg/sglang. #}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
-# Copy UCX and NIXL from wheel_builder
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+# Copy UCX and NIXL from nixl_builder
+COPY --from=nixl_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=nixl_builder $NIXL_PREFIX $NIXL_PREFIX
+COPY --chown=dynamo:0 --from=nixl_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Install RDMA libraries required for UCX to find RDMA devices
 RUN apt-get update && \
@@ -136,7 +148,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl \
+        /opt/dynamo/wheelhouse/aisim-*.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         "distro==1.9.0"
 {% else %}
@@ -145,7 +157,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
@@ -383,20 +395,21 @@ RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder
 ENV IMAGEIO_FFMPEG_EXE=
 {% endif %}
 
-{% if device != "xpu" and target not in ("dev", "local-dev") %}
+{% if device != "xpu" %}
 # Add generic UCX aliases beside NIXL's private libraries so native consumers
 # use the same implementation without breaking UCX's $ORIGIN-based core and
 # module lookup. The wheel's auditwheel dependency directory is deliberately
 # placed first for every process; it contains only hash-mangled dependencies
 # plus the two generic UCX aliases. No existing wheel file or ELF metadata is
-# modified. The same script publishes NIXL's C API directory at the second path
-# below and registers it with the runtime linker, so the bare dlopen of
-# libnixl_capi.so in nixl-sys resolves. Both paths are passed explicitly because
-# the ENV on the next line has to name the same two directories.
+# modified. Then register NIXL's C API directory with the loader and expose it
+# at /opt/dynamo/nixl. Both paths are passed explicitly because the ENV on the
+# next line has to name the same two directories.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
-    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat /opt/dynamo/nixl-capi
-ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl-capi${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+    --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat && \
+    python3 /tmp/register_nixl_libs.py --link /opt/dynamo/nixl
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership

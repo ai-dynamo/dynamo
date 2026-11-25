@@ -29,14 +29,13 @@ impl WorkerInputs {
     /// a policy that declares it without [`Self::CACHE`], because the counts come from the
     /// indexer that `CACHE` starts.
     pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
+    /// Request live frontend-local decode progress in a picker. Experimental: plugins read
+    /// it through `experimental::decode_progress`; the host collects it when declared.
+    pub const DECODE_PROGRESS: Self = Self(1 << 4);
     /// Request each row's active request count, read through the worker-selection stage's
     /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it
     /// receive nothing.
     pub const ACTIVE_REQUESTS: Self = Self(1 << 5);
-    /// Previous name of [`Self::ACTIVE_REQUESTS`].
-    // TODO(v1.9): Remove this alias.
-    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::ACTIVE_REQUESTS`")]
-    pub const OCCUPANCY: Self = Self::ACTIVE_REQUESTS;
     /// Request each worker's KV copy offer: the prefix it could copy from another worker or
     /// cache owner.
     ///
@@ -51,12 +50,6 @@ impl WorkerInputs {
     /// A scorer that reads it commits the selected worker to its offer: the copy becomes the
     /// booking's committed copy, which the role's `Commitments::KV_COPY` hint policy sends.
     pub const KV_COPY: Self = Self(1 << 6);
-    /// Previous name of [`Self::KV_COPY`].
-    // TODO(v1.9): Remove this alias.
-    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::KV_COPY`")]
-    pub const KV_TRANSFER: Self = Self::KV_COPY;
-    /// Every optional column but the copy column, which only scorers may declare.
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
     #[inline]
     pub const fn contains(self, other: Self) -> bool {

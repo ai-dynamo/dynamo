@@ -23,6 +23,16 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+_DEPRECATED = Deprecated("--new", remove_in="v2.0")
+
+
+def _warn(**keywords):
+    _DEPRECATED.warn("--old", **keywords)
+
+
+def _call_warn(**keywords):
+    _warn(**keywords)
+
 
 @pytest.mark.parametrize(
     ("value", "expected"),
@@ -436,3 +446,41 @@ def test_deprecated_hidden_argument_is_quiet_unless_used(monkeypatch, recwarn):
     assert parser.parse_args([]).old == 1
     assert not recwarn
     assert "--old" not in " ".join(parser.format_help().split())
+
+
+def test_deprecated_message_names_one_or_several():
+    assert (
+        _DEPRECATED.message("--old")
+        == _DEPRECATED.message(["--old"])
+        == "--old is deprecated and will be removed in v2.0; use --new."
+    )
+    assert _DEPRECATED.message(["--old", "TEST_OLD"]) == (
+        "--old and TEST_OLD are deprecated and will be removed in v2.0; use --new."
+    )
+    assert _DEPRECATED.message(("--old", "--older", "TEST_OLD")) == (
+        "--old, --older and TEST_OLD are deprecated and will be removed in v2.0; "
+        "use --new."
+    )
+    with pytest.raises(ValueError, match="^names is empty$"):
+        _DEPRECATED.message([])
+
+
+def test_deprecated_warn_names_several_in_one_future_warning():
+    with pytest.warns(FutureWarning) as records:
+        _DEPRECATED.warn(["--old", "TEST_OLD"])
+
+    assert [str(record.message) for record in records] == [
+        _DEPRECATED.message(["--old", "TEST_OLD"])
+    ]
+
+
+def test_deprecated_warn_stacklevel_counts_callers():
+    with pytest.warns(FutureWarning) as warning_line:
+        _call_warn(stacklevel=1)
+    with pytest.warns(FutureWarning) as default:
+        _call_warn()
+
+    # Each helper is one line of code directly under its ``def`` line.
+    assert warning_line[0].lineno == _warn.__code__.co_firstlineno + 1
+    assert default[0].lineno == _call_warn.__code__.co_firstlineno + 1
+    assert default[0].filename == __file__

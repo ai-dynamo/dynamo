@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: KAI scheduler identity in operator configuration
+templates:
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: preserves the default scheduler name
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^  kaiScheduler:\n    schedulerName: "kai-scheduler"\n    enabled: false$'
+
+  - it: forwards a custom name with externally installed KAI
+    set:
+      global.kai-scheduler.enabled: true
+      global.kai-scheduler.schedulerName: runai-scheduler
+      global.grove.enabled: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^  kaiScheduler:\n    schedulerName: "runai-scheduler"\n    enabled: true$'
+
+  - it: keeps integration disabled when only a custom name is configured
+    set:
+      global.kai-scheduler.schedulerName: runai-scheduler
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^  kaiScheduler:\n    schedulerName: "runai-scheduler"\n    enabled: false$'

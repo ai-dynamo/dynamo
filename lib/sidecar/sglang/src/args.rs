@@ -20,7 +20,7 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
-    /// Reachable host that decode workers use to connect to a prefill worker's
+    /// Reachable host that decode workers use to connect to this prefill node's
     /// SGLang disaggregation bootstrap port. By default this is derived from
     /// SGLang's concrete `host`, then `dist_init_addr`, then a routable local
     /// address. This is required when discovery exposes only loopback or

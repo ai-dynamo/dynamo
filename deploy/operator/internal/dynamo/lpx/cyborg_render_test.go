@@ -60,8 +60,8 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = new(test.replicas)
 			_, err := RenderNodeLocal(workload, plan, RenderInput{
-				Cyborg: cyborg,
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+				Cyborg: &CliqueTemplate{Template: cyborg},
+				Stages: map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}},
 			})
 			if test.wantError {
 				require.ErrorContains(t, err, "materialized Cyborg Pod hostname")
@@ -128,7 +128,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].SubPath = "cyborg"
 	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].ReadOnly = true
 	input := RenderInput{
-		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+		Stages: map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}},
 	}
 	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	imageEntrypointEnv := append(modelEnv, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
-	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
+	input.Stages = map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}}
 	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
 	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
@@ -187,7 +187,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
 			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = test.mountPath
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+				Stages: map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}},
 			})
 			require.ErrorContains(t, err, test.wantError)
 		})
@@ -247,11 +247,11 @@ func TestHybridCyborgBindingsPrecedeAuthoredReferences(t *testing.T) {
 			}
 
 			t.Log("Publish the operator bindings before references while preserving other bindings")
-			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}))
+			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}, nil))
 			require.Equal(t, test.want, cyborg.Spec.PodSpec.Containers[0].Env)
 
 			t.Log("Repeat rendering without duplicating or reordering environment bindings")
-			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}))
+			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}, nil))
 			require.Equal(t, test.want, cyborg.Spec.PodSpec.Containers[0].Env)
 		})
 	}
