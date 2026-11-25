@@ -72,13 +72,14 @@ impl ResponsePlaneMode {
         let value =
             std::env::var(crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE)
                 .ok();
-        let mode = Self::from_config_value(value.as_deref())?;
+        let mode = Self::from_config_value(value.as_deref())?.tcp_under_tls();
         Ok(*RESPONSE_PLANE_MODE.get_or_init(|| mode))
     }
 
     fn from_config_value(value: Option<&str>) -> Result<Self> {
         match value {
-            None | Some("tcp") => Ok(Self::Tcp),
+            None => Ok(Self::default()),
+            Some("tcp") => Ok(Self::Tcp),
             Some("quic") => Ok(Self::Quic),
             Some("velo") => Ok(Self::Velo),
             Some(other) => anyhow::bail!(
@@ -86,6 +87,27 @@ impl ResponsePlaneMode {
                 crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE
             ),
         }
+    }
+
+    /// Velo has no TLS, so a Velo selection gives way to tcp while any
+    /// `DYN_TCP_TLS_*` setting is present.
+    pub(crate) fn tcp_under_tls(self) -> Self {
+        self.tcp_if_tls_set(&velo_response::tcp_tls_settings())
+    }
+
+    fn tcp_if_tls_set(self, tls_settings: &[&str]) -> Self {
+        if self != Self::Velo || tls_settings.is_empty() {
+            return self;
+        }
+        // A process can build many runtimes, so warn once.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "{} is set and the Velo response plane has no TLS; using the tcp response plane",
+                tls_settings.join(", ")
+            );
+        });
+        Self::Tcp
     }
 
     pub fn from_transport_name(transport: &str) -> Result<Self> {
@@ -883,25 +905,30 @@ mod tests {
 
     #[test]
     fn prologue_round_trips_the_typed_error() {
-        let prologue = ResponseStreamPrologue {
-            error: Some("Generate Error: unsupported input".to_string()),
-            typed_error: Some(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
-                    .message("unsupported input")
-                    .build(),
-            ),
-        };
+        for error_type in [
+            ErrorType::Backend(BackendError::InvalidArgument),
+            ErrorType::NotImplemented,
+        ] {
+            let prologue = ResponseStreamPrologue {
+                error: Some("Generate Error: unsupported input".to_string()),
+                typed_error: Some(
+                    DynamoError::builder()
+                        .error_type(error_type)
+                        .message("unsupported input")
+                        .build(),
+                ),
+            };
 
-        let encoded = serde_json::to_vec(&prologue).expect("prologue should serialize");
-        let decoded: ResponseStreamPrologue =
-            serde_json::from_slice(&encoded).expect("prologue should deserialize");
+            let encoded = serde_json::to_vec(&prologue).expect("prologue should serialize");
+            let decoded: ResponseStreamPrologue =
+                serde_json::from_slice(&encoded).expect("prologue should deserialize");
 
-        assert_eq!(decoded, prologue);
-        assert_eq!(
-            decoded.typed_error.map(|e| e.error_type()),
-            Some(ErrorType::Backend(BackendError::InvalidArgument))
-        );
+            assert_eq!(decoded, prologue);
+            assert_eq!(
+                decoded.typed_error.map(|e| e.error_type()),
+                Some(error_type)
+            );
+        }
     }
 
     #[test]
@@ -956,24 +983,25 @@ mod tests {
 
     #[test]
     fn response_plane_mode_parses_supported_values() {
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(None).unwrap(),
-            ResponsePlaneMode::Tcp
-        );
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(Some("tcp")).unwrap(),
-            ResponsePlaneMode::Tcp
-        );
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(Some("quic")).unwrap(),
-            ResponsePlaneMode::Quic
-        );
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(Some("velo")).unwrap(),
-            ResponsePlaneMode::Velo
-        );
-        assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
-        assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
+        let parse = ResponsePlaneMode::from_config_value;
+        assert_eq!(parse(None).unwrap(), ResponsePlaneMode::Tcp);
+        assert_eq!(parse(Some("tcp")).unwrap(), ResponsePlaneMode::Tcp);
+        assert_eq!(parse(Some("quic")).unwrap(), ResponsePlaneMode::Quic);
+        assert_eq!(parse(Some("velo")).unwrap(), ResponsePlaneMode::Velo);
+        assert!(parse(Some("")).is_err());
+        assert!(parse(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn velo_gives_way_to_tcp_while_tls_is_set() {
+        use ResponsePlaneMode::{Quic, Tcp, Velo};
+        let tls = ["DYN_TCP_TLS_CA_CERT_PATH"];
+
+        assert_eq!(Velo.tcp_if_tls_set(&tls), Tcp);
+        assert_eq!(Velo.tcp_if_tls_set(&[]), Velo);
+        // Only a Velo selection falls back.
+        assert_eq!(Tcp.tcp_if_tls_set(&tls), Tcp);
+        assert_eq!(Quic.tcp_if_tls_set(&tls), Quic);
     }
 
     #[test]

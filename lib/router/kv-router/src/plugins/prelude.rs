@@ -22,10 +22,16 @@ pub use crate::plugins::worker_selection::{
 
 // Request-classifier contracts and the request they classify.
 pub use crate::plugins::request_classifier::{
-    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
     RequestClassifierProvider, RequestClassifierProviderError, RequestClassifierRegistryError,
-    RequestProgress, WorkerView,
+    RequestProgress, WorkerCacheView, WorkerLoadView, WorkerView,
+};
+
+// Experimental dispatch-gate contract: how a classifier holds a queued request. Its shape may
+// change in a minor release.
+pub use crate::plugins::request_classifier::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
 
 // Experimental hint-policy contracts, their registration, and the KV copies they send.

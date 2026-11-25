@@ -2,16 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The router-local request vocabulary: what a host hands the scheduler kernel
-//! (`RouterRequest`, `RoutingConstraints`, the worker-config view `WorkerConfigLike`) and
-//! what comes back (`RouterResponse`, `PotentialLoad`, `WorkerSelectionResult`), plus the
-//! event sink hosts implement. Owned by the kernel.
+//! (`RoutingConstraints`, the worker-config view `WorkerConfigLike`) and what comes back
+//! (`PotentialLoad`, `WorkerSelectionResult`), plus the event sink hosts implement. Owned by
+//! the kernel.
 
 use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys, WorkerKvTransferKeysExt};
 use dynamo_kv_events::event::RouterEvent;
-use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
-use dynamo_tokens::Token;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -46,24 +44,8 @@ pub trait WorkerConfigLike {
         None
     }
 
-    /// Tokens retained by the backend's native KV offloading tier, if available.
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        None
-    }
-
     fn taints(&self) -> &HashSet<String> {
         &EMPTY_WORKER_TAINTS
-    }
-
-    /// Stable identifier for the worker, preserved across process restarts.
-    ///
-    /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
-    /// …). Used by rendezvous-style routing (HRW hashing) so cache assignments survive worker
-    /// restarts and minimise cache movement when the set of live workers churns. Returns
-    /// `None` when the worker did not publish a stable id, in which case callers should fall
-    /// back to the (ephemeral) `worker_id`.
-    fn stable_routing_id(&self) -> Option<&str> {
-        None
     }
 
     /// Returns the worker's topology domain labels (e.g. {"zone": "us-east-1a", "rack": "rack1"}).
@@ -83,11 +65,6 @@ pub trait WorkerConfigLike {
 
     /// Returns the KV transfer topology enforcement mode.
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
-        None
-    }
-
-    /// Returns the taint preference weight used when KV transfer topology enforcement is preferred.
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
         None
     }
 
@@ -170,66 +147,6 @@ pub trait RouterEventSink: Send + Sync {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "method", rename_all = "snake_case")]
-pub enum RouterRequest {
-    #[serde(rename = "new")]
-    New {
-        tokens: Vec<Token>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
-        #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
-        routing_constraints: RoutingConstraints,
-        #[serde(default)]
-        priority_jump: f64,
-        #[serde(default, skip_serializing_if = "is_zero")]
-        strict_priority: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lora_name: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_namespace: Option<String>,
-    },
-    PotentialLoads {
-        tokens: Vec<Token>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lora_name: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_namespace: Option<String>,
-    },
-    MarkPrefill {
-        // once prefill completes, the frontend might not be allowed to send a
-        // request with linking the id. In this case, the request_id is provided in the payload.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-    },
-    MarkFree {
-        // once request is cancelled, the frontend might not be allowed to send a
-        // request with linking the id. In this case, the request_id is provided in the payload.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-    },
-}
-
-impl Default for RouterRequest {
-    fn default() -> Self {
-        RouterRequest::New {
-            tokens: vec![],
-            block_mm_infos: None,
-            routing_constraints: RoutingConstraints::default(),
-            priority_jump: 0.0,
-            strict_priority: 0,
-            lora_name: None,
-            cache_namespace: None,
-        }
-    }
-}
-
-fn is_zero(value: &u32) -> bool {
-    *value == 0
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
@@ -237,35 +154,6 @@ pub struct PotentialLoad {
     pub potential_decode_blocks: usize,
     #[serde(default)]
     pub active_requests: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "method", rename_all = "snake_case")]
-pub enum RouterResponse {
-    New {
-        worker_id: WorkerId,
-        #[serde(default)]
-        dp_rank: DpRank,
-        overlap_blocks: u32,
-    },
-    QueueRejected {
-        rejection: dynamo_admission::QueueRejection,
-    },
-    PrefillMarked {
-        success: bool,
-    },
-    FreeMarked {
-        success: bool,
-    },
-    PotentialLoads {
-        // loads of every worker tracked by the scheduler.
-        loads: Vec<PotentialLoad>,
-        // the queue sizes for this specific router instance.
-        #[serde(default)]
-        pending_count: usize,
-        #[serde(default)]
-        pending_isl_tokens: usize,
-    },
 }
 
 #[derive(Debug)]
@@ -330,16 +218,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_router_request_mark_free_backwards_compatible_deserialization() {
-        let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();
-
-        assert!(matches!(
-            request,
-            RouterRequest::MarkFree { request_id: None }
-        ));
-    }
-
-    #[test]
     fn test_worker_config_like_topology_domains_default() {
         // A minimal implementor that does NOT override topology_domains()
         struct MinimalConfig;
@@ -371,267 +249,7 @@ mod tests {
             config.kv_transfer_enforcement().is_none(),
             "Default kv_transfer_enforcement() should return None"
         );
-        assert!(
-            config.kv_transfer_preferred_weight().is_none(),
-            "Default kv_transfer_preferred_weight() should return None"
-        );
-        assert!(config.native_offloading_capacity_tokens().is_none());
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
-    }
-
-    #[test]
-    fn test_router_request_mark_free_serialization_with_request_id() {
-        let request = RouterRequest::MarkFree {
-            request_id: Some("req-123".to_string()),
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(
-            serialized,
-            r#"{"method":"mark_free","request_id":"req-123"}"#
-        );
-        assert!(matches!(
-            deserialized,
-            RouterRequest::MarkFree {
-                request_id: Some(ref request_id)
-            } if request_id == "req-123"
-        ));
-    }
-
-    #[test]
-    fn test_router_request_new_serialization_with_priority_jump() {
-        let request = RouterRequest::New {
-            tokens: vec![1, 2, 3],
-            block_mm_infos: None,
-            routing_constraints: RoutingConstraints::default(),
-            priority_jump: 5.0,
-            strict_priority: 0,
-            lora_name: None,
-            cache_namespace: None,
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(
-            serialized,
-            r#"{"method":"new","tokens":[1,2,3],"priority_jump":5.0}"#
-        );
-        assert!(matches!(
-            deserialized,
-            RouterRequest::New {
-                priority_jump,
-                ..
-            } if priority_jump == 5.0
-        ));
-    }
-
-    #[test]
-    fn test_router_request_new_serialization_with_lora_name() {
-        let request = RouterRequest::New {
-            tokens: vec![1, 2, 3],
-            block_mm_infos: None,
-            routing_constraints: RoutingConstraints::default(),
-            priority_jump: 0.0,
-            strict_priority: 0,
-            lora_name: Some("adapter-a".to_string()),
-            cache_namespace: None,
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(
-            serialized,
-            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"lora_name":"adapter-a"}"#
-        );
-        assert!(matches!(
-            deserialized,
-            RouterRequest::New {
-                tokens,
-                lora_name: Some(ref lora_name),
-                ..
-            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
-        ));
-    }
-
-    #[test]
-    fn test_router_request_new_defaults_lora_name() {
-        let deserialized: RouterRequest =
-            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
-
-        assert!(matches!(
-            deserialized,
-            RouterRequest::New {
-                tokens,
-                lora_name: None,
-                ..
-            } if tokens == vec![1, 2, 3]
-        ));
-    }
-
-    #[test]
-    fn test_router_request_new_strict_priority_compatibility() {
-        let request = RouterRequest::New {
-            tokens: vec![1, 2, 3],
-            block_mm_infos: None,
-            routing_constraints: RoutingConstraints::default(),
-            priority_jump: 0.0,
-            strict_priority: 4,
-            lora_name: None,
-            cache_namespace: None,
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        assert_eq!(
-            serialized,
-            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"strict_priority":4}"#
-        );
-
-        let missing: RouterRequest =
-            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
-        assert!(matches!(
-            missing,
-            RouterRequest::New {
-                strict_priority: 0,
-                ..
-            }
-        ));
-
-        let zero = RouterRequest::New {
-            tokens: vec![1, 2, 3],
-            block_mm_infos: None,
-            routing_constraints: RoutingConstraints::default(),
-            priority_jump: 0.0,
-            strict_priority: 0,
-            lora_name: None,
-            cache_namespace: None,
-        };
-        assert_eq!(
-            serde_json::to_string(&zero).unwrap(),
-            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0}"#
-        );
-    }
-
-    #[test]
-    fn test_router_request_new_serialization_with_cache_namespace() {
-        let request = RouterRequest::New {
-            tokens: vec![1, 2, 3],
-            block_mm_infos: None,
-            routing_constraints: RoutingConstraints::default(),
-            priority_jump: 0.0,
-            strict_priority: 0,
-            lora_name: None,
-            cache_namespace: Some("tenant-a".to_string()),
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(
-            serialized,
-            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"cache_namespace":"tenant-a"}"#
-        );
-        assert!(matches!(
-            deserialized,
-            RouterRequest::New {
-                tokens,
-                cache_namespace: Some(ref cache_namespace),
-                ..
-            } if tokens == vec![1, 2, 3] && cache_namespace == "tenant-a"
-        ));
-    }
-
-    #[test]
-    fn test_router_request_potential_loads_serialization_with_lora_name() {
-        let request = RouterRequest::PotentialLoads {
-            tokens: vec![1, 2, 3],
-            block_mm_infos: None,
-            lora_name: Some("adapter-a".to_string()),
-            cache_namespace: None,
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(
-            serialized,
-            r#"{"method":"potential_loads","tokens":[1,2,3],"lora_name":"adapter-a"}"#
-        );
-        assert!(matches!(
-            deserialized,
-            RouterRequest::PotentialLoads {
-                tokens,
-                block_mm_infos: None,
-                lora_name: Some(ref lora_name),
-                cache_namespace: None,
-            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
-        ));
-    }
-
-    #[test]
-    fn test_router_request_potential_loads_serialization_with_cache_namespace() {
-        let request = RouterRequest::PotentialLoads {
-            tokens: vec![1, 2, 3],
-            block_mm_infos: None,
-            lora_name: None,
-            cache_namespace: Some("tenant-a".to_string()),
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(
-            serialized,
-            r#"{"method":"potential_loads","tokens":[1,2,3],"cache_namespace":"tenant-a"}"#
-        );
-        assert!(matches!(
-            deserialized,
-            RouterRequest::PotentialLoads {
-                tokens,
-                cache_namespace: Some(ref cache_namespace),
-                ..
-            } if tokens == vec![1, 2, 3] && cache_namespace == "tenant-a"
-        ));
-    }
-
-    #[test]
-    fn test_router_request_potential_loads_defaults_lora_name() {
-        let deserialized: RouterRequest =
-            serde_json::from_str(r#"{"method":"potential_loads","tokens":[1,2,3]}"#).unwrap();
-
-        assert!(matches!(
-            deserialized,
-            RouterRequest::PotentialLoads {
-                tokens,
-                block_mm_infos: None,
-                lora_name: None,
-                cache_namespace: None,
-            } if tokens == vec![1, 2, 3]
-        ));
-    }
-
-    #[test]
-    fn test_router_request_mark_prefill_serialization_with_request_id() {
-        let request = RouterRequest::MarkPrefill {
-            request_id: Some("req-123".to_string()),
-        };
-
-        let serialized = serde_json::to_string(&request).unwrap();
-        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(
-            serialized,
-            r#"{"method":"mark_prefill","request_id":"req-123"}"#
-        );
-        assert!(matches!(
-            deserialized,
-            RouterRequest::MarkPrefill {
-                request_id: Some(ref request_id)
-            } if request_id == "req-123"
-        ));
     }
 
     #[test]

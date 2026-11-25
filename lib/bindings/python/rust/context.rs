@@ -12,7 +12,9 @@
 
 use dynamo_backend_common::FirstTokenNotifier;
 use dynamo_llm::http::service::response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders};
-use dynamo_llm::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
+use dynamo_llm::protocols::common::extensions::{
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+};
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::Context as PipelineContext;
@@ -60,13 +62,14 @@ fn warn_bridge_missing_once(method: &str) {
 /// facade in `dynamo.common.backend.telemetry` is a one-line wrapper around
 /// those methods.
 #[derive(Clone)]
-#[pyclass]
+#[pyclass(from_py_object)]
 pub struct Context {
     inner: Arc<dyn AsyncEngineContext>,
     trace_context: Option<DistributedTraceContext>,
     first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     session_affinity: Option<SessionAffinityId>,
+    agent_context: Option<Arc<AgentContext>>,
     /// Where a frontend chat engine sets HTTP response headers. `None` when
     /// the request's response cannot carry them.
     response_headers: Option<ResponseHeaders>,
@@ -190,6 +193,7 @@ impl Context {
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
             session_affinity: None,
+            agent_context: None,
             response_headers: None,
             span: None,
         }
@@ -202,6 +206,15 @@ impl Context {
         self.session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)?
             .map(|session_affinity| session_affinity.as_ref().clone());
+        Ok(self)
+    }
+
+    /// Keep the request's [`AgentContext`], for a request routed from Python to inherit.
+    pub fn with_agent_context_from<T: Send + Sync + 'static>(
+        mut self,
+        context: &PipelineContext<T>,
+    ) -> Result<Self, String> {
+        self.agent_context = context.get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)?;
         Ok(self)
     }
 
@@ -262,6 +275,10 @@ impl Context {
         self.session_affinity.as_ref()
     }
 
+    pub fn agent_context(&self) -> Option<&AgentContext> {
+        self.agent_context.as_deref()
+    }
+
     /// Build the `traceparent` header value. Prefers the engine.generate
     /// OTel span context when valid so downstream engine spans nest under
     /// `engine.generate`; falls back to the inbound trace context.
@@ -310,6 +327,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             session_affinity: None,
+            agent_context: None,
             response_headers: None,
             span: None,
         }
@@ -329,6 +347,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
             session_affinity: self.session_affinity.clone(),
+            agent_context: self.agent_context.clone(),
             response_headers: None,
             span: self.span.clone(),
         }
@@ -648,13 +667,13 @@ impl Drop for SpanProxy {
 /// Primitive types preserve type; everything else renders via `repr()`.
 fn py_to_otel_value(v: &Bound<'_, PyAny>) -> PyResult<opentelemetry::Value> {
     use opentelemetry::Value;
-    if let Ok(b) = v.downcast::<PyBool>() {
+    if let Ok(b) = v.cast::<PyBool>() {
         Ok(Value::Bool(b.is_true()))
-    } else if let Ok(i) = v.downcast::<PyInt>() {
+    } else if let Ok(i) = v.cast::<PyInt>() {
         Ok(Value::I64(i.extract::<i64>()?))
-    } else if let Ok(f) = v.downcast::<PyFloat>() {
+    } else if let Ok(f) = v.cast::<PyFloat>() {
         Ok(Value::F64(f.extract::<f64>()?))
-    } else if let Ok(s) = v.downcast::<PyString>() {
+    } else if let Ok(s) = v.cast::<PyString>() {
         // `to_cow` (not `to_str`) for abi3 compatibility: enabling the
         // `ais-forward-pass` pulls in AISimulate's consolidated perf-model core, which sets
         // pyo3 `abi3-py39`; under the <3.10 limited API `PyString::to_str` is

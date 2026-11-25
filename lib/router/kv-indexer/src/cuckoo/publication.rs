@@ -36,7 +36,6 @@ pub trait DcCkfDeltaSink {
 pub enum PublisherFenceReason {
     SequenceExhausted,
     DeliveryUncertain,
-    LeaseStalled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,10 +93,6 @@ where
         self.last_sequence
     }
 
-    pub const fn fence_reason(&self) -> Option<PublisherFenceReason> {
-        self.fenced
-    }
-
     pub fn sink(&self) -> &S {
         &self.sink
     }
@@ -150,11 +145,6 @@ where
 
     pub fn retire_lease(&mut self) {
         self.lease = None;
-    }
-
-    pub fn retire_stalled_lease(&mut self) {
-        self.lease = None;
-        self.fenced = Some(PublisherFenceReason::LeaseStalled);
     }
 
     /// Install a new lease from an actor barrier snapshot.

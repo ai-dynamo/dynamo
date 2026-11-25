@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: pod checkpoint-restore webhook scope
+templates:
+  - charts/dynamo-operator/templates/webhook-configuration.yaml
+tests:
+  - it: does not register the pod webhook while checkpoint is disabled
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      # Mutating configuration: DGD, DCD and DGDR only.
+      - lengthEqual:
+          path: webhooks
+          count: 3
+        documentIndex: 1
+      - notContains:
+          path: webhooks
+          content:
+            name: mpodcheckpointrestore.kb.io
+          any: true
+        documentIndex: 1
+
+  - it: registers the pod webhook scoped to operator-stamped pods when checkpoint is enabled
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    set:
+      dynamo-operator.checkpoint.enabled: true
+    asserts:
+      - lengthEqual:
+          path: webhooks
+          count: 4
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].name
+          value: mpodcheckpointrestore.kb.io
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].clientConfig.service.path
+          value: /mutate-core-v1-pod-checkpoint-restore
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].rules[0].operations
+          value: [CREATE]
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].objectSelector.matchExpressions[0].key
+          value: nvidia.com/dynamo-component-type
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].objectSelector.matchExpressions[0].operator
+          value: Exists
+        documentIndex: 1
+      - notExists:
+          path: webhooks[3].namespaceSelector
+        documentIndex: 1
+
+  - it: keeps the namespace selector alongside the object selector in namespace-restricted mode
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    set:
+      dynamo-operator.checkpoint.enabled: true
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.namespaceRestriction.targetNamespace: tenant-a
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - equal:
+          path: webhooks[3].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: tenant-a
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].objectSelector.matchExpressions[0].key
+          value: nvidia.com/dynamo-component-type
+        documentIndex: 1
