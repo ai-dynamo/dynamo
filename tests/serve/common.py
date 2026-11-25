@@ -32,7 +32,12 @@ from tests.utils.payload_builder import (
     make_completions_health_check,
     make_images_health_check,
 )
-from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    CompletionPayload,
+    EngineFailurePayload,
+    ImagesPayload,
+)
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 DEFAULT_TIMEOUT = 10
@@ -53,6 +58,8 @@ def _tail_logs(content: str, *, lines: int = 80) -> str:
 _ENDPOINT_HEALTH_CHECK_FACTORIES = (
     (CompletionPayload, make_completions_health_check),
     (ChatPayload, make_chat_health_check),
+    # Its single request must not reach a frontend that would still reject it.
+    (EngineFailurePayload, make_chat_health_check),
     (ImagesPayload, make_images_health_check),
 )
 
@@ -180,8 +187,9 @@ def _prepare_deployment(
 
     # Stagger engine startup under xdist to avoid vLLM profiling race
     # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    # CPU-only (gpu_0) deployments run no GPU memory profiling, so skip it.
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker_id.startswith("gw"):
+    if worker_id.startswith("gw") and request.node.get_closest_marker("gpu_0") is None:
         worker_num = int(worker_id.removeprefix("gw"))
         if worker_num > 0:
             stagger_s = worker_num * 15

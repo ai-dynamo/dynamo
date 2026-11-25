@@ -37,8 +37,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
 | `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](chat-processor.md). |
 | `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
-| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers) parser for chain-of-thought models |
-| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default); explicit request controls take precedence |
+| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers) parser for chain-of-thought models |
+| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default); explicit request controls take precedence |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](multimodal.md) inputs on this worker |
@@ -53,13 +53,15 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 > [!NOTE]
 > `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
 
-The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers).
+The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers).
 
 ## Tokenizer Behavior
 
 By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang. This enables all frontend endpoints (`v1/chat/completions`, `v1/completions`, `v1/embeddings`).
 
 For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](chat-processor.md) for architecture and usage.
+
+Set `--default-chat-template-kwargs` on the frontend, not on the SGLang worker. The frontend renders the chat template, so SGLang's flag has no effect behind Dynamo, and the worker refuses it at startup. The frontend applies the defaults to every chat request, for workers and sidecars, before it reads the thinking controls. A key in the request's `chat_template_kwargs` takes precedence unless its value is `null` or `"auto"`, and a request thinking control replaces the thinking keys in the defaults. The flag cannot set `chat_template`; use `--custom-jinja-template` to replace the chat template.
 
 > [!WARNING]
 > `--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
@@ -133,13 +135,61 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 |-------|-------------|
 | `/engine/control/start_profile` | Start PyTorch profiling |
 | `/engine/control/stop_profile` | Stop profiling and save traces |
-| `/engine/control/release_memory_occupation` | Release GPU memory for maintenance |
-| `/engine/control/resume_memory_occupation` | Resume GPU memory after release |
+| `/engine/pause_generation` | Pause generation and remove the worker from routing |
+| `/engine/continue_generation` | Continue generation and return the worker to routing |
+| `/engine/release_memory_occupation` | Release GPU memory while generation is paused |
+| `/engine/resume_memory_occupation` | Restore GPU memory before generation continues |
 | `/engine/control/update_weights_from_disk` | Update model weights from disk |
 | `/engine/control/update_weights_from_tensor` | Update model weights from tensor payload |
 | `/engine/control/update_weights_from_distributed` | Update model weights from distributed source |
 | `/engine/control/update_weights_from_ipc` | Update model weights from IPC payload |
 | `/engine/control/update_weight_version` | Update weight version metadata |
+
+> [!NOTE]
+> Earlier docs listed the memory routes under `/engine/control/`. Those paths return HTTP 404; use `/engine/release_memory_occupation` and `/engine/resume_memory_occupation`.
+
+### Release and Resume GPU Memory
+
+Workers expose `pause_generation`, `continue_generation`, `release_memory_occupation`, and `resume_memory_occupation` by default, without [`--engine-route`](#configurable-sglang-method-routes). Each route calls the SGLang tokenizer-manager method of the same name. An `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` descriptor with the same path replaces the default route.
+
+> [!WARNING]
+> Start SGLang with `--enable-memory-saver` (`--load-format gms` turns it on). Without it, `release_memory_occupation` returns success but frees no managed GPU allocations. SGLang selects a [memory-saver adapter whose `pause` method does nothing](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/utils/torch_memory_saver_adapter.py).
+
+With an empty `tags` list, release and resume cover the weights, the KV cache, and CUDA graphs. What happens to the weights on release:
+
+- **`--load-format gms`:** the GPU Memory Service keeps them, and resume maps them back.
+- **`--enable-weights-cpu-backup` without GMS:** SGLang keeps a CPU copy and restores it on resume.
+- **Neither:** the weights are discarded. Reload them with an `/engine/control/update_weights_from_*` route after you resume memory and before you continue generation.
+
+Call the routes in this order:
+
+1. **Pause generation** with `{"mode": "retract"}`. Running requests return to SGLang's waiting queue, and the worker leaves discovery so the router stops sending it new requests. Do not use `in_place`: SGLang releases memory only when no request is running. Releasing memory with running requests fails [SGLang's idle assertion](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/managers/scheduler_components/weight_updater.py#L337-L341) and can terminate the scheduler. Restart the worker if this happens.
+
+   > [!NOTE]
+   > The XPU image pins SGLang 0.5.19, which also needs an empty waiting queue before release. On XPU, pause with `{"mode": "abort"}`. This aborts all in-flight requests.
+
+2. **Release memory.** `release_memory_occupation` frees GPU memory. The worker stays out of discovery.
+3. **Resume memory.** `resume_memory_occupation` restores GPU memory. The worker stays out of discovery. Send resume only once after each release. With GMS, a second resume crashes the scheduler; see [Known Issues](../../../../../reference/general/releases/known-issues.mdx).
+4. **Continue generation.** `continue_generation` resumes SGLang and registers the worker in discovery again.
+
+After each of these routes, Dynamo checks SGLang's pause state and updates discovery to match. Release and resume do not change discovery on their own.
+
+Set `DYN_SYSTEM_PORT` on the worker (the system server is disabled by default) and send the requests to that port:
+
+```bash
+WORKER_URL=http://localhost:8081
+
+curl --fail-with-body -X POST "$WORKER_URL/engine/pause_generation" \
+  -H 'Content-Type: application/json' -d '{"mode": "retract"}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/release_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/resume_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/continue_generation" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+The request bodies follow the SGLang request schemas for the installed SGLang version. For example, the release and resume bodies accept SGLang's optional `tags` list, such as `{"tags": ["weights", "kv_cache"]}`. `--fail-with-body` makes curl exit with an error on an HTTP error status, and `&&` stops the sequence there. A failed resume leaves the worker paused and out of discovery. Check the worker logs and restart the worker after fixing the reported cause. Do not retry resume or call continue: resume can fail after restoring only part of the memory, and a second resume can crash the scheduler.
 
 ### Configurable SGLang Method Routes
 
@@ -154,10 +204,10 @@ Set `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` to expose additional SGLang m
 - The target defaults to the `sgl.Engine` instance. Set `:tm` to target its tokenizer manager.
 - Repeat `--engine-route` for multiple routes. Separate multiple `DYN_SGLANG_ENGINE_ROUTES` descriptors with whitespace.
 
-For per-worker generation control with NVIDIA Collective Communications Library (NCCL) weight updates, expose this allowlist:
+For per-worker generation control with NVIDIA Collective Communications Library (NCCL) weight updates, expose these additional routes. Pause and continue are already on by default:
 
 ```bash
-export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info pause_generation:tm flush_cache init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group continue_generation:tm"
+export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info flush_cache init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group"
 python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B
 ```
 
@@ -178,5 +228,159 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 - **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
-- **[Diffusion](../../../../../use-cases/diffusion/overview.md)**: LLM, image, and video diffusion models
+- **Diffusion**: [image](../../../../../use-cases/diffusion/workflows/text-to-image.md), [video](../../../../../use-cases/diffusion/workflows/text-to-video.md), and [language](../../../../../use-cases/diffusion/workflows/text-to-text-llm-diffusion.md) diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration
+
+
+## Experimental Worker Drain
+
+**Experimental.** Manual drain currently supports standalone aggregated SGLang
+workers using the TCP response plane. Workers that share an engine across
+multiple Dynamo gateway processes do not expose these controls.
+
+There is no separate drain enable flag. On a supported worker, enabling the
+system listener with `DYN_SYSTEM_PORT` also exposes the lifecycle API below.
+`Experimental` describes the support and validation scope, not an additional
+opt-in requirement. Setting `DYN_SYSTEM_PORT=-1` disables the entire system
+listener, including its health and metrics endpoints; this is the default when
+no system port is configured. Normal SIGTERM shutdown still works without the
+listener.
+
+Use the selected worker's system listener directly and restrict access to
+trusted administrators. The frontend HTTP address does not expose these
+worker-local routes.
+
+| Method | Worker system path | Behavior |
+| --- | --- | --- |
+| `POST` | `/engine/drain` | Withdraw from discovery, allow routing convergence, then close admission |
+| `GET` | `/engine/status` | Report the worker ID, lifecycle state, and reason |
+| `POST` | `/engine/resume` | Cancel drain and restore admission and discovery |
+
+Send no body or an empty JSON object. Drain returns 202 while completion is
+pending. Status and a successful resume return 200. Conflicts return 409,
+and discovery RPC failures return 503.
+Manual drain requires the TCP response plane. Other response planes return 409.
+
+
+### Drain and resume a worker
+
+Start discovery services and the frontend as described in the
+[SGLang launch scripts](../../../../../recipes/cli-templates/sglang.mdx).
+For a standalone aggregated worker, enable its system listener before startup:
+
+```bash
+DYN_SYSTEM_PORT=8081 python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --request-plane tcp \
+  --response-plane tcp
+```
+
+When the worker runs locally, set its control address:
+
+```bash
+WORKER_URL=http://127.0.0.1:8081
+```
+
+For Kubernetes, select one worker Pod. Replace `default` and
+`my-sglang-worker` with its namespace and Pod name, and run this command in a
+separate terminal. The worker must already have `DYN_SYSTEM_PORT=8081` in its
+container environment.
+
+```bash
+kubectl -n default port-forward pod/my-sglang-worker 18081:8081
+```
+
+Use `WORKER_URL=http://127.0.0.1:18081` for that forwarded worker. Send the drain
+request:
+
+```bash
+curl --fail-with-body -sS -i -X POST "$WORKER_URL/engine/drain" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+With the default routing grace, the response is HTTP 202. Example body:
+
+```json
+{"worker_id":"1234","state":"draining","reason":"routing_grace"}
+```
+
+Poll the same worker's status until `state` is `drained`:
+
+```bash
+curl --fail-with-body -sS "$WORKER_URL/engine/status"
+```
+
+Example completion response:
+
+```json
+{"worker_id":"1234","state":"drained","reason":null}
+```
+
+To cancel an administrative drain or restore the worker after it drains, send:
+
+```bash
+curl --fail-with-body -sS -i -X POST "$WORKER_URL/engine/resume" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+A successful resume returns HTTP 200 with `state="serving"`. After discovery
+converges, verify inference through your frontend. For the model above and a
+frontend listening on port 8000:
+
+```bash
+FRONTEND_URL=http://127.0.0.1:8000
+curl --fail-with-body -sS "$FRONTEND_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":8}'
+```
+
+Expect a successful Chat Completions response with a `choices` array. Polling or
+resuming a different worker does not complete the selected worker's operation.
+
+### Admission and completion semantics
+
+Drain lets previously admitted requests run and keeps internal health probes
+available. During routing convergence the worker can still accept requests.
+Configure that interval with `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default
+5 seconds). After admission closes, late requests receive a worker-unavailable
+error. Frontend pipelines that support migration can reselect using the existing
+`--migration-limit` and ordinary routing and replay rules. A zero limit disables
+reselection.
+
+The grace period starts after discovery confirms withdrawal. Admission checks
+its deadline at request ingress, even while an engine-control operation holds
+the lifecycle lock. Repeated drain calls do not extend the deadline.
+
+Discovery RPC errors leave the write outcome unconfirmed. A failed drain keeps
+admission open and reports `discovery_unregister_pending`; retry drain to
+confirm withdrawal. Every resume call reasserts discovery registration, including
+when admission is already open. Resume opens admission before registration so
+requests can arrive as soon as the endpoint becomes visible. If registration
+fails, the call returns an error and admission stays open unless shutdown
+supersedes resume. Retry resume to confirm registration.
+
+SGLang's `pause_generation` and drain are mutually exclusive. Continue
+generation before draining a paused worker. Resume a draining or drained worker
+before pausing it. SIGTERM moves the worker to `stopping`, prevents resume, and
+follows the existing shutdown sequence.
+
+Poll status for `drained`. The worker reaches this state after business
+admission closes, worker ingress requests and their response streams finish,
+and the SGLang tokenizer manager has no remaining request IDs. While draining,
+`reason` indicates whether the worker is waiting for routing grace, Dynamo
+ingress, SGLang requests, or an available completion check.
+
+| Reason | Meaning |
+| --- | --- |
+| `routing_grace` | Discovery withdrawal is confirmed; routing convergence is in progress |
+| `discovery_unregister_pending` | Withdrawal is unconfirmed; retry drain |
+| `dynamo_inflight` | Admitted worker requests or their response streams remain |
+| `sglang_inflight` | The tokenizer manager still tracks requests |
+| `completion_check_unavailable` | Completion cannot be confirmed; this does not count as `drained` |
+
+> [!NOTE]
+> `drained` confirms request-level completion. Background scheduler and KV
+> cache operations may still be in progress.
+
+Replacement admission and Pod deletion remain part of the
+[manual Grove OnDelete release workflow](https://github.com/ai-dynamo/dynamo/issues/17568).

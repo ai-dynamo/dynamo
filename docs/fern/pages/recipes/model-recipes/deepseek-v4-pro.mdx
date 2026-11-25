@@ -79,7 +79,7 @@ Recommended picks differ by SKU: **B200 → Disaggregated (1P1D)** (highest tok/
 
 </div>
 
-- The `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0` image (pinned in each `deploy.yaml`).
+- The runtime image pinned in each `deploy.yaml`: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0` for the B200 targets and `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0` for the H200 targets.
 
 Create the namespace and token secret:
 

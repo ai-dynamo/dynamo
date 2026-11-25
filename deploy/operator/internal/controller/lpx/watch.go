@@ -63,8 +63,7 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("register LPR owner UID index: %w", err)
 	}
 
-	return ctrlBuilder.Owns(&corev1.ConfigMap{}).
-		Owns(&corev1.Service{}).
+	return ctrlBuilder.Owns(&corev1.Service{}).
 		Owns(&grovev1alpha1.PodCliqueSet{}).
 		Watches(&grovev1alpha1.PodClique{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliquePredicate())).
 		Watches(&grovev1alpha1.PodCliqueScalingGroup{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliqueScalingGroupPredicate())).
@@ -74,6 +73,7 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 
 func pipelineRequestOwnerUID(obj client.Object) []string {
 	owner := metav1.GetControllerOf(obj)
+	// Dynamo authors these references with its alpha PCS client.
 	if owner == nil || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.Kind != podCliqueSetKind {
 		return nil
 	}

@@ -93,9 +93,6 @@ Write the policy into a YAML file:
 # worker-selection.yaml
 worker_selection:
   aggregated: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
 ```
 
 Then point the frontend at it:

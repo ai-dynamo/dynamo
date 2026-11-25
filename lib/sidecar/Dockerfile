@@ -176,6 +176,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -186,8 +188,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
         openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev \
     && apt-get clean \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -212,6 +226,7 @@ ARG TARGETARCH
 
 USER root
 COPY container/compliance/ /src/container/compliance/
+COPY pyproject.toml /src/pyproject.toml
 
 # Scan the filesystem that actually ships, rather than the build-tool packages
 # present in this helper stage. The Rust SBOM contains only dependencies linked
@@ -230,6 +245,7 @@ RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \
         --output-dir /legal \
         --policy /src/container/compliance/policy/licenses.toml \
         --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
+        --source-version "$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' /src/pyproject.toml | head -n1)" \
         --verbose \
     && python3 -m compliance.policy.validate \
         --policy /src/container/compliance/policy/licenses.toml \

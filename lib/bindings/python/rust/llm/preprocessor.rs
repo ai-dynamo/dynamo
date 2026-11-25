@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use llm_rs::preprocessor::media::{MediaDecoder as RsMediaDecoder, MediaFetcher as RsMediaFetcher};
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct MediaDecoder {
     pub(crate) inner: RsMediaDecoder,
@@ -39,7 +39,7 @@ impl MediaDecoder {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct MediaFetcher {
     pub(crate) inner: RsMediaFetcher,

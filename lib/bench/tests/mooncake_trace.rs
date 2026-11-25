@@ -27,19 +27,22 @@ use dynamo_bench::kv_router_common::replay::{
     WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
     host_offload_mock_engine_args, process_mooncake_trace,
 };
-use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::pruning::PruneConfig;
-use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
-use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::routing::TokensWithHashes;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, OverlapScores,
+    PruneConfig, ThreadPoolIndexer,
+};
 use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
     ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
     MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
@@ -403,7 +406,7 @@ async fn assert_overlap_score_parity(
             assert_eq!(
                 warning_count.load(Ordering::Relaxed),
                 0,
-                "{} parity replay emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker",
+                "{} parity replay emitted warn/error logs from dynamo_kv_indexer or dynamo_mocker",
                 config.short_name()
             );
         }
@@ -864,25 +867,14 @@ fn default_cli_args_load_the_canonical_512_token_fixture() -> anyhow::Result<()>
 }
 
 #[test]
-fn removed_legacy_branch_sharded_name_is_rejected() {
-    let removed_name = format!("{}-{}-branch-sharded-crtc", "anchor", "aware");
-    let error = MooncakeIndexerConfig::from_short_name(&removed_name, 4).unwrap_err();
-    let message = error.to_string();
+fn unknown_indexer_name_is_rejected_with_the_valid_names() {
+    let error = MooncakeIndexerConfig::from_short_name("no-such-indexer", 4).unwrap_err();
 
-    assert!(message.contains("Unknown indexer"));
-    assert!(message.contains("branch-sharded-crtc"));
-    let valid_names = message.split("Valid names: ").nth(1).unwrap_or("");
-    assert!(!valid_names.contains(&removed_name));
-}
-
-#[test]
-fn retired_transposed_ckf_benchmark_name_is_rejected() {
-    let error = MooncakeIndexerConfig::from_short_name("transposed-ckf", 4).unwrap_err();
-    let message = error.to_string();
-
-    assert!(message.contains("Unknown indexer"));
-    let valid_names = message.split("Valid names: ").nth(1).unwrap_or("");
-    assert!(!valid_names.contains("transposed-ckf"));
+    assert_eq!(
+        error.to_string(),
+        "Unknown indexer 'no-such-indexer'. Valid names: radix-tree, nested-map, \
+         concurrent-radix-tree-compressed, branch-sharded-crtc"
+    );
 }
 
 #[test]
@@ -1324,7 +1316,7 @@ async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
     let ttl = Duration::from_millis(250);
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
@@ -1363,7 +1355,7 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
         assert_eq!(
             warning_count.load(Ordering::Relaxed),
             0,
-            "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
+            "{label} emitted warn/error logs from dynamo_kv_indexer or dynamo_mocker"
         );
     }
 
@@ -1372,7 +1364,7 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
 
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
     let traces = process_mooncake_trace(
@@ -1413,7 +1405,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
             assert_eq!(
                 warning_count.load(Ordering::Relaxed),
                 0,
-                "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
+                "{label} emitted warn/error logs from dynamo_kv_indexer or dynamo_mocker"
             );
             assert_eq!(
                 support::duplicate_store_warning_count(metrics.as_ref()),
@@ -1430,7 +1422,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
     let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
@@ -1450,7 +1442,7 @@ async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "authoritative CKF false-positive tolerance measurement"]
 async fn mooncake_trace_measures_fixed_d16_ckf_tolerance() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
     let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;

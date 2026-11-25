@@ -3,6 +3,7 @@
 
 mod agentic;
 mod artifacts;
+mod default_selector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
@@ -14,13 +15,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockerConfig};
-use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_scheduler::host::PrefillLoadEstimator;
 
 pub use agentic::AgenticReplayOptions;
-/// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
-pub use aisimulate_core::ReplayReport as TraceSimulationReport;
-pub(crate) use aisimulate_core::replay::TraceCollector;
-pub use aisimulate_core::replay::{
+/// Backward-compatible Dynamo Mocker name for [`aisim_core::ReplayReport`].
+pub use aisim_core::ReplayReport as TraceSimulationReport;
+pub(crate) use aisim_core::replay::TraceCollector;
+pub use aisim_core::replay::{
     CanonicalReplayCoverage, CanonicalReplayRecord, LifecycleOperation, OfflineRuntimeEvidence,
     PerRequestRecord, ReplayCaptureOptions, ReplayDeterminism, ReplayTerminalStatus, SlaThresholds,
     TraceDistributionStats, TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats,
@@ -65,8 +67,8 @@ impl OfflineDisaggReplayConfig {
     }
 }
 
-pub use aisimulate_core::replay::TrafficStats;
-pub use aisimulate_core::replay::{
+pub use aisim_core::replay::TrafficStats;
+pub use aisim_core::replay::{
     ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
     ReplaySchedulerIntervalMetrics, ReplaySchedulerMetricsSnapshot, ReplayTelemetryObserver,
     ReplayTelemetrySampleKind, ReplayTelemetrySnapshot, ReplayTrafficMetricsSnapshot,
@@ -189,7 +191,7 @@ impl Default for ConversationAffinityConfig {
 
 impl ConversationAffinityConfig {
     pub fn validate(self) -> anyhow::Result<()> {
-        use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_TTL_SECS;
+        use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_TTL_SECS;
         anyhow::ensure!(
             self.ttl_seconds.is_finite()
                 && (1.0..=MAX_SESSION_AFFINITY_TTL_SECS as f64).contains(&self.ttl_seconds),
@@ -203,7 +205,7 @@ impl ConversationAffinityConfig {
 ///
 /// They reach replay internals that the entrypoint signatures do not carry. The default scope is
 /// the behavior outside any [`with_replay_scope`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ReplayScope {
     /// Native session/sibling affinity, independently scoped to each worker pool.
     pub conversation_affinity: Option<ConversationAffinityConfig>,
@@ -215,10 +217,13 @@ pub struct ReplayScope {
     /// Registry in which each offline KV-router placement registers its selector, so the host can
     /// change router policy parameters during the replay. `None` registers nothing.
     pub router_controls: Option<ReplayRouterControls>,
+    /// Registry a worker-selection policy named in the router config resolves from. `None`
+    /// offers the policies Dynamo ships.
+    pub router_plugins: Option<RouterPluginRegistry>,
     /// Request identity and KV-router selection semantics of offline replays that do not pass
     /// their own [`ReplayCaptureOptions`]. [`ReplayDeterminism::CanonicalV1`] assigns ordinal
     /// request IDs and seeds every KV-router selector, so two replays of the same input and
-    /// configuration produce the same report.
+    /// configuration produce the same report. A configured worker-selection policy is not seeded.
     pub determinism: ReplayDeterminism,
 }
 
@@ -228,6 +233,7 @@ thread_local! {
             conversation_affinity: None,
             kv_event_lag_ms: 0.0,
             router_controls: None,
+            router_plugins: None,
             determinism: ReplayDeterminism::Random,
         })
     };

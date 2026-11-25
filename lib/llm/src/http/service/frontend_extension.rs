@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Extension point for the HTTP frontend (currently: static GET routes).
+//! Extension point for the HTTP frontend (static-path routes).
 //! The context is a narrow, read-only view of live frontend state, so
 //! extensions have the same capability in any language. Grow it with typed
 //! read-only accessors as needed.
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::handler::Handler;
 use axum::http::Method;
-use axum::routing::get;
+use axum::routing::{MethodFilter, on};
 
 use super::RouteDoc;
 use super::service_v2::State;
@@ -63,7 +63,7 @@ pub struct FrontendRouteSet {
 }
 
 impl FrontendRouteSet {
-    /// Start building a route set. Currently only `GET` routes are supported.
+    /// Start building a route set.
     pub fn builder() -> FrontendRouteSetBuilder {
         FrontendRouteSetBuilder::default()
     }
@@ -98,31 +98,61 @@ pub fn validate_extension_route_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Registers each route into both the router and its docs atomically; `get`
+/// Extension routes serve these five methods; `HEAD` is served by a `GET`
+/// route. Single source of truth, reused by Python.
+pub fn validate_extension_route_method(method: &Method) -> anyhow::Result<()> {
+    if !matches!(
+        *method,
+        Method::GET | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
+        anyhow::bail!(
+            "unsupported frontend route method {method}; expected GET, POST, PUT, PATCH or DELETE"
+        );
+    }
+    Ok(())
+}
+
+/// Registers each route into both the router and its docs atomically; `route`
 /// validates the path and rejects duplicates instead of panicking axum.
 #[derive(Default)]
 pub struct FrontendRouteSetBuilder {
     route_docs: Vec<RouteDoc>,
     router: Router,
-    seen_paths: HashSet<String>,
+    seen_routes: HashSet<(Method, String)>,
 }
 
 impl FrontendRouteSetBuilder {
     /// Register a `GET` route, recording it in both the router and the docs.
-    /// Errors on an invalid path or a duplicate path within this set.
-    pub fn get<H, T>(mut self, path: impl Into<String>, handler: H) -> anyhow::Result<Self>
+    pub fn get<H, T>(self, path: impl Into<String>, handler: H) -> anyhow::Result<Self>
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.route(Method::GET, path, handler)
+    }
+
+    /// Register a route, recording it in both the router and the docs. Errors
+    /// on an unsupported method, an invalid path, or a duplicate method and
+    /// path within this set.
+    pub fn route<H, T>(
+        mut self,
+        method: Method,
+        path: impl Into<String>,
+        handler: H,
+    ) -> anyhow::Result<Self>
     where
         H: Handler<T, ()>,
         T: 'static,
     {
         let path = path.into();
+        validate_extension_route_method(&method)?;
         validate_extension_route_path(&path)?;
-        if !self.seen_paths.insert(path.clone()) {
-            anyhow::bail!("duplicate frontend route registered: GET {path}");
+        if !self.seen_routes.insert((method.clone(), path.clone())) {
+            anyhow::bail!("duplicate frontend route registered: {method} {path}");
         }
-        self.route_docs
-            .push(RouteDoc::new(Method::GET, path.clone()));
-        self.router = self.router.route(&path, get(handler));
+        let filter = MethodFilter::try_from(method.clone())?;
+        self.route_docs.push(RouteDoc::new(method, path.clone()));
+        self.router = self.router.route(&path, on(filter, handler));
         Ok(self)
     }
 
@@ -172,6 +202,20 @@ mod tests {
             .unwrap()
             .get("/a", || async { StatusCode::OK });
         assert!(dup.is_err(), "duplicate GET path within a set must error");
+    }
+
+    #[test]
+    fn builder_keys_routes_by_method_and_path() {
+        let set = FrontendRouteSet::builder()
+            .get("/a", || async { StatusCode::OK })
+            .unwrap()
+            .route(Method::POST, "/a", || async { StatusCode::OK })
+            .expect("GET and POST on one path must both register");
+        let dup = set.route(Method::POST, "/a", || async { StatusCode::OK });
+        assert!(dup.is_err(), "duplicate POST path within a set must error");
+        let trace =
+            FrontendRouteSet::builder().route(Method::TRACE, "/b", || async { StatusCode::OK });
+        assert!(trace.is_err(), "TRACE must be rejected");
     }
 
     #[test]

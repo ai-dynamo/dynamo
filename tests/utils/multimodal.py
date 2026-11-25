@@ -102,6 +102,8 @@ def make_image_payload_cached_tokens(
     min_routing_total_blocks: int = 0,
     min_avg_kv_hit_rate: float = 0.0,
     prompt_filler_repeats: int = 0,
+    timeout: int = 60,
+    payload_cls: type[CachedTokensChatPayload] = CachedTokensChatPayload,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
@@ -113,11 +115,13 @@ def make_image_payload_cached_tokens(
     ``prompt_filler_repeats`` prepends N copies of a topic-aligned filler so
     the routing-token sequence spans multiple blocks on specs that use a
     coarse routing-block size (e.g. qwen3_5 family at block_size=544).
+    ``payload_cls`` lets a backend substitute a subclass that adjusts the
+    checks at run time (e.g. SGLang's wide-pad gate).
     """
     prompt = _MULTIMODAL_COLOR_PROMPT
     if prompt_filler_repeats > 0:
         prompt = (_COLOR_PROMPT_FILLER * prompt_filler_repeats).strip() + " " + prompt
-    return CachedTokensChatPayload(
+    return payload_cls(
         body={
             "messages": [
                 {
@@ -142,6 +146,7 @@ def make_image_payload_cached_tokens(
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
         min_routing_total_blocks=min_routing_total_blocks,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
+        timeout=timeout,
     )
 
 

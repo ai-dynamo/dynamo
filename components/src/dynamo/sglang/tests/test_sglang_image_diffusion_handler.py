@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from PIL import Image
 
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
+from dynamo.common.http.base import HttpStatusError
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
     ImageDiffusionWorkerHandler,
@@ -485,7 +487,9 @@ class TestImageDiffusionWorkerHandler:
         """Test that nvext parameters are passed to the generator."""
         test_image = Image.new("RGB", (256, 256), color="yellow")
 
-        handler._generate_images = AsyncMock(return_value=[test_image.tobytes()])
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
 
         request = {
             "prompt": "A yellow square",
@@ -501,25 +505,22 @@ class TestImageDiffusionWorkerHandler:
             },
         }
 
-        # Execute generation
-        results = []
         mock_context.trace_headers = MagicMock(
             return_value={"traceparent": "00-1234567890-1234567890-01"}
         )
-        async for result in handler.generate(request, mock_context):
-            results.append(result)
+        async for _ in handler.generate(request, mock_context):
+            pass
 
-        # Verify results
-        handler._generate_images.assert_called_once_with(
-            prompt="A yellow square",
-            width=256,
-            height=256,
-            num_inference_steps=10,
-            guidance_scale=7.5,
-            seed=42,
-            negative_prompt="negative",
-            input_reference=None,
-        )
+        assert handler.generator.generate.call_args[1]["sampling_params_kwargs"] == {
+            "prompt": "A yellow square",
+            "negative_prompt": "negative",
+            "height": 256,
+            "width": 256,
+            "num_inference_steps": 10,
+            "save_output": False,
+            "guidance_scale": 7.5,
+            "seed": 42,
+        }
 
     @pytest.mark.asyncio
     async def test_generate_i2i_passes_image_path(
@@ -618,8 +619,9 @@ class TestImageDiffusionWorkerHandler:
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [403, 404, 415])
     async def test_generate_i2i_maps_a_4xx_fetch_to_invalid_argument(
-        self, handler, mock_context, tmp_path, monkeypatch
+        self, handler, mock_context, monkeypatch, status
     ):
         """A 4xx from the origin the client chose is the client's problem.
 
@@ -628,14 +630,12 @@ class TestImageDiffusionWorkerHandler:
         URL is not echoed back -- it has no length limit and the video handler
         puts str(exc) straight in its response body.
         """
-        from dynamo.common.http.base import HttpStatusError
-
         handler.generator.generate = Mock()
         monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
-        url = "http://example.com/" + "u" * 5000
+        url = "http://127.0.0.1/" + "u" * 5000
 
         async def fake_fetch(u, timeout, *, policy=None, max_bytes=None):
-            raise HttpStatusError(404, "Not Found", u)
+            raise HttpStatusError(status, "private origin details", u)
 
         monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
         request = {
@@ -646,11 +646,16 @@ class TestImageDiffusionWorkerHandler:
             "input_reference": url,
         }
 
-        with pytest.raises(InvalidArgument, match="HTTP 404") as excinfo:
+        with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler.generate(request, mock_context):
                 pass
 
         assert "uuuu" not in str(excinfo.value)
+        assert "private origin details" not in str(excinfo.value)
+        assert str(excinfo.value) == (
+            IMAGE_FETCH_ERROR_MESSAGES.get(status)
+            or f"input_reference could not be fetched (HTTP {status})"
+        )
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio

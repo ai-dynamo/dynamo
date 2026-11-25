@@ -25,7 +25,9 @@ pub mod compute;
 pub mod discovery;
 pub mod engine;
 pub mod engine_routes;
-pub mod error;
+/// The semantic error contract, owned by `dynamo-error`; every path under
+/// `dynamo_runtime::error` resolves unchanged.
+pub use dynamo_error as error;
 pub mod health_check;
 pub mod local_endpoint_registry;
 pub mod metadata_registry;
@@ -37,6 +39,7 @@ pub mod logging;
 pub mod metrics;
 pub mod namespace;
 pub mod nvtx;
+mod otlp;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;

@@ -15,7 +15,13 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 ## Decision APIs
 
-**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Supported causal backends are aggregated, single-rank SGLang and vLLM workers using their qualified serialized scoring profiles. See [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for SGLang launch commands and [Decision API Reference](../api/decision-apis.md) for wire contracts, usage accounting, and errors.
+
+For a vLLM causal worker, enable `--systemone-serial` or set `DYN_VLLM_SYSTEMONE_SERIAL=true`, together with `--max-num-seqs=1` and `--logprobs-mode=raw_logprobs`. The worker opt-in defaults to `false`; `--no-systemone-serial` overrides an enabled environment setting. It does not change engine scheduling settings, and incompatible profiles fail worker startup. Without the opt-in, ordinary vLLM workers do not advertise decision capability or change model-discovery checksums for decision support. The frontend flag remains independently required to expose the APIs.
+
+The vLLM profile rejects forward-pass instrumentation enabled by `DYN_FORWARDPASS_METRIC_PORT`, `--fpm-trace`, or `DYN_FPM_TRACE`, including operator-injected settings. Each question generates one internal engine token, so `usage.output_tokens` equals the question count in either public contract. SGLang's non-generating profile reports zero output tokens.
+
+The Dynamo Kubernetes operator sets `DYN_FORWARDPASS_METRIC_PORT` on every worker, and a DynamoGraphDeployment (DGD) cannot unset it. Operator-managed vLLM workers therefore cannot use this decision profile yet. Run the qualified profile outside operator management; operator support requires a separate change to forward-pass instrumentation.
 
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |
@@ -29,7 +35,7 @@ Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded
 
 Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
 
-The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+The protocol ceiling of 255 candidates is not a guarantee that every backend or tokenizer supports that many choices. The vLLM causal profile is limited to 26 candidates using single-letter A–Z labels. Scoring requires distinct single-token labels at the answer position; the effective limit also depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
 
 Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
 
@@ -115,6 +121,45 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+<ParamField path="DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS" type="integer" default="0">
+  Maximum pre-commit wait in milliseconds for streaming chat completions, completions, Responses,
+  and Anthropic messages. Unset or `0` disables the wait; an invalid value also disables it and logs
+  `ignoring invalid pre-commit error peek window`. Set a positive value, for example `500`, to let
+  early backend errors return an HTTP error status before HTTP 200 is committed. The wait can delay
+  the first streamed byte by up to this many milliseconds. The value is read once when the HTTP
+  service is created; set it before startup and restart the frontend to change it.
+
+  The wait ends when the first non-annotation backend event arrives or the window expires.
+  Annotation frames, such as the request ID, do not end the wait. The frontend buffers at most 16 of
+  them; a 17th ends the wait early. For how clients see errors after the wait, see
+  [Streaming errors](#streaming-errors).
+</ParamField>
+
+### Streaming errors
+
+By default, the frontend commits a streaming response's HTTP 200 status immediately,
+without waiting for a backend event. Enable a [bounded pre-commit wait](#http-and-networking)
+to let early failures return an HTTP error status. Once headers are committed, later
+failures arrive as error events in the stream, even when the HTTP status is 200.
+Clients must check these events rather than treating HTTP 200 as successful completion.
+An error ends the current stream; any retry is a new request.
+
+Image-fetch failures caused by an origin HTTP 403 or 404 return API HTTP 400
+before headers are committed. In OpenAI chat-completion and completion streams,
+late failures carry error code 400 under HTTP 200; other streaming APIs use their
+own error-event formats. The fixed public message identifies the origin status
+and gives recovery advice without exposing the origin response or URL credentials:
+
+| Message the client receives | When | What to do |
+| --- | --- | --- |
+| `Image download returned HTTP 403. Refresh the URL or access permissions, or resend the image data before retrying.` | The image origin returned 403. | Refresh the URL or access permissions, or send the image inline. |
+| `Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.` | The image origin returned 404. | Fix the URL, or send the image inline. |
+| `Cached image is unavailable on this worker. Resend the request with the image URL or inline image data and the same UUID; UUID-only reuse requires the image to be cached on every worker that processes the image.` | vLLM only: a UUID-only image is missing from a worker's processor cache. | Resend with the URL or inline data and the same UUID. Resending only the UUID does not restore a missing entry. |
+
+An ordinary URL-based image-cache miss is handled internally; the worker fetches
+the image if needed. In vLLM, UUID-only reuse requires an existing entry on every worker
+that processes the image. See [vLLM multimodal cache reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#reuse-vllm-multimodal-processor-cache-entries).
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded
@@ -124,11 +169,14 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### Routing and readiness
 
 <ParamField path="--router-mode" type="string" default="round-robin">
-  Routing strategy. `power-of-two` samples two workers and selects the worker with fewer in-flight
-  requests. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the synchronous
-  prefill fallback path.
+  Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
+  fallback path.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  When neither this flag nor `--router-policy-config` is set, the mode is `round-robin`. When only
+  a policy file is set, the mode is `kv` and the file selects each role's policy. A policy file
+  with any mode other than `kv` is an error.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
 </ParamField>
@@ -145,6 +193,17 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   to disable session affinity. See [Session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
 
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`
+</ParamField>
+
+<ParamField path="--router-session-affinity-max-entries" type="integer" default="65536">
+  Maximum number of sessions each affinity table holds at once; must be at least `1`. A frontend
+  keeps one table per worker set it routes to. A request that would start a new session past the
+  limit fails as resource exhausted (HTTP 529 by default) until an idle session expires. Replica
+  sync copies bindings to every frontend, so size the limit for the sessions live across all
+  frontends; sync is best effort, so it is not a hard fleet-wide cap. Has no effect unless
+  `--router-session-affinity-ttl-secs` is set.
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`
 </ParamField>
 
 <ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
@@ -368,7 +427,9 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for shared `router` settings, policy-class queues, and worker-selection instances. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies.
+  The file selects each role's policy, so pass it without `--router-mode`; any `--router-mode` other
+  than `kv` alongside it is an error. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
   Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
@@ -378,9 +439,10 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-prefill-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
 
-  Worker-selection instance for disaggregated prefill workers in the current router process. This
-  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
-  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+  Worker-selection policy type for disaggregated prefill workers in the current router process,
+  run with its default parameters. This option overrides `worker_selection.prefill` from
+  `--router-policy-config`. It is not included in worker model cards. Set it to `default` to use
+  Dynamo's built-in worker selector.
 
   Environment variable: `DYN_ROUTER_PREFILL_POLICY`
 </ParamField>
@@ -388,79 +450,145 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-decode-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
 
-  Worker-selection instance for decode workers in the current router process. This option
-  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
-  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
-  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+  Worker-selection policy type for decode workers in the current router process, run with its
+  default parameters. This option overrides `worker_selection.decode` from `--router-policy-config`.
+  It is not included in worker model cards. Set it to `default` to use Dynamo's built-in worker
+  selector. Configure an aggregated pool with `worker_selection.aggregated` or
+  `DYN_ROUTER_WORKER_SELECTION_POLICY`.
 
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>
 
 ## AIS prefill load model
 
-<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
-  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
-  data roots, selection policy and nested estimator controls. Defaults to
-  `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
-  with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
-</ParamField>
-
-Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.
-
-
 These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model ais`.
 
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix, then decays only the oldest active prefill request on each worker for prompt-side load accounting.
 
-<ParamField path="--ais-backend" type="string" default="null">
+<ParamField path="--ais-perf-model" type="JSON/YAML file or inline JSON" default="null">
+  AIS perf model that the router predicts prefill durations with. Available since v1.8. The value
+  is one perf model config, or a list of configs with one `worker_type` each. Write it as a path
+  to a YAML or JSON file, or as inline JSON (text that starts with `{` or `[`):
+
+  ```bash
+  --ais-perf-model perf-model.yaml
+  --ais-perf-model '{"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm", "worker_type": "aggregated"}'
+  ```
+
+  The router takes the `prefill` config or the `aggregated` config of the value. A relative file
+  path starts at the working directory. Relative paths inside a file start at the folder of that
+  file. For the keys of a config, see
+  [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+  in the AISimulate documentation.
+
+  The flag without `--router-prefill-load-model ais` is an error:
+  `--ais-perf-model requires --router-prefill-load-model=ais`. The environment variable alone is
+  ignored when the load model is not `ais`. `--router-prefill-load-model ais` without an AIS input
+  is an error:
+  `--router-prefill-load-model=ais requires an AIS perf model: set --ais-perf-model or DYN_AIS_PERF_MODEL`.
+
+  Environment variable: `DYN_AIS_PERF_MODEL`
+</ParamField>
+
+<ParamField path="--router-prefill-load-worker-type" type="string" default="null">
+  Worker type whose config the router takes from `--ais-perf-model`. Available since v1.8. Set it
+  when the value is one config without `worker_type`, or a list with both a `prefill` and an
+  `aggregated` config. Like `--ais-perf-model`, the flag is an error without
+  `--router-prefill-load-model ais`, and the environment variable alone is ignored then.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>aggregated</Badge></span>
+
+  Environment variable: `DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE`
+</ParamField>
+
+The inputs below are deprecated. They still work and print one warning that names the inputs in
+use, for example
+`--ais-backend, --ais-system and --ais-model-path are deprecated and will be removed in v1.9; use --ais-perf-model.`
+A flat flag is named with the spelling that was typed, `--ais-` or `--aic-`, and a value from
+the environment is named by its variable.
+A deprecated input together with `--ais-perf-model` or `DYN_AIS_PERF_MODEL` is an error, for
+example `--ais-perf-model cannot be combined with --ais-backend`.
+
+The `--aic-*` spellings of the flat flags are deprecated with them. `--ais-nextn` is deprecated in
+the same way: write `nextn` in the config. `--ais-nextn-accept-rates` and `--ais-mtp-seed` are not
+deprecated and can be combined with `--ais-perf-model`.
+
+<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
+  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
+  data roots, selection policy and nested estimator controls. Defaults to
+  `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
+  with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
+
+  Environment variable: `DYN_AIS_PERF_CONFIG`
+</ParamField>
+
+<ParamField path="--ais-backend" type="string" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Backend family to model in AIS, for example `vllm` or `sglang`.
 
   Environment variable: `DYN_AIS_BACKEND`
 </ParamField>
 
-<ParamField path="--ais-system" type="string" default="null">
+<ParamField path="--ais-system" type="string" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   AIS hardware/system identifier, for example `h200_sxm`.
 
   Environment variable: `DYN_AIS_SYSTEM`
 </ParamField>
 
-<ParamField path="--ais-model-path" type="string" default="null">
+<ParamField path="--ais-model-path" type="string" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Model path or model identifier used for AIS perf lookup.
 
   Environment variable: `DYN_AIS_MODEL_PATH`
 </ParamField>
 
-<ParamField path="--ais-backend-version" type="string" default="backend-specific">
+<ParamField path="--ais-backend-version" type="string" default="backend-specific" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Pinned AIS database version. If omitted, Dynamo uses the backend default.
 
   Environment variable: `DYN_AIS_BACKEND_VERSION`
 </ParamField>
 
-<ParamField path="--ais-tp-size" type="integer" default="1">
+<ParamField path="--ais-tp-size" type="integer" default="1" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Tensor-parallel size to model in AIS.
 
   Environment variable: `DYN_AIS_TP_SIZE`
 </ParamField>
 
-<ParamField path="--ais-moe-tp-size" type="integer" default="null">
+<ParamField path="--ais-moe-tp-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   MoE tensor-parallel size for models that require AIS MoE parallelism.
 
   Environment variable: `DYN_AIS_MOE_TP_SIZE`
 </ParamField>
 
-<ParamField path="--ais-moe-ep-size" type="integer" default="null">
+<ParamField path="--ais-moe-ep-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   MoE expert-parallel size for models that require AIS MoE parallelism.
 
   Environment variable: `DYN_AIS_MOE_EP_SIZE`
 </ParamField>
 
-<ParamField path="--ais-attention-dp-size" type="integer" default="null">
+<ParamField path="--ais-attention-dp-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Attention data-parallel size for models that require AIS MoE parallelism.
 
   Environment variable: `DYN_AIS_ATTENTION_DP_SIZE`
 </ParamField>
 
-For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--ais-moe-tp-size` to the same value as `--ais-tp-size`, with `--ais-moe-ep-size 1` and `--ais-attention-dp-size 1`.
+With the flat flags, MoE models require `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--ais-moe-tp-size` to the same value as `--ais-tp-size`, with `--ais-moe-ep-size 1` and `--ais-attention-dp-size 1`.
 
 ## Fault tolerance
 
@@ -685,7 +813,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
-  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
+  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. With `--dyn-chat-processor sglang`, `fastokens` also applies to the SGLang chat processor (needs the `fastokens` Python package) and `basetenkenizer` uses HuggingFace there. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
 
@@ -712,7 +840,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 <ParamField path="--frontend-route-extension" type="string" default="[]">
   Load a trusted HTTP route provider by a name registered in the `dynamo.frontend.routes` entry-point
   group or by an importable `module:function` path. Repeat the option to load multiple providers.
-  Providers can add static `GET` routes but cannot override built-in routes; invalid or duplicate
+  Providers can add static-path routes but cannot override built-in routes; invalid or duplicate
   routes fail startup. Extensions apply only to the HTTP frontend. See
   [Python Route Extensions](../../developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md) for a packaged and direct-load example.
 
@@ -725,17 +853,22 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   If no registered name matches, a value containing `:` is resolved as `module:function`. Unknown
   names fail startup and report the available registered extensions.
 - **Provider return:** The provider callable returns one `FrontendRoute` or an iterable of routes.
-- **Route shape:** Extensions support static-path `GET` routes only. Path parameters, wildcards,
-  other HTTP methods, asynchronous handlers, and duplicates of built-in routes are rejected.
-- **Handler signature:** A synchronous `handler(ctx: FrontendExtensionContext)` returns a
-  JSON-serializable body for HTTP 200, or `FrontendResponse(status_code, body)` to override the
-  status code.
+- **Route shape:** `FrontendRoute(method, path, handler, timeout_s=30.0, max_body_bytes=65536)`.
+  The method is `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`, and the path is static. Path
+  parameters, wildcards, other methods, and duplicates of a built-in method and path are rejected.
+- **Handler signature:** `handler(ctx: FrontendExtensionContext)` returns a JSON-serializable body
+  for HTTP 200, or `FrontendResponse(status_code, body)` to override the status code. The handler can
+  be an `async def`, which runs on the Frontend's event loop.
+- **Request data:** `FrontendExtensionContext` exposes the request `body` (`bytes`), the request
+  `headers` (a `dict` with lower-case names), and the Frontend's `DistributedRuntime` as `runtime`.
 - **Live state:** `FrontendExtensionContext` exposes `is_ready()`, `is_cancelled()`,
   `has_any_ready_model()`, `is_model_ready_to_serve(name)`, `model_display_names()`, and
   `serving_ready_display_names()`.
-- **Execution limits:** Handlers run in a small dedicated thread pool. A handler that exceeds 30
-  seconds returns 503. A saturated pool rejects new extension requests with the configured overload
-  status code, 529 by default.
+- **Execution limits:** A handler that exceeds its route's `timeout_s` returns 503. A request body
+  over the route's `max_body_bytes` returns 413. A route with 64 calls in flight, or a full handler
+  pool, rejects new requests with the configured overload status code, 529 by default. See
+  [Handler limits](../../developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md#handler-limits)
+  for the full rules.
 - **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment
   values loads multiple providers. Duplicate provider names are de-duplicated.
 
@@ -754,12 +887,26 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_ENABLE_ANTHROPIC_API`
 </ParamField>
 
+The `dynamo` chat processor runs Rust parsing in the frontend; workers publish parser choices through `--dyn-tool-call-parser` and `--dyn-reasoning-parser`. See [Parser Generation Routing](../../use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#parser-generation-routing) for `DYN_PARSER_VERSION`, aliases, fallback, and migration settings.
+
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>dynamo</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  Any value other than `dynamo`, `vllm` or `sglang` loads a [custom chat processor](../../developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md):
+  a name registered in the `dynamo.frontend.chat_processors` entry-point group, or a `module:function` path.
 
   Environment variable: `DYN_CHAT_PROCESSOR`
+</ParamField>
+
+<ParamField path="--isolate-tool-call-markers" type="boolean" default="false">
+  Tokenize message content that contains the tool-call parser's delimiters (for example a literal `<tool_call>` inside a tool result) as plain sub-words, so the model cannot copy a delimiter token out of untrusted input and have it parsed as a real tool call. Requires `--dyn-chat-processor=sglang`. Requests the option cannot encode safely are rejected, and the native DeepSeek-V4 and Kimi K3 encoders do not support it; see [Echoed delimiters](../../developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md#echoed-delimiters) for the cases.
+
+  Environment variable: `DYN_ISOLATE_TOOL_CALL_MARKERS`
+</ParamField>
+
+<ParamField path="--dyn-chat-processor-config" type="string (JSON object)">
+  Settings passed to a custom chat processor. Rejected with the built-in processors.
+
+  Environment variable: `DYN_CHAT_PROCESSOR_CONFIG`
 </ParamField>
 
 <ParamField path="--dyn-debug-perf" type="boolean" default="false">
@@ -787,67 +934,47 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 
 ## Host memory allocator
 
-The frontend performs per-request host-memory allocations. Under high CPU load, allocator
-contention can cap frontend throughput before the GPU workers saturate. The frontend does not
-preload jemalloc by default.
+The Dynamo Python extension (`dynamo._core`) uses a built-in jemalloc for every Rust allocation, in
+the frontend and in every other process that imports it. CPython and C libraries keep the system
+allocator. `DYN_FRONTEND_JEMALLOC` is no longer read.
 
-<Note>
-Whether the container image ships jemalloc depends on how the image is built. Images built with
-`dynamo_runtime.Dockerfile` without an inference backend (`--framework dynamo`, the `dev` /
-`local-dev` / `runtime` targets used for development containers and backend-less components)
-include `libjemalloc2` since v1.3.0. The released vLLM, SGLang, and TensorRT-LLM images (runtime and
-dev targets), as well as the standalone frontend entrypoint image do not. Verify with
-`dpkg -L libjemalloc2 | grep 'libjemalloc.so'`; if the library is missing, either build a custom
-frontend image that includes it, or install it from an initContainer into a shared volume mounted
-by both containers and point `LD_PRELOAD` at the copied library path. Pointing `LD_PRELOAD` at a
-path that does not exist only prints a loader warning, and the process continues with the default
-glibc allocator.
-</Note>
+jemalloc cannot be turned off at runtime. To use the system allocator, for example to heap-profile
+Rust allocations with a preloaded jemalloc, build without the default `jemalloc` feature and
+re-enable the other defaults (currently `custom-policy`):
+`maturin build --no-default-features --features custom-policy`. musl and Windows (MSVC) builds
+always use the system allocator.
 
-<Note>
-  Released vLLM, SGLang, TensorRT-LLM, and standalone frontend images up to and including v1.5.0 do
-  not ship `libjemalloc2`; images from later releases include it. Verify with
-  `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`. On older images, install the package into a shared
-  volume with an initContainer or use a custom image.
-</Note>
+| Option | Value | Effect |
+|---|---|---|
+| `background_thread` | `true` | Returns unused pages to the operating system on a schedule, even while idle. A process runs one such thread (`jemalloc_bg_thd`), up to four under load. Not set on macOS. |
+| `dirty_decay_ms` | `10000` | Unused pages are returned over about 10 seconds. |
+| `muzzy_decay_ms` | `0` | Pages are released outright, not through `MADV_FREE`, which would keep them counted as resident. |
+| `narenas` | `16` | Caps arenas. The default is four per CPU in the affinity mask, which a Kubernetes CPU limit alone does not shrink. |
 
-<ParamField path="LD_PRELOAD" type="string" default="unset">
-  Preload jemalloc for the frontend process. The library path depends on the container architecture:
+<ParamField path="_RJEM_MALLOC_CONF" type="string" default="the built-in options above">
+  Overrides individual built-in options, for example to return pages sooner:
 
   ```bash
-  # x86_64
-  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
-
-  # arm64
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+  export _RJEM_MALLOC_CONF="dirty_decay_ms:1000"
   ```
 
-  In Kubernetes, set this variable on the frontend container rather than modifying the image. Locate
-  the installed path with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'` if the image uses a different
-  layout.
+  See [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
+  to measure the effect.
 </ParamField>
 
-<Warning>
-The TensorRT-LLM image bakes its own `LD_PRELOAD` (`/opt/dynamo/libstdc++.so.6` and TensorRT-LLM's
-bundled `libnixl.so`). Assigning `LD_PRELOAD` as shown above replaces that value. On TensorRT-LLM images, prepend the jemalloc
-library instead:
-
-```bash
-export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-```
-</Warning>
-
-<ParamField path="MALLOC_CONF" type="string" default="jemalloc defaults">
-  Configure jemalloc when it is preloaded. The best values depend on the request workload and CPU
-  allocation. This is an empirical starting point, not a production default:
+<ParamField path="LD_PRELOAD" type="string" default="unset">
+  Optional. Preloads a separate jemalloc, configured by `MALLOC_CONF`, for CPython and C
+  allocations; the built-in allocator is unaffected. The vLLM, SGLang, TensorRT-LLM, and frontend
+  images ship `libjemalloc2` from v1.6.0, and `--framework dynamo` images from v1.3.0.
 
   ```bash
-  export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2    # x86_64
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2   # arm64
   ```
 
-  Validate allocator changes with the same AIPerf workload before and after enabling them. See
-  [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
-  for the symptom this addresses and how to measure the effect.
+  The TensorRT-LLM image already sets `LD_PRELOAD` (`/opt/dynamo/libstdc++.so.6` and its bundled
+  `libnixl.so`): prepend jemalloc to that list instead of replacing it, writing the full list out in
+  a Kubernetes manifest.
 </ParamField>
 
 ## HTTP endpoints
@@ -860,7 +987,7 @@ The frontend exposes the following HTTP endpoints.
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | Chat completions (streaming and non-streaming) |
 | `POST` | `/v1/completions` | Text completions |
-| `POST` | `/v1/embeddings` | Text embeddings |
+| `POST` | `/v1/embeddings` | Embeddings (text, token IDs, or multimodal `messages` on vLLM workers) |
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/responses/input_tokens` | Estimated input token count for the Responses API |
 | `POST` | `/v1/images/generations` | Image generation; the response carries [image accounting](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#image-accounting) |
@@ -891,7 +1018,9 @@ Use `/v1/images/edits` for prompt-guided variations.
   array of those strings.
 
 See the [Image Edits API](../api/image-edits.mdx) for build requirements,
-accepted fields, limits, errors, and rolling upgrades.
+accepted fields, limits, errors, and rolling upgrades, and
+[Create a Variation with Image Edits](../../use-cases/diffusion/workflows/text-to-image.md#create-a-variation-with-image-edits)
+for a reference-image-plus-prompt example.
 
 ### Anthropic (Experimental)
 
@@ -920,8 +1049,13 @@ Before conversion, the frontend validates these
   `interleaved-thinking-2025-05-14`. Budgets are invalid with `disabled`, `adaptive`,
   or `between_tools`. `between_tools` is accepted without enabling thinking before the first tool.
 - `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
+- `thread` ([message threads](https://platform.claude.com/docs/en/build-with-claude/message-threads))
+  is refused with `error.details.error_code: "thread_unsupported_request"`: the frontend keeps no
+  conversation between requests, so send the full conversation without `thread`. The Anthropic
+  SDK tool runner does so on that code, as does the thread helper with
+  `unsupported_request_behavior: "continue_unthreaded"`.
 
-For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
+For `system`, `metadata`, `tool_choice`, `thinking`, and `thread`, `null` is treated as omission.
 
 ### Infrastructure
 
@@ -1000,13 +1134,35 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   When truthy, the frontend drops all request NvExt fields except `cache_salt` on
   `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/v1/messages`; ignores the
   `x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
-  `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, and
-  `x-dynamo-request-strict-priority` routing headers and their compatibility aliases; and ignores
+  `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`,
+  `x-dynamo-request-strict-priority`, and `x-dynamo-elapsed-since-arrival-ms` routing headers and their compatibility aliases; and ignores
   the response-side `nvext.extra_fields` opt-in. Cache isolation remains active. The frontend
   continues to use non-empty `nvext.cache_salt` and `x-tenant-id` values on these four endpoint
   groups. Top-level cache salts remain active on chat completions, completions, classify, and
   pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
+</ParamField>
+
+### Media refusal for text-only models
+
+A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
+
+<ParamField path="--reject-media" type="boolean" default="false">
+  Refuse media in any message, including earlier turns, before conversion or routing:
+
+  - `/v1/chat/completions`: image, video, and audio URL parts, plus inline `input_audio`.
+  - `/v1/responses`: `input_image` parts, including `file_id` references, system/developer messages, assistant history, and function-call outputs. Audio and video input parts are not accepted by the Responses request schema.
+  - `/v1/messages`: image blocks with base64 or URL sources, including images inside `tool_result` content.
+
+  Refusals are counted with `error_type="unsupported_modality"` on `dynamo_frontend_requests_total`, apart from validation and overload errors.
+
+  Environment variable: `DYN_REJECT_MEDIA`
+</ParamField>
+
+<ParamField path="--reject-media-status-code" type="integer" default="415">
+  HTTP status for a request refused by `--reject-media`. Only 4xx and 5xx values are accepted. Set it to a status an upstream gateway fails over on, for example `429`, to have that gateway send media requests to a multimodal model.
+
+  Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
 </ParamField>
 
 ### Endpoint path customization

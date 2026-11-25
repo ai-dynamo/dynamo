@@ -55,10 +55,26 @@ export VLLM_OMNI_TARGET_DEVICE
 
 # Use --system flag only for CUDA (system Python), omit for CPU/XPU (venv)
 if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
+  # Move the installed OpenTelemetry SDK and exporters with any API version Omni
+  # raises; an API newer than the SDK breaks SDK imports.
+  mapfile -t otel_packages < <(python3 -c '
+import importlib.metadata as md
+# Capped at the tested release; the SDK pins the API. Move with Omni and vLLM.
+for name, version in (
+    ("opentelemetry-sdk", "1.45.2"),
+    ("opentelemetry-exporter-otlp", "1.45.2"),
+    ("opentelemetry-exporter-prometheus", "0.66b2"),
+):
+    try:
+        md.distribution(name)
+    except md.PackageNotFoundError:
+        continue
+    print(f"{name}<={version}")
+')
   uv pip install --system \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
-    "vllm-omni==${VLLM_OMNI_VERSION}"
+    "vllm-omni==${VLLM_OMNI_VERSION}" "${otel_packages[@]}"
 else
   uv pip install \
     --prerelease=allow \

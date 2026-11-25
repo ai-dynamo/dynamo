@@ -7,27 +7,67 @@ import argparse
 import os
 import re
 import warnings
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
 
 
+def join_names(names: Sequence[str]) -> str:
+    """Return ``a``, ``a and b`` or ``a, b and c``."""
+    if len(names) <= 2:
+        return " and ".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 @dataclass(frozen=True)
 class Deprecated:
-    """Opt-in CLI/env deprecation; declare the replacement and removal release once."""
+    """Opt-in deprecation of flags, environment variables, config keys or keywords.
+
+    Declare the replacement and the removal release once. ``names`` is one
+    name or every deprecated name in use: one sentence, and one warning,
+    names them all.
+    """
 
     replacement: str
     remove_in: str
 
-    def message(self, name: str) -> str:
+    def message(self, names: str | Sequence[str]) -> str:
+        if isinstance(names, str):
+            names = [names]
+        if not names:
+            raise ValueError("names is empty")
+        verb = "is" if len(names) == 1 else "are"
         return (
-            f"{name} is deprecated and will be removed in {self.remove_in}; "
-            f"use {self.replacement}."
+            f"{join_names(names)} {verb} deprecated and will be removed in "
+            f"{self.remove_in}; use {self.replacement}."
         )
 
-    def warn(self, name: str) -> None:
-        warnings.warn(self.message(name), FutureWarning, stacklevel=3)
+    def warn(self, names: str | Sequence[str], *, stacklevel: int = 2) -> None:
+        """Emit one ``FutureWarning`` that names every item of ``names``.
+
+        ``stacklevel=1`` is the line that calls this method, ``2`` the caller
+        of that function, and so on. Earlier calls are not remembered.
+        """
+        warnings.warn(self.message(names), FutureWarning, stacklevel=stacklevel + 1)
+
+
+@dataclass
+class ArgEnv:
+    """The env of another process, for registering that process's arguments.
+
+    Argument groups read their env defaults from ``os.environ`` and warn
+    about deprecated or removed settings. A process that parses another
+    process's configuration (the planner reads its frontend's from the
+    DynamoGraphDeployment spec) passes an ``ArgEnv`` instead: env defaults
+    come from ``environ`` only, deprecation and removal notices are skipped
+    because they belong to the process that runs with that env, and
+    ``env_dests`` records the env var -> dest of every argument registered.
+    """
+
+    environ: Mapping[str, str]
+    env_dests: dict[str, str] = field(default_factory=dict)
 
 
 def parse_bool(value: str) -> bool:
@@ -64,6 +104,8 @@ def env_or_default(
     env_var: str,
     default: T,
     value_type: Optional[Union[type, Callable[..., Any]]] = None,
+    *,
+    env: Optional[ArgEnv] = None,
 ) -> T:
     """
     Get value from environment variable or return default.
@@ -76,11 +118,12 @@ def env_or_default(
         value_type: If provided, use this type to convert the env value. If None, the type
         is taken from type(default). Use value_type when default is None but you still
         want the env value coerced (e.g. env_or_default("DYN_FOO", None, value_type=int)).
+        env: Read ``env.environ`` instead of ``os.environ``.
 
     Returns:
         Environment variable value (type-converted) or default
     """
-    value = os.environ.get(env_var)
+    value = (os.environ if env is None else env.environ).get(env_var)
     if value is None:
         return default
 
@@ -129,6 +172,7 @@ def add_argument(
     arg_type: Optional[Union[type, Callable[..., Any]]] = str,
     env_value_type: Optional[Union[type, Callable[..., Any]]] = None,
     deprecated: Optional[Deprecated] = None,
+    env: Optional[ArgEnv] = None,
     **kwargs: Any,
 ) -> None:
     """
@@ -147,6 +191,7 @@ def add_argument(
         arg_type: Type for the argument (default: str)
         env_value_type: Optional parser used only for the environment value
         deprecated: Warn on explicit CLI/env use and show the migration in help.
+        env: Another process's env (see ``ArgEnv``); skips ``deprecated``.
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
     value_type_for_env = env_value_type
@@ -154,7 +199,12 @@ def add_argument(
         value_type_for_env = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
-    default_with_env = env_or_default(env_var, default, value_type=value_type_for_env)
+    default_with_env = env_or_default(
+        env_var, default, value_type=value_type_for_env, env=env
+    )
+    if env is not None:
+        env.env_dests[env_var] = arg_dest
+        deprecated = None
 
     names = [flag_name]
 
@@ -210,6 +260,7 @@ def add_negatable_bool_argument(
     obsolete_flag: Optional[str] = None,
     env_value_type: Optional[Callable[..., bool]] = None,
     deprecated: Optional[Deprecated] = None,
+    env: Optional[ArgEnv] = None,
 ) -> None:
     """
     Add negatable boolean flag (--foo / --no-foo).
@@ -223,6 +274,7 @@ def add_negatable_bool_argument(
         dest: Optional destination name for the parsed value
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
         env_value_type: Optional strict parser for the environment value
+        env: Another process's env (see ``ArgEnv``)
     """
     add_argument(
         parser,
@@ -236,6 +288,7 @@ def add_negatable_bool_argument(
         env_value_type=env_value_type,
         action=argparse.BooleanOptionalAction,
         deprecated=deprecated,
+        env=env,
     )
 
 

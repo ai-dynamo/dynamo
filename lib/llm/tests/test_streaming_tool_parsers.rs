@@ -126,6 +126,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
 
             Annotated {
@@ -1438,6 +1439,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
             event: None,
             comment: None,
@@ -2210,6 +2212,7 @@ fn make_glm47_chunk(
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }),
         event: None,
         comment: None,
@@ -2435,6 +2438,7 @@ fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamR
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }),
         event: None,
         comment: None,

@@ -16,6 +16,13 @@ use crate::load::InFlightTracker;
 /// does not make a pool's load unknown.
 const FRESH_WINDOWS: u32 = 3;
 
+/// Original receipt time and local request count, retained when a report is reprojected.
+#[derive(Clone, Copy, Debug)]
+pub struct ReportReceipt {
+    received: Instant,
+    ours: u64,
+}
+
 /// One serving-load report from a pool's Relay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoadReport {
@@ -85,6 +92,17 @@ struct KvReport {
     expires: Instant,
 }
 
+impl Report {
+    fn new(report: LoadReport, receipt: ReportReceipt) -> Self {
+        Self {
+            report,
+            received: receipt.received,
+            expires: receipt.received + report.window * FRESH_WINDOWS,
+            ours: receipt.ours,
+        }
+    }
+}
+
 impl PoolSignals {
     /// `in_flight` must be the tracker the Global Frontend counts its
     /// requests in.
@@ -96,23 +114,23 @@ impl PoolSignals {
         }
     }
 
-    /// Records what a pool's Relay reported.
-    pub fn record_load(&self, pool: &PoolId, source: RelaySource, report: LoadReport) {
-        let received = Instant::now();
-        let current = Report {
-            expires: received + report.window * FRESH_WINDOWS,
-            received,
-            report,
+    /// Capture report receipt before its discovery-dependent projection is known.
+    pub fn receive_report(&self, pool: &PoolId) -> ReportReceipt {
+        ReportReceipt {
+            received: Instant::now(),
             ours: self.in_flight.get(pool),
-        };
-        let mut sources = self.reports.entry(pool.clone()).or_default();
-        prune(&mut sources, received);
-        let source_report = sources.entry(source).or_default();
-        source_report.load = Some(current);
+        }
     }
 
-    /// Records the KV blocks a pool's workers hold for running requests, and
-    /// their total, as the pool's Relay reported once a `window`.
+    /// Records what a pool's Relay reported.
+    pub fn record_load(&self, pool: &PoolId, source: RelaySource, report: LoadReport) {
+        let receipt = self.receive_report(pool);
+        let mut sources = self.reports.entry(pool.clone()).or_default();
+        prune(&mut sources, receipt.received);
+        sources.entry(source).or_default().load = Some(Report::new(report, receipt));
+    }
+
+    /// Records KV occupancy reported over one window.
     pub fn record_kv(
         &self,
         pool: &PoolId,
@@ -124,18 +142,45 @@ impl PoolSignals {
         let now = Instant::now();
         let mut sources = self.reports.entry(pool.clone()).or_default();
         prune(&mut sources, now);
-        let source_report = sources.entry(source).or_default();
-        source_report.kv = Some(KvReport {
+        sources.entry(source).or_default().kv = Some(KvReport {
             used,
             total,
             expires: now + window * FRESH_WINDOWS,
         });
     }
 
+    /// Atomically replace derived reports while preserving their original receipt age.
+    pub fn project_source(
+        &self,
+        pool: &PoolId,
+        source: RelaySource,
+        load: Option<(LoadReport, ReportReceipt)>,
+        kv: Option<(u64, u64, Duration, ReportReceipt)>,
+    ) {
+        let mut sources = self.reports.entry(pool.clone()).or_default();
+        let report = SourceReport {
+            load: load.map(|(report, receipt)| Report::new(report, receipt)),
+            kv: kv.map(|(used, total, window, receipt)| KvReport {
+                used,
+                total,
+                expires: receipt.received + window * FRESH_WINDOWS,
+            }),
+        };
+        sources.insert(source, report);
+        prune(&mut sources, Instant::now());
+    }
+
     /// Drops what a pool's Relay reported, for when the pool leaves or its
     /// Relay changes.
     pub fn forget(&self, pool: &PoolId) {
         self.reports.remove(pool);
+    }
+
+    /// Withdraw one disconnected Relay without discarding a surviving replica's reports.
+    pub fn forget_source(&self, pool: &PoolId, source: RelaySource) {
+        if let Some(mut sources) = self.reports.get_mut(pool) {
+            sources.remove(&source);
+        }
     }
 
     /// How full the pool is against its own capacity. `None` without a fresh
@@ -389,5 +434,28 @@ mod tests {
 
         drop(counted);
         assert_eq!(signals.occupancy(&blue).unwrap().slots, 63.0 / 128.0);
+    }
+
+    #[test]
+    fn withdrawing_one_relay_preserves_the_other_replicas_load() {
+        let signals = PoolSignals::new(Arc::new(InFlightTracker::new()));
+        let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
+        let other = RelaySource {
+            runtime_id: 2,
+            incarnation: 1,
+        };
+        signals.record_load(&blue, RELAY, half_full());
+        signals.record_load(
+            &blue,
+            other,
+            LoadReport {
+                in_flight: 16,
+                ..half_full()
+            },
+        );
+        signals.forget_source(&blue, other);
+        assert_eq!(signals.occupancy(&blue).unwrap().slots, 0.5);
+        signals.forget_source(&blue, RELAY);
+        assert!(signals.occupancy(&blue).is_none());
     }
 }

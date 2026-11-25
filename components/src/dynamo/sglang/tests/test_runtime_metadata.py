@@ -46,14 +46,14 @@ def register():
     [
         ("kimi_k3", False, True, True, True, [163588, 39964, 163589], True),
         (None, False, True, True, True, [163588], False),
-        ("kimi_k3", True, True, True, True, [163588], False),
-        ("kimi_k3", False, False, True, True, [163588], False),
-        ("kimi_k3", False, True, False, True, [163588], False),
-        ("kimi_k3", False, True, True, False, [163588], False),
-        ("kimi_k3", False, True, True, True, [], False),
+        ("kimi_k3", True, True, True, True, [163588], None),
+        ("kimi_k3", False, False, True, True, [163588], None),
+        ("kimi_k3", False, True, False, True, [163588], None),
+        ("kimi_k3", False, True, True, False, [163588], None),
+        ("kimi_k3", False, True, True, True, [], None),
     ],
 )
-def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
+def test_structural_tag_reasoning_policy_advertises_gate_availability(
     register,
     parser,
     skip_tokenizer_init,
@@ -91,9 +91,10 @@ def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
     )
 
     key = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
-    assert (key in runtime_config.runtime_data) is expected
-    if expected:
-        assert json.loads(runtime_config.runtime_data[key]) is True
+    if expected is None:
+        assert key not in runtime_config.runtime_data
+    else:
+        assert json.loads(runtime_config.runtime_data[key]) is expected
 
 
 @pytest.mark.parametrize(
@@ -209,14 +210,48 @@ def test_token_budget_matches_sglang_policy(
 
 
 @pytest.mark.parametrize(
-    "disaggregation_mode, runtime_supported, enable_multimodal, capability_expected",
+    "disaggregation_mode, runtime_supported, worker_flags, capability_expected, reasoning_gate_expected",
     [
-        (None, True, False, False),
-        ("null", True, False, False),
-        ("prefill", False, False, False),
-        ("prefill", True, True, False),
-        ("prefill", True, False, True),
-        ("decode", True, False, True),
+        (None, True, {}, False, True),
+        ("null", True, {}, False, True),
+        ("prefill", False, {}, False, False),
+        ("prefill", True, {}, True, True),
+        ("decode", True, {}, True, True),
+        *[
+            pytest.param(
+                mode,
+                True,
+                {"enable_multimodal": True, "frontend_decoding": True},
+                False,
+                True,
+                id=f"frontend-decoded-media-{mode}",
+            )
+            for mode in ("null", "prefill", "decode")
+        ],
+        pytest.param(
+            "prefill",
+            True,
+            {"enable_multimodal": True, "multimodal_worker": True},
+            False,
+            False,
+            id="dedicated-multimodal-prefill",
+        ),
+        pytest.param(
+            "decode",
+            True,
+            {"enable_multimodal": True, "multimodal_worker": True},
+            False,
+            False,
+            id="dedicated-multimodal-decode",
+        ),
+        pytest.param(
+            "encode",
+            False,
+            {"enable_multimodal": True, "multimodal_encode_worker": True},
+            False,
+            False,
+            id="multimodal-encoder",
+        ),
     ],
 )
 def test_runtime_config_publishes_supported_disagg_capabilities(
@@ -225,8 +260,9 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     caplog,
     disaggregation_mode,
     runtime_supported,
-    enable_multimodal,
+    worker_flags,
     capability_expected,
+    reasoning_gate_expected,
 ):
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
@@ -241,7 +277,8 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     )
     dynamo_args = register.DynamoConfig()
     dynamo_args.enable_local_indexer = False
-    dynamo_args.enable_multimodal = enable_multimodal
+    for name, value in worker_flags.items():
+        setattr(dynamo_args, name, value)
     capacity = SimpleNamespace(
         max_num_seqs=None,
         max_num_batched_tokens=None,
@@ -292,9 +329,9 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     if capability_expected:
         assert json.loads(runtime_config.runtime_data[capability]) is True
     reasoning_gate = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
-    assert (reasoning_gate in runtime_config.runtime_data) is (
-        runtime_supported and not enable_multimodal
-    )
+    assert (reasoning_gate in runtime_config.runtime_data) is reasoning_gate_expected
+    if reasoning_gate in runtime_config.runtime_data:
+        assert json.loads(runtime_config.runtime_data[reasoning_gate]) is True
     assert "Failed to get runtime config" not in caplog.text
 
 
@@ -461,6 +498,52 @@ def test_mooncake_runtime_data_publishes_sglang_key_prefix(
 
 
 @pytest.mark.parametrize(
+    "extra_config, expected",
+    [
+        ({}, 256),
+        ({"prefetch_threshold": 1024}, 1024),
+        # SGLang never loads less than one page.
+        ({"prefetch_threshold": 0}, 64),
+    ],
+)
+def test_mooncake_runtime_data_publishes_prefetch_threshold(
+    register, monkeypatch, extra_config, expected
+):
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name="model",
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["prefetch_threshold"] == expected
+
+
+def test_mooncake_runtime_data_names_keys_by_attention_tp_rank(register, monkeypatch):
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=None,
+        served_model_name="model",
+        page_size=64,
+        tp_size=8,
+        attn_dp_size=4,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["tp_size"] == 2
+
+
+@pytest.mark.parametrize(
     "filename, content",
     [
         ("extra.json", '{"extra_backend_tag": "équipe"}'),
@@ -576,6 +659,7 @@ def test_mooncake_runtime_data_describes_the_direct_linker(register):
     # The linker names keys after model_path, HiCache after served_model_name.
     assert data["key_prefix"] == "Org-Model"
     assert data["page_size"] == 256
+    assert data["prefetch_threshold"] is None
 
     # The linker's own config flag wins over the deprecated HiCache extra config.
     linker_with_config = SimpleNamespace(

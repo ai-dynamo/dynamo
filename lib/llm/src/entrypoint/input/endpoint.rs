@@ -209,8 +209,8 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::ActiveSequenceEventData;
     use dynamo_runtime::pipeline::context::Controller;
+    use dynamo_slot_tracker::host::ActiveSequenceEventData;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio_util::sync::CancellationToken;
 

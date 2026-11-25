@@ -382,6 +382,7 @@ class TestVllmRendererApi:
             "abort_immediately",
             "session_id",
             "kv_hints",
+            "block_hashes",
         )
         expected_output_fields = (
             "request_id",
@@ -402,6 +403,8 @@ class TestVllmRendererApi:
             "new_sampling_mask",
             "spec_decode_metrics",
             "prompt_token_id_logprobs",
+            "error",
+            "watermarking",
         )
 
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
@@ -417,6 +420,9 @@ class TestVllmRendererApi:
                 "new_prompt_len_snapshot",
                 "num_generation_tokens",
                 "is_coalesced",
+                "stage_payload",
+                "stage_work",
+                "segment_generation",
             )
 
         actual_request_fields = EngineCoreRequest.__struct_fields__
@@ -468,12 +474,9 @@ class TestVllmRendererApi:
         )
         assert output.request_id == "test-123"
         assert output.new_token_ids == [1, 2, 3]
-        if "mm_cache_miss_hashes" in EngineCoreOutput.__struct_fields__:
-            assert output.mm_cache_miss_hashes is None
-        if "new_sampling_mask" in EngineCoreOutput.__struct_fields__:
-            assert output.new_sampling_mask is None
-        if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
-            assert output.spec_decode_metrics is None
+        assert output.mm_cache_miss_hashes is None
+        assert output.new_sampling_mask is None
+        assert output.spec_decode_metrics is None
         if "pooling_output_payload" in EngineCoreOutput.__struct_fields__:
             assert output.pooling_output_payload is None
         if "num_generation_tokens" in EngineCoreOutput.__struct_fields__:

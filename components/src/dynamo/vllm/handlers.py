@@ -3,9 +3,9 @@
 
 import asyncio
 import base64
+import binascii
 import functools
 import importlib
-import inspect
 import logging
 import math
 import os
@@ -37,6 +37,7 @@ import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.exceptions import VLLMClientError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -46,7 +47,8 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
@@ -89,7 +91,12 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
+from dynamo.llm.exceptions import (
+    Cancelled,
+    EngineShutdown,
+    InvalidArgument,
+    WorkerOverloaded,
+)
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -107,8 +114,10 @@ from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
     adapt_engine_generate_request,
     publish_engine_generate_capability,
+    publish_json_multimodal_capability,
 )
 from .engine_monitor import VllmEngineMonitor
+from .errors import uuid_image_cache_miss_error, vllm_client_error_to_http_error
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
@@ -140,7 +149,6 @@ _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 # expecting KV-transfer metadata from an upstream prefill worker.
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
-_GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
@@ -228,190 +236,6 @@ def _rl_init_weights_timeout_s() -> float:
             str(_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S),
         )
     )
-
-
-class _DeferredAbort:
-    """Defers engine_client.abort(request_id) until the first engine output.
-
-    In disaggregated decode mode, calling engine_client.abort() while a NIXL
-    KV transfer is still in flight on the decode worker can crash EngineCore.
-    This guard delays the real abort call until the first generation result
-    has been yielded (which, for a decode worker, means the KV transfer has
-    completed and the engine has produced at least one token).
-
-    When abort() is called before the first token, a background asyncio.Task
-    is spawned to wait for the first-token signal and then perform the real
-    abort.
-    """
-
-    def __init__(
-        self,
-        engine_client: Any,
-        request_id: str,
-        on_engine_dead: Optional[Any] = None,
-    ):
-        self._engine_client = engine_client
-        self._request_id = request_id
-        # Escalation hook invoked if the (possibly deferred/background) engine
-        # abort hits EngineDeadError, so engine death shuts the runtime down even
-        # when the abort runs outside the request's own error handling (the
-        # disconnect-monitor or deferred-after-first-token path).
-        self._on_engine_dead = on_engine_dead
-        self._first_token_received = False
-        self._first_token_event = asyncio.Event()
-        # Strong reference to the deferred-abort background task so it is not
-        # garbage collected mid-execution (asyncio.create_task only holds a
-        # weak reference via the event loop).
-        self._abort_task: Optional[asyncio.Task] = None
-        # Exception the real engine abort raised (if it has run), so the admin
-        # abort_request route can report failure instead of a false "ok".
-        self._abort_exc: Optional[BaseException] = None
-
-    def signal_first_token(self) -> None:
-        """Called when the first engine output for the request is received."""
-        if not self._first_token_received:
-            self._first_token_received = True
-            self._first_token_event.set()
-
-    async def abort(self) -> None:
-        """Abort the request. Creates a Task to hold a strong reference so the
-        engine abort cannot be dropped if this coroutine is concurrently
-        cancelled."""
-        if self._abort_task is None:
-            if self._first_token_received:
-                logger.debug(
-                    f"Deferred abort: first token already received, "
-                    f"aborting request {self._request_id} now"
-                )
-                self._abort_task = asyncio.create_task(self._run_abort())
-            else:
-                logger.debug(
-                    f"Deferred abort: first token not received for request "
-                    f"{self._request_id}, spawning background task"
-                )
-                self._abort_task = asyncio.create_task(self._wait_and_abort())
-        # Only block on completion when the abort runs immediately (post first
-        # token). A pre-first-token deferred abort fires in the background when
-        # the first token arrives; awaiting it here would hang the caller (admin
-        # route or disconnect monitor) until — or unless — generation produces
-        # output. _abort_task keeps the background task alive; close() reaps it.
-        if not self._first_token_received:
-            return
-        try:
-            # shield() so that if the caller (e.g. a cancelled system-route
-            # request or a disconnected client) is cancelled while awaiting, the
-            # cancellation is NOT propagated into the abort task — it really does
-            # continue in the background. A bare `await self._abort_task` would
-            # cancel the task too, silently dropping the abort.
-            await asyncio.shield(self._abort_task)
-        except asyncio.CancelledError:
-            logger.debug(
-                f"Deferred abort: shielded from cancellation for request "
-                f"{self._request_id}, abort continues in background"
-            )
-
-    async def _run_abort(self) -> None:
-        """Execute engine.abort() and emit the canonical completion log."""
-        try:
-            await self._engine_client.abort(self._request_id)
-            logger.debug(f"Aborted Request ID: {self._request_id}")
-        except Exception as e:
-            # Record so abort_request can report the failure rather than a false
-            # success. Also escalate engine death here, since a deferred or
-            # disconnect-monitor abort runs in the background with no caller
-            # awaiting the result to handle EngineDeadError.
-            self._abort_exc = e
-            logger.warning(
-                f"Deferred abort: engine abort raised for request "
-                f"{self._request_id}: {e}"
-            )
-            if isinstance(e, EngineDeadError) and self._on_engine_dead is not None:
-                self._on_engine_dead(e)
-
-    async def _wait_and_abort(self) -> None:
-        """Background task: wait for first token, then abort."""
-        try:
-            await self._first_token_event.wait()
-        except Exception:
-            pass
-        await self._run_abort()
-
-    async def close(self) -> None:
-        """Clean up the deferred-abort waiter when generation exits.
-
-        Handles case 1b: if abort() was requested before the first token
-        arrived AND the generation loop exits without ever producing output,
-        the background _wait_and_abort task would otherwise remain parked on
-        first_token_event.wait() forever. Cancel it so it does not leak.
-
-        Safety invariant: this method must NOT call engine_client.abort() in
-        the pre-first-token window. Issuing abort before the engine has
-        produced output is exactly what this guard exists to avoid (it can
-        crash EngineCore while a NIXL KV transfer is still in flight on the
-        decode worker).
-        """
-        if self._abort_task is None:
-            return
-
-        if not self._first_token_received:
-            # Case 1b: cancel the local waiter without firing the real abort.
-            self._abort_task.cancel()
-
-        try:
-            # shield so that if cleanup is awaiting a real post-first-token abort
-            # and the caller is cancelled, the abort still completes (the
-            # pre-first-token path was cancelled just above and resolves here).
-            await asyncio.shield(self._abort_task)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning(
-                f"Deferred abort: cleanup observed error for request "
-                f"{self._request_id}: {e}"
-            )
-
-
-@asynccontextmanager
-async def _deferred_abort_guard(
-    engine_client: Any,
-    request_id: str,
-    is_decode_only: bool,
-    registry: Optional[dict[str, "_DeferredAbort"]] = None,
-    on_engine_dead: Optional[Any] = None,
-) -> AsyncIterator[Optional[_DeferredAbort]]:
-    """Own the _DeferredAbort lifecycle for a single request.
-
-    Yields a _DeferredAbort in disaggregated-decode mode, otherwise yields
-    None. On exit, awaits guard.close() so the background waiter cannot leak
-    when generation finishes without producing output (case 1b). close() is
-    specifically designed not to call engine_client.abort() in the unsafe
-    pre-first-token window.
-
-    When `registry` is provided, the guard registers itself under `request_id`
-    for the request's lifetime so out-of-band callers (the admin abort_request
-    route) can route their abort through this same deferred path instead of
-    calling engine_client.abort() directly in the unsafe window.
-    """
-    guard = (
-        _DeferredAbort(engine_client, request_id, on_engine_dead)
-        if is_decode_only
-        else None
-    )
-    if guard is not None and registry is not None:
-        registry[request_id] = guard
-    try:
-        yield guard
-    finally:
-        if guard is not None:
-            # Keep the guard registered until close() finishes: close() may
-            # await a deferred abort, and an out-of-band admin abort_request
-            # during that window must still find the guard and route through
-            # the deferred path instead of taking the unsafe direct abort.
-            try:
-                await guard.close()
-            finally:
-                if registry is not None:
-                    registry.pop(request_id, None)
 
 
 class VllmEnginePauseController:
@@ -608,7 +432,7 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
-# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 _DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
 
@@ -911,14 +735,10 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
-        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
-        # the same concept as `thinking_token_budget` on SamplingParams and
+        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM exposes the
+        # same concept as `thinking_token_budget` on SamplingParams and
         # enforces it via the builtin thinking-budget logits processor.
-        if (
-            key == "max_thinking_tokens"
-            and value is not None
-            and hasattr(sampling_params, "thinking_token_budget")
-        ):
+        if key == "max_thinking_tokens" and value is not None:
             sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
@@ -954,6 +774,8 @@ def build_sampling_params(
     # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
     # directly from the request output_options (lib/llm/src/backend.rs).
 
+    # Legacy completions use SamplingParams defaults; chat and Responses use
+    # the remaining context when the model has no generation limit.
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
@@ -964,12 +786,21 @@ def build_sampling_params(
                 f"max_tokens={provided_max_tokens} cannot be greater than "
                 f"max_model_len={model_max_len}. Please request fewer output tokens."
             )
-        sampling_params.max_tokens = get_max_tokens(
-            max_model_len=model_max_len,
-            max_tokens=provided_max_tokens,
-            input_length=input_length,
-            default_sampling_params=default_sampling_params,
+        use_sampling_default = (
+            isinstance(extra_args, dict)
+            and extra_args.get("request_type") == "completions"
+            and not (enable_rl and _is_token_in_request(request))
         )
+        max_tokens = (
+            sampling_params.max_tokens if use_sampling_default else provided_max_tokens
+        )
+        if not use_sampling_default or max_tokens is not None:
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=model_max_len,
+                max_tokens=max_tokens,
+                input_length=input_length,
+                default_sampling_params=default_sampling_params,
+            )
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -997,37 +828,13 @@ def _update_kv_transfer_params(
     sampling_params.extra_args = extra_args
 
 
-@functools.cache
-def _vllm_kv_hints_types() -> tuple[type[Any], type[Any]] | None:
-    """Load vLLM's first-class KV hint types when the API is available."""
-    try:
-        module = importlib.import_module("vllm.v1.kv_hints")
-    except ModuleNotFoundError as exc:
-        if exc.name != "vllm.v1.kv_hints":
-            raise
-        return None
-
-    action_type = getattr(module, "KvHintAction", None)
-    envelope_type = getattr(module, "KvHintsEnvelope", None)
-    if action_type is None or envelope_type is None:
-        return None
-    return action_type, envelope_type
-
-
-def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
+def _build_vllm_kv_hints(request: Mapping[str, Any]) -> KvHintsEnvelope | None:
     """Convert Dynamo's typed KV hint message to vLLM's envelope type."""
     raw_envelope = request.get("kv_hint")
     if raw_envelope is None:
         return None
     if not isinstance(raw_envelope, Mapping):
         raise ValueError("kv_hint must be an object")
-
-    kv_hints_types = _vllm_kv_hints_types()
-    if kv_hints_types is None:
-        raise RuntimeError(
-            "This vLLM version does not support first-class KV hint request metadata"
-        )
-    action_type, envelope_type = kv_hints_types
 
     raw_actions = raw_envelope.get("actions")
     if not isinstance(raw_actions, list):
@@ -1040,7 +847,7 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
         if not isinstance(payload, Mapping):
             raise ValueError("kv_hint action payload must be an object")
         actions.append(
-            action_type(
+            KvHintAction(
                 action_id=str(raw_action["action_id"]),
                 action_type=str(raw_action["action_type"]),
                 action_version=str(raw_action["action_version"]),
@@ -1048,7 +855,7 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
             )
         )
 
-    envelope = envelope_type(
+    envelope = KvHintsEnvelope(
         protocol_version=str(raw_envelope["protocol_version"]),
         message_id=str(raw_envelope["message_id"]),
         actions=actions,
@@ -1111,9 +918,7 @@ def build_sampling_params_openai(
         sampling_params.min_tokens = request["min_tokens"]
 
     thinking_token_budget = resolve_thinking_token_budget(request)
-    if thinking_token_budget is not None and hasattr(
-        sampling_params, "thinking_token_budget"
-    ):
+    if thinking_token_budget is not None:
         sampling_params.thinking_token_budget = thinking_token_budget
 
     # Same setattr gap as in build_sampling_params.
@@ -1122,62 +927,15 @@ def build_sampling_params_openai(
 
 
 def _engine_generate_reasoning_kwargs(
-    engine_client: Any,
     reasoning_ended: bool | None,
     reasoning_parser_kwargs: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if reasoning_ended is None and reasoning_parser_kwargs is None:
         return {}
-
-    support = _engine_generate_reasoning_support(engine_client)
-    if support is None:
-        return {}
-    accepts_reasoning_ended, accepts_reasoning_parser_kwargs = support
-
-    kwargs: dict[str, Any] = {}
-    if accepts_reasoning_ended:
-        kwargs["reasoning_ended"] = reasoning_ended
-    if accepts_reasoning_parser_kwargs:
-        kwargs["reasoning_parser_kwargs"] = reasoning_parser_kwargs
-
-    if not kwargs:
-        logger.debug(
-            "vLLM generate does not accept reasoning parser kwargs; "
-            "running without request-local reasoning parser metadata"
-        )
-    return kwargs
-
-
-def _engine_generate_reasoning_support(
-    engine_client: Any,
-) -> tuple[bool, bool] | None:
-    try:
-        cached = vars(engine_client).get(_GENERATE_REASONING_SUPPORT_CACHE_ATTR)
-    except TypeError:
-        cached = None
-    if cached is not None:
-        return cached
-
-    try:
-        parameters = inspect.signature(engine_client.generate).parameters
-    except (TypeError, ValueError):
-        logger.debug(
-            "Unable to inspect vLLM generate signature; dropping reasoning parser kwargs"
-        )
-        return None
-
-    accepts_kwargs = any(
-        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
-    )
-    support = (
-        accepts_kwargs or "reasoning_ended" in parameters,
-        accepts_kwargs or "reasoning_parser_kwargs" in parameters,
-    )
-    try:
-        setattr(engine_client, _GENERATE_REASONING_SUPPORT_CACHE_ATTR, support)
-    except Exception:
-        pass
-    return support
+    return {
+        "reasoning_ended": reasoning_ended,
+        "reasoning_parser_kwargs": reasoning_parser_kwargs,
+    }
 
 
 def _request_reasoning_metadata(
@@ -1220,17 +978,18 @@ ResponseT = TypeVar("ResponseT")
 
 async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
+    request: dict[str, Any],
 ) -> AsyncIterator[ResponseT]:
     """Keep request-side vLLM errors client-visible on worker endpoints."""
-    from vllm.exceptions import VLLMClientError
-
-    from .errors import vllm_client_error_to_http_error
-
     try:
         async for chunk in generator:
             yield chunk
     except VLLMClientError as exc:
         raise vllm_client_error_to_http_error(exc) from exc
+    except (ValueError, EngineGenerateError) as exc:
+        if error := uuid_image_cache_miss_error(exc, request):
+            raise error from exc
+        raise
 
 
 def _as_exact_int(value: object) -> Optional[int]:
@@ -1344,12 +1103,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._pause_controller = VllmEnginePauseController(self.engine_client)
         self._pause_lock = asyncio.Lock()
-        # Maps request_id -> _DeferredAbort for in-flight decode-only requests so
-        # admin abort_request can route through the deferred-abort path instead
-        # of calling engine_client.abort() during the unsafe pre-first-token
-        # NIXL-KV-transfer window.
-        self._deferred_aborts: dict[str, _DeferredAbort] = {}
-
         self._multimodal_request_processor = VllmMultimodalRequestProcessor(
             model=config.model_source_path,
             engine_client=engine,
@@ -2156,28 +1909,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if not request_id:
             return {"status": "error", "message": "Missing 'request_id' in body"}
         try:
-            guard = self._deferred_aborts.get(request_id)
-            if guard is not None:
-                # Route through the per-request deferred-abort guard so that in
-                # disaggregated decode mode the real engine abort is deferred
-                # until the first token, never firing during an in-flight NIXL
-                # KV transfer (which can crash EngineCore).
-                await guard.abort()
-                # If the abort already ran (post-first-token) and failed, report
-                # it instead of a false "ok"; escalate engine death like the
-                # direct path does. (Pre-first-token aborts are queued and have
-                # no result yet, so they correctly report accepted/ok.)
-                abort_exc = guard._abort_exc
-                if abort_exc is not None:
-                    if isinstance(abort_exc, EngineDeadError):
-                        self._shutdown_on_engine_dead(abort_exc)
-                    return {
-                        "status": "error",
-                        "request_id": request_id,
-                        "message": f"abort failed: {abort_exc}",
-                    }
-            else:
-                await self.engine_client.abort(request_id)
+            await self.engine_client.abort(request_id)
             logger.debug(f"[RL] Aborted request {request_id}")
             return {"status": "ok", "request_id": request_id}
         except EngineDeadError as e:
@@ -2423,14 +2155,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError
 
-    async def _monitor_abort(self, context, request_id, is_prefill, abort_guard=None):
+    async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
         Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
-
-        If abort_guard is provided, the abort call is routed through it so that
-        it can be deferred until the first engine output (used in disagg decode
-        mode to avoid aborting during an active NIXL KV transfer).
         """
         wait_for = []
         try:
@@ -2464,25 +2192,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Aborting {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Abort the request (via guard if provided, otherwise direct).
-            if abort_guard is not None:
-                # Guard owns completion logging: "Aborted Request ID:" is
-                # emitted from _run_abort() once engine.abort() returns,
-                # even if this task is concurrently cancelled.
-                await abort_guard.abort()
-            else:
-                # No guard: shield the abort so a concurrent CancelledError
-                # from _abort_monitor cleanup cannot interrupt it mid-flight.
-                try:
-                    await asyncio.shield(self.engine_client.abort(request_id))
-                except asyncio.CancelledError:
-                    logger.debug(
-                        f"Abort shielded from cancellation for request "
-                        f"{request_id}, continuing in background"
-                    )
+            # Safe during an in-flight remote KV read: vLLM keeps the blocks
+            # of a WAITING_FOR_REMOTE_KVS request until the connector reports
+            # the receive done.
+            # Shield the abort so a concurrent CancelledError from
+            # _abort_monitor cleanup cannot interrupt it mid-flight.
+            try:
+                await asyncio.shield(self.engine_client.abort(request_id))
+            except asyncio.CancelledError:
                 logger.debug(
-                    f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                    f"Abort shielded from cancellation for request "
+                    f"{request_id}, continuing in background"
                 )
+            logger.debug(
+                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+            )
 
             # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
@@ -2507,19 +2231,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
-    async def _abort_monitor(
-        self, context, request_id, is_prefill=False, abort_guard=None
-    ):
+    async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
         If shutdown event was triggered, raises EngineShutdown on exit.
-
-        If abort_guard is provided, the abort call is routed through it so the
-        abort can be deferred until the first engine output.
         """
-        task = asyncio.create_task(
-            self._monitor_abort(context, request_id, is_prefill, abort_guard)
-        )
+        task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
             yield task
         finally:
@@ -2577,7 +2294,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest for loaded adapters, or None for base model names.
 
-        Raises ValueError for unknown non-base names when LoRA is enabled.
+        Raises InvalidArgument for unknown non-base names when LoRA is enabled.
 
         **Contract for subclasses**: This method requires the following attributes
         to be defined by subclasses:
@@ -2679,6 +2396,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if self.config.route_to_encoder:
             lora_needs_set.append(WorkerType.Encode)
 
+        publish_json_multimodal_capability(
+            runtime_config,
+            ModelInput.Tokens,
+            lora_worker_type,
+            self.config.enable_multimodal,
+        )
         apply_data_parallel_runtime_config(runtime_config, self.dp_range)
         publish_kv_hint_capabilities(
             runtime_config,
@@ -2775,7 +2498,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "rejecting the request",
                     lora_request.lora_name,
                 )
-                raise ValueError(
+                raise InvalidArgument(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
             self._track_lora_request_activation(admitted_lora_request)
@@ -3278,8 +3001,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
-            ValueError: If decoding fails or format is invalid
+            InvalidArgument: If the payload is not valid base64 or the loader
+                rejects it as a client input fault.
+            ValueError: If the input is not a string (internal contract), or
+                any other decoding failure on the caller's payload, including
+                `.encode()` failures before the load and tensor operation
+                failures after it.
+            RuntimeError: If ModelConfig is unavailable.
         """
+        from vllm.exceptions import VLLMClientError
+
         if not isinstance(prompt_embeds_base64, str):
             raise ValueError(
                 f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
@@ -3298,11 +3029,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Resource failures are server-side faults. Preserve their type so
             # the bindings return a retryable 5xx instead of a client 400.
             raise
+        except VLLMClientError as e:
+            raise InvalidArgument(f"Invalid prompt_embeds: {e}") from e
+        except binascii.Error as e:
+            raise InvalidArgument("prompt_embeds is not valid base64") from e
         except Exception as e:
-            logger.error(f"Failed to decode prompt_embeds: {e}")
-            raise ValueError(
-                f"Failed to decode prompt_embeds as PyTorch tensor: {e}"
-            ) from e
+            raise ValueError(f"Failed to decode prompt_embeds: {e}") from e
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
@@ -3319,7 +3051,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - tensor: The decoded tensor (for logging shape/dtype)
 
         Raises:
-            ValueError: If decoding fails or tensor is invalid
+            ValueError: If the decoded tensor is not 2-D (internal contract).
+            Exception: whatever `_decode_prompt_embeds` raised, unchanged.
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
         if embeddings_tensor.dim() != 2:
@@ -3339,6 +3072,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
+        custom_data: Dict[str, Any] | None = None,
     ) -> TokensPrompt | EmbedsPrompt:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -3355,8 +3089,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             The vLLM prompt built from prompt embeddings or token IDs.
 
         Raises:
-            InvalidArgument: Prompt embeddings are disabled.
-            ValueError: Prompt embeddings cannot be decoded or validated.
+            InvalidArgument: Prompt embeddings are disabled or fail payload
+                validation.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -3399,6 +3133,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             request,
             multi_modal_data,
             mm_processor_kwargs,
+            custom_data=custom_data,
         )
         return prompt
 
@@ -3538,7 +3273,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     session_id=session_id,
                     **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                     **_engine_generate_reasoning_kwargs(
-                        self.engine_client,
                         reasoning_ended,
                         reasoning_parser_kwargs,
                     ),
@@ -3830,7 +3564,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in _translate_vllm_client_errors(generator):
+            async for chunk in _translate_vllm_client_errors(generator, request):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
@@ -3991,15 +3725,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
 
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
-        is_decode_only = mode == DisaggregationMode.DECODE
-        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+        if mode == DisaggregationMode.DECODE and BYPASS_REMOTE_PREFILL_ANNOTATION in (
             request.get("annotations") or []
         ):
             logger.debug(
                 "DECODE: conditional-disagg bypass annotation present; "
                 "running request as AGG (prefill+decode on this worker)."
             )
-            is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
         has_external_encoder_result = request.get("encoder_result") is not None
         if has_external_encoder_result and mode != DisaggregationMode.AGGREGATED:
@@ -4055,6 +3787,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
+            custom_data = None
         else:
             try:
                 prepared_input = await self._multimodal_request_processor.prepare_input(
@@ -4076,6 +3809,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = prepared_input.multi_modal_data
             mm_processor_kwargs = prepared_input.mm_processor_kwargs
             pre_rendered = prepared_input.pre_rendered_prompt
+            custom_data = prepared_input.custom_data
 
         # Build prompt from request. `prompt` is either a pre-rendered
         # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
@@ -4100,6 +3834,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
+                    custom_data=custom_data,
                 )
 
         _apply_nvext_cache_salt(request, prompt)
@@ -4249,107 +3984,84 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     raise InvalidArgument(str(exc)) from None
                 raise
 
-        # In disagg decode mode, defer engine_client.abort() until the first
-        # token so we don't abort while a NIXL KV transfer is still in flight
-        # on the decode worker (which can crash EngineCore). The guard's
-        # cleanup runs after _abort_monitor tears down its monitor task, so
-        # any deferred-abort waiter spawned by the monitor is in a stable
-        # state when close() is awaited.
         with (
             closing(artifact_session) if artifact_session is not None else nullcontext()
         ):
-            async with _deferred_abort_guard(
-                self.engine_client,
-                request_id,
-                is_decode_only,
-                self._deferred_aborts,
-                self._shutdown_on_engine_dead,
-            ) as abort_guard:
-                async with self._abort_monitor(
-                    context, request_id, abort_guard=abort_guard
-                ):
-                    # nvext.engine_data opt-in: if the client requested
-                    # `nvext.extra_fields=["engine_data"]`, we accumulate
-                    # per-chunk token_ids and logprobs and attach them to the
-                    # FINAL chunk (the one carrying `finish_reason`). The Rust
-                    # frontend's response builder (delta.rs) gates emission via
-                    # `NvExtResponseFieldSelection.engine_data` so this payload
-                    # only reaches clients that asked for it.
-                    want_engine_data = _nvext_extra_field_requested(
-                        request, "engine_data"
-                    )
-                    # Fallback when the engine does not report prompt IDs. MITO
-                    # image expansion can change these during engine preprocessing.
-                    request_prompt_token_ids = (
-                        _prompt_token_ids_for_engine_data(request, prompt)
-                        if want_engine_data
-                        else None
-                    )
-                    accumulated_token_ids: dict[int, list[int]] = {}
-                    accumulated_log_probs: dict[int, list[float]] = {}
-                    try:
-                        async for tok in self.generate_tokens(
-                            prompt,
-                            sampling_params,
-                            request_id,
-                            data_parallel_rank=dp_rank,
-                            lora_request=lora_request,
-                            trace_headers=trace_headers,
-                            priority=priority,
-                            reasoning_ended=reasoning_ended,
-                            reasoning_parser_kwargs=reasoning_parser_kwargs,
-                            session_id=session_id,
-                            # Transferred prefill KV counts as cached in vLLM, so a
-                            # decode attempt's count would not be local reuse.
-                            report_kv_cache_hit=kv_params is None,
-                            want_engine_data=want_engine_data,
-                            kv_hints=kv_hints,
-                            artifact_session=artifact_session,
-                            emit_routed_experts=(
-                                artifact_session is None
-                                or want_engine_data
-                                or _nvext_extra_field_requested(
-                                    request, "routed_experts"
-                                )
-                            ),
-                        ):
-                            if abort_guard is not None:
-                                abort_guard.signal_first_token()
-                            if artifact_forced_logprobs:
-                                if client_logprob_width is None:
-                                    tok = {
-                                        key: value
-                                        for key, value in tok.items()
-                                        if key not in ("log_probs", "top_logprobs")
-                                    }
-                                elif (
-                                    client_logprob_width == 0 and "top_logprobs" in tok
-                                ):
-                                    tok = {
-                                        **tok,
-                                        "top_logprobs": [[] for _ in tok["token_ids"]],
-                                    }
-                            if prefill_result is not None and "completion_usage" in tok:
-                                tok["completion_usage"][
-                                    "prompt_tokens_details"
-                                ] = prefill_prompt_tokens_details
+            async with self._abort_monitor(context, request_id):
+                # nvext.engine_data opt-in: if the client requested
+                # `nvext.extra_fields=["engine_data"]`, we accumulate
+                # per-chunk token_ids and logprobs and attach them to the
+                # FINAL chunk (the one carrying `finish_reason`). The Rust
+                # frontend's response builder (delta.rs) gates emission via
+                # `NvExtResponseFieldSelection.engine_data` so this payload
+                # only reaches clients that asked for it.
+                want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                # Fallback when the engine does not report prompt IDs. MITO
+                # image expansion can change these during engine preprocessing.
+                request_prompt_token_ids = (
+                    _prompt_token_ids_for_engine_data(request, prompt)
+                    if want_engine_data
+                    else None
+                )
+                accumulated_token_ids: dict[int, list[int]] = {}
+                accumulated_log_probs: dict[int, list[float]] = {}
+                try:
+                    async for tok in self.generate_tokens(
+                        prompt,
+                        sampling_params,
+                        request_id,
+                        data_parallel_rank=dp_rank,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        priority=priority,
+                        reasoning_ended=reasoning_ended,
+                        reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        session_id=session_id,
+                        # Transferred prefill KV counts as cached in vLLM, so a
+                        # decode attempt's count would not be local reuse.
+                        report_kv_cache_hit=kv_params is None,
+                        want_engine_data=want_engine_data,
+                        kv_hints=kv_hints,
+                        artifact_session=artifact_session,
+                        emit_routed_experts=(
+                            artifact_session is None
+                            or want_engine_data
+                            or _nvext_extra_field_requested(request, "routed_experts")
+                        ),
+                    ):
+                        if artifact_forced_logprobs:
+                            if client_logprob_width is None:
+                                tok = {
+                                    key: value
+                                    for key, value in tok.items()
+                                    if key not in ("log_probs", "top_logprobs")
+                                }
+                            elif client_logprob_width == 0 and "top_logprobs" in tok:
+                                tok = {
+                                    **tok,
+                                    "top_logprobs": [[] for _ in tok["token_ids"]],
+                                }
+                        if prefill_result is not None and "completion_usage" in tok:
+                            tok["completion_usage"][
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
 
-                            if want_engine_data:
-                                _accumulate_engine_data(
-                                    tok,
-                                    request_prompt_token_ids,
-                                    accumulated_token_ids,
-                                    accumulated_log_probs,
-                                )
-                            yield tok
-                    except EngineDeadError as e:
-                        logger.error(f"vLLM EngineDeadError: {e}")
-                        logger.warning("Initiating Dynamo Runtime shutdown.")
-                        self.runtime.shutdown()
-                        os._exit(1)
-                    finally:
-                        if artifact_session is not None:
-                            artifact_session.close()
+                        if want_engine_data:
+                            _accumulate_engine_data(
+                                tok,
+                                request_prompt_token_ids,
+                                accumulated_token_ids,
+                                accumulated_log_probs,
+                            )
+                        yield tok
+                except EngineDeadError as e:
+                    logger.error(f"vLLM EngineDeadError: {e}")
+                    logger.warning("Initiating Dynamo Runtime shutdown.")
+                    self.runtime.shutdown()
+                    os._exit(1)
+                finally:
+                    if artifact_session is not None:
+                        artifact_session.close()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
@@ -4382,30 +4094,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         session_id = session_id_from_request(request)
         kv_hints = _build_vllm_kv_hints(request)
 
-        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
-            request.get("annotations") or []
-        ):
-            logger.debug(
-                "DECODE: conditional-disagg bypass annotation present; "
-                "running text-mode request as AGG (prefill+decode on this worker)."
-            )
-            is_decode_only = False
-
-        # Mirror _generate_token_mode: in disagg decode mode route aborts through
-        # the per-request deferred guard so engine_client.abort() never fires in
-        # the unsafe pre-first-token window, and the admin abort_request route can
-        # reach this request via self._deferred_aborts.
-        async with (
-            _deferred_abort_guard(
-                self.engine_client,
-                request_id,
-                is_decode_only,
-                self._deferred_aborts,
-                self._shutdown_on_engine_dead,
-            ) as abort_guard,
-            self._abort_monitor(context, request_id, abort_guard=abort_guard),
-        ):
+        async with self._abort_monitor(context, request_id):
             try:
                 gen = self.engine_client.generate(
                     prompt,
@@ -4436,8 +4125,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         break
 
                     for output in res.outputs:
-                        if abort_guard is not None:
-                            abort_guard.signal_first_token()
                         if not first_token_output_seen and getattr(
                             output, "token_ids", None
                         ):
@@ -4530,7 +4217,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
             generator = self._generate_token_mode(request, context, request_id)
-            async for chunk in _translate_vllm_client_errors(generator):
+            async for chunk in _translate_vllm_client_errors(generator, request):
                 yield chunk
 
     def _prefill_kv_protocol(
@@ -4659,7 +4346,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         session_id=session_id,
                         **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                         **_engine_generate_reasoning_kwargs(
-                            self.engine_client,
                             reasoning_ended,
                             reasoning_parser_kwargs,
                         ),
@@ -4732,8 +4418,9 @@ class EmbeddingWorkerHandler:
     Does NOT inherit BaseWorkerHandler. The base class does generation-only
     init (media loaders, KV-block lookup via get_dp_range_for_worker, embedding
     cache manager) that would either fail or be meaningless on a pooling
-    engine. Embedding inference is a single forward pass with no KV cache, no
-    multimodal data, and no streamed decode.
+    engine. Embedding inference is a single forward pass with no KV cache and
+    no streamed decode. Multimodal input arrives as vLLM's chat-style
+    ``messages`` and is rendered by vLLM's own renderer, which loads the media.
     """
 
     def __init__(
@@ -4768,7 +4455,7 @@ class EmbeddingWorkerHandler:
         ``_abort_monitor`` context manager can propagate it.
 
         Mirrors ``BaseWorkerHandler._monitor_abort`` but trimmed for the
-        embedding path (no ``is_prefill``, no ``abort_guard``).
+        embedding path (no ``is_prefill``).
         """
         shutdown_task: Optional[asyncio.Task] = None
         wait_for: list[Any] = []
@@ -4844,6 +4531,117 @@ class EmbeddingWorkerHandler:
                 # Re-raise EngineShutdown if the monitor task raised it.
                 task.result()
 
+    async def _render_chat_embedding_input(self, request: dict) -> list[Any]:
+        """Render chat-style ``messages`` into one engine prompt per conversation.
+
+        Uses vLLM's own embedding request model and renderer, as ``vllm serve``
+        does for ``/v1/embeddings``: the model's chat template (or
+        ``--custom-jinja-template``) and multimodal processor see the same
+        conversation, and vLLM loads the media of every content part it
+        accepts (``image_url``, ``video_url``, ``audio_url``, ``input_audio``),
+        subject to the engine's media limits and allowed media sources.
+
+        Input vLLM rejects is a client error rather than a 500. vLLM's typed
+        client errors go through ``vllm_client_error_to_http_error``, as on the
+        other vLLM request paths: the worker raises their status (422 for
+        media that can't be loaded), and the frontend maps it to its error
+        class and keeps the message private, since it can name the media URL.
+        Other validation failures (a text-only model given media, a malformed
+        message) raise ``InvalidArgument``, a 400 with vLLM's message.
+        """
+        from vllm.entrypoints.pooling.embed.protocol import (
+            EmbeddingBatchChatRequest,
+            EmbeddingChatRequest,
+        )
+        from vllm.exceptions import VLLMClientError
+        from vllm.renderers.chat_utils import load_chat_template
+        from vllm.utils.mistral import is_mistral_tokenizer
+
+        from .errors import vllm_client_error_to_http_error
+
+        messages = request["messages"]
+        batched = (
+            isinstance(messages, list)
+            and bool(messages)
+            and isinstance(messages[0], list)
+        )
+        request_cls = EmbeddingBatchChatRequest if batched else EmbeddingChatRequest
+        model_config = self.engine_client.model_config
+        renderer = self.engine_client.renderer
+        mm_config = model_config.multimodal_config
+        try:
+            chat_request = request_cls.model_validate(
+                {
+                    key: request[key]
+                    for key in _CHAT_EMBEDDING_REQUEST_FIELDS
+                    if request.get(key) is not None
+                }
+            )
+            # ``--custom-jinja-template``, or None for the model's own, as with
+            # ``vllm serve`` without ``--chat-template``. vLLM caches the load.
+            chat_params = chat_request.build_chat_params(
+                load_chat_template(self.config.custom_jinja_template), "auto"
+            ).with_defaults(
+                {"tokenize": is_mistral_tokenizer(renderer.tokenizer)},
+                default_media_io_kwargs=(
+                    mm_config.media_io_kwargs if mm_config else None
+                ),
+            )
+            conversations = (
+                list(chat_request.messages) if batched else [chat_request.messages]
+            )
+            _, engine_prompts = await renderer.render_chat_async(
+                conversations,
+                chat_params,
+                chat_request.build_tok_params(model_config),
+            )
+        except VLLMClientError as e:
+            raise vllm_client_error_to_http_error(e) from e
+        # The other errors vLLM's server answers with 400 (pydantic's
+        # ValidationError is a ValueError).
+        except (ValueError, TypeError) as e:
+            raise InvalidArgument(str(e)) from e
+        return list(engine_prompts)
+
+    async def _render_chat_embedding_input_until_stopped(
+        self, request: dict, context: Context
+    ) -> list[Any]:
+        """Render chat-style input unless the request stops first.
+
+        Rendering can download media before any engine request exists, so
+        ``_abort_monitor`` has nothing to abort yet. Instead the render is
+        raced against the request stopping and the worker shutting down; when
+        either wins, the render is canceled and nothing is encoded. Media
+        already handed to vLLM's decode thread pool finishes decoding in the
+        background. Raises Cancelled if the request stopped (an empty stream
+        would aggregate to a successful response with no embeddings), and
+        EngineShutdown on shutdown.
+        """
+        render_task = asyncio.create_task(self._render_chat_embedding_input(request))
+        stopped = context.async_killed_or_stopped()
+        waiters: list[Any] = [render_task, stopped]
+        shutdown_task: Optional[asyncio.Task] = None
+        if self.shutdown_event is not None:
+            shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+            waiters.append(shutdown_task)
+
+        done: set[Any] = set()
+        try:
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            # Also collects a render error nobody will read, so asyncio
+            # doesn't log it as never retrieved.
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+        if shutdown_task is not None and shutdown_task in done:
+            raise EngineShutdown("Engine was shut down during embedding.")
+        if stopped in done:
+            raise Cancelled("Embedding request stopped while rendering its input")
+        return render_task.result()
+
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -4863,15 +4661,22 @@ class EmbeddingWorkerHandler:
         ``add_special_tokens`` is also forwarded for raw text; when omitted,
         vLLM's embedding default is retained. Rust-preprocessed and
         caller-supplied token IDs are never modified.
+
+        Instead of ``input``, the request can carry vLLM's chat-style
+        ``messages`` (one conversation, or a list of conversations), which may
+        contain image, video and audio content parts; see
+        ``_render_chat_embedding_input``. Each conversation yields one vector.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
-        # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
-        # requests carry the same logical batch as 'token_ids'.
+        # Raw OpenAI requests carry 'input' (or chat-style 'messages').
+        # Rust-preprocessed embedding requests carry the same logical batch as
+        # 'token_ids'.
         token_ids_batch = request.get("token_ids")
         is_tokens_path = token_ids_batch is not None
+        messages = None if is_tokens_path else request.get("messages")
         input_field = token_ids_batch if is_tokens_path else request.get("input")
-        if input_field is None:
-            raise ValueError(
+        if input_field is None and messages is None:
+            raise InvalidArgument(
                 "Embedding request missing required 'input' or 'token_ids' field"
             )
 
@@ -4883,17 +4688,20 @@ class EmbeddingWorkerHandler:
         # Token-id forms must be passed to vLLM as TokensPrompt so the engine
         # skips its own tokenizer; the previous str()-coercion path turned
         # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
-        prompts: list[Any] = _classify_embedding_input(input_field)
+        # Chat-style input is rendered below, once its options are validated.
+        prompts: list[Any] = (
+            [] if messages is not None else _classify_embedding_input(input_field)
+        )
 
         dimensions = request.get("dimensions")
         if dimensions is not None and (
             not isinstance(dimensions, int) or isinstance(dimensions, bool)
         ):
-            raise TypeError(
+            raise InvalidArgument(
                 f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
             )
         if dimensions is not None and dimensions < 1:
-            raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+            raise InvalidArgument(f"dimensions must be >= 1, got {dimensions}")
 
         # Rust's preprocessed request represents an omitted client format as
         # ``None``. Treat both an absent key and an explicit internal null as
@@ -4902,7 +4710,7 @@ class EmbeddingWorkerHandler:
         if encoding_format is None:
             encoding_format = "float"
         if encoding_format not in ("float", "base64"):
-            raise ValueError(
+            raise InvalidArgument(
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
                 "expected 'float' or 'base64'"
             )
@@ -4913,12 +4721,12 @@ class EmbeddingWorkerHandler:
             if not isinstance(truncate_prompt_tokens, int) or isinstance(
                 truncate_prompt_tokens, bool
             ):
-                raise TypeError(
+                raise InvalidArgument(
                     "Invalid 'truncate_prompt_tokens' type "
                     f"{type(truncate_prompt_tokens).__name__}; expected int"
                 )
             if truncate_prompt_tokens < -1:
-                raise ValueError(
+                raise InvalidArgument(
                     "truncate_prompt_tokens must be >= -1, "
                     f"got {truncate_prompt_tokens}"
                 )
@@ -4927,7 +4735,7 @@ class EmbeddingWorkerHandler:
         add_special_tokens = request.get("add_special_tokens")
         if add_special_tokens is not None:
             if not isinstance(add_special_tokens, bool):
-                raise TypeError(
+                raise InvalidArgument(
                     "Invalid 'add_special_tokens' type "
                     f"{type(add_special_tokens).__name__}; expected bool"
                 )
@@ -4956,6 +4764,10 @@ class EmbeddingWorkerHandler:
         if dimensions is not None:
             pooling_kwargs["dimensions"] = dimensions
         pooling_params = PoolingParams(**pooling_kwargs)
+        if messages is not None:
+            prompts = await self._render_chat_embedding_input_until_stopped(
+                request, context
+            )
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
@@ -4966,11 +4778,14 @@ class EmbeddingWorkerHandler:
 
         async def _encode_one(idx: int, prompt: Any):
             request_id = f"{base_request_id}-{idx}"
-            encode_arg: Any = (
-                prompt
-                if isinstance(prompt, str)
-                else TokensPrompt(prompt_token_ids=prompt)
-            )
+            encode_arg: Any
+            if isinstance(prompt, str):
+                encode_arg = prompt
+            elif isinstance(prompt, list):
+                encode_arg = TokensPrompt(prompt_token_ids=prompt)
+            else:
+                # Already rendered by vLLM (chat-style input).
+                encode_arg = prompt
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -4981,7 +4796,11 @@ class EmbeddingWorkerHandler:
                 if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-                async for out in self.engine_client.encode(**encode_kwargs):
+                # Input vLLM rejects here (e.g. a conversation that renders
+                # to an empty prompt) is a client error, as with ``vllm serve``.
+                async for out in _translate_vllm_client_errors(
+                    self.engine_client.encode(**encode_kwargs), request
+                ):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(
@@ -5034,7 +4853,7 @@ class EmbeddingWorkerHandler:
                     else len(_pooling_output_to_list(embedding_row))
                 )
                 if actual_dim < dimensions:
-                    raise ValueError(
+                    raise InvalidArgument(
                         f"dimensions={dimensions} exceeds model embedding "
                         f"dimension {actual_dim}"
                     )
@@ -5078,6 +4897,17 @@ class EmbeddingWorkerHandler:
         }
 
 
+# Fields of a chat-style embedding request that vLLM's request model consumes
+# while rendering. ``dimensions`` and ``encoding_format`` are applied by the
+# handler itself.
+_CHAT_EMBEDDING_REQUEST_FIELDS = (
+    "model",
+    "messages",
+    "add_special_tokens",
+    "truncate_prompt_tokens",
+)
+
+
 def _is_token_id(x: Any) -> bool:
     """True iff ``x`` is an int that could be a vLLM token id.
 
@@ -5095,24 +4925,24 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
       - ``list[int]``  — wrapped in ``TokensPrompt`` by the caller.
 
     Rejects mixed lists (e.g. ``["foo", 42]`` or ``[[1, 2], "bar"]``) with
-    a clear ``TypeError`` rather than silently coercing.
+    a clear ``InvalidArgument`` rather than silently coercing.
     """
     if isinstance(input_field, str):
         return [input_field]
     if not isinstance(input_field, list):
-        raise TypeError(
+        raise InvalidArgument(
             f"Invalid 'input' type {type(input_field).__name__}; "
             "expected str, list[str], list[int], or list[list[int]]"
         )
     if not input_field:
-        raise ValueError("Embedding request 'input' must be non-empty")
+        raise InvalidArgument("Embedding request 'input' must be non-empty")
 
     first = input_field[0]
     if isinstance(first, str):
         texts: list[str] = []
         for item in input_field:
             if not isinstance(item, str):
-                raise TypeError(
+                raise InvalidArgument(
                     "'input' list mixes str and non-str entries; pass either "
                     "all strings or all token-id arrays"
                 )
@@ -5122,7 +4952,7 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
         token_ids: list[int] = []
         for item in input_field:
             if not _is_token_id(item):
-                raise TypeError(
+                raise InvalidArgument(
                     "'input' list mixes int and non-int entries; for tokenized "
                     "input pass all integers (single prompt) or list[list[int]]"
                 )
@@ -5133,21 +4963,21 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
         prompts: list[list[int]] = []
         for i, item in enumerate(input_field):
             if not isinstance(item, list):
-                raise TypeError(
+                raise InvalidArgument(
                     f"'input' list element at index {i} must be a list of "
                     "ints (token IDs); mixed batches are not supported"
                 )
             inner: list[int] = []
             for x in item:
                 if not _is_token_id(x):
-                    raise TypeError(
+                    raise InvalidArgument(
                         f"'input' list element at index {i} must be a list of "
                         "ints (token IDs); mixed batches are not supported"
                     )
                 inner.append(x)
             prompts.append(inner)
         return prompts
-    raise TypeError(
+    raise InvalidArgument(
         f"Unsupported 'input' element type {type(first).__name__}; "
         "expected str, int, or list[int]"
     )

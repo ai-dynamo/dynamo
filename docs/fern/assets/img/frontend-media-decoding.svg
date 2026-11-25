@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="907" height="408" viewBox="22 32 907 408" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Decode images in parallel in the Rust frontend</title>
+  <desc id="desc">Five images take about 50 ms each. Decoding them one after another on the worker takes about 250 ms. Decoding them in parallel in the frontend takes about 60 ms, saving about 200 ms.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-blue-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="32" width="907" height="408" fill="#FFFFFF"/>
+  <text x="36" y="66" font-size="22.4" font-weight="700" fill="#1A1A1A">Decode images in parallel in the Rust frontend</text>
+    <rect x="40.0" y="97.0" width="40" height="30" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="49.0" cy="105.0" r="3" fill="#76B900"/><polygon points="44.0,123.0 54.0,114.0 60.0,119.0 66.0,113.0 76.0,123.0" fill="#76B900"/>  <rect x="98.0" y="97.0" width="40" height="30" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="107.0" cy="105.0" r="3" fill="#76B900"/><polygon points="102.0,123.0 112.0,114.0 118.0,119.0 124.0,113.0 134.0,123.0" fill="#76B900"/>  <rect x="156.0" y="97.0" width="40" height="30" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="165.0" cy="105.0" r="3" fill="#76B900"/><polygon points="160.0,123.0 170.0,114.0 176.0,119.0 182.0,113.0 192.0,123.0" fill="#76B900"/>  <rect x="214.0" y="97.0" width="40" height="30" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="223.0" cy="105.0" r="3" fill="#76B900"/><polygon points="218.0,123.0 228.0,114.0 234.0,119.0 240.0,113.0 250.0,123.0" fill="#76B900"/>  <rect x="272.0" y="97.0" width="40" height="30" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="281.0" cy="105.0" r="3" fill="#76B900"/><polygon points="276.0,123.0 286.0,114.0 292.0,119.0 298.0,113.0 308.0,123.0" fill="#76B900"/>
+  <text x="350" y="118" font-size="17" font-weight="400" fill="#374151" text-anchor="start">5 images, about 50 ms each</text>
+  <text x="36" y="200" font-size="22" font-weight="700" fill="#1A1A1A" text-anchor="start">Sequential</text>
+  <text x="36" y="222" font-size="15" font-weight="400" fill="#5A6572" text-anchor="start">on the worker</text>
+  <rect x="250" y="174" width="110" height="54" fill="#F7C873" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="305" y="207" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">img 1</text>
+  <rect x="360" y="174" width="110" height="54" fill="#FDE7C2" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="415" y="207" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">img 2</text>
+  <rect x="470" y="174" width="110" height="54" fill="#F7C873" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="525" y="207" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">img 3</text>
+  <rect x="580" y="174" width="110" height="54" fill="#FDE7C2" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="635" y="207" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">img 4</text>
+  <rect x="690" y="174" width="110" height="54" fill="#F7C873" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="745" y="207" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">img 5</text>
+  <text x="820" y="212" font-size="28" font-weight="700" fill="#92400E" text-anchor="start">250 ms</text>
+  <text x="36" y="330" font-size="22" font-weight="700" fill="#1A1A1A" text-anchor="start">Parallel</text>
+  <text x="36" y="352" font-size="15" font-weight="400" fill="#5A6572" text-anchor="start">in the frontend</text>
+  <rect x="382" y="262" width="418" height="164" fill="#F4F9E8"/>
+  <rect x="250" y="262" width="110" height="26" rx="3" fill="#76B900"/>
+  <text x="305" y="281" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 1</text>
+  <rect x="256" y="294" width="110" height="26" rx="3" fill="#76B900"/>
+  <text x="311" y="313" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 2</text>
+  <rect x="262" y="326" width="110" height="26" rx="3" fill="#76B900"/>
+  <text x="317" y="345" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 3</text>
+  <rect x="268" y="358" width="110" height="26" rx="3" fill="#76B900"/>
+  <text x="323" y="377" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 4</text>
+  <rect x="274" y="390" width="110" height="26" rx="3" fill="#76B900"/>
+  <text x="329" y="409" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 5</text>
+  <text x="404" y="310" font-size="26" font-weight="700" fill="#3F6600" text-anchor="start">about 60 ms</text>
+  <text x="590" y="402" font-size="20" font-weight="700" fill="#3F6600" text-anchor="middle">about 200 ms saved</text>
+</svg>

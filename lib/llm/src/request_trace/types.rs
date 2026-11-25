@@ -245,6 +245,10 @@ pub struct ToolCallMetadata {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Set only when the endpoint returns the tool's namespace separately from
+    /// `name`, as `/v1/responses` does for namespaced tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

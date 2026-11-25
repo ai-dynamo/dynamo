@@ -446,6 +446,51 @@ async def test_submit_ceiling_rejects_without_mutating(use_lock):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bundled", [False, True], ids=["separate", "bundled"])
+async def test_zero_cost_scale_up_does_not_allow_scale_down_below_floor(bundled):
+    cm = FakeCapacityManager()
+    cm.pools["default/a"] = {"prefill": [1, 0], "decode": [2, 4]}
+    orch = _orch(cm, max_gpus=8, min_gpus=8)
+
+    # The GPU reduction alone must be rejected without changing either pool.
+    standalone = await _submit(orch, "default/a", _targets(decode=1))
+    assert standalone.status == ScaleStatus.REJECTED
+    assert cm.current_replicas("default/a") == {"prefill": 1, "decode": 2}
+
+    if bundled:
+        targets = _targets(prefill=2, decode=1)
+    else:
+        free_update = await _submit(orch, "default/a", _targets(prefill=2))
+        assert free_update.status == ScaleStatus.SUCCESS
+        assert cm.current_replicas("default/a") == {"prefill": 2, "decode": 2}
+        targets = _targets(decode=1)
+
+    result = await _submit(orch, "default/a", targets)
+
+    assert result.status == ScaleStatus.REJECTED
+    assert "below floor" in result.message.lower()
+    assert cm.current_replicas("default/a") == {
+        "prefill": 1 if bundled else 2,
+        "decode": 2,
+    }
+    assert orch.total_gpus(cm.observe()) == 8
+
+
+@pytest.mark.asyncio
+async def test_nonzero_internal_gpu_transfer_retains_floor_tolerance():
+    cm = FakeCapacityManager()
+    cm.pools["default/a"] = {"prefill": [1, 1], "decode": [2, 4]}
+    orch = _orch(cm, max_gpus=9, min_gpus=9)
+
+    # +1 GPU and -4 GPUs form a real transfer within the 4-GPU floor tolerance.
+    result = await _submit(orch, "default/a", _targets(prefill=2, decode=1))
+
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.current_replicas("default/a") == {"prefill": 2, "decode": 1}
+    assert orch.total_gpus(cm.observe()) == 6
+
+
+@pytest.mark.asyncio
 async def test_submit_scale_down_always_allowed_under_ceiling():
     cm = FakeCapacityManager()
     cm.add("default/a", prefill=3, decode=3, gpu=1)
