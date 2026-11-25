@@ -1909,6 +1909,7 @@ where
                     TransportType::Direct(endpoint) => {
                         (endpoint.clone(), "transport.direct.request")
                     }
+                    TransportType::Velo(endpoint) => (endpoint.clone(), "transport.velo.request"),
                 };
                 (addr, kind, instance)
             })

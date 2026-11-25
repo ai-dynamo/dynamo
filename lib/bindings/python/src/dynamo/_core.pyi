@@ -299,7 +299,7 @@ class PyAsyncRequestStream:
 class TransportType:
     """
     A read-only view of an instance's transport, wrapping the runtime
-    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp" / "direct")
+    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp" / "direct" / "velo")
     and ``address`` is its (transport-specific) address. The address format is
     not a stable parse target.
     """

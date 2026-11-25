@@ -908,6 +908,37 @@ mod tests {
     }
 
     #[test]
+    fn unknown_transport_variant_is_skipped() {
+        let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
+        let mut known_instances = HashMap::new();
+
+        let future_plane = kv::KeyValue::new(
+            kv::Key::new(format!("ns/component/endpoint/{:x}", 1)),
+            bytes::Bytes::from_static(
+                br#"{"component":"component","endpoint":"endpoint","namespace":"ns","instance_id":1,"transport":{"future_plane":"x"}}"#,
+            ),
+        );
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Put(future_plane),
+            &prefix,
+            INSTANCES_BUCKET,
+            &mut known_instances,
+            true,
+        );
+        assert!(events.is_empty());
+        assert!(known_instances.is_empty());
+
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Put(endpoint_kv(1)),
+            &prefix,
+            INSTANCES_BUCKET,
+            &mut known_instances,
+            true,
+        );
+        assert_eq!(events, vec![DiscoveryEvent::Added(endpoint_instance(1))]);
+    }
+
+    #[test]
     fn resync_changed_model_taints_emits_scoped_event() {
         let prefix = format!("{}/{}/{}/{}", MODELS_BUCKET, "ns", "worker", "generate");
         let old = model_spec("first").into_instance(7);

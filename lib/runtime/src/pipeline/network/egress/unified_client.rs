@@ -7,6 +7,7 @@
 //! in the request plane. All transport implementations (TCP, NATS)
 //! implement this trait to provide a consistent interface for the egress router.
 
+use crate::error::{DynamoError, ErrorType};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -14,6 +15,20 @@ use std::collections::HashMap;
 
 /// Type alias for request headers
 pub type Headers = HashMap<String, String>;
+
+/// The typed failure for a request-plane address that belongs to another
+/// request plane. A process serves one request plane, so a local `local`
+/// client cannot send to a `velo` request-plane address.
+pub(crate) fn mixed_request_plane_error(local: &str, address: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message(format!(
+                "request plane '{local}' received velo request-plane address '{address}': mixed request planes are unsupported"
+            ))
+            .build()
+    )
+}
 
 /// Unified interface for request plane clients
 ///
@@ -197,5 +212,23 @@ mod tests {
             ..Default::default()
         };
         assert!(stats2.is_available());
+    }
+
+    #[test]
+    fn mixed_request_plane_error_is_worker_unavailable() {
+        let err = mixed_request_plane_error("tcp", "velo://x/AA/1/ns/c/e");
+        assert!(crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::WorkerUnavailable],
+            &[]
+        ));
+
+        let message = format!("{err:#}");
+        assert!(message.contains("tcp"), "{message}");
+        assert!(message.contains("velo"), "{message}");
+        assert!(
+            message.contains("mixed request planes are unsupported"),
+            "{message}"
+        );
     }
 }

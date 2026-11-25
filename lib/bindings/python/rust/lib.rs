@@ -1201,7 +1201,7 @@ struct Client {
 }
 
 /// A read-only view of an instance's transport, wrapping the runtime
-/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp" / "direct") and its
+/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp" / "direct" / "velo") and its
 /// `address`; the address format is transport-specific and not a stable parse
 /// target.
 #[pyclass(eq, hash, frozen)]
@@ -1218,6 +1218,7 @@ impl TransportType {
             rs::component::TransportType::Nats(_) => "nats_tcp",
             rs::component::TransportType::Tcp(_) => "tcp",
             rs::component::TransportType::Direct(_) => "direct",
+            rs::component::TransportType::Velo(_) => "velo",
         }
     }
 

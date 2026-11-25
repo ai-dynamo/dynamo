@@ -52,6 +52,9 @@ pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 /// Both ends must use this constant.
 pub(crate) const ACK_UNAVAILABLE_PREFIX: &str = "Server unavailable:";
 
+/// Scheme prefix of a Velo request-plane address published to discovery.
+pub(crate) const VELO_SCHEME: &str = "velo://";
+
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
 
