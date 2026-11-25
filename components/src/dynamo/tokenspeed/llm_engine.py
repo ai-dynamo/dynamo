@@ -45,7 +45,7 @@ from dynamo.common.backend.metrics import (
     ensure_prometheus_multiproc_dir,
     register_engine_registry,
 )
-from dynamo.common.backend.publisher import KvEventSource, ZmqSource
+from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils import nvtx_utils as _nvtx
@@ -83,6 +83,9 @@ _CLIENT_ERROR_STATUS = 400
 _ABORT_GRACE_S = 3.0
 # Per-token NVTX ranges are guarded on this so they cost one branch when off.
 _NVTX = _nvtx.ENABLED
+# How often the router's per-rank load is refreshed from the engines' reports,
+# which they send with each output batch and at least once a second.
+_LOAD_PERIOD_S = 0.1
 # gc.set_threshold() once the engine is up: see _tune_gc().
 _GC_THRESHOLDS = (50_000, 50, 100)
 
@@ -111,6 +114,9 @@ class TokenspeedLLMEngine(LLMEngine):
         self._kv_event_dir: tempfile.TemporaryDirectory | None = None
         # PROMETHEUS_MULTIPROC_DIR the engine ranks write tokenspeed: metrics to.
         self._metrics_dir: tempfile.TemporaryDirectory | None = None
+        self._snapshot_publisher: Any = None
+        self._rank_kv_tokens: dict[int, int] = {}
+        self._load_reporter: asyncio.Task | None = None
         self._model_max_len: int | None = None
         # The connected tokenspeed_engine.Frontend.
         self.frontend: Any = None
@@ -217,6 +223,11 @@ class TokenspeedLLMEngine(LLMEngine):
         total_kv_blocks = (
             min(cache_tokens) // block_size if cache_tokens and block_size else None
         )
+        self._rank_kv_tokens = {
+            int(engine["data_parallel_rank"]): int(engine["kv_cache_size_tokens"])
+            for engine in engines
+            if engine.get("kv_cache_size_tokens") is not None
+        }
         chunked_prefill_size = _optional_int(
             getattr(self.server_args, "chunked_prefill_size", None)
         )
@@ -290,6 +301,44 @@ class TokenspeedLLMEngine(LLMEngine):
             registry, path=os.environ["PROMETHEUS_MULTIPROC_DIR"]
         )
         register_engine_registry(metrics, registry, prefix_filters=["tokenspeed:"])
+
+    def component_metrics_dp_ranks(self) -> list[int]:
+        # TokenSpeed builds without per-rank load reports opt out.
+        if self.frontend is None or not hasattr(self.frontend, "fresh_snapshots"):
+            return []
+        return list(range(self._dp_size))
+
+    def attach_snapshot_publisher(self, publisher: Any) -> None:
+        self._snapshot_publisher = publisher
+        # The framework may call this off the event loop's thread.
+        self._loop.call_soon_threadsafe(self._start_load_reporter)
+
+    def _start_load_reporter(self) -> None:
+        if self._load_reporter is None and not self._stopping:
+            self._load_reporter = asyncio.create_task(self._report_load())
+
+    async def _report_load(self) -> None:
+        """Publish each rank's KV load to the router and the
+        ``dynamo_component_*`` gauges."""
+        block_size = self.kv_block_size
+        while True:
+            await asyncio.sleep(_LOAD_PERIOD_S)
+            publisher, frontend = self._snapshot_publisher, self.frontend
+            if publisher is None or frontend is None:
+                continue
+            try:
+                # Empty while any rank's report is stale.
+                for load in frontend.fresh_snapshots():
+                    rank = int(load.dp_rank)
+                    publisher.publish(
+                        rank,
+                        _component_snapshot(
+                            load, self._rank_kv_tokens.get(rank), block_size
+                        ),
+                    )
+            except Exception:  # noqa: BLE001 - load reports never fail serving
+                logger.warning("TokenSpeed load reporting stopped", exc_info=True)
+                return
 
     async def is_quiescent(self) -> bool | None:
         """A prefill engine finishes a request only once its KV reached the
@@ -573,10 +622,15 @@ class TokenspeedLLMEngine(LLMEngine):
     async def cleanup(self) -> None:
         self._stopping = True
         try:
-            for task in (self._dispatcher, self._monitor, *self._background):
+            for task in (
+                self._dispatcher,
+                self._monitor,
+                self._load_reporter,
+                *self._background,
+            ):
                 if task is not None:
                     task.cancel()
-            self._dispatcher = self._monitor = None
+            self._dispatcher = self._monitor = self._load_reporter = None
             self._engine_lost("TokenSpeed engine shut down")
             process, self._process = self._process, None
             if process is not None:
@@ -900,6 +954,22 @@ def _tcp_address(host: str, port: int) -> str:
     except ValueError:
         pass  # A hostname.
     return f"tcp://{host}:{port}"
+
+
+def _component_snapshot(
+    load: Any, kv_tokens: int | None, block_size: int | None
+) -> ComponentSnapshot:
+    """A rank's load report in the block unit the worker registered: pages
+    held by running requests, scaled from TokenSpeed pages to KV blocks."""
+    pages = int(load.max_total_pages)
+    usage = int(load.num_active_pages) / pages if pages > 0 else 0.0
+    blocks = kv_tokens // block_size if kv_tokens and block_size else pages
+    return ComponentSnapshot(
+        kv_used_blocks=round(usage * blocks),
+        kv_total_blocks=blocks,
+        gpu_cache_usage=usage,
+        dp_rank=int(load.dp_rank),
+    )
 
 
 def _free_port_run(count: int) -> int:

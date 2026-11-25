@@ -117,6 +117,9 @@ class FakeFrontend:
     def in_flight(self):
         return [len(self.unfinished)]
 
+    def fresh_snapshots(self):
+        return list(self.native.loads)
+
     def close(self):
         self.outputs.put_nowait(self._CLOSED)
 
@@ -172,6 +175,7 @@ class FakeNative:
         self.aborted = []
         self.abort_answers = True
         self.submit_gate = None
+        self.loads = []
         self.frontend = None
         self._registered = threading.Event()
         self._registered.set()
@@ -974,6 +978,45 @@ async def test_engine_metrics_off_registers_nothing(native):
         metrics = StubMetrics()
         await engine.register_prometheus(metrics)
         assert metrics.callbacks == []
+    finally:
+        await engine.cleanup()
+
+
+async def test_rank_load_reaches_router_in_registered_blocks(native, monkeypatch):
+    monkeypatch.setattr(llm_engine, "_LOAD_PERIOD_S", 0)
+    native.engines = [
+        dict(native.engines[0], index=rank, data_parallel_rank=rank)
+        for rank in range(2)
+    ]
+    # 8192 tokens in 64-token blocks: 128 blocks, whatever TokenSpeed's page.
+    native.loads = [
+        SimpleNamespace(dp_rank=rank, num_active_pages=active, max_total_pages=512)
+        for rank, active in ((0, 128), (1, 0))
+    ]
+    engine = make_engine(
+        kv_block_size=64,
+        mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=1),
+    )
+    published = []
+    publisher = SimpleNamespace(publish=lambda rank, snap: published.append(snap))
+    try:
+        await engine.start(worker_id=1)
+        assert engine.component_metrics_dp_ranks() == [0, 1]
+        engine.attach_snapshot_publisher(publisher)
+
+        async def two_published():
+            while len(published) < 2:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(two_published(), timeout=10)
+        rank0, rank1 = published[:2]
+        assert (rank0.dp_rank, rank0.kv_used_blocks, rank0.kv_total_blocks) == (
+            0,
+            32,
+            128,
+        )
+        assert rank0.gpu_cache_usage == 0.25
+        assert (rank1.dp_rank, rank1.kv_used_blocks) == (1, 0)
     finally:
         await engine.cleanup()
 
