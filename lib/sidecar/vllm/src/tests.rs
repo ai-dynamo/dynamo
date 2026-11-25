@@ -30,7 +30,8 @@ use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::engine::{MooncakeSetup, VllmSidecarEngine};
+use crate::connectors::{MooncakeBootstrap, MooncakeConnectorProtocol, ResolvedConnector};
+use crate::engine::VllmSidecarEngine;
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 use crate::test_fixtures::*;
@@ -1842,10 +1843,17 @@ async fn mooncake_prefill_publishes_sidecar_allocated_handoff() {
         1,
         model_info(),
     )
-    .with_mooncake_setup(MooncakeSetup {
-        host: "127.0.0.1".to_string(),
-        port: bootstrap_port,
-    });
+    .with_resolved_connector(
+        Arc::new(MooncakeConnectorProtocol::new(
+            "127.0.0.1".to_string(),
+            bootstrap_port,
+        )),
+        ResolvedConnector::Mooncake(MooncakeBootstrap::new(
+            format!("http://127.0.0.1:{bootstrap_port}"),
+            "prefill-engine-0".to_string(),
+        )),
+    )
+    .expect("resolved connector");
     prefill.start(0).await.expect("start");
 
     let outputs = collect(&prefill, request()).await;
@@ -1860,8 +1868,8 @@ async fn mooncake_prefill_publishes_sidecar_allocated_handoff() {
         "transfer_id must be a UUID: {transfer_id}"
     );
     assert_eq!(
-        handoff,
-        json!({
+        handoff.as_ref(),
+        &json!({
             "do_remote_decode": false,
             "do_remote_prefill": true,
             "transfer_id": transfer_id,
@@ -1907,10 +1915,10 @@ async fn mooncake_prefill_startup_requires_the_bootstrap_server() {
         DisaggregationMode::Prefill,
         transport,
     )
-    .with_mooncake_setup(MooncakeSetup {
-        host: "127.0.0.1".to_string(),
-        port: unused_port,
-    });
+    .with_connector(Arc::new(MooncakeConnectorProtocol::new(
+        "127.0.0.1".to_string(),
+        unused_port,
+    )));
     let error = prefill
         .start(0)
         .await

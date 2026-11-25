@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::connectors::{MooncakeBootstrap, MooncakeConnectorProtocol, ResolvedConnector};
 use crate::test_fixtures::*;
 use dynamo_backend_common::{FinishReason, StopReason};
 use serde_json::json;
@@ -755,11 +756,15 @@ fn prompt_metadata_preserves_opt_in_positions_and_values() {
 
 #[test]
 fn mooncake_prefill_terminal_publishes_sidecar_allocated_handoff() {
-    let bootstrap = MooncakeBootstrap {
-        remote_bootstrap_addr: "http://10.0.0.1:8998".to_string(),
-        engine_id: "prefill-engine-0".to_string(),
+    let connector = MooncakeConnectorProtocol::new("10.0.0.1".to_string(), 8998);
+    let bootstrap = MooncakeBootstrap::new(
+        "http://10.0.0.1:8998".to_string(),
+        "prefill-engine-0".to_string(),
+    );
+    let handoff = match connector.new_request(&ResolvedConnector::Mooncake(bootstrap)) {
+        RequestHandoff::Mooncake(handoff) => handoff,
+        RequestHandoff::None => panic!("Mooncake must allocate a handoff"),
     };
-    let handoff = bootstrap.new_handoff();
     let expected = json!({
         "do_remote_decode": false,
         "do_remote_prefill": true,
@@ -769,19 +774,25 @@ fn mooncake_prefill_terminal_publishes_sidecar_allocated_handoff() {
     });
 
     let terminal = ResponseState::new(&minimal_request(), DisaggregationMode::Prefill)
-        .with_mooncake(handoff.clone())
+        .with_handoff(
+            Arc::new(connector.clone()),
+            RequestHandoff::Mooncake(handoff.clone()),
+        )
         .convert(sequence_response(true, false, None))
         .expect("convert terminal")
         .expect("terminal output");
     assert_eq!(
         terminal.disaggregated_params,
-        Some(expected.clone()),
+        Some(Box::new(expected.clone())),
         "the sidecar must publish the handoff itself"
     );
 
     let engine_params = json!({"remote_port": 5600});
     let terminal = ResponseState::new(&minimal_request(), DisaggregationMode::Prefill)
-        .with_mooncake(handoff.clone())
+        .with_handoff(
+            Arc::new(connector.clone()),
+            RequestHandoff::Mooncake(handoff.clone()),
+        )
         .convert(sequence_response(
             true,
             false,
@@ -789,7 +800,7 @@ fn mooncake_prefill_terminal_publishes_sidecar_allocated_handoff() {
         ))
         .unwrap()
         .unwrap();
-    assert_eq!(terminal.disaggregated_params, Some(expected));
+    assert_eq!(terminal.disaggregated_params, Some(Box::new(expected)));
 
     // An aborted prefill publishes nothing.
     let mut aborted = sequence_response(true, false, None);
@@ -802,7 +813,7 @@ fn mooncake_prefill_terminal_publishes_sidecar_allocated_handoff() {
         .unwrap()
         .finish_reason = pb::finish_info::FinishReason::Aborted as i32;
     let terminal = ResponseState::new(&minimal_request(), DisaggregationMode::Prefill)
-        .with_mooncake(handoff)
+        .with_handoff(Arc::new(connector), RequestHandoff::Mooncake(handoff))
         .convert(aborted)
         .unwrap()
         .unwrap();

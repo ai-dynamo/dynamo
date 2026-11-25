@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::connectors::{MooncakeBootstrap, MooncakeConnectorProtocol, ResolvedConnector};
 use crate::test_fixtures::*;
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{BackendError, ErrorType, SamplingOptions, StopConditions};
@@ -1385,19 +1386,26 @@ fn frontend_router_metadata_rejects_non_array_fields() {
 
 #[test]
 fn mooncake_prefill_allocates_and_injects_transfer_id() {
-    let bootstrap = MooncakeBootstrap {
-        remote_bootstrap_addr: "http://10.0.0.1:8998".to_string(),
-        engine_id: "prefill-engine-0".to_string(),
+    let connector = MooncakeConnectorProtocol::new("10.0.0.1".to_string(), 8998);
+    let bootstrap = MooncakeBootstrap::new(
+        "http://10.0.0.1:8998".to_string(),
+        "prefill-engine-0".to_string(),
+    );
+    let handoff = match connector.new_request(&ResolvedConnector::Mooncake(bootstrap.clone())) {
+        RequestHandoff::Mooncake(handoff) => handoff,
+        RequestHandoff::None => panic!("Mooncake must allocate a handoff"),
     };
-    let handoff = bootstrap.new_handoff();
     assert!(
         uuid::Uuid::parse_str(&handoff.transfer_id).is_ok(),
         "transfer_id must be a UUID: {}",
         handoff.transfer_id
     );
+    let fresh = match connector.new_request(&ResolvedConnector::Mooncake(bootstrap)) {
+        RequestHandoff::Mooncake(handoff) => handoff,
+        RequestHandoff::None => panic!("Mooncake must allocate a handoff"),
+    };
     assert_ne!(
-        bootstrap.new_handoff().transfer_id,
-        handoff.transfer_id,
+        fresh.transfer_id, handoff.transfer_id,
         "each request allocates a fresh transfer_id"
     );
 
@@ -1405,7 +1413,8 @@ fn mooncake_prefill_allocates_and_injects_transfer_id() {
         request(),
         "mooncake-prefill".into(),
         DisaggregationMode::Prefill,
-        Some(&handoff),
+        &connector,
+        &RequestHandoff::Mooncake(handoff.clone()),
     )
     .unwrap();
     let kv = struct_to_json_v14(
@@ -1428,7 +1437,8 @@ fn mooncake_prefill_allocates_and_injects_transfer_id() {
         request(),
         "nixl-prefill".into(),
         DisaggregationMode::Prefill,
-        None,
+        &NixlConnectorProtocol,
+        &RequestHandoff::None,
     )
     .unwrap();
     let kv = struct_to_json_v14(
