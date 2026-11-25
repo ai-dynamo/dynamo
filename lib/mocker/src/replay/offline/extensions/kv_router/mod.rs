@@ -4664,7 +4664,6 @@ policy_classes:
         assert!(pending.kv_transfer_candidates.is_none());
     }
 
-    /// `event` as residency of its rank's cache owner (KVCR-owned memory or disk).
     fn cache_owned(event: RouterEvent) -> RouterEvent {
         let owner = replay_cache_owner(WorkerWithDpRank::new(event.worker_id, event.event.dp_rank));
         RouterEvent::with_cache_owner(event.worker_id, event.event, event.storage_tier, owner)

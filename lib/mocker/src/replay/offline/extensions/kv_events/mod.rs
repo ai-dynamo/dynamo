@@ -328,7 +328,6 @@ mod tests {
         }
     }
 
-    /// `event` as the rank's KVCR store reports it.
     fn cache_owned(event: KvEvent) -> KvEvent {
         KvEvent {
             domain: KvEventDomain::CacheOwner,
