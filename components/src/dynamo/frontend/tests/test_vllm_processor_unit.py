@@ -7162,16 +7162,17 @@ class TestOneTokenReasoningParserStreaming:
         post = self._post(tokenizer)
         ids = [2000, 2001, 198, 524, 9399, 29]
         # A matched stop string is trimmed from the worker's text.
-        assert post._token_texts('{"city":"Paris"}\n</', ids) == [
-            '{"city":',
-            '"Paris"}',
-            "\n",
-            "</",
+        assert post._token_texts('{"city":"Paris"}\n</', ids) == (
             "",
-            "",
-        ]
+            ['{"city":', '"Paris"}', "\n", "</", "", ""],
+        )
+        # Held-back text of earlier tokens leads, and a stop string is trimmed.
+        assert post._token_texts('held{"city":"Pa', ids[:2]) == (
+            "held",
+            ['{"city":', '"Pa'],
+        )
         # Text the pieces cannot match stays whole, on the last token.
-        assert post._token_texts("other", ids[:2]) == ["", "other"]
+        assert post._token_texts("other", ids[:2]) == ("", ["", "other"])
 
     @pytest.mark.parametrize("chunk_size", [2, 3, 8])
     def test_deepseek_r1_multi_token_chunks(self, tokenizer, chunk_size):
@@ -7220,3 +7221,61 @@ class TestOneTokenReasoningParserStreaming:
 
         assert run(1) == ("Câu trả lời 😀", "Suy nghĩ 🤔 về câu hỏi.\nBước 2 ✅")
         assert run(chunk_size) == run(1)
+
+    def _deepseek_r1_stream(self, tokenizer, chunks):
+        """Stream (text, token_ids) chunks through the real deepseek_r1 parser."""
+        from vllm.reasoning import ReasoningParserManager
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=SimpleNamespace(
+                include_reasoning=True, tool_choice="none", model_fields=frozenset()
+            ),
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser(
+                "deepseek_r1"
+            ),
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+        content, reasoning = "", ""
+        for n, (text, ids) in enumerate(chunks):
+            choice = post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=text,
+                    token_ids=ids,
+                    finish_reason="stop" if n == len(chunks) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            delta = (choice or {}).get("delta") or {}
+            content += delta.get("content") or ""
+            reasoning += delta.get("reasoning_content") or ""
+        return content, reasoning
+
+    def test_held_back_text_before_reasoning_end_stays_reasoning(self, tokenizer):
+        """With stop=["STOP!!"] the worker holds back "ecret" of "secret", which
+        then leads the chunk that ends reasoning, and trims that chunk's text."""
+
+        def encode(text):
+            return tokenizer.encode(text, add_special_tokens=False)
+
+        chunks = [
+            ("<think>s", encode("<think>secret")),
+            ("ecret</think>A", encode("</think>Answer")),
+        ]
+        assert self._deepseek_r1_stream(tokenizer, chunks) == ("A", "secret")
+
+    def test_literal_replacement_character_before_reasoning_end(self, tokenizer):
+        text = "<think>x�</think>Answer"
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        single = self._deepseek_r1_stream(
+            tokenizer,
+            [(tokenizer.decode(ids[: i + 1])[len(tokenizer.decode(ids[:i])) :], [t])
+             for i, t in enumerate(ids)],
+        )
+        assert single == ("Answer", "x�")
+        assert self._deepseek_r1_stream(tokenizer, [(text, ids)]) == single
