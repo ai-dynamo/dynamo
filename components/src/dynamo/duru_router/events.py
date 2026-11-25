@@ -26,6 +26,7 @@ class CompactFeed:
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.error = None
+        self._closed = False
         self.sequence = 0
         self.journal = sink
         self.emit("header", schema=1)
@@ -36,6 +37,11 @@ class CompactFeed:
 
     def emit(self, event, **fields):
         with self.lock:
+            if self._closed:
+                # A clock tick can still be waiting for this lock after join times out.
+                if event == "u_clock":
+                    return
+                raise RuntimeError("Compact live feed is closed")
             if self.error:
                 raise RuntimeError("Compact live feed failed") from self.error
             self.sequence += 1
@@ -65,7 +71,11 @@ class CompactFeed:
     def close(self):
         self.stop.set()
         self.thread.join(timeout=2)
-        try:
-            self.emit("footer")
-        finally:
-            self.journal.close()
+        with self.lock:
+            if self._closed:
+                return
+            try:
+                self.emit("footer")
+            finally:
+                self._closed = True
+                self.journal.close()
