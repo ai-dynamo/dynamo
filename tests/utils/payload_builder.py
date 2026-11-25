@@ -296,6 +296,7 @@ def completion_payload_default(
     max_tokens: int = 1000,
     temperature: float = 0.0,
     stream: bool = False,
+    timeout: int = 60,
 ) -> CompletionPayload:
     return CompletionPayload(
         body={
@@ -305,6 +306,7 @@ def completion_payload_default(
             "stream": stream,
         },
         repeat_count=repeat_count,
+        timeout=timeout,
         expected_log=expected_log or [],
         # Accept any of these keywords in the response (case-insensitive)
         expected_response=expected_response
