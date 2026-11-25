@@ -129,6 +129,16 @@ async def close_configured_artifact_runtime() -> None:
     await close()
 
 
+async def warm_configured_nixl_artifact_server() -> None:
+    # Start the NIXL agent (about a second) before the first nixl_read request.
+    from dynamo.artifacts.nixl import configured_nixl_artifact_server
+
+    server = configured_nixl_artifact_server()
+    if server is not None:
+        await server.warm()
+        logger.info("NIXL artifact delivery ready")
+
+
 async def initialize_configured_artifact_runtime() -> None:
     from dynamo.artifacts.runtime import (
         initialize_configured_artifact_runtime as initialize,
@@ -333,6 +343,8 @@ async def worker(argv: list[str] | None = None) -> None:
 
     if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
         await initialize_configured_artifact_runtime()
+    if os.environ.get("DYNAMO_ARTIFACT_NIXL_BYTES"):
+        await warm_configured_nixl_artifact_server()
 
     shutdown_event = asyncio.Event()
     state_agent_lifecycle = StateAgentLifecycle()

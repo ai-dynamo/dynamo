@@ -17,6 +17,7 @@ torch = pytest.importorskip("torch")
 
 from dynamo.artifacts.nixl import (  # noqa: E402 -- optional dependency guard
     NixlArtifactCapacityError,
+    NixlArtifactReader,
     NixlArtifactServer,
     read_nixl_artifact,
 )
@@ -25,11 +26,12 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
 
 class _FakeMetadata:
-    def __init__(self, token):
+    def __init__(self, token, nixl_metadata="worker-a"):
         self.token = token
+        self.nixl_metadata = nixl_metadata
 
     def model_dump(self, mode=None):
-        return {"token": self.token}
+        return {"token": self.token, "nixl_metadata": self.nixl_metadata}
 
 
 class _FakeReadable:
@@ -71,6 +73,9 @@ class _FakeNixl:
 
     def __init__(self):
         self.readables = {}
+        self.connections = 0
+        self.remotes_added = []
+        self.remotes_removed = []
         fake = self
 
         class Descriptor:
@@ -78,22 +83,41 @@ class _FakeNixl:
                 self.tensor = tensor
 
         class Connector:
+            def __init__(self):
+                self.connection = None
+
+            async def _create_connection(self):
+                if self.connection is None:
+                    fake.connections += 1
+                    self.connection = object()
+                return self.connection
+
             async def create_readable(self, descriptor):
                 readable = _FakeReadable(fake, descriptor)
                 fake.readables[readable.token] = readable
                 return readable
 
             async def begin_read(self, metadata, descriptor):
-                return _FakeRead(fake.readables[metadata["token"]], descriptor.tensor)
+                return _FakeRead(fake.readables[metadata.token], descriptor.tensor)
 
         class RdmaMetadata:
             @staticmethod
             def model_validate(value):
-                return value
+                return _FakeMetadata(value["token"], value.get("nixl_metadata"))
+
+        class Remote:
+            def __init__(self, connection, nixl_metadata):
+                assert connection is not None
+                self.name = nixl_metadata
+                fake.remotes_added.append(nixl_metadata)
+
+            def __exit__(self, *_):
+                fake.remotes_removed.append(self.name)
 
         self.Descriptor = Descriptor
         self.Connector = Connector
         self.RdmaMetadata = RdmaMetadata
+        self.Remote = Remote
 
 
 DEST = {"kind": "nixl_read", "lease_seconds": 30}
@@ -120,7 +144,9 @@ async def test_read_returns_exact_bytes_and_releases_the_buffer():
     assert server.held_bytes == len(data)
     json.dumps(receipt)
 
-    tensor = await read_nixl_artifact(receipt, nixl_connect=fake)
+    tensor = await read_nixl_artifact(
+        receipt, reader=NixlArtifactReader(nixl_connect=fake)
+    )
     assert tensor.numpy().tobytes() == data
     for _ in range(10):
         await asyncio.sleep(0)
@@ -214,9 +240,58 @@ async def test_reader_rejects_other_receipts_and_digest_mismatch():
         {key: value for key, value in receipt.items() if key != "rdma_metadata"},
     ):
         with pytest.raises(ValueError):
-            await read_nixl_artifact(bad, nixl_connect=fake)
+            await read_nixl_artifact(bad, reader=NixlArtifactReader(nixl_connect=fake))
     with pytest.raises(ValueError, match="digest"):
-        await read_nixl_artifact({**receipt, "sha256": "0" * 64}, nixl_connect=fake)
+        await read_nixl_artifact(
+            {**receipt, "sha256": "0" * 64},
+            reader=NixlArtifactReader(nixl_connect=fake),
+        )
+
+
+@pytest.mark.asyncio
+async def test_reader_keeps_each_worker_connected_across_reads():
+    fake = _FakeNixl()
+    server = _server(fake)
+    reader = NixlArtifactReader(nixl_connect=fake)
+    for _ in range(3):
+        receipt = await server.submit(b"r" * 16, ["hidden_states"], DEST)
+        await reader.read(receipt)
+    assert fake.remotes_added == ["worker-a"]
+    assert fake.remotes_removed == []
+    assert reader.connected_remotes == 1
+    reader.close()
+    assert fake.remotes_removed == ["worker-a"]
+    assert reader.connected_remotes == 0
+
+
+@pytest.mark.asyncio
+async def test_reader_evicts_the_least_recently_used_worker():
+    fake = _FakeNixl()
+    reader = NixlArtifactReader(nixl_connect=fake, max_remotes=2)
+    for agent in ("a", "b", "a", "c"):
+        await reader._pin_remote(agent)
+    assert fake.remotes_added == ["a", "b", "c"]
+    assert fake.remotes_removed == ["b"]
+    assert reader.connected_remotes == 2
+
+
+@pytest.mark.asyncio
+async def test_warm_starts_one_agent_and_reads_reuse_it():
+    fake = _FakeNixl()
+    server = _server(fake)
+    await server.warm()
+    await server.warm()
+    assert fake.connections == 1
+    reader = NixlArtifactReader(nixl_connect=fake)
+    await reader.warm()
+    receipt = await server.submit(b"w" * 16, ["hidden_states"], DEST)
+    await reader.read(receipt)
+    assert fake.connections == 2
+
+
+def test_reader_rejects_a_nonpositive_remote_limit():
+    with pytest.raises(ValueError):
+        NixlArtifactReader(nixl_connect=_FakeNixl(), max_remotes=0)
 
 
 def test_capture_session_accepts_nixl_read_with_a_server():
@@ -291,7 +366,9 @@ async def test_finalized_nixl_artifact_is_uncompressed_and_decodes():
     )
     receipt = await session.finalize()
     assert receipt["mode"] == "nixl_read"
-    tensor = await read_nixl_artifact(receipt, nixl_connect=fake)
+    tensor = await read_nixl_artifact(
+        receipt, reader=NixlArtifactReader(nixl_connect=fake)
+    )
     data = tensor.numpy().tobytes()
     # Prelude "<8sHHHIQ": magic, major, minor, then the codec at bytes 12-13.
     assert int.from_bytes(data[12:14], "little") == CODEC_NONE

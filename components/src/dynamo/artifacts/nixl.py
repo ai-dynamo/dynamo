@@ -17,6 +17,11 @@ artifact until the lease ends. Deliver receipts only to trusted consumers.
 
 Enable it on a worker with `DYNAMO_ARTIFACT_NIXL_BYTES` (the held-byte budget).
 `DYNAMO_ARTIFACT_NIXL_MAX_LEASE_SECONDS` caps the lease a request may ask for.
+
+Consumers read with `NixlArtifactReader`, or `read_nixl_artifact()`, which uses a
+shared one. A process's first NIXL agent takes about a second to start (UCX and CUDA
+initialization); later agents and reads are milliseconds. Call `warm()` at startup
+to move that cost off the first request.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ import hashlib
 import logging
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import cache
@@ -35,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 MODE = "nixl_read"
 _DEFAULT_MAX_LEASE_SECONDS = 300
+_DEFAULT_MAX_REMOTES = 64
 _RECEIPT_FIELDS = ("kind", "mode", "format", "contents")
 
 
@@ -46,6 +53,13 @@ def _load_nixl_connect():
     import dynamo.nixl_connect as nixl_connect
 
     return nixl_connect
+
+
+async def _shared_connection(connector: Any) -> Any:
+    """The connector's single NIXL agent, started on first use (about a second)."""
+    # nixl_connect starts its shared agent lazily inside its first operation and
+    # has no public accessor for it; this is that same idempotent call.
+    return await connector._create_connection()
 
 
 @dataclass
@@ -82,6 +96,12 @@ class NixlArtifactServer:
     @property
     def held_bytes(self) -> int:
         return self._held_bytes
+
+    async def warm(self) -> None:
+        """Start the NIXL agent now instead of on the first request."""
+        if self._connector is None:
+            self._connector = self._nixl.Connector()
+        await _shared_connection(self._connector)
 
     def validate(self, destination: dict[str, Any], mode: str) -> None:
         """Check a request's destination before inference."""
@@ -229,39 +249,112 @@ async def close_configured_nixl_artifact_server() -> None:
             await server.close()
 
 
+class NixlArtifactReader:
+    """Reads `nixl_read` artifacts through one NIXL agent, kept for its lifetime.
+
+    A new agent per read leaks memory (about 1 MiB a read in testing), and adding and
+    removing a worker's agent around every read leaks a file descriptor each time.
+    The reader keeps each worker it has read from connected, evicting the least
+    recently used beyond `max_remotes`. Use it from one event loop at a time.
+    """
+
+    def __init__(
+        self,
+        *,
+        nixl_connect: Any = None,
+        connector: Any = None,
+        max_remotes: int = _DEFAULT_MAX_REMOTES,
+    ):
+        if type(max_remotes) is not int or max_remotes < 1:
+            raise ValueError("max_remotes must be a positive integer")
+        self._nixl = nixl_connect if nixl_connect is not None else _load_nixl_connect()
+        self._connector = connector if connector is not None else self._nixl.Connector()
+        self._max_remotes = max_remotes
+        # Keyed by the worker agent's metadata, which changes when it restarts.
+        self._remotes: OrderedDict[str, Any] = OrderedDict()
+
+    @property
+    def connected_remotes(self) -> int:
+        return len(self._remotes)
+
+    async def warm(self) -> None:
+        """Start the NIXL agent now instead of on the first read."""
+        await _shared_connection(self._connector)
+
+    async def _pin_remote(self, nixl_metadata: str) -> None:
+        if nixl_metadata in self._remotes:
+            self._remotes.move_to_end(nixl_metadata)
+            return
+        connection = await _shared_connection(self._connector)
+        self._remotes[nixl_metadata] = self._nixl.Remote(connection, nixl_metadata)
+        while len(self._remotes) > self._max_remotes:
+            _, evicted = self._remotes.popitem(last=False)
+            evicted.__exit__(None, None, None)
+
+    async def read(
+        self,
+        receipt: dict[str, Any],
+        *,
+        device: Any = "cpu",
+        timeout_seconds: float = 60.0,
+    ):
+        """Pull one artifact into a uint8 tensor on `device`.
+
+        On the CPU, the bytes are checked against the receipt's sha256. Decode them
+        with `dynamo.artifacts.vllm.format.decode_generation_artifact`.
+        """
+        import torch
+
+        if not isinstance(receipt, dict) or any(
+            receipt.get(name) is None for name in (*_RECEIPT_FIELDS, "rdma_metadata")
+        ):
+            raise ValueError("not a nixl_read artifact receipt")
+        if receipt.get("mode") != MODE or receipt.get("state") != "ready":
+            raise ValueError("artifact receipt is not a ready nixl_read delivery")
+        nbytes = receipt.get("byte_count")
+        if type(nbytes) is not int or nbytes <= 0:
+            raise ValueError("invalid nixl_read byte count")
+        metadata = self._nixl.RdmaMetadata.model_validate(receipt["rdma_metadata"])
+        nixl_metadata = getattr(metadata, "nixl_metadata", None)
+        if isinstance(nixl_metadata, str) and nixl_metadata:
+            await self._pin_remote(nixl_metadata)
+        target = torch.empty(nbytes, dtype=torch.uint8, device=device)
+        operation = await self._connector.begin_read(
+            metadata, self._nixl.Descriptor(target)
+        )
+        with operation:
+            await asyncio.wait_for(operation.wait_for_completion(), timeout_seconds)
+        if target.device.type == "cpu":
+            digest = hashlib.sha256(target.numpy().tobytes()).hexdigest()
+            if digest != receipt.get("sha256"):
+                raise ValueError("nixl_read artifact digest differs from receipt")
+        return target
+
+    def close(self) -> None:
+        """Disconnect from every worker this reader has read from."""
+        while self._remotes:
+            _, remote = self._remotes.popitem()
+            remote.__exit__(None, None, None)
+
+
+_default_reader: NixlArtifactReader | None = None
+
+
+def default_nixl_artifact_reader() -> NixlArtifactReader:
+    """The process-wide reader `read_nixl_artifact` uses."""
+    global _default_reader
+    if _default_reader is None:
+        _default_reader = NixlArtifactReader()
+    return _default_reader
+
+
 async def read_nixl_artifact(
     receipt: dict[str, Any],
     *,
     device: Any = "cpu",
     timeout_seconds: float = 60.0,
-    connector: Any = None,
-    nixl_connect: Any = None,
+    reader: NixlArtifactReader | None = None,
 ):
-    """Pull one `nixl_read` artifact into a uint8 tensor on `device`.
-
-    On the CPU, the bytes are checked against the receipt's sha256. Decode them with
-    `dynamo.artifacts.vllm.format.decode_generation_artifact(tensor.numpy())`.
-    """
-    import torch
-
-    if not isinstance(receipt, dict) or any(
-        receipt.get(name) is None for name in (*_RECEIPT_FIELDS, "rdma_metadata")
-    ):
-        raise ValueError("not a nixl_read artifact receipt")
-    if receipt.get("mode") != MODE or receipt.get("state") != "ready":
-        raise ValueError("artifact receipt is not a ready nixl_read delivery")
-    nbytes = receipt.get("byte_count")
-    if type(nbytes) is not int or nbytes <= 0:
-        raise ValueError("invalid nixl_read byte count")
-    nixl = nixl_connect if nixl_connect is not None else _load_nixl_connect()
-    connector = connector if connector is not None else nixl.Connector()
-    metadata = nixl.RdmaMetadata.model_validate(receipt["rdma_metadata"])
-    target = torch.empty(nbytes, dtype=torch.uint8, device=device)
-    operation = await connector.begin_read(metadata, nixl.Descriptor(target))
-    with operation:
-        await asyncio.wait_for(operation.wait_for_completion(), timeout_seconds)
-    if target.device.type == "cpu":
-        digest = hashlib.sha256(target.numpy().tobytes()).hexdigest()
-        if digest != receipt.get("sha256"):
-            raise ValueError("nixl_read artifact digest differs from receipt")
-    return target
+    """Pull one `nixl_read` artifact; see `NixlArtifactReader.read`."""
+    reader = reader if reader is not None else default_nixl_artifact_reader()
+    return await reader.read(receipt, device=device, timeout_seconds=timeout_seconds)

@@ -2932,3 +2932,25 @@ async def test_register_vllm_model_publishes_hidden_state_capture(monkeypatch):
         call.args[1] for call in runtime_config.set_engine_specific.call_args_list
     ]
     assert not any("/var/hs" in value for value in published)
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_warms_the_nixl_artifact_server(monkeypatch):
+    from dynamo.artifacts import nixl as artifact_nixl
+
+    vllm_main = _load_vllm_main()
+    warmed = []
+
+    class FakeServer:
+        async def warm(self):
+            warmed.append(True)
+
+    monkeypatch.setattr(
+        artifact_nixl, "configured_nixl_artifact_server", lambda: FakeServer()
+    )
+    await vllm_main.warm_configured_nixl_artifact_server()
+    assert warmed == [True]
+
+    monkeypatch.setattr(artifact_nixl, "configured_nixl_artifact_server", lambda: None)
+    await vllm_main.warm_configured_nixl_artifact_server()
+    assert warmed == [True]
