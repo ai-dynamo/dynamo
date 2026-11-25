@@ -67,7 +67,7 @@ impl RoutingHost {
                 } else {
                     let worker_id = match target_constraint {
                         Some(target) => {
-                            self.inner.ensure_routable(target.worker_id)?;
+                            self.inner.ensure_dispatchable(target.worker_id)?;
                             target.worker_id
                         }
                         None => self.inner.with_selectable_worker_ids(|ids| {
@@ -143,6 +143,12 @@ impl RoutingHost {
         let budget = CleanupBudget::default();
         let staged_kv = StagedKv::for_request(request.content());
         check_candidate_policy(request.content(), self.candidate_policy.is_some())?;
+        // A request that names its worker can reach a held one, so its candidates come from the
+        // dispatchable instances. Every other request sees only the routable ones.
+        let live_worker_ids = || match explicit {
+            Some(_) => self.inner.client.instance_ids_dispatchable(),
+            None => self.inner.client.instance_ids_avail(),
+        };
         let candidate = self
             .candidate_policy
             .as_ref()
@@ -150,7 +156,7 @@ impl RoutingHost {
                 policy.select(
                     request.content(),
                     explicit.map(|pin| pin.worker_id),
-                    &|| self.inner.client.instance_ids_avail(),
+                    &live_worker_ids,
                     &|| self.inner.client.instance_ids_free(),
                 )
             })
@@ -169,7 +175,7 @@ impl RoutingHost {
                 request.content(),
                 target,
                 explicit.map(|pin| pin.worker_id),
-                &|| self.inner.client.instance_ids_avail(),
+                &live_worker_ids,
             )?;
         }
         let (selection, mut operation) = if let Some(target) = candidate_target {
@@ -326,7 +332,7 @@ impl RoutingHost {
                                 request,
                                 worker_id,
                                 explicit.map(|pin| pin.worker_id),
-                                &|| self.inner.client.instance_ids_avail(),
+                                &live_worker_ids,
                             )?;
                         }
                         let occupancy = guard.retarget_worker(worker_id);

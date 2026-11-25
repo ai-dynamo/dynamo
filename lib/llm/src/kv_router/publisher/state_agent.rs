@@ -2045,6 +2045,7 @@ mod tests {
                 ),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             },
             intent_incarnation: worker.worker_id,
             worker,

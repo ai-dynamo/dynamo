@@ -366,6 +366,7 @@ async fn producer_instance(endpoint: &Endpoint) -> Result<Instance> {
         transport: build_transport_type(endpoint, &endpoint.id(), connection_id).await?,
         device_type: None,
         request_plane_codec: None,
+        held: false,
     })
 }
 
@@ -597,6 +598,7 @@ mod tests {
             transport: TransportType::Tcp(format!("tcp://127.0.0.1:{}", 10_000 + instance_id)),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         }
     }
 

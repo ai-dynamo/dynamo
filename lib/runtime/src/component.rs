@@ -71,7 +71,7 @@ pub mod service;
 
 pub(crate) use client::EndpointDiscoverySource;
 pub(crate) use client::RoutingInstances;
-pub use client::{Client, RoutingInstanceCounts};
+pub use client::{Client, DispatchableInstances, RoutingInstanceCounts};
 pub use endpoint::{StartedEndpoint, build_transport_type};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -127,6 +127,10 @@ pub struct Instance {
     /// Missing metadata identifies a legacy JSON-only worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_plane_codec: Option<RequestPlanePayloadCodec>,
+    /// Whether this instance is held out of automatic routing. Routers still discover a held
+    /// instance and can dispatch a request that names it, but never select it on their own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 impl Instance {

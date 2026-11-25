@@ -1469,6 +1469,7 @@ mod tests {
                 transport: TransportType::Nats("worker.generate".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             };
             router
                 .cancel_instance_streams(&removed.endpoint_instance_id())
@@ -1622,6 +1623,7 @@ mod tests {
             transport: TransportType::Nats("worker.generate".to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         };
         let payload_codec = payload_codec_for_worker(Some(&worker));
         assert_eq!(payload_codec, RequestPlanePayloadCodec::Json);

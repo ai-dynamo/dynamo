@@ -1024,7 +1024,7 @@ where
 
         let state = self.occupancy_state()?;
         if let Some(worker_id) = pinned_worker {
-            self.ensure_routable(worker_id)?;
+            self.ensure_dispatchable(worker_id)?;
             let selection = self.device_aware_candidates(request, &[worker_id]);
             let is_cpu = selection
                 .candidates
@@ -1071,12 +1071,16 @@ where
     }
 
     /// Reject an exact target that local fault detection has removed from routing.
-    pub fn ensure_routable(&self, instance_id: u64) -> anyhow::Result<()> {
+    ///
+    /// A held instance passes: automatic routing never selects one, so an exact target that
+    /// names it came from the caller.
+    pub fn ensure_dispatchable(&self, instance_id: u64) -> anyhow::Result<()> {
         if self
             .client
             .routing_instances()
-            .routable_ids()
-            .contains(&instance_id)
+            .dispatchable_ids()
+            .binary_search(&instance_id)
+            .is_ok()
         {
             return Ok(());
         }
@@ -1647,7 +1651,11 @@ where
     ) -> anyhow::Result<(u64, Option<OccupancyPermit>)> {
         if let Some(instance_id) = pinned_worker {
             let routing_instances = self.client.routing_instances();
-            if !routing_instances.routable_ids().contains(&instance_id) {
+            if routing_instances
+                .dispatchable_ids()
+                .binary_search(&instance_id)
+                .is_err()
+            {
                 return Err(anyhow::anyhow!(
                     "instance_id={instance_id} not found for endpoint {}",
                     self.client.endpoint.id()
@@ -3344,6 +3352,112 @@ mod tests {
         rt.shutdown();
     }
 
+    /// A client over two synthetic workers, `1` held and `2` ready. A real instance is
+    /// registered first for the reason given in
+    /// `round_robin_excludes_overloaded_workers_from_candidates`.
+    async fn client_with_a_held_and_a_ready_worker(
+        drt: &DistributedRuntime,
+        namespace: &str,
+    ) -> Client {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let endpoint = drt
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_routable_instances().await.unwrap();
+        client.override_discovered_instances_with_held(vec![1, 2], vec![1]);
+        client
+    }
+
+    #[tokio::test]
+    async fn automatic_selection_never_picks_a_held_worker() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+
+        for (index, mode) in [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let client =
+                client_with_a_held_and_a_ready_worker(&drt, &format!("test_held_skip_{index}"))
+                    .await;
+            let router = PushRouter::<u64, TestResponse>::for_test(client, mode)
+                .await
+                .unwrap();
+
+            assert_eq!(router.selectable_worker_ids().unwrap(), vec![2], "{mode:?}");
+            for _ in 0..6 {
+                assert_eq!(router.peek_next_worker(), Some(2), "{mode:?}");
+            }
+        }
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn an_exact_target_reaches_a_held_worker() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = client_with_a_held_and_a_ready_worker(&drt, "test_held_exact_target").await;
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        router.ensure_dispatchable(1).unwrap();
+        router.ensure_dispatchable(2).unwrap();
+        assert!(router.ensure_dispatchable(3).is_err());
+
+        let (selected, _permit) = router.select_exact_target(&42, Some(1)).await.unwrap();
+        assert_eq!(selected, 1);
+        // Without a target the held worker is never the pick.
+        for _ in 0..6 {
+            let (selected, _permit) = router.select_exact_target(&42, None).await.unwrap();
+            assert_eq!(selected, 2);
+        }
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn only_held_workers_is_reported_as_unavailable() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = client_with_a_held_and_a_ready_worker(&drt, "test_only_held_workers").await;
+        client.override_discovered_instances_with_held(vec![1, 2], vec![1, 2]);
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        assert_eq!(router.peek_next_worker(), None);
+        let error = router.generate(SingleIn::new(42)).await.unwrap_err();
+        // Held workers are not busy workers: the caller must not see a retryable overload.
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Unavailable],
+            &[ErrorType::ResourceExhausted]
+        ));
+
+        rt.shutdown();
+    }
+
     #[tokio::test]
     async fn device_aware_weighted_peek_returns_available_worker_select_stays_none() {
         let rt = Runtime::from_current().unwrap();
@@ -3958,6 +4072,7 @@ mod tests {
                 ),
                 device_type: None,
                 request_plane_codec: None,
+                held: false,
             })
             .await
             .unwrap();

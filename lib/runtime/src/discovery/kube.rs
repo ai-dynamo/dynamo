@@ -747,6 +747,7 @@ mod tests {
             transport: TransportType::Tcp("127.0.0.1:1234".into()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         };
         let instance = spec.clone().into_instance(discovery.instance_id());
         let result = tokio::time::timeout(
@@ -771,6 +772,7 @@ mod tests {
             transport: TransportType::Tcp(transport.to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         })
     }
 
@@ -1139,6 +1141,7 @@ mod tests {
             transport: TransportType::Tcp("127.0.0.1:1234".into()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         }
         .into_instance(1)
     }

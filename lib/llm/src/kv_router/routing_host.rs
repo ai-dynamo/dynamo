@@ -544,7 +544,9 @@ impl RoutingHost {
     }
 
     fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
-        if !self.inner.client.is_instance_discovered(target.worker_id) {
+        if !self.inner.client.is_instance_discovered(target.worker_id)
+            || self.inner.client.is_instance_held(target.worker_id)
+        {
             return false;
         }
         let Some(kv_router) = self.kv_router_if_enabled() else {
@@ -624,8 +626,16 @@ impl RoutingHost {
         let session_id = self
             .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
+        // A held worker takes only requests that name it, so a session binding to one is
+        // stale. Dropping it here leaves a held exact target one possible source, the caller.
+        let bound_to_held_worker = |target: Option<u64>| {
+            explicit.is_none()
+                && target.is_some_and(|worker_id| self.inner.client.is_instance_held(worker_id))
+        };
         if is_query_only {
-            let target = affinity.query_target(&session_id, explicit)?;
+            let target = affinity
+                .query_target(&session_id, explicit)?
+                .filter(|target| !bound_to_held_worker(Some(target.worker_id)));
             return Ok((select(target).await?, None));
         }
 
@@ -662,6 +672,10 @@ impl RoutingHost {
                 .target()
                 .is_some_and(|target| !self.inner.client.is_instance_discovered(target.worker_id))
         {
+            operation.invalidate();
+            operation = reacquire().await?;
+        }
+        if bound_to_held_worker(operation.target().map(|target| target.worker_id)) {
             operation.invalidate();
             operation = reacquire().await?;
         }

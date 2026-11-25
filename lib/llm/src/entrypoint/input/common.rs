@@ -75,9 +75,11 @@ async fn wait_for_min_initial_workers(
         return Ok(());
     }
 
-    let mut watcher = client.instance_avail_watcher();
+    // Held workers count, as they do for a single worker above: a worker set's pipeline is
+    // built while its workers are held, and they become routable when they are released.
+    let mut watcher = client.instance_dispatch_watcher();
     loop {
-        let available = watcher.borrow_and_update().len();
+        let available = watcher.borrow_and_update().ids.len();
         if available >= min_initial_workers {
             return Ok(());
         }

@@ -564,6 +564,9 @@ pub enum DiscoverySpec {
         /// Payload codec accepted by this endpoint's request-plane worker.
         /// `None` represents a legacy JSON-only worker.
         request_plane_codec: Option<RequestPlanePayloadCodec>,
+        /// Register the instance held out of automatic routing.
+        /// See [`Instance::held`](crate::component::Instance::held).
+        held: bool,
     },
     Model {
         namespace: String,
@@ -653,6 +656,7 @@ impl DiscoverySpec {
                 transport,
                 device_type,
                 request_plane_codec,
+                held,
             } => DiscoveryInstance::Endpoint(crate::component::Instance {
                 namespace,
                 component,
@@ -661,6 +665,7 @@ impl DiscoverySpec {
                 transport,
                 device_type,
                 request_plane_codec,
+                held,
             }),
             Self::Model {
                 namespace,
@@ -1887,6 +1892,7 @@ mod tests {
             transport: TransportType::Nats("worker.generate".to_string()),
             device_type: None,
             request_plane_codec: Some(RequestPlanePayloadCodec::Msgpack),
+            held: false,
         }
         .into_instance(42);
 
@@ -1914,6 +1920,54 @@ mod tests {
         }
     }
 
+    fn endpoint_with_hold(held: bool) -> DiscoveryInstance {
+        DiscoverySpec::Endpoint {
+            namespace: "default".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            transport: TransportType::Nats("worker.generate".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+            held,
+        }
+        .into_instance(42)
+    }
+
+    #[test]
+    fn endpoint_hold_round_trips_and_is_omitted_when_unset() {
+        // An instance that is not held serializes exactly as it did before the field existed,
+        // and a record written without the field reads as not held.
+        let unheld = serde_json::to_value(endpoint_with_hold(false)).unwrap();
+        assert!(unheld.get("held").is_none());
+        assert_eq!(
+            serde_json::from_value::<DiscoveryInstance>(unheld).unwrap(),
+            endpoint_with_hold(false)
+        );
+
+        let held = serde_json::to_value(endpoint_with_hold(true)).unwrap();
+        assert_eq!(held["held"], true);
+        assert_eq!(
+            serde_json::from_value::<DiscoveryInstance>(held).unwrap(),
+            endpoint_with_hold(true)
+        );
+    }
+
+    #[test]
+    fn a_released_endpoint_is_one_in_place_update() {
+        let held = endpoint_with_hold(true);
+        let released = endpoint_with_hold(false);
+        let known = HashMap::from([(held.id(), held)]);
+
+        let (events, next) = reconcile_discovery_snapshot(
+            &known,
+            HashMap::from([(released.id(), released.clone())]),
+        );
+
+        // No removal: a consumer keeps the instance and everything it built for it.
+        assert_eq!(events, vec![DiscoveryEvent::Added(released.clone())]);
+        assert_eq!(next.get(&released.id()), Some(&released));
+    }
+
     #[test]
     fn matches_routes_by_query_scope() {
         let endpoint = DiscoveryInstance::Endpoint(Instance {
@@ -1924,6 +1978,7 @@ mod tests {
             transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
             device_type: None,
             request_plane_codec: None,
+            held: false,
         });
         let model = DiscoveryInstance::Model {
             namespace: "ns".to_string(),
