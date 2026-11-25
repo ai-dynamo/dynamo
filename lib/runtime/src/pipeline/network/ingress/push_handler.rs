@@ -585,12 +585,6 @@ struct ParsedRequest<Req> {
     payload_codec: RequestPlanePayloadCodec,
 }
 
-#[derive(Clone, Copy)]
-struct ResponsePlaneModes {
-    configured: ResponsePlaneMode,
-    advertised: ResponsePlaneMode,
-}
-
 /// Per-shape strategy for turning a raw payload into a typed engine
 /// request. Captures the wire-shape divergence between the unary
 /// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
@@ -806,7 +800,7 @@ where
         request: Req,
         payload_codec: RequestPlanePayloadCodec,
         start_time: Instant,
-        response_modes: ResponsePlaneModes,
+        plane: ResponsePlaneMode,
         lifecycle: &LifecycleTrace,
         mut publisher: P,
     ) -> Result<(), PipelineError>
@@ -814,22 +808,6 @@ where
         Self: IngressDispatch<Request = Req>,
         P: ResponsePublisher,
     {
-        let ResponsePlaneModes {
-            configured: configured_mode,
-            advertised: advertised_mode,
-        } = response_modes;
-
-        if configured_mode != advertised_mode {
-            let message = format!(
-                "response plane mismatch: frontend requested {}, worker configured {}",
-                advertised_mode.name(),
-                configured_mode.name()
-            );
-            let _ = publisher.send_prologue(Some(message.clone())).await;
-            let _ = publisher.finish().await;
-            return Err(PipelineError::Generic(message));
-        }
-
         let request_context = request.context();
         tracing::trace!("calling generate");
         let worker_operation = lifecycle.start_worker_operation();
@@ -882,7 +860,7 @@ where
                         }
                         PipelineError::Generic(format!(
                             "Failed to open {} response stream: {error}",
-                            configured_mode.name()
+                            plane.name()
                         ))
                     })?;
                 }
@@ -941,7 +919,7 @@ where
         finish.map_err(|error| {
             PipelineError::Generic(format!(
                 "Failed to finish {} response stream: {error}",
-                configured_mode.name()
+                plane.name()
             ))
         })
     }
@@ -1027,10 +1005,20 @@ where
             None => ResponsePlaneMode::configured()
                 .map_err(|error| PipelineError::Generic(error.to_string()))?,
         };
-        let response_modes = ResponsePlaneModes {
-            configured: configured_mode,
-            advertised: advertised_mode,
-        };
+        // Answer on the frontend's plane, so a frontend and a worker with
+        // different defaults still interoperate, as during a rolling upgrade.
+        if configured_mode != advertised_mode {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "response plane mismatch: frontend requested {}, worker configured {}; \
+                     answering on {}",
+                    advertised_mode.name(),
+                    configured_mode.name(),
+                    advertised_mode.name()
+                );
+            });
+        }
         let cancellation_counter = self
             .metrics()
             .map(|metrics| metrics.cancellation_total.clone());
@@ -1070,7 +1058,7 @@ where
                     request,
                     payload_codec,
                     start_time,
-                    response_modes,
+                    advertised_mode,
                     &lifecycle,
                     publisher,
                 )
@@ -1104,7 +1092,7 @@ where
                 tokio::select! {
                     biased;
                     _ = context.killed() => return Ok(()),
-                    result = self.generate_and_publish(request, payload_codec, start_time, response_modes, &lifecycle, publisher) => result?,
+                    result = self.generate_and_publish(request, payload_codec, start_time, advertised_mode, &lifecycle, publisher) => result?,
                 }
             }
             ResponsePlaneMode::Quic => {
@@ -1135,7 +1123,7 @@ where
                     request,
                     payload_codec,
                     start_time,
-                    response_modes,
+                    advertised_mode,
                     &lifecycle,
                     publisher,
                 )
@@ -1461,68 +1449,74 @@ mod tests {
         .await;
     }
 
-    #[derive(Default)]
-    struct MismatchPublisher {
-        prologue: Arc<std::sync::Mutex<Option<Option<String>>>>,
-        finished: Arc<AtomicBool>,
-    }
+    struct OneChunk;
 
-    impl ResponsePublisher for MismatchPublisher {
-        async fn send(&self, _payload: Bytes) -> anyhow::Result<()> {
-            panic!("mismatch must not send response data")
-        }
-
-        async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
-            *self.prologue.lock().unwrap() = Some(error);
-            Ok(())
-        }
-
-        async fn finish(&mut self) -> anyhow::Result<()> {
-            self.finished.store(true, Ordering::Release);
-            Ok(())
-        }
-
-        async fn abort(&mut self) -> anyhow::Result<()> {
-            panic!("mismatch must finish with a frontend-visible error")
+    #[async_trait]
+    impl crate::engine::AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for OneChunk
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            let chunk = Annotated::from_data(serde_json::json!({ "token": 0 }));
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter([chunk])),
+                request.context(),
+            ))
         }
     }
 
+    /// A worker answers on the frontend's plane even when it is configured
+    /// for another one, so mixed defaults interoperate during an upgrade.
     #[tokio::test]
-    async fn response_plane_mismatch_reports_error_before_generate() {
-        for (configured, advertised) in [
-            (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),
-            (ResponsePlaneMode::Quic, ResponsePlaneMode::Tcp),
-        ] {
-            let ingress = TestIngress::new();
-            let publisher = MismatchPublisher::default();
-            let prologue = publisher.prologue.clone();
-            let finished = publisher.finished.clone();
-            let lifecycle = LifecycleTrace::new(false);
-
-            let error = ingress
-                .generate_and_publish(
-                    Context::new(serde_json::json!({})),
-                    RequestPlanePayloadCodec::Json,
-                    Instant::now(),
-                    ResponsePlaneModes {
-                        configured,
-                        advertised,
-                    },
-                    &lifecycle,
-                    publisher,
-                )
-                .await
-                .expect_err("mismatched response planes must fail");
-
-            let expected = format!(
-                "response plane mismatch: frontend requested {}, worker configured {}",
-                advertised.name(),
-                configured.name()
-            );
-            assert!(error.to_string().contains(&expected));
-            assert_eq!(*prologue.lock().unwrap(), Some(Some(expected)));
-            assert!(finished.load(Ordering::Acquire));
+    async fn velo_worker_answers_a_tcp_frontend() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        // Read until the engine's chunk arrives; the writer may keep the
+        // connection open for the frontend's reply.
+        let peer = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            while !String::from_utf8_lossy(&received).contains("\"token\":0") {
+                let mut buf = [0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0, "tcp response stream closed before the chunk");
+                received.extend_from_slice(&buf[..n]);
+            }
+        });
+        let ingress = TestIngress::for_engine(Arc::new(OneChunk)).unwrap();
+        ingress.response_plane.set(ResponsePlaneMode::Velo).unwrap();
+        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+            address,
+            subject: "mixed-plane".to_string(),
+            context: "mixed-plane".to_string(),
+            stream_type: crate::pipeline::network::StreamType::Response,
         }
+        .into();
+        let header = serde_json::to_vec(&serde_json::json!({
+            "id": "mixed-plane",
+            "request_type": "single_in",
+            "response_type": "many_out",
+            "connection_info": connection,
+        }))
+        .unwrap();
+        let payload = TwoPartCodec::default()
+            .encode_message(TwoPartMessage::from_parts(
+                header.into(),
+                Bytes::from_static(b"{}"),
+            ))
+            .unwrap();
+
+        ingress
+            .handle_payload_shared(payload, Some("mixed-plane".to_string()))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), peer)
+            .await
+            .expect("the worker sent no chunk over tcp")
+            .unwrap();
     }
 
     /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.

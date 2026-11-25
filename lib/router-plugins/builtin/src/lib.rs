@@ -11,6 +11,7 @@
 
 mod default;
 pub mod kv_fetch;
+mod output_length;
 pub mod router_modes;
 mod sticky_min_load;
 mod thunderagent;
@@ -35,7 +36,10 @@ pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
     registry
 }
 
-use dynamo_kv_router::plugins::prelude::*;
+// `default_registry` and `with_defaults` are the host half of this crate: they set the host's
+// default policy, which only a host can do.
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::*;
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
@@ -49,12 +53,15 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
+    output_length::register(registry)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+    use dynamo_kv_router::plugins::worker_selection::*;
 
     use super::*;
 
@@ -101,7 +108,11 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&SelectionConfig::from(&config), worker_type, partition);
+            factory(WorkerSelectionPolicyContext::new(
+                &SelectionConfig::from(&config),
+                worker_type,
+                partition,
+            ));
         }
     }
 
@@ -133,7 +144,11 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&SelectionConfig::from(&config), worker_type, partition);
+            factory(WorkerSelectionPolicyContext::new(
+                &SelectionConfig::from(&config),
+                worker_type,
+                partition,
+            ));
         }
     }
 
@@ -152,11 +167,11 @@ worker_selection:
         let factory = resolved
             .unwrap()
             .expect("a configured instance resolves to a factory");
-        factory(
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Prefill,
             RoutingPartitionRef::new("model", "default"),
-        );
+        ));
     }
 
     /// `kv_fetch` is on by default only under `kvcr`: a `kvcr` role runs it without listing it, a

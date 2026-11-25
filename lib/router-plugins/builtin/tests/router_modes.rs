@@ -5,7 +5,8 @@ mod support;
 
 use std::collections::HashSet;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, WorkerSelectionPolicyHostExt};
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::router_modes::{LEAST_LOADED, RANDOM, ROUND_ROBIN};
 use dynamo_router_policies::{default_registry, register, with_defaults};
 use dynamo_scheduler::host::WorkerSelector;
@@ -15,11 +16,11 @@ const MODES: [&str; 3] = [RANDOM, ROUND_ROBIN, LEAST_LOADED];
 
 fn policy(policy_type: &str) -> WorkerSelectionPolicy {
     let factory = default_registry().resolve_type(policy_type).unwrap();
-    factory(
+    factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::default(),
         WorkerType::Decode,
         RoutingPartitionRef::new("model", "group"),
-    )
+    ))
 }
 
 #[test]
@@ -90,11 +91,11 @@ fn sticky_min_load_picks_from_active_request_counts() {
     register(&mut registry).unwrap();
     let factory = registry.resolve_type("dynamo-sticky-min-load").unwrap();
     let policy = || {
-        factory(
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::default(),
             WorkerType::Decode,
             RoutingPartitionRef::new("model", "group"),
-        )
+        ))
     };
 
     // The fixture gives worker 0 the fewest active requests on both ranks.

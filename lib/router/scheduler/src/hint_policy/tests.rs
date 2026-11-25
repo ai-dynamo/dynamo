@@ -18,8 +18,8 @@ use dynamo_kv_hints::{KvHint, KvHintTransferWorkerMetadata, MAX_KV_HINT_ACTIONS}
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_worker_selection::{
-    WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
 /// Records how often it runs, and returns `actions` actions of type `test.<name>`.
@@ -132,7 +132,7 @@ impl WorkerScorer for InputsScorer {
 
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         _candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -146,7 +146,7 @@ struct FirstPicker;
 impl WorkerPicker for FirstPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         _input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(0)
@@ -155,7 +155,6 @@ impl WorkerPicker for FirstPicker {
 
 fn selection(inputs: WorkerInputs) -> WorkerSelectionPolicy {
     WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
         "prefill",
         vec![Box::new(InputsScorer(inputs))],
         Box::new(FirstPicker),

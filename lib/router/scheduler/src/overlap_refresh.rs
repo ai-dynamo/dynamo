@@ -44,15 +44,6 @@ pub struct RefreshedOverlap {
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
 }
 
-impl RefreshedOverlap {
-    pub fn from_overlap(overlap: OverlapSignals) -> Self {
-        Self {
-            overlap,
-            kv_transfer_candidates: None,
-        }
-    }
-}
-
 /// Re-query overlap scores for a request that has been waiting in the scheduler queue.
 ///
 /// Implementations are expected to be cheap to clone (typically `Arc`-wrapped) and to never
@@ -236,7 +227,6 @@ impl OverlapScoresRefresh for NoopOverlapScoresRefresh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::OverlapSignals;
     use dynamo_kv_indexer::OverlapScores;
     use dynamo_kv_indexer::{KvRouterError, MatchDetails, TieredMatchDetails};
     use dynamo_router_protocol::worker::WorkerWithDpRank;
@@ -289,11 +279,7 @@ mod tests {
             _retain_kv_transfer_chain: bool,
         ) -> Option<RefreshedOverlap> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            Some(RefreshedOverlap::from_overlap(OverlapSignals {
-                tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: Default::default(),
-                effective_cached_tokens: Default::default(),
-            }))
+            Some(RefreshedOverlap::default())
         }
     }
 

@@ -246,7 +246,7 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <div className="dynamo-model-tags"><span>TRT-LLM</span><span>2-8x GPU</span><span>Static ISL-OSL</span></div>
   <a className="dynamo-card-link" href="qwen3-32b-fp8.mdx" aria-label="Open the Qwen3-32B FP8 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm trtllm" data-hardware="h100 h200 b200 b300 gb200 gb300 vr200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-h100 vllm-disagg-h100 vllm-agg-h200 vllm-disagg-h200 vllm-agg-b200 vllm-disagg-b200 vllm-agg-gb200 vllm-disagg-gb200 vllm-agg-b300 vllm-disagg-b300 vllm-agg-gb300 vllm-disagg-gb300 vllm-agg-vr200 vllm-disagg-vr200 trtllm-agg-b200 trtllm-disagg-b200">
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm trtllm" data-hardware="h100 h200 b200 b300 gb200 gb300 vr200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-h100 vllm-disagg-h100 vllm-agg-h200 vllm-disagg-h200 vllm-agg-b200 vllm-disagg-b200 vllm-agg-b200-certified vllm-disagg-b200-certified vllm-agg-gb200 vllm-disagg-gb200 vllm-agg-b300 vllm-disagg-b300 vllm-agg-gb300 vllm-disagg-gb300 vllm-agg-vr200 vllm-disagg-vr200 trtllm-agg-b200 trtllm-disagg-b200">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
       <div><h3>Nemotron 3.5 Super VL</h3><p>NVIDIA</p></div>
@@ -308,6 +308,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <p className="dynamo-model-summary">Aggregated TensorRT-LLM recipes for long-context agentic traffic on B200, GB200, or H200, with KV-aware routing and CPU KV-cache offload.</p>
     <div className="dynamo-model-tags"><span>TensorRT-LLM</span><span>8x B200/GB200/H200</span><span>Agentic + multimodal</span></div>
   <a className="dynamo-card-link" href="gemma-4-31b.mdx" aria-label="Open the Gemma-4-31B recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang" data-hardware="b200 vr200" data-technique="aggregated disaggregated kv-routing" data-workload="chat" data-targets="agg-b200 disagg-b200 agg-vr200 disagg-vr200">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.webp" alt="" />
+      <div><h3>Inkling 2 Mini</h3><p>Thinking Machines</p></div>
+    </div>
+    <p className="dynamo-model-summary">A multimodal thinking MoE with NVFP4 routed experts. SGLang recipes serve it aggregated on 2 GPUs or disaggregated 1P1D on 4 GPUs, on B200 or VR200, with reasoning, tool calling, structured output, and image input.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>2x or 4x B200 / VR200</span><span>Chat · tool calling</span><span>Text + image</span></div>
+  <a className="dynamo-card-link" href="inkling-2-mini.mdx" aria-label="Open the Inkling 2 Mini recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang vllm" data-hardware="b200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse" data-targets="agg-gb300-agentic disagg-gb300-agentic agg-b200">
     <div className="dynamo-model-card-top">

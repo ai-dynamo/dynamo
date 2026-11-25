@@ -5,7 +5,7 @@ title: OTLP Metrics Export
 subtitle: Push the same metrics Dynamo serves at /metrics to an OpenTelemetry collector, and how the Prometheus-to-OTLP conversion behaves.
 ---
 
-Dynamo can push its metrics to an OpenTelemetry collector over OTLP, in addition to serving them at `/metrics`. Both surfaces carry the same metrics, including engine metrics from vLLM, SGLang, and TensorRT-LLM.
+Dynamo can push its metrics to an OpenTelemetry collector over OTLP, in addition to serving them at `/metrics`. Both surfaces carry the same metrics, including engine metrics from vLLM, SGLang, and TensorRT-LLM, and the frontend's own metrics (`dynamo_frontend_*`) on both the HTTP and KServe frontends. Earlier releases left the frontend's own metrics out of OTLP ([#18906](https://github.com/ai-dynamo/dynamo/issues/18906)); that gap is fixed.
 
 Export is **off by default**. With it off, nothing is collected and nothing is sent.
 
@@ -33,6 +33,8 @@ Header values are split on the first `=` only, so a bearer token containing base
 ## Relationship to `/metrics`
 
 Enabling OTLP export does not change `/metrics` in any way. The scrape path renders exactly what it always has: Dynamo's own metrics encoded by the Prometheus text encoder, followed by each engine's exposition text appended verbatim.
+
+On the frontend, HTTP or KServe, Dynamo's own metrics on `/metrics` are one block sorted by family name. Each family is declared once, a series that appears twice keeps the first sample merged, and a family whose help or type conflicts is dropped, as described under [Dropped and flagged data](#dropped-and-flagged-data). Earlier releases served the frontend's own registry first and the runtime's after it, so a scraper that parses the output by position, rather than by family name, may need updating.
 
 The two surfaces are fed independently — the scrape collects when Prometheus scrapes it, the exporter collects on its own interval — so enabling export adds one collection per interval and changes nothing about the scrape.
 
@@ -79,9 +81,12 @@ The original Prometheus type word travels with each metric in `metric.metadata` 
 
 - A histogram or summary with no `_count` sample is dropped: its buckets and total cannot be reconciled, and a quantile computed from it would be meaningless.
 - A `NaN` value is reported as no-recorded-value with the value left unset, rather than as a raw `NaN` that some backends reject.
+- If two metric families share a name but declare different help or type, the first one merged is kept and the later one is dropped, from both `/metrics` and OTLP. Dynamo's own families are merged from the runtime's root registry first, then from the registries attached to it, in the order they were attached. Engine families are merged last and only on the OTLP path, since `/metrics` appends engine text verbatim. `dynamo_metrics_merge_conflicts_total` counts each drop, and a one-time `skipping metric family` warning names the family and both declarations.
 - If a collector responds with `partial_success`, the count of rejected data points is logged. A successful response is not assumed to mean the data was kept.
 
 ### Known gaps
 
 - **Exemplars are not converted**, so a backend cannot jump from a histogram bucket to the trace that produced it. This is a limitation of the data model rather than a choice: upstream Prometheus defines `Bucket.exemplar` and `Counter.exemplar`, but the `prometheus` Rust crate vendors a reduced copy of that schema without them, so an exemplar has nowhere to arrive. Nothing is being discarded.
+- **Triton engine metrics are not exported.** The Triton backend hands its metrics to Dynamo only as exposition text, so they appear at `/metrics` but not over OTLP.
+- **Planner metrics are not exported.** The Planner serves them from its own Prometheus client on its own port, outside the runtime's registry.
 - **`target_info` and `job`/`instance` handling** are scrape-side concerns and do not apply, since Dynamo pushes rather than being scraped by the collector.

@@ -331,29 +331,30 @@ def parse_args() -> (
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
-            from vllm.utils import FlexibleArgumentParser
-        except ImportError:
-            try:
-                from vllm.utils.argparse_utils import FlexibleArgumentParser
-            except ModuleNotFoundError:
-                logger.exception(
-                    "Flag '--chat-processor vllm' requires vllm be installed."
-                )
-                sys.exit(1)
+            from vllm.utils.argparse_utils import FlexibleArgumentParser
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
 
         # On a host with no GPU and a CUDA-built wheel, vllm.platforms
         # auto-detection picks UnspecifiedPlatform and the
         # AsyncEngineArgs.add_cli_args call below crashes inside
         # DeviceConfig.__post_init__. Frontend uses vLLM for parsers
-        # only and never constructs an engine, so coerce CpuPlatform.
-        # Must run before importing vllm.engine.arg_utils, which binds
-        # current_platform at module scope.
+        # only and never constructs an engine, so coerce CpuPlatform and
+        # skip its engine config checks, which reject x86 hosts without
+        # Triton. Must run before importing vllm.engine.arg_utils, which
+        # binds current_platform at module scope.
         import vllm.platforms
 
         if vllm.platforms.current_platform.device_type == "":
             from vllm.platforms.cpu import CpuPlatform
 
-            vllm.platforms.current_platform = CpuPlatform()
+            class _FrontendCpuPlatform(CpuPlatform):
+                @classmethod
+                def check_and_update_config(cls, vllm_config) -> None:
+                    pass
+
+            vllm.platforms.current_platform = _FrontendCpuPlatform()
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
@@ -478,8 +479,8 @@ async def async_main():
         config.session_affinity_max_entries
     )
     # Shared with the backends so a worker's advertised config is built from the
-    # same flags and semantics. --router-mode always has a default here, so this
-    # never returns None.
+    # same flags and semantics. FrontendConfig.validate resolved the router mode,
+    # so this never returns None.
     router_config = build_router_config(config)
 
     metrics_prefix = (

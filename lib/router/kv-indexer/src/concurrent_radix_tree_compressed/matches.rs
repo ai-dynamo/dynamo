@@ -36,7 +36,6 @@ impl ConcurrentRadixTreeCompressed {
         )
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn find_details_from_seq<S: HashSequence>(
         &self,
         next_child: Option<SharedNode>,
@@ -74,7 +73,6 @@ impl ConcurrentRadixTreeCompressed {
         details
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn walk_match_path<S: HashSequence>(
         mut next_child: Option<SharedNode>,
         sequence: &S,
@@ -163,7 +161,6 @@ impl ConcurrentRadixTreeCompressed {
 
     // NOTE(perf): A reusable compact result sink reduced result-map work in
     // profiles but did not improve end-to-end throughput under contention.
-    #[cfg_attr(feature = "profile", inline(never))]
     pub fn find_matches_impl(
         &self,
         sequence: &[LocalBlockHash],

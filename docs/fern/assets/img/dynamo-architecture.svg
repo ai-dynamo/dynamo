@@ -58,9 +58,6 @@
   <rect x="650" y="390" width="110" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
   <text x="665" y="412" font-family="Helvetica" font-size="11">Model Express</text>
 
-  <rect x="105" y="375" width="70" height="30" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
-  <text x="125" y="395" font-family="Helvetica" font-size="11">KVBM</text>
-
   <rect x="310" y="375" width="70" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
   <text x="330" y="397" font-family="Helvetica" font-size="11">NIXL</text>
 
@@ -89,7 +86,6 @@
     <path d="M 860 245 L 860 358" marker-end="url(#arrowhead)" />
     <path d="M 900 245 L 900 278" marker-end="url(#arrowhead)" />
     <path d="M 900 315 L 900 358" marker-end="url(#arrowhead)" />
-    <path d="M 175 390 L 308 390" marker-end="url(#arrowhead)" />
     <path d="M 325 410 L 325 458" marker-end="url(#arrowhead)" />
     <path d="M 355 460 L 355 412" marker-end="url(#arrowhead)" />
   </g>
@@ -101,7 +97,7 @@
     <text x="485" y="190">capacity, placement</text>
     <text x="485" y="215">fault tolerance</text>
     <text x="100" y="285">lifecycle, handoff,</text>
-    <text x="100" y="300">blocks (KVBM)</text>
+    <text x="100" y="300">blocks</text>
     <text x="320" y="285">model</text>
     <text x="320" y="300">weights</text>
     <text x="435" y="285">cache visibility/</text>

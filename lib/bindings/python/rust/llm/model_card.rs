@@ -57,7 +57,7 @@ impl ModelDeploymentCard {
         }
     }
 
-    fn runtime_config(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn runtime_config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let rc = pythonize::pythonize(py, &self.inner.runtime_config).map_err(to_pyerr)?;
         Ok(rc.unbind())
     }

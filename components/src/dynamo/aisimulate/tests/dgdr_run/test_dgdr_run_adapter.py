@@ -978,9 +978,9 @@ def test_pinned_aisimulate_dispatches_the_complete_lifecycle_to_dgdr_run(
     monkeypatch: pytest.MonkeyPatch,
     search_fails: bool,
 ) -> None:
-    import aisimulate.recommend as recommendation
-    from aisimulate.config import CoreRecommendationConfig
-    from aisimulate.sweeper import search
+    import aisim.recommend as recommendation
+    from aisim.config import CoreRecommendationConfig
+    from aisim.sweeper import search
 
     config = CoreRecommendationConfig.model_validate(
         {
@@ -1111,7 +1111,7 @@ def test_on_round_tolerates_upstream_candidate_objects(
     Without pareto_objectives the adapter skips live front selection; this tests only that
     on_round advances the round counter without crashing.
     """
-    from aisimulate.sweeper.config import Candidate
+    from aisim.sweeper.config import Candidate
 
     pareto_candidate = Candidate(
         config={"backend": "vllm", "backend_version": "0.1"},
@@ -1144,8 +1144,8 @@ def test_pareto_live_front_size_exceeds_max_candidates(
     pareto_front() to derive the 3-point true front.  With maxCandidates=1, the snapshot
     must report paretoFront=3 and publish exactly 1 candidate.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate
-    from aisimulate.sweeper.config import OptimizationTarget
+    from aisim.sweeper.config import Candidate as AISCandidate
+    from aisim.sweeper.config import OptimizationTarget
 
     # f0, f1, f2 are mutually non-dominated (trade off tpg vs tpu).
     # f3 is dominated by f0 on both objectives and must be excluded from the front.
@@ -1198,8 +1198,8 @@ def test_pareto_on_round_replaces_dominated_points_with_true_front(
     With pareto_objectives, the adapter calls ais_pareto_front([A,B,C], objectives) and
     correctly identifies {A, C}.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate
-    from aisimulate.sweeper.config import OptimizationTarget
+    from aisim.sweeper.config import Candidate as AISCandidate
+    from aisim.sweeper.config import OptimizationTarget
 
     def ais_point(tag: str, tpg: float, tpu: float) -> AISCandidate:
         return AISCandidate(
@@ -1276,7 +1276,7 @@ def test_pareto_on_candidate_does_not_publish_dominated_points_between_rounds(
     Uses snapshot_interval_seconds=0 and observes the asynchronous snapshot between the
     second on_candidate() and the subsequent on_round().
     """
-    from aisimulate.sweeper.config import OptimizationTarget
+    from aisim.sweeper.config import OptimizationTarget
 
     pareto_objectives = [
         OptimizationTarget.THROUGHPUT_PER_GPU,
@@ -1335,7 +1335,7 @@ def test_pareto_on_candidate_uses_full_front_for_dominance_across_cap(
       D=(110,30) arrives  — dominates A and B; front becomes {C,D}, retained={D,C}
       E=(70,90) arrives   — dominated by C=(80,100); must be excluded
     """
-    from aisimulate.sweeper.config import OptimizationTarget
+    from aisim.sweeper.config import OptimizationTarget
 
     pareto_objectives = [
         OptimizationTarget.THROUGHPUT_PER_GPU,
@@ -1397,7 +1397,7 @@ def test_pareto_between_round_front_growth_updates_pareto_count(
     on_candidate.  The live snapshot must immediately report paretoFront=2 and include
     both A and C, without waiting for on_round().
     """
-    from aisimulate.sweeper.config import OptimizationTarget
+    from aisim.sweeper.config import OptimizationTarget
 
     pareto_objectives = [
         OptimizationTarget.THROUGHPUT_PER_GPU,
@@ -1453,7 +1453,7 @@ def test_subscribe_with_pareto_objectives_in_config_enables_live_selection(
     extract objectives from the workload (which is a bare Workload, not a SmartSearchConfig),
     always failing silently and leaving pareto_objectives=None.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate
+    from aisim.sweeper.config import Candidate as AISCandidate
 
     plugin = create_adapter()
     config = {
@@ -1523,9 +1523,9 @@ def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
     fake_search_config: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import aisimulate.recommend as recommendation
-    from aisimulate.config import CoreRecommendationConfig
-    from aisimulate.sweeper import search
+    import aisim.recommend as recommendation
+    from aisim.config import CoreRecommendationConfig
+    from aisim.sweeper import search
 
     # Use the same scalar CoreRecommendationConfig as the scalar lifecycle test;
     # the sweeper is mocked so the target never reaches AISimulate. The Pareto
@@ -1595,7 +1595,7 @@ def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
         recommendation, "resolve_budget", lambda *args, **kwargs: {"cpu_limit": 1}
     )
 
-    from aisimulate.sweeper.config import Candidate as AISCandidate
+    from aisim.sweeper.config import Candidate as AISCandidate
 
     # Config must carry the same search-space parameters as pareto_a so that
     # on_round can materialize the retained point (fake_render reads config["tag"]).

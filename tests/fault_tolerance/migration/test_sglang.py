@@ -24,6 +24,7 @@ from tests.utils.prometheus import sum_metric_samples
 # Customized utils for migration tests
 from .utils import (
     DynamoFrontendProcess,
+    expected_ongoing_migrations,
     managed_processes_concurrently,
     run_migration_test,
     wait_for_endpoint_instance_reduction,
@@ -571,7 +572,9 @@ def test_request_migration_sglang_aggregated(
                 use_chat_completion=(request_api == "chat"),
                 stream=stream,
                 max_tokens=AGGREGATED_MAX_TOKENS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
                 graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
                     frontend, worker
                 ),
@@ -684,7 +687,9 @@ def test_request_migration_sglang_kv_transfer(
                 max_tokens=KV_TRANSFER_MAX_TOKENS,
                 use_long_prompt=True,
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
                 graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
                     frontend, worker
                 ),
@@ -784,7 +789,9 @@ def test_request_migration_sglang_decode(
                 stream=True,
                 max_tokens=DECODE_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
                 graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
                     frontend, worker
                 ),

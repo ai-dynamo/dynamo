@@ -3,7 +3,7 @@
 
 //! Dynamo observation conversion shared by offline replay and Live Mocker.
 
-use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventTier};
+use aisim_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventTier};
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
@@ -14,10 +14,13 @@ use crate::common::protocols::ForwardPassSnapshot;
 
 /// Router storage tier of a native KV event. `HostPinned` events describe a
 /// G2 host pool (per-rank or cluster-shared) and must never enter the device (G1) index.
+/// `Disk` events describe a KVCR disk cache (G3). The event's `domain` is not
+/// carried: Dynamo indexes every native event under the publishing worker.
 pub(crate) fn dynamo_storage_tier(tier: KvEventTier) -> StorageTier {
     match tier {
         KvEventTier::Device => StorageTier::Device,
         KvEventTier::HostPinned => StorageTier::HostPinned,
+        KvEventTier::Disk => StorageTier::Disk,
     }
 }
 
@@ -99,7 +102,7 @@ pub(crate) fn dynamo_forward_pass_snapshot(
 mod tests {
     use std::sync::Arc;
 
-    use aisimulate_core::engine::{KvBlock, StoredBlocks};
+    use aisim_core::engine::{KvBlock, StoredBlocks};
     use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
     use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
@@ -116,7 +119,8 @@ mod tests {
         blocks: &[(u64, u64, &[u32])],
     ) -> KvEvent {
         KvEvent {
-            tier: aisimulate_core::engine::KvEventTier::Device,
+            tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id,
             dp_rank,
             data: KvEventData::Stored(StoredBlocks {
@@ -131,6 +135,7 @@ mod tests {
                     })
                     .collect(),
                 session_id: Some("session-1".to_owned()),
+                cache_salt: None,
             }),
         }
     }
@@ -160,7 +165,8 @@ mod tests {
         assert_eq!(token_ids, Some(vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]]));
 
         let (event, token_ids, session_id) = dynamo_kv_event(KvEvent {
-            tier: aisimulate_core::engine::KvEventTier::Device,
+            tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id: 18,
             dp_rank: 3,
             data: KvEventData::Removed {
@@ -212,7 +218,8 @@ mod tests {
         assert_eq!(matches.scores.get(&worker), Some(&2));
 
         let removed = dynamo_kv_event(KvEvent {
-            tier: aisimulate_core::engine::KvEventTier::Device,
+            tier: aisim_core::engine::KvEventTier::Device,
+            domain: aisim_core::engine::KvEventDomain::Worker,
             event_id: 3,
             dp_rank: 3,
             data: KvEventData::Removed {
