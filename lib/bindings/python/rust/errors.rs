@@ -25,7 +25,7 @@ pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException)
 
 pub fn queue_rejection_to_pyerr(rejection: dynamo_admission::host::QueueRejection) -> PyErr {
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
-    let attributes = Python::with_gil(|py| -> PyResult<()> {
+    let attributes = Python::attach(|py| -> PyResult<()> {
         let value = error.value(py);
         value.setattr("policy_class", &rejection.policy_class)?;
         value.setattr("limit_kind", rejection.limit_kind.to_string())?;
@@ -72,7 +72,7 @@ fn routed_engine_error(error: &DynamoError, message: String) -> PyErr {
     let err = RoutedEngineError::new_err(message);
     // Without the attribute the error still raises; it only loses its class.
     if let Ok(serialized) = serde_json::to_string(error) {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let _ = err.value(py).setattr(ROUTED_ENGINE_ERROR_ATTR, serialized);
         });
     }

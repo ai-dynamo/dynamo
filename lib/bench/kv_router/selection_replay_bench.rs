@@ -22,7 +22,7 @@ use dynamo_bench::kv_router_common::issuer::{
     parse_cpu_list, pin_current_thread_to_cpus, validate_cpu_partition,
 };
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_slot_tracker::host::BusyThresholds;
+use dynamo_slot_tracker::host::{BusyThresholds, BusyThresholdsHostExt};
 use serde::Serialize;
 
 use corpus::{Corpus, Omitted, WorkloadParams};
@@ -196,11 +196,10 @@ fn main() -> Result<()> {
     });
 
     let router = router_config(args.router_config_json.as_deref())?;
-    let busy = BusyThresholds {
-        prefill_busy_threshold: args.active_prefill_tokens_threshold,
-        prefill_busy_threshold_frac: args.active_prefill_tokens_threshold_frac,
-        decode_busy_threshold_frac: args.active_decode_blocks_threshold,
-    };
+    let busy = BusyThresholds::default()
+        .with_prefill_busy_threshold(args.active_prefill_tokens_threshold)
+        .with_prefill_busy_threshold_frac(args.active_prefill_tokens_threshold_frac)
+        .with_decode_busy_threshold_frac(args.active_decode_blocks_threshold);
 
     // The router's runtime and indexer threads inherit this thread's CPUs.
     pin_current_thread_to_cpus(&backend_cpus)?;

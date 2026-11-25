@@ -79,6 +79,8 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 }
 
 /// Build the error returned when the worker fails before any response bytes.
+/// Public for a [`StreamingDispatch`] that reaches its workers another way and
+/// must report such a failure as the request plane does.
 ///
 /// A typed [`ErrorClass::InvalidRequest`] or [`ErrorClass::NotImplemented`]
 /// refusal from the worker's prologue is returned as the worker's own error.
@@ -96,7 +98,7 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 /// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_REASONS`]
 /// are withheld rather than attached. The worker's text stays in the message
 /// either way; only the machine-readable type is withheld.
-pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
     let builder = DynamoError::builder()
         .error_type(ErrorType::CannotConnect)
         .message(format!(
@@ -128,15 +130,9 @@ fn is_worker_request_rejection(class: ErrorClass) -> bool {
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod testing {
-    use super::{DynamoError, StreamPrologueError};
-
     /// The semantic reason set is pinned by a cross-crate test in `lib/llm/src/migration.rs`.
     pub fn migration_sensitive_error_reasons() -> &'static [&'static str] {
         super::MIGRATION_SENSITIVE_ERROR_REASONS
-    }
-
-    pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
-        super::pre_stream_failure_error(error)
     }
 }
 

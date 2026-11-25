@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
+    local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY,
+    model_card::ModelDeploymentCard,
     protocols::{Annotated, openai::chat_completions::NvCreateChatCompletionStreamResponse},
 };
 use dynamo_runtime::{
@@ -1420,6 +1422,100 @@ async fn completion_endpoints_reject_invalid_logit_bias_keys() {
         }
 
         assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// A model whose workers publish `max_logprobs` takes log-probability counts
+/// up to that limit instead of 20. Chat and completions refuse a larger count
+/// before the engine sees it; responses lowers it and reports the lowered value.
+#[tokio::test]
+#[serial]
+async fn published_max_logprobs_sets_the_models_logprobs_limit() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let chat = |top_logprobs: u8| {
+            json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "logprobs": true,
+                "top_logprobs": top_logprobs
+            })
+        };
+
+        // Nothing published: the limit stays at 20.
+        let svc = HarnessService::start(Vec::new()).await;
+        let response = post_json(&svc, "/v1/chat/completions", chat(32)).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "Top_logprobs must be between 0 and 20, got 32",
+        )
+        .await;
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let engine = Arc::new(ScriptedChatEngine::new(vec![script; 2].into_iter().map(Ok)));
+        let mut card = ModelDeploymentCard::with_name_only(MODEL);
+        card.runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), json!(32));
+        let svc = HarnessService::start_with_engine_and_card(engine, card).await;
+
+        // At the published limit: the count reaches the engine unchanged.
+        let response = post_json(&svc, "/v1/chat/completions", chat(32)).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        bounded(response.bytes()).await.unwrap();
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].inner.top_logprobs, Some(32));
+
+        // Above it: refused before the engine, and the message names the limit.
+        let response = post_json(&svc, "/v1/chat/completions", chat(33)).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "Top_logprobs must be between 0 and 32, got 33",
+        )
+        .await;
+        assert!(svc.engine.take_requests().await.is_empty());
+
+        // Completions checks `logprobs` against the same published limit.
+        let response = post_json(
+            &svc,
+            "/v1/completions",
+            json!({"model": MODEL, "prompt": "ping", "logprobs": 33}),
+        )
+        .await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "Logprobs must be between 0 and 32, got 33",
+        )
+        .await;
+
+        // Responses lowers an over-limit count to the published limit and echoes it.
+        let response = post_json(
+            &svc,
+            "/v1/responses",
+            json!({
+                "model": MODEL,
+                "input": "ping",
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": 40
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = bounded(response.json()).await.unwrap();
+        assert_eq!(body["top_logprobs"], json!(32));
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].inner.logprobs, Some(true));
+        assert_eq!(requests[0].inner.top_logprobs, Some(32));
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     })
     .await;

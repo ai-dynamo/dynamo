@@ -121,10 +121,11 @@ contract are unchanged.
 CRDs to be installed before upgrading the operator.
 
 **Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
-Ordinary Helm upgrades remove the flag automatically. The legacy
-`dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability; it remains solely
-for the existing Planner live-retune RBAC condition. Retune behavior and its disabled defaults are
-unchanged. Review API migration notes before future upgrades.
+Ordinary Helm upgrades remove the flag automatically. Remove `dynamo-operator.dgdrV1Beta2.enabled`
+and `dynamo-operator.dgdrV1Beta2.plannerLiveRetune` from your Helm overrides. On install or
+upgrade, every Planner ServiceAccount can create DGDR Requests, read Runs and Candidates, and
+get, create, update, or delete any Lease in its namespace, even when the old values are `false`.
+Enable experimental live retune per deployment with `retune.executor: dgdr` in the Planner config.
 
 #### Operator behavior breaking changes
 
@@ -170,6 +171,62 @@ workload for that bundle.
 
 **Existing deployments:** An LPX workload that the old operator created does not continue across
 this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
+
+#### Dependency compatibility
+
+##### AISimulate 0.15.0.dev202611230000000114
+
+**Change:** Dynamo now pins AISimulate `0.15.0.dev202611230000000114`, replacing
+`0.15.0.dev202611130000000104`. Planner, the DGDR profiler, and mocker workers run the AISimulate
+that their image installs. On `b200_sxm`, `b300_sxm`, `gb200`, `gb300`, `h100_sxm`, `h200_sxm`,
+`l40s`, and `rtx_pro_6000_server`, the new release accepts these backend versions:
+
+| Backend | Accepted versions | No longer accepted |
+|---|---|---|
+| vLLM | 0.30.0, 0.32.0 (current) | 0.24.0, 0.31.0 |
+| SGLang | 0.5.21, 0.5.23 (current) | 0.5.14 |
+| TensorRT-LLM | 1.3.0rc29, 1.4.0rc2 (current) | 1.3.0rc20 |
+
+`a100_sxm` and `b60` keep their versions. The profiler writes the current version into
+`--ais-perf-model`, so newly generated deployments move to the versions marked current. An
+execution profile loads only when the pinned release compiles the same engine as the one recorded in
+the profile, so profiles generated with the old pin can fail to load, although both releases use
+engine spec schema version 30.
+
+**Affected:**
+
+- Planner configurations whose `ais_perf_model` entries set a `backend_version` that the new
+  release no longer accepts. They fail with `UnlistedQueryVersionError`.
+- Planner configurations that load an execution-profile dataset generated with the old pin. Loading
+  can fail with `compiled baseline differs from the profile basis`.
+- Mocker workers whose `--ais-perf-model` sets a version that the new release no longer accepts.
+
+**Action:**
+
+1. Download or generate each execution-profile dataset again with the new pin. Then restart
+   Planner, which prepares a dataset only when its configured source changes.
+2. Set each explicit `backend_version` to a version that the new release accepts and that matches
+   your workers. If your workers run the current version, you can use `current`:
+
+   ```diff
+    ais_perf_model:
+      - worker_type: prefill
+        model: Qwen/Qwen3-0.6B
+        system: b200_sxm
+        backend: vllm
+   -    backend_version: 0.24.0
+   +    backend_version: current
+   ```
+
+   This field selects AISimulate performance data. It does not upgrade the inference engine. The
+   new release has no data for the versions that it no longer accepts. If your workers keep such a
+   version, select the accepted version that is closest to it.
+
+**Existing deployments:** A running DGD keeps the AISimulate version of the images that it names
+until you change those images. An operator upgrade alone moves new profiling work to the new pin:
+v1beta2 Runs, and v1beta1 Requests created without `spec.image`, use
+`dynamo-operator.controllerManager.manager.dgdrDefaultImage`, or `dynamo-planner:<chart appVersion>`
+when that value is empty. v1beta1 Requests that set `spec.image` keep that image.
 
 ### v1.8.0
 
@@ -896,8 +953,6 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
-| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | Legacy prerequisite for Planner live-retune RBAC. This does not gate DGDR v1beta2 API availability. |
-| dynamo-operator.dgdrV1Beta2.plannerLiveRetune | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs: create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates, and read, create, update and delete any Lease in the namespace. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |

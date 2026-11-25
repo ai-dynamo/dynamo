@@ -12,7 +12,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::experimental::hints::{
+    Commitments, HintContext, HintHost, HintPolicy, HintPolicyConstructor, HintPolicyError,
+    HintPolicyProviderError, HintPolicyRegistryError, KvCopySource, KvHintAction,
+    KvSourceLocationsPayload,
+};
+use dynamo_kv_router::plugins::*;
 
 use crate::KVCR_POLICY_TYPE;
 
@@ -134,6 +139,7 @@ pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPo
 mod tests {
     use super::*;
     use dynamo_kv_hints::KvHint;
+    use dynamo_kv_router::plugins::experimental::hints::ExternalSequenceBlockHash;
 
     /// The wire shape engines and KVCR read: field names and values are N-2 compatible.
     #[test]

@@ -93,13 +93,17 @@ def test_telemetry_capture_callback_and_jsonl_share_one_sample_stream(
     samples = telemetry["samples"]
     assert samples
     assert callback_samples == samples
-    assert [json.loads(line) for line in jsonl_path.read_text().splitlines()] == samples
+    # JSONL has no tuples, so compare with the JSON form of the samples.
+    assert [
+        json.loads(line) for line in jsonl_path.read_text().splitlines()
+    ] == json.loads(json.dumps(samples))
     assert samples[0]["kind"] == "baseline"
     assert [sample["sample_ordinal"] for sample in samples] == list(range(len(samples)))
     assert sum(sample["traffic"]["arriving_requests"] for sample in samples) == 6
     assert sum(sample["traffic"]["completed_requests"] for sample in samples) == 6
 
     assert set(samples[0]) == {
+        "completion_feedback",
         "host_caches",
         "sample_ordinal",
         "kind",
