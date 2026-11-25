@@ -114,14 +114,16 @@ its own:
 | `DYN_TCP_REQUEST_TIMEOUT` | Bounds the send and the worker's acknowledgment, including first contact with a worker. |
 | `DYN_TCP_WORKER_POOL_SIZE` | Maximum requests a worker runs at once. |
 | `DYN_TCP_WORK_QUEUE_SIZE` | Maximum requests a worker queues beyond the pool. A request beyond both is refused as overloaded. |
-| `DYN_TCP_MAX_MESSAGE_SIZE` | Maximum request size. Also limits one response item above 256 KiB, counted with its small frame header. |
+| `DYN_TCP_MAX_MESSAGE_SIZE` | Maximum request size. Also limits each response item above 256 KiB. |
 | `DYN_TCP_RESPONSE_STREAM_HOST` | Host the Velo listener binds and advertises for both planes. `DYN_TCP_RPC_HOST` and `DYN_TCP_RPC_PORT` are not used. |
 
 - Set the same `DYN_TCP_MAX_MESSAGE_SIZE` on every frontend and worker in the
   pool. When a worker's limit is lower than the frontend's, the worker refuses
   the larger requests, and the frontend treats each refusal as a connection
-  failure and marks the worker down. A response item above the limit ends its
-  own stream.
+  failure and marks the worker down.
+- A response item above 256 KiB is checked against the limit with its 40-byte
+  frame header included, and one that exceeds it ends its own stream. Smaller
+  response items are not checked.
 - Each request header value is limited to 1024 bytes, and the encoded header
   map to 15,872 bytes. A request over either limit fails at the frontend and is
   not sent. The `tcp` request plane has no such limit, so a long `x-request-id`
