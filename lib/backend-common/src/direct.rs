@@ -512,7 +512,7 @@ impl DirectEngineHost {
                 engine.kv_event_sources().await?,
             )?;
         }
-        let local_model = build_local_model(&config, &engine_config, false).await?;
+        let local_model = build_local_model(&config, &engine_config, false, None).await?;
         let mut card = local_model.into_card();
         card.model_type = model_type;
         card.model_input = config.model_input;
