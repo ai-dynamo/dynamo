@@ -143,6 +143,7 @@ impl PolicyParameters {
 pub(crate) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    super::chunk_table::register(registry)?;
     for (policy_type, preset) in [
         ("dynamo-default-cost-fn", Preset::Default),
         (KVCR_POLICY_TYPE, Preset::Kvcr),
