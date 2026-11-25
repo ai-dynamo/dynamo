@@ -19,6 +19,11 @@ pub struct Block<T> {
 
 // A slot is per block, millions per rank: keep its size a decision, not an accident.
 const _: () = assert!(std::mem::size_of::<(u64, Block<u64>)>() == 32);
+// A slot with a `Copy` value is `Copy`, so copying a ledger of them is a memory copy.
+const _: () = {
+    const fn is_copy<T: Copy>() {}
+    is_copy::<(u64, Block<u64>)>();
+};
 
 /// Blocks in sequence order: `parent` precedes the first, and each block precedes the next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,13 +39,13 @@ const NONE: u32 = u32::MAX;
 /// The blocks held in one place, keyed by the engine's block hash.
 ///
 /// A host with several owners or tiers keeps one ledger for each. A block is held or it is
-/// not: a second store changes nothing, and one remove drops it. An engine that holds
-/// duplicate blocks under one hash (vLLM) needs its removes counted before they reach the
-/// ledger.
+/// not: a second store changes nothing, and one remove drops it. A host whose engine holds
+/// duplicate blocks under one hash (vLLM) counts the copies itself: [`store`](Self::store)
+/// says whether the block was new, and [`remove`](Self::remove) whether it was held.
 ///
-/// `T` is the host's value for a block, fixed by the block's first store. It is `Copy`, so
-/// copying the ledger copies memory and removing a block frees nothing. A host with
-/// variable-size data per block keeps that data itself and puts its id here.
+/// `T` is the host's value for a block, fixed by the block's first store. Copying the ledger
+/// clones every value. With a `Copy` value that is a memory copy; a value that owns memory
+/// costs a clone per block, wherever the host copies the ledger.
 ///
 /// Blocks sit in the order they were stored, except those a remove has moved. The blocks of
 /// a sequence are therefore usually next to each other, which is what makes
@@ -62,21 +67,24 @@ impl<T> Default for Ledger<T> {
     }
 }
 
-impl<T: Copy> Ledger<T> {
+impl<T: Clone> Ledger<T> {
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
 
     /// Records `hash` as held. The first store of a block fixes its `content` and `parent`.
-    pub fn store(&mut self, hash: u64, content: T, parent: Option<u64>) {
-        if let Entry::Vacant(slot) = self.index.entry(hash) {
-            let at = u32::try_from(self.slots.len())
-                .ok()
-                .filter(|&at| at != NONE)
-                .expect("a ledger holds fewer than 2^32 - 1 blocks");
-            slot.insert(at);
-            self.slots.push((hash, Block { parent, content }));
-        }
+    /// Returns whether the block was new.
+    pub fn store(&mut self, hash: u64, content: T, parent: Option<u64>) -> bool {
+        let Entry::Vacant(slot) = self.index.entry(hash) else {
+            return false;
+        };
+        let at = u32::try_from(self.slots.len())
+            .ok()
+            .filter(|&at| at != NONE)
+            .expect("a ledger holds fewer than 2^32 - 1 blocks");
+        slot.insert(at);
+        self.slots.push((hash, Block { parent, content }));
+        true
     }
 
     /// Drops `hash`. Returns whether it was held.
@@ -94,11 +102,12 @@ impl<T: Copy> Ledger<T> {
 
     /// Every held block with its hash, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (u64, Block<T>)> + '_ {
-        self.slots.iter().copied()
+        self.slots.iter().cloned()
     }
 
     /// The blocks that chain back to the start of a sequence, as chains ordered so that each
-    /// comes after the chain that holds its parent.
+    /// comes after the chain that holds its parent. A chain ends where its sequence ends or
+    /// branches, so the parent of a chain is the last block of an earlier chain.
     ///
     /// A block whose parent is not held is left out, with everything after it: a prefix index
     /// cannot hold a block it cannot reach. The same blocks always give the same chains in
@@ -141,14 +150,14 @@ impl<T: Copy> Ledger<T> {
         let mut chains = Vec::new();
         let mut queue = VecDeque::from(roots);
         while let Some(start) = queue.pop_front() {
-            let (first, block) = self.slots[start as usize];
-            let mut blocks = vec![(first, block.content)];
+            let (first, block) = &self.slots[start as usize];
+            let mut blocks = vec![(*first, block.content.clone())];
             let mut tail = start;
             let branches = loop {
                 let child = first_child[tail as usize];
                 if child != NONE && next_sibling[child as usize] == NONE {
-                    let (hash, block) = self.slots[child as usize];
-                    blocks.push((hash, block.content));
+                    let (hash, block) = &self.slots[child as usize];
+                    blocks.push((*hash, block.content.clone()));
                     tail = child;
                     continue;
                 }

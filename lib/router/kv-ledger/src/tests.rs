@@ -6,9 +6,11 @@ use std::collections::{BTreeMap, VecDeque};
 use crate::{Applied, Block, Chain, Effect, Ledger, Replay};
 
 /// Stores `hashes` as a chain under `parent`, with `hash + 1000` as each block's content.
+/// Checks that each store says whether its block was new.
 fn store(ledger: &mut Ledger<u64>, mut parent: Option<u64>, hashes: &[u64]) {
     for &hash in hashes {
-        ledger.store(hash, hash + 1000, parent);
+        let held = ledger.iter().any(|(held, _)| held == hash);
+        assert_eq!(ledger.store(hash, hash + 1000, parent), !held);
         parent = Some(hash);
     }
 }
@@ -118,6 +120,32 @@ fn chains_do_not_depend_on_where_blocks_sit() {
     );
     assert!(ledger.remove(4));
     assert_eq!(ledger.chains(), vec![chain(None, &[1]), chain(None, &[3])]);
+}
+
+#[test]
+fn a_value_that_owns_memory_is_kept_from_the_first_store() {
+    let tokens = |hash: u64| vec![hash as u32; 3];
+    let mut ledger = Ledger::default();
+    assert!(ledger.store(1, tokens(1), None));
+    assert!(ledger.store(2, tokens(2), Some(1)));
+    // A second store of a held block says so, and keeps the first value and parent.
+    assert!(!ledger.store(2, tokens(9), None));
+
+    // A copy keeps its values when the ledger it was copied from drops them.
+    let copy = ledger.clone();
+    assert!(ledger.remove(1));
+    let both = Chain {
+        parent: None,
+        blocks: vec![(1, tokens(1)), (2, tokens(2))],
+    };
+    assert_eq!(copy.chains(), vec![both]);
+    assert_eq!(ledger.chains(), vec![]);
+    let held: Vec<_> = ledger.iter().collect();
+    let block = Block {
+        parent: Some(1),
+        content: tokens(2),
+    };
+    assert_eq!(held, vec![(2, block)]);
 }
 
 fn push(replay: &mut Replay<u64, Vec<u64>>, seq: u64) -> Applied {
@@ -307,11 +335,19 @@ fn a_copy_cut_then_its_tail_equals_following_from_the_start() {
         source.apply(seq, event, fold);
         let ledger = source.state();
         assert_eq!(held(ledger), plain, "blocks held after batch {seq}");
-        assert_eq!(
-            ledger.chains(),
-            plain_chains(&plain),
-            "chains after batch {seq}"
-        );
+        let chains = ledger.chains();
+        assert_eq!(chains, plain_chains(&plain), "chains after batch {seq}");
+        // What lets a host name a chain's parent from the chains it has already read.
+        for (at, chain) in chains.iter().enumerate() {
+            let ends_an_earlier_chain = |parent| {
+                let mut tails = chains[..at].iter().filter_map(|chain| chain.blocks.last());
+                tails.any(|&(tail, _)| tail == parent)
+            };
+            assert!(
+                chain.parent.is_none_or(ends_an_earlier_chain),
+                "the parent of chain {at} after batch {seq}"
+            );
+        }
         assert_eq!(ledger.is_empty(), plain.is_empty(), "after batch {seq}");
 
         if below(7) == 0 {
