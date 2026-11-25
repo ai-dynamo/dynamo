@@ -630,19 +630,28 @@ impl AdmissionContext {
     }
 }
 
-fn reset_full_ranks<'a>(
-    counts: &'a mut FullRankCounts,
-    provider: Option<&RejectThresholdsProvider>,
-) -> Option<&'a mut FullRankCounts> {
-    if let Some(limits) = provider
+/// The host's reject thresholds as its provider reports them now, when any is configured.
+fn reject_limits(provider: Option<&RejectThresholdsProvider>) -> Option<BusyThresholds> {
+    provider
         .map(|provider| provider())
         .filter(BusyThresholds::is_configured)
-    {
-        counts.reset(limits);
-        Some(counts)
-    } else {
-        counts.clear();
-        None
+}
+
+/// Starts a pass over the ranks judged against `limits`: the counts to record full ranks
+/// into, or None with the counts emptied when there is nothing to judge.
+fn reset_full_ranks(
+    counts: &mut FullRankCounts,
+    limits: Option<BusyThresholds>,
+) -> Option<&mut FullRankCounts> {
+    match limits {
+        Some(limits) => {
+            counts.reset(limits);
+            Some(counts)
+        }
+        None => {
+            counts.clear();
+            None
+        }
     }
 }
 
@@ -1716,11 +1725,8 @@ impl<
             let cached_tokens = SchedulingContext::new(request, workers)
                 .with_eligibility(eligibility)
                 .best_cached_tokens();
-            let reject_thresholds = self
-                .reject_thresholds
-                .as_ref()
-                .map(|provider| provider())
-                .unwrap_or_default();
+            let reject_thresholds =
+                reject_limits(self.reject_thresholds.as_ref()).unwrap_or_default();
             let mut classification =
                 ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
                     .with_pinned_worker(request.pinned_worker)
@@ -1806,11 +1812,7 @@ impl<
         if self.eligibility.exclusive
             && request.affinity_target.is_some()
             && !request.overlap.effective_cached_tokens.is_empty()
-            && let Some(limits) = self
-                .reject_thresholds
-                .as_ref()
-                .map(|provider| provider())
-                .filter(BusyThresholds::is_configured)
+            && let Some(limits) = reject_limits(self.reject_thresholds.as_ref())
         {
             full_ranks.reset(limits);
             self.slots
@@ -2097,21 +2099,16 @@ impl<
     /// Project every rank's load for `request` on the caller task and judge it against the
     /// host's reject thresholds, as the actor would with no writes of its own in between.
     fn prepare_load(&self, request: &SchedulingRequest, overlap: bool) -> PreparedLoad {
-        let limits = self
-            .reject_thresholds
-            .as_ref()
-            .map(|provider| provider())
-            .filter(BusyThresholds::is_configured);
+        let limits = reject_limits(self.reject_thresholds.as_ref());
         // Before any rank is read: a write this count includes is visible to the pass.
         let actor_writes = self.actor_writes.load(AtomicOrdering::Acquire);
         let decay_now = Instant::now();
         let (mut loads, mut full_ranks) = self.load_maps.pop().unwrap_or_default();
-        full_ranks.reset(limits.unwrap_or_default());
         let load_table_version = self.slots.project_worker_loads_into(
             request.token_seq.as_deref().filter(|_| overlap),
             decay_now,
             &mut loads,
-            limits.is_some().then_some(&mut full_ranks),
+            reset_full_ranks(&mut full_ranks, limits),
         );
         PreparedLoad {
             loads,
@@ -2359,7 +2356,8 @@ impl<
                     let reject = (self.eligibility.exclusive && request.affinity_target.is_some())
                         .then_some(self.reject_thresholds.as_ref())
                         .flatten();
-                    let full_ranks = reset_full_ranks(&mut self.gate_full_ranks, reject);
+                    let full_ranks =
+                        reset_full_ranks(&mut self.gate_full_ranks, reject_limits(reject));
                     if let Some(full_ranks) = full_ranks {
                         self.slots
                             .record_full_worker_ranks_at(decay_now, full_ranks);
@@ -2700,7 +2698,7 @@ impl<
                 };
             }
             if !gate_fresh {
-                let rejecting = reset_full_ranks(full_ranks, reject);
+                let rejecting = reset_full_ranks(full_ranks, reject_limits(reject));
                 if let Some(full_ranks) = rejecting {
                     slots.record_full_worker_ranks_at(decay_now, full_ranks);
                 }
@@ -2858,7 +2856,7 @@ impl<
                         };
                     }
                     if !gate_fresh {
-                        let rejecting = reset_full_ranks(full_ranks, reject);
+                        let rejecting = reset_full_ranks(full_ranks, reject_limits(reject));
                         if let Some(full_ranks) = rejecting {
                             slots.record_full_worker_ranks_at(decay_now, full_ranks);
                         }
@@ -3144,11 +3142,7 @@ impl<
         mut prepared: Option<Box<PreparedAdmission>>,
         handle: impl FnOnce(&Self, &mut SchedulingRequest, Option<Box<PreparedAdmission>>) -> R,
     ) -> R {
-        let limits = self
-            .reject_thresholds
-            .as_ref()
-            .map(|provider| provider())
-            .filter(BusyThresholds::is_configured);
+        let limits = reject_limits(self.reject_thresholds.as_ref());
         let project_overlap = self.projects_overlap();
         let mut adopted = prepared.as_deref_mut().and_then(|prepared| {
             self.adopt_prepared_load(prepared, &request, project_overlap, limits)
@@ -3164,21 +3158,11 @@ impl<
                 // The host's reject thresholds are judged in the same pass that projects each
                 // rank's load, so selection only consults the ranks found full: no second read
                 // per rank.
-                let full_ranks = match limits {
-                    Some(limits) => {
-                        self.full_ranks.reset(limits);
-                        Some(&mut self.full_ranks)
-                    }
-                    None => {
-                        self.full_ranks.clear();
-                        None
-                    }
-                };
                 self.slots.project_worker_loads_into(
                     request.token_seq.as_deref().filter(|_| project_overlap),
                     decay_now,
                     &mut request.worker_loads,
-                    full_ranks,
+                    reset_full_ranks(&mut self.full_ranks, limits),
                 );
             }
         }
