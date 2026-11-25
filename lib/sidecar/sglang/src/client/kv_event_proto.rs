@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Converts a response of SGLang's `KvEvents` stream into the batch the ZMQ
-//! decoder returns for the same events, through the decoder's own helpers.
+//! Converts the responses of SGLang's `KvEvents` service into the batches the
+//! ZMQ decoder returns for the same events, through the decoder's own helpers.
 
 use anyhow::{Context as _, Result};
-use dynamo_sidecar_common::kv_events::KvBatch;
 use dynamo_sidecar_common::kv_events::wire::{
     BlockHashValue, KvEventBatch, KvTokenIds, RawKvEvent, normalize_medium, normalize_token_ids,
 };
+use dynamo_sidecar_common::kv_events::{KvBatch, KvSnapshotItem};
 use sglang_kv_types::kv::v1 as pb;
 
 #[cfg(test)]
@@ -30,6 +30,24 @@ pub(crate) fn batch(response: pb::SubscribeKvEventsResponse) -> Option<KvBatch> 
             },
         )
     }))
+}
+
+/// The stores or the end of a snapshot response; `None` for a response without either.
+pub(crate) fn snapshot_item(response: pb::GetKvSnapshotResponse) -> Option<Result<KvSnapshotItem>> {
+    use pb::get_kv_snapshot_response::Item;
+    Some(match response.item? {
+        Item::Blocks(blocks) => {
+            let stores = blocks.stored.into_iter().map(block_stored);
+            stores.collect::<Result<_>>().map(KvSnapshotItem::Stores)
+        }
+        Item::End(end) => end
+            .resume
+            .context("KV snapshot without a cursor")
+            .map(|resume| KvSnapshotItem::End {
+                next_sequence: resume.next_sequence_number,
+                is_complete: end.complete,
+            }),
+    })
 }
 
 fn event(event: pb::KvCacheEvent) -> Result<RawKvEvent> {

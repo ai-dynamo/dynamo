@@ -3,8 +3,8 @@
 
 //! Opt-in replay recovery for a rank's ZMQ KV event listener.
 
-use super::PublisherInput;
 use super::zmq_listener::{is_mismatched_rank, normalize_batch, split_zmq_kv_batch};
+use super::{PublisherInput, barrier};
 use crate::utils::zmq::multipart_message;
 #[cfg(test)]
 use dynamo_kv_events::placement::PlacementEvent;
@@ -157,7 +157,6 @@ const MAX_LIVE_DRAIN: usize = 4096;
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const ROUND_TIMEOUT: Duration = Duration::from_secs(120);
-const BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn wait_for_handshake(monitor: &mut tmq::pair::Pair) -> Result<()> {
     let event = monitor
@@ -185,16 +184,6 @@ fn live_batch(message: tmq::Multipart) -> Option<(u64, Vec<u8>)> {
     split_zmq_kv_batch(multipart_message(message))
         .inspect_err(|error| tracing::warn!(%error, "Failed to decode ZMQ KV batch envelope"))
         .ok()
-}
-
-/// Waits until the processor and index have finished every batch sent before it.
-async fn barrier(tx: &mpsc::UnboundedSender<PublisherInput>) -> Result<()> {
-    let (done, result) = tokio::sync::oneshot::channel();
-    tx.send(PublisherInput::Barrier(done))
-        .map_err(|_| anyhow::anyhow!("KV publisher stopped"))?;
-    result
-        .await
-        .map_err(|_| anyhow::anyhow!("KV index barrier dropped"))?
 }
 
 fn set_status(status: &tokio::sync::watch::Sender<KvStreamStatus>, value: KvStreamStatus) {
@@ -483,8 +472,7 @@ async fn recovery_session(
                             next_replay = Some(Instant::now());
                         } else {
                             // Report success only after the index has finished every batch.
-                            tokio::time::timeout(BARRIER_TIMEOUT, barrier(ingest.tx)).await
-                                .map_err(fatal)?.map_err(fatal)?;
+                            barrier(ingest.tx).await.map_err(fatal)?;
                             is_success = true;
                             *deadline = None;
                             set_status(&config.status, KvStreamStatus::Success);

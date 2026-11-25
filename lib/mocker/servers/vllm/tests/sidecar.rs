@@ -302,3 +302,14 @@ async fn sidecar_relays_stored_and_evicted_blocks() {
 async fn sidecar_relays_the_zmq_events_of_an_engine_without_the_grpc_stream() {
     relays_stored_and_evicted_blocks(false).await;
 }
+
+#[tokio::test]
+async fn sidecar_loads_the_blocks_the_engine_holds() {
+    let args = fast_engine_args();
+    let block_size = u32::try_from(args.block_size).unwrap();
+    let server = RunningServer::start(ServerMode::Aggregated, args, false).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    let drop_stream = || server.service.drop_kv_event_subscribers();
+    common::check_kv_snapshot(&engine, block_size, false, &drop_stream).await;
+}

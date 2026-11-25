@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use dynamo_kv_events::zmq_wire::RawKvEvent;
 use dynamo_llm::kv_router::publisher::KvEventSourceConfig;
@@ -12,6 +12,11 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::*;
+
+/// An engine that predates `GetKvSnapshot`.
+fn no_snapshot() -> GetSnapshot {
+    Box::new(|| Box::pin(future::ready(Err(tonic::Status::unimplemented("")))))
+}
 
 #[tokio::test]
 async fn subscription_failures_choose_zmq_or_no_feed() {
@@ -24,7 +29,14 @@ async fn subscription_failures_choose_zmq_or_no_feed() {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 Box::pin(future::ready(Err(tonic::Status::new(code, "injected"))))
             });
-            (rank, subscribe)
+            let snapshot = no_snapshot();
+            (
+                rank,
+                KvEventCalls {
+                    subscribe,
+                    snapshot,
+                },
+            )
         })
     };
     let zmq = || {
@@ -42,6 +54,41 @@ async fn subscription_failures_choose_zmq_or_no_feed() {
     let feeds = kv_event_feeds(failing(tonic::Code::FailedPrecondition), no_fallback).await;
     assert!(feeds.unwrap().is_empty());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_stream_opened_before_its_snapshot_drops_the_batches_the_snapshot_holds() {
+    let batch = |sequence| -> KvBatch {
+        let batch = KvEventBatch {
+            ts: 0.0,
+            events: Vec::new(),
+            data_parallel_rank: Some(0),
+        };
+        Ok((sequence, batch))
+    };
+    let is_subscribed = Arc::new(AtomicBool::new(false));
+    let subscribed = is_subscribed.clone();
+    let mut calls = KvEventCalls {
+        subscribe: Box::new(move || {
+            subscribed.store(true, Ordering::SeqCst);
+            let undecodable = Err(anyhow::anyhow!("undecodable"));
+            let batches = [batch(5), undecodable, batch(6), batch(7), batch(8)];
+            Box::pin(future::ready(Ok(stream::iter(batches).boxed())))
+        }),
+        // The engine's snapshot holds the batches it sent a subscriber before the call.
+        snapshot: Box::new(move || {
+            assert!(is_subscribed.load(Ordering::SeqCst));
+            Box::pin(future::ready(Ok(KvSnapshot {
+                stores: Vec::new(),
+                next_sequence: 7,
+                is_complete: true,
+            })))
+        }),
+    };
+
+    let (_, batches) = open(&mut calls, 0).await.unwrap();
+    let sequences = batches.filter_map(|batch| future::ready(batch.ok().map(|batch| batch.0)));
+    assert_eq!(sequences.collect::<Vec<_>>().await, [7, 8]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -78,10 +125,14 @@ async fn an_ended_stream_is_reopened_at_once_unless_it_delivered_nothing() {
         idempotent_stores: false,
         feed: KvEventFeed::Grpc {
             stream: batch(0),
-            resubscribe: Box::new(move || {
-                opened.send(Instant::now()).unwrap();
-                Box::pin(future::ready(Ok(reopened.next().unwrap())))
-            }),
+            snapshot: None,
+            calls: KvEventCalls {
+                subscribe: Box::new(move || {
+                    opened.send(Instant::now()).unwrap();
+                    Box::pin(future::ready(Ok(reopened.next().unwrap())))
+                }),
+                snapshot: no_snapshot(),
+            },
         },
     };
     let cancel = CancellationToken::new();

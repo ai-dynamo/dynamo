@@ -58,4 +58,6 @@ To enable request migration, set `--migration-limit` to a value greater than `0`
 
 During shutdown, the shared worker removes its registration. It then waits and releases its resources. Sidecars do not report when all engine work has stopped. The prefill worker therefore waits for a limited time. This wait does not prove that engine KV transfers are complete.
 
+A vLLM or SGLang sidecar that restarts beside a running engine reloads the engine's KV blocks when the engine serves `GetKvSnapshot`. It also reloads them after it loses the engine's KV event stream. The reload covers the device tier only. Routers learn blocks in host memory, on disk, or in external stores again when the engine next stores them.
+
 Configure cache offloading in the native engine. Install any required plugin in the engine container. Running the sidecar in a separate process does not prevent caching inside the engine. Test offload-aware routing, storage tiers, and prefill/decode transfer combinations separately. A prefix-cache hit or KV event alone does not prove that these combinations work. Support for a feature does not mean that all model and feature combinations are verified.

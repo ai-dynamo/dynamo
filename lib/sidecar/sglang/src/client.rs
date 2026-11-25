@@ -14,10 +14,9 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
-use dynamo_sidecar_common::kv_events::{Subscribe, grpc_batches};
+use dynamo_sidecar_common::kv_events::{KvEventCalls, grpc_batches, grpc_snapshot};
 use dynamo_sidecar_common::v14::GrpcChannelPool;
 use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
-use sglang_kv_types::kv::v1::kv_events_client::KvEventsClient;
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::Channel;
@@ -440,21 +439,38 @@ impl Pool {
         }
     }
 
-    /// Opens this listener's `SubscribeKvEvents` stream for `dp_rank` on each call.
-    pub(crate) fn kv_event_subscription(&self, dp_rank: u32) -> Subscribe {
+    /// This listener's `KvEvents` calls for `dp_rank`.
+    pub(crate) fn kv_event_calls(&self, dp_rank: u32) -> KvEventCalls {
+        use sglang_kv_types::kv::v1 as kv;
         let channel = self.kv_events.clone();
-        Box::new(move || {
-            let mut client = KvEventsClient::new(channel.clone())
-                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
-            Box::pin(async move {
-                let request = sglang_kv_types::kv::v1::SubscribeKvEventsRequest {
-                    data_parallel_rank: dp_rank,
-                    resume: None,
-                };
-                let response = client.subscribe_kv_events(request).await?;
-                Ok(grpc_batches(response.into_inner(), kv_event_proto::batch))
-            })
-        })
+        let client = move || {
+            kv::kv_events_client::KvEventsClient::new(channel.clone())
+                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+        };
+        let subscriber = client.clone();
+        KvEventCalls {
+            subscribe: Box::new(move || {
+                let mut client = subscriber();
+                Box::pin(async move {
+                    let request = kv::SubscribeKvEventsRequest {
+                        data_parallel_rank: dp_rank,
+                        resume: None,
+                    };
+                    let responses = client.subscribe_kv_events(request).await?;
+                    Ok(grpc_batches(responses.into_inner(), kv_event_proto::batch))
+                })
+            }),
+            snapshot: Box::new(move || {
+                let mut client = client();
+                Box::pin(async move {
+                    let request = kv::GetKvSnapshotRequest {
+                        data_parallel_rank: dp_rank,
+                    };
+                    let responses = client.get_kv_snapshot(request).await?;
+                    grpc_snapshot(responses.into_inner(), kv_event_proto::snapshot_item).await
+                })
+            }),
+        }
     }
 }
 

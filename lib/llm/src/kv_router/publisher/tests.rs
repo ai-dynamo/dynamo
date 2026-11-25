@@ -2387,6 +2387,33 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
+    async fn barrier_without_a_local_index_leaves_the_processor_running() {
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        let publisher = MockPublisher::new();
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher.clone(),
+            1,
+            CancellationToken::new(),
+            rx,
+            None,
+            Some(60_000),
+            DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
+        ));
+
+        tx.send(local_gpu_batch(vec![stored_event(0, None, 10, 0)]).into())
+            .unwrap();
+        super::super::barrier(&tx).await.unwrap();
+        tx.send(local_gpu_batch(vec![removed_event(1, 10, 0)]).into())
+            .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        // The store the barrier flushed, and the remove sent after it.
+        assert_eq!(publisher.get_events().len(), 2);
+    }
+
+    #[tokio::test]
     async fn test_native_list_coalesces_singleton_stores_without_timeout() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();

@@ -28,7 +28,10 @@ Sources that opt into replay recovery (`zmq_recovery.rs`) are the exception:
 DEP #14897 requires a verified local index before registration, so recovery
 sends one barrier before `Success` and waits until the index has finished every
 earlier batch. There are no per-batch acknowledgements, and bad events are
-still handled as on the live path.
+still handled as on the live path. `KvEventPublisher::flush` is the same
+barrier for push sources: a worker waits on it once, before it registers, so
+that the state an engine loaded at startup is in the local index, when it has
+one, that a router queries.
 
 `Cleared` is different: it is an ordering barrier and must complete across every
 affected physical tier before publication.

@@ -22,7 +22,7 @@ use futures::Stream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 
-use kv_events::{KvEventResponses, KvEventStream};
+use kv_events::{KvEventResponses, KvEventStream, KvSnapshotResponses};
 use request::{PreparedRequest, SequenceOutputExt};
 
 #[path = "server_request.rs"]
@@ -32,8 +32,25 @@ mod kv_events {
     dynamo_mocker::grpc_kv_events!(
         dynamo_vllm_sidecar::proto,
         data_parallel_rank,
-        super::kv_event
+        super::kv_event,
+        super::kv_stream_start,
+        super::kv_snapshot_end
     );
+}
+
+/// vLLM's stream has no response before its batches.
+fn kv_stream_start(
+    _request: &pb::SubscribeKvEventsRequest,
+    _stream_id: &str,
+) -> Result<Option<pb::SubscribeKvEventsResponse>, Status> {
+    Ok(None)
+}
+
+fn kv_snapshot_end(_stream_id: &str, next_sequence_number: u64) -> pb::KvSnapshotEnd {
+    pb::KvSnapshotEnd {
+        next_sequence_number,
+        complete: true,
+    }
 }
 
 /// The fields the Mocker's ZMQ sink publishes for the same event.
@@ -291,6 +308,14 @@ impl VllmMockerService {
     pub fn publish_all_blocks_cleared(&self) {
         if let Some(kv_events) = &self.kv_events {
             kv_events.publish_all_blocks_cleared();
+        }
+    }
+
+    /// End every KV event subscriber's stream, as when the stream is lost.
+    #[doc(hidden)]
+    pub fn drop_kv_event_subscribers(&self) {
+        if let Some(kv_events) = &self.kv_events {
+            kv_events.drop_subscribers();
         }
     }
 
@@ -598,6 +623,18 @@ impl pb::kv_events_server::KvEvents for VllmMockerService {
             Status::failed_precondition("the Mocker does not publish KV cache events")
         })?;
         kv_events.subscribe(request.into_inner()).map(Response::new)
+    }
+
+    type GetKvSnapshotStream = KvSnapshotResponses;
+
+    async fn get_kv_snapshot(
+        &self,
+        request: Request<pb::GetKvSnapshotRequest>,
+    ) -> Result<Response<Self::GetKvSnapshotStream>, Status> {
+        let kv_events = self.kv_events.as_ref().ok_or_else(|| {
+            Status::failed_precondition("the Mocker does not publish KV cache events")
+        })?;
+        kv_events.snapshot(request.into_inner()).map(Response::new)
     }
 }
 

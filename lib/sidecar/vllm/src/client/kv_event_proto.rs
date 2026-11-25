@@ -1,27 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Converts a response of vLLM's `KvEvents` stream into the batch the ZMQ
-//! decoder returns for the same events, through the decoder's own helpers.
+//! Converts the responses of vLLM's `KvEvents` service into the batches the
+//! ZMQ decoder returns for the same events, through the decoder's own helpers.
 
 use anyhow::{Context as _, Result, bail};
-use dynamo_sidecar_common::kv_events::KvBatch;
 use dynamo_sidecar_common::kv_events::wire::{
     BlockHashValue, ExtraKeyItem, KvCacheSpecKind, KvEventBatch, Locality, RawKvEvent,
     extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, mark_first_raw_key_block,
     normalize_medium,
 };
+use dynamo_sidecar_common::kv_events::{KvBatch, KvSnapshotItem};
 
 use crate::proto as pb;
 
 #[cfg(test)]
 mod tests;
 
-/// The batch of a stream response; `None` for the stream's start.
+/// The batch of a stream response; `None` for a response without one.
 pub(crate) fn batch(response: pb::SubscribeKvEventsResponse) -> Option<KvBatch> {
-    let pb::subscribe_kv_events_response::Item::Batch(batch) = response.item? else {
-        return None;
-    };
+    let pb::subscribe_kv_events_response::Item::Batch(batch) = response.item?;
     let events = batch.events.into_iter().map(event).collect::<Result<_>>();
     Some(events.map(|events| {
         (
@@ -33,6 +31,21 @@ pub(crate) fn batch(response: pb::SubscribeKvEventsResponse) -> Option<KvBatch> 
             },
         )
     }))
+}
+
+/// The stores or the end of a snapshot response; `None` for a response without either.
+pub(crate) fn snapshot_item(response: pb::GetKvSnapshotResponse) -> Option<Result<KvSnapshotItem>> {
+    use pb::get_kv_snapshot_response::Item;
+    Some(match response.item? {
+        Item::Blocks(blocks) => {
+            let stores = blocks.stored.into_iter().map(block_stored);
+            stores.collect::<Result<_>>().map(KvSnapshotItem::Stores)
+        }
+        Item::End(end) => Ok(KvSnapshotItem::End {
+            next_sequence: end.next_sequence_number,
+            is_complete: end.complete,
+        }),
+    })
 }
 
 fn event(event: pb::KvCacheEvent) -> Result<RawKvEvent> {

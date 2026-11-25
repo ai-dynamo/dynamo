@@ -1303,7 +1303,7 @@ impl VllmSidecarEngine {
         };
         let grpc = grpc
             .into_keys()
-            .map(|rank| (rank, client.kv_event_subscription(rank)));
+            .map(|rank| (rank, client.kv_event_calls(rank)));
         let image_token_id = self.routing_image_token_id.get().copied().flatten();
         Ok(kv_event_feeds(grpc, zmq)
             .await?
