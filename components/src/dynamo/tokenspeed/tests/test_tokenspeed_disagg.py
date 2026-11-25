@@ -927,6 +927,57 @@ async def test_kv_events_with_attention_dp_reject_port_overflow(native):
         await engine.cleanup()
 
 
+class StubMetrics:
+    auto_labels: dict = {}
+
+    def __init__(self):
+        self.callbacks = []
+
+    def register_prometheus_expfmt_callback(self, callback):
+        self.callbacks.append(callback)
+
+    def register_prometheus_typed_callback(self, callback):
+        pass
+
+
+async def test_engine_metrics_reach_worker_metrics(native, monkeypatch):
+    from prometheus_client.mmap_dict import MmapedDict, mmap_key
+
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", "")
+    engine = make_engine(enable_metrics=True)
+    try:
+        await engine.start(worker_id=1)
+        # The ranks inherit the directory from the launcher's environment.
+        directory = llm_engine.os.environ["PROMETHEUS_MULTIPROC_DIR"]
+        assert directory
+        directory = Path(directory)
+        assert directory.is_dir()
+        # What a rank writes: ts-metrics stores gauges as livemax files.
+        name = "tokenspeed:num_running_reqs"
+        values = MmapedDict(str(directory / "gauge_livemax_123.db"))
+        values.write_value(mmap_key(name, name, ["dp_rank"], ["0"], "help"), 7.0, 0)
+        values.close()
+        metrics = StubMetrics()
+        await engine.register_prometheus(metrics)
+        [callback] = metrics.callbacks
+        assert 'tokenspeed:num_running_reqs{dp_rank="0"} 7.0' in callback()
+    finally:
+        await engine.cleanup()
+    assert not directory.exists()
+    assert "PROMETHEUS_MULTIPROC_DIR" not in llm_engine.os.environ
+
+
+async def test_engine_metrics_off_registers_nothing(native):
+    engine = make_engine(enable_metrics=False)
+    try:
+        await engine.start(worker_id=1)
+        metrics = StubMetrics()
+        await engine.register_prometheus(metrics)
+        assert metrics.callbacks == []
+    finally:
+        await engine.cleanup()
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
