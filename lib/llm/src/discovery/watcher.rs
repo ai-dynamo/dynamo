@@ -693,6 +693,10 @@ impl ModelWatcher {
             {
                 let mut prefill_config = router_config.kv_router_config.clone();
                 prefill_config.router_track_active_blocks = false;
+                // Created here, not per prefill binding, so that thresholds written
+                // through the API survive a binding rebuild.
+                let prefill_load_thresholds = prefill_threshold_handle(&load_thresholds);
+                worker_set.prefill_load_thresholds = Some(prefill_load_thresholds.clone());
 
                 // Fallback only: a prefill worker that declares its own
                 // `router_config` overrides this at activation time.
@@ -710,7 +714,7 @@ impl ModelWatcher {
                     router_config.session_affinity_mode,
                     model_name.clone(),
                     namespace.clone(),
-                    load_thresholds.clone(),
+                    prefill_load_thresholds,
                     cancellation.child_token(),
                     Some(allocator_trim.clone()),
                 ))
@@ -1611,8 +1615,8 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
 
 /// A frontend in direct routing mode does not pick workers, so its handle
 /// ignores busy-worker thresholds: they belong to the caller that picks workers.
-/// The prefill router shares this handle, because in direct mode the caller
-/// (EPP) picks both workers, decode and prefill.
+/// The prefill pool's handle is disabled with it, because in direct mode the
+/// caller (EPP) picks both workers, decode and prefill.
 fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
     if !router_config.router_mode.is_direct_routing() {
         return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
@@ -1625,6 +1629,16 @@ fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
         );
     }
     LoadThresholdHandle::disabled()
+}
+
+/// The prefill pool's handle: a separate cell that starts from the serving
+/// set's thresholds and is disabled when that set's handle is.
+fn prefill_threshold_handle(serving: &LoadThresholdHandle) -> LoadThresholdHandle {
+    if serving.is_enabled() {
+        LoadThresholdHandle::new(serving.get())
+    } else {
+        LoadThresholdHandle::disabled()
+    }
 }
 
 /// A custom policy factory cannot infer whether an untyped legacy card is
@@ -2119,6 +2133,105 @@ mod tests {
         assert!(!direct.is_enabled());
         assert!(!direct.is_configured());
         assert!(load_threshold_handle(&config(RouterMode::KV)).is_configured());
+    }
+
+    #[tokio::test]
+    async fn decode_set_gives_its_prefill_pool_a_separate_threshold_handle() {
+        use crate::discovery::LoadThresholdConfig;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let configured = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.8),
+            active_prefill_tokens_threshold: Some(1000),
+            ..Default::default()
+        };
+        let prefill_tokens = |value| LoadThresholdConfig {
+            active_prefill_tokens_threshold: Some(value),
+            ..Default::default()
+        };
+        for (index, router_mode, worker_type) in [
+            (0, RouterMode::RoundRobin, WorkerType::Decode),
+            (1, RouterMode::Direct, WorkerType::Decode),
+            (2, RouterMode::RoundRobin, WorkerType::Aggregated),
+        ] {
+            let watcher = ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig::new(router_mode, Default::default())
+                    .with_load_threshold_config(configured.clone()),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            );
+            let namespace = format!("prefill-thresholds-{index}");
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            card.set_name(&format!("prefill-thresholds-model-{index}"));
+            card.model_input = ModelInput::Tokens;
+            card.model_type = ModelType::Chat;
+            card.worker_type = Some(worker_type);
+            let worker_id = watcher.drt.discovery().instance_id();
+            let DiscoveryEvent::Added(discovery) = discovered_card(&namespace, worker_id, &card)
+            else {
+                unreachable!()
+            };
+            let desired = watcher
+                .normalize(discovery, &NamespaceFilter::Global)
+                .unwrap()
+                .unwrap();
+            let spec = GroupSpec {
+                key: desired.group_key.clone(),
+                mdc_checksum: desired.mdc_checksum.clone(),
+                fingerprint: desired.mdc_checksum.clone(),
+                generation: index + 1,
+                video_contract: desired.video_contract.clone(),
+                representative: desired,
+            };
+            let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);
+            let worker_set = watcher
+                .prepare_worker_set(&spec, rx, runtime.child_token())
+                .await
+                .unwrap()
+                .worker_set
+                .take()
+                .unwrap();
+
+            let serving = worker_set.load_thresholds.clone().unwrap();
+            if worker_type == WorkerType::Aggregated {
+                assert!(worker_set.prefill_load_thresholds.is_none());
+                continue;
+            }
+            let prefill = worker_set.prefill_load_thresholds.clone().unwrap();
+            let enabled = !router_mode.is_direct_routing();
+            assert_eq!(serving.is_enabled(), enabled);
+            assert_eq!(prefill.is_enabled(), enabled);
+            assert_eq!(serving.get(), prefill.get());
+            assert_eq!(prefill.is_configured(), enabled);
+
+            // `/busy_threshold` on a LoRA adapter name writes through the adapter view.
+            let mut adapter_card = ModelDeploymentCard::with_name_only("adapter");
+            adapter_card.lora = Some(crate::model_card::LoraInfo {
+                name: "adapter".to_string(),
+                max_gpu_lora_count: Some(4),
+            });
+            let model = Model::new("adapter".to_string());
+            model.add_worker_set(namespace, Arc::new(worker_set.adapter_view(adapter_card)));
+            assert_eq!(model.accepts_load_thresholds(), enabled);
+            model.load_threshold_config(Some(&prefill_tokens(7)));
+            let written = enabled.then_some(7);
+            assert_eq!(serving.get().active_prefill_tokens_threshold, written);
+            assert_eq!(prefill.get().active_prefill_tokens_threshold, written);
+
+            prefill.update(&prefill_tokens(9));
+            assert_eq!(serving.get().active_prefill_tokens_threshold, written);
+        }
+        runtime.shutdown();
     }
 
     #[test]
