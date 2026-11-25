@@ -209,7 +209,11 @@ async fn zero_top_logprobs_omits_top_logprob_metadata() {
 
 #[tokio::test]
 async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
-    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    // speedup_ratio 0.0 runs at unscaled 1x timing and never fills the default
+    // 8-slot buffer during the stall; 1000x overflows it.
+    let mut args = engine_args();
+    args.speedup_ratio = 1000.0;
+    let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut bursty = request("bursty");
     bursty.sampling_params.as_mut().unwrap().max_new_tokens = Some(50);
     let mut stream = service

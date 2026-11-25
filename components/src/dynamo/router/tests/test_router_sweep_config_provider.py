@@ -12,16 +12,13 @@ from copy import deepcopy
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import CandidateContext, SweepContext
-from aisimulate.sweeper.replay import BackendDeploymentSpec
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import CandidateContext, SweepContext
+from aisim.sweeper.replay import BackendDeploymentSpec
 
 import dynamo.router.simulation.provider as router_provider_module
 from dynamo.router.simulation import create_provider
@@ -177,6 +174,14 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.compile_prediction({"not_a_router_knob": True}, prediction_context)
+    with pytest.raises(ValueError, match="less than or equal to 31536000"):
+        adapter.compile_prediction(
+            {
+                "policy": "kv_router",
+                "conversation_affinity": {"ttl_seconds": 31_536_001},
+            },
+            prediction_context,
+        )
     with pytest.raises(ValueError, match="round_robin rejects"):
         adapter.compile_recommendation(
             {
@@ -248,6 +253,41 @@ def test_public_router_prediction_materializes_runtime_hook() -> None:
     }
 
 
+def test_public_router_prediction_forwards_use_kv_events() -> None:
+    replay_spec = create_provider().compile_prediction(
+        {"policy": "kv_router", "use_kv_events": False},
+        PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+    )
+
+    assert replay_spec.config["use_kv_events"] is False
+    assert (
+        replay_spec.runtime_hooks[0].config["router_config"]["use_kv_events"] is False
+    )
+    with pytest.raises(ValueError, match="do not accept null"):
+        create_provider().compile_prediction(
+            {"policy": "kv_router", "use_kv_events": None},
+            PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+        )
+
+
+def test_public_router_policy_config_reaches_runtime_config() -> None:
+    context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
+    replay_spec = create_provider().compile_prediction(
+        {"policy": "kv_router", "policy_config": "two-tier.yaml"},
+        context,
+    )
+
+    assert replay_spec.config["policy_config"] == "two-tier.yaml"
+    router_config = replay_spec.runtime_hooks[0].config["router_config"]
+    assert router_config["router_policy_config"] == "two-tier.yaml"
+
+    with pytest.raises(ValueError, match="round_robin requires"):
+        create_provider().compile_prediction(
+            {"policy": "round_robin", "policy_config": "two-tier.yaml"},
+            context,
+        )
+
+
 def test_public_router_ais_load_model_reaches_runtime_config() -> None:
     replay_spec = create_provider().compile_prediction(
         {
@@ -279,7 +319,7 @@ def test_public_router_ais_load_model_reaches_runtime_config() -> None:
 
     hook_config = replay_spec.runtime_hooks[0].config
     assert hook_config["router_config"]["router_prefill_load_model"] == "ais"
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisim_core.sdk import ForwardPassPerfModelConfig
 
     assert (
         hook_config["ais_perf_config"]
@@ -598,3 +638,39 @@ def test_kv_router_prediction_materializes_documented_defaults() -> None:
         "prefill_load_scale": 1.0,
         "temperature": 0.0,
     }
+
+
+def test_both_kv_router_plan_shapes_expand_knob_domains_identically() -> None:
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={},
+        sweep=_sweep_context(),
+    )
+    knobs = {
+        "overlap_score_credit": {"range": {"min": 0.5, "max": 0.5}},
+        "prefill_load_scale": {"range": {"min": 0, "max": 1, "step": 0.3}},
+        "temperature": {"range": {"min": 0.1, "max": 1.0}},
+    }
+    flat = adapter.compile_recommendation({"policy": "kv_router", **knobs}, context)
+    mixed = adapter.compile_recommendation(
+        {"policy": {"choices": ["round_robin", "kv_router"]}, **knobs}, context
+    )
+
+    expanded = {
+        "prefill_load_model_type": ["none", "ais"],
+        "overlap_score_credit": [0.5],
+        "prefill_load_scale": [0.0, 0.3, 0.6, 0.9],
+    }
+    conditional = mixed.fragment.conditional_by_branch["agg"][0]
+    assert flat.fragment.choices_by_branch["agg"] == {"mode": ["kv_router"], **expanded}
+    assert conditional.choices == expanded
+    assert (
+        flat.fragment.float_ranges_by_branch["agg"]
+        == conditional.float_ranges
+        == {"temperature": (0.1, 1.0)}
+    )
+    assert flat.fragment.log_float_ranges_by_branch["agg"] == []
+    assert conditional.log_float_ranges == []

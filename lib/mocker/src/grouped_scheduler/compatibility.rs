@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use aisimulate_core::engine::{
-    HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
+use aisim_core::engine::{
+    Admission, HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
     TransferTimingMode as EngineTransferTimingMode,
 };
 use anyhow::{Result, anyhow};
@@ -27,25 +27,45 @@ pub(super) enum Cleanup {
 
 pub(super) struct CompatibilityState {
     args: MockerConfig,
-    request_prompt_lengths: Mutex<HashMap<Uuid, usize>>,
+    request_accounting: Mutex<HashMap<Uuid, RequestAccounting>>,
     handoffs: Mutex<HandoffMap>,
+}
+
+#[derive(Clone, Copy)]
+struct RequestAccounting {
+    prompt_len: usize,
+    cached_tokens: Option<usize>,
+    cache_usage_reported: bool,
 }
 
 impl CompatibilityState {
     pub(super) fn new(args: MockerConfig) -> Self {
         Self {
             args,
-            request_prompt_lengths: Mutex::new(HashMap::new()),
+            request_accounting: Mutex::new(HashMap::new()),
             handoffs: Mutex::new(HandoffMap::default()),
         }
     }
 
-    pub(super) fn native_request(&self, request: DirectRequest) -> Request {
+    pub(super) fn native_request(&self, request: DirectRequest) -> Result<Request> {
+        anyhow::ensure!(
+            request.kv_hints.is_none(),
+            "Dynamo grouped live engines do not support authored KV fetch hints"
+        );
+        anyhow::ensure!(
+            request.images.is_empty(),
+            "Dynamo grouped live engines do not support image requests"
+        );
         let request_id = request.uuid.unwrap_or_else(Uuid::new_v4);
-        self.request_prompt_lengths
-            .lock()
-            .insert(request_id, request.tokens.len());
-        Request {
+        self.request_accounting.lock().insert(
+            request_id,
+            RequestAccounting {
+                prompt_len: request.tokens.len(),
+                cached_tokens: None,
+                cache_usage_reported: false,
+            },
+        );
+        Ok(Request {
             request_id,
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,
@@ -53,6 +73,24 @@ impl CompatibilityState {
             session_id: request
                 .replay_context
                 .and_then(|context| context.session_id().map(str::to_owned)),
+            images: Vec::new(),
+            kv_hint: None,
+            // The engine publishes a salted prompt's KV blocks under AISim's
+            // salted hashes. A router fed by those events must look the
+            // request up by `ReplayRequestHashes::from_tokens_with_cache_salt`.
+            cache_salt: request.cache_salt,
+        })
+    }
+
+    pub(super) fn record_admissions(&self, admissions: &[Admission]) {
+        let mut requests = self.request_accounting.lock();
+        for admission in admissions {
+            if let Some(request) = requests.get_mut(&admission.request_id) {
+                // Recomputing or readmitting a request must not count its own KV as a hit.
+                request
+                    .cached_tokens
+                    .get_or_insert(admission.reused_input_tokens);
+            }
         }
     }
 
@@ -65,6 +103,10 @@ impl CompatibilityState {
     }
 
     pub(super) fn mark_destination(&self, handoff_id: DynamoHandoffId, request_id: Uuid) {
+        // Transferred prompt KV does not measure the prefill worker's cache hits.
+        if let Some(request) = self.request_accounting.lock().get_mut(&request_id) {
+            request.cache_usage_reported = true;
+        }
         self.handoffs
             .lock()
             .mark_destination(handoff_id, request_id);
@@ -77,7 +119,7 @@ impl CompatibilityState {
     pub(super) fn apply_cleanup(&self, cleanup: Cleanup) {
         match cleanup {
             Cleanup::Request(request_id) => {
-                self.request_prompt_lengths.lock().remove(&request_id);
+                self.request_accounting.lock().remove(&request_id);
                 self.handoffs.lock().cancel_request(request_id);
             }
             Cleanup::SourceHandoff(handoff_id) => self.handoffs.lock().finish_source(handoff_id),
@@ -88,10 +130,23 @@ impl CompatibilityState {
     }
 
     pub(super) fn output_signal(&self, output: Output) -> OutputSignal {
-        let prompt_len = output.completed.then(|| {
-            self.request_prompt_lengths
-                .lock()
-                .remove(&output.request_id)
+        let accounting = {
+            let mut requests = self.request_accounting.lock();
+            if output.completed {
+                requests.remove(&output.request_id)
+            } else {
+                requests.get_mut(&output.request_id).map(|request| {
+                    let snapshot = *request;
+                    request.cache_usage_reported |=
+                        output.cached_tokens.is_some() || request.cached_tokens.is_some();
+                    snapshot
+                })
+            }
+        };
+        let cached_tokens = output.cached_tokens.or_else(|| {
+            accounting
+                .filter(|request| !output.rejected && !request.cache_usage_reported)
+                .and_then(|request| request.cached_tokens)
         });
         if output.completed {
             self.handoffs
@@ -103,16 +158,16 @@ impl CompatibilityState {
             token_id: output.token_id,
             completed: output.completed,
             rejected: output.rejected,
-            handoff_delay_ms: prompt_len.flatten().and_then(|prompt_len| {
+            handoff_delay_ms: accounting.filter(|_| output.completed).and_then(|request| {
                 compute_prefill_handoff_delay_ms(
                     self.args.worker_type,
                     output.completed,
-                    prompt_len,
+                    request.prompt_len,
                     self.args.kv_transfer_bandwidth,
                     self.args.kv_transfer_bytes_per_token,
                 )
             }),
-            cached_tokens: output.cached_tokens,
+            cached_tokens,
         }
     }
 
@@ -146,6 +201,11 @@ impl CompatibilityState {
                 request_id,
                 transferable_prompt_tokens,
             },
+            LifecycleEvent::TtftMilestone { .. } => {
+                return Err(anyhow!(
+                    "host-aware TTFT milestones are not supported by Dynamo grouped live engines"
+                ));
+            }
         })
     }
 }
@@ -276,6 +336,28 @@ mod tests {
     }
 
     #[test]
+    fn destination_admission_does_not_invent_cache_usage() {
+        for explicit in [None, Some(0), Some(3)] {
+            let state = CompatibilityState::new(MockerConfig::default());
+            let request = state.native_request(DirectRequest::default()).unwrap();
+            state.mark_destination(handoff(9), request.request_id);
+            state.record_admissions(&[Admission {
+                request_id: request.request_id,
+                reused_input_tokens: 0,
+                cache_tier_attribution: None,
+            }]);
+            let output = state.output_signal(Output {
+                request_id: request.request_id,
+                token_id: Some(7),
+                completed: true,
+                rejected: false,
+                cached_tokens: explicit,
+            });
+            assert_eq!(output.cached_tokens, explicit);
+        }
+    }
+
+    #[test]
     fn cancelling_request_does_not_remove_unrelated_empty_handoff() {
         let mut handoffs = HandoffMap::default();
         let target = handoff(1);
@@ -316,14 +398,84 @@ mod tests {
             (Some(" "), None),
             (None, None),
         ] {
-            let request = state.native_request(DirectRequest {
-                replay_context: session_id.map(|id| ReplayRequestContext {
-                    session_id: Some(id.to_owned()),
+            let request = state
+                .native_request(DirectRequest {
+                    replay_context: session_id.map(|id| ReplayRequestContext {
+                        session_id: Some(id.to_owned()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            });
+                })
+                .unwrap();
             assert_eq!(request.session_id.as_deref(), expected);
+            assert!(request.images.is_empty());
+            assert!(request.kv_hint.is_none());
         }
+    }
+
+    #[test]
+    fn host_aware_ttft_milestones_are_rejected_explicitly() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let error = state
+            .lifecycle_event(LifecycleEvent::TtftMilestone {
+                request_id: Uuid::from_u128(12),
+                stage: aisim_core::engine::TtftMilestone::Received,
+                at_ms: 0.0,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("host-aware TTFT milestones"));
+    }
+
+    #[test]
+    fn native_request_carries_the_cache_salt() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let native = state
+            .native_request(DirectRequest {
+                cache_salt: Some("tenant".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(native.cache_salt.as_deref(), Some("tenant"));
+    }
+
+    #[test]
+    fn unhandled_request_fields_do_not_mutate_compatibility_state() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let mut request = DirectRequest {
+            kv_hints: Some(aisim_core::replay::AuthoredKvHints {
+                source_worker: 0,
+                source_dp_rank: 0,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            state
+                .native_request(request.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("authored KV fetch hints")
+        );
+        assert!(state.request_accounting.lock().is_empty());
+        request.kv_hints = None;
+        request.images.push(aisim_core::engine::ImageSpec {
+            identity: 1,
+            token_start: 0,
+            token_end: 1,
+            encoder: aisim_core::engine::EncoderShape {
+                sequences: 1,
+                patch_tokens: 1,
+                transformer_tokens: 1,
+                output_tokens: 1,
+            },
+            embedding_bytes: 1,
+        });
+        assert!(
+            state
+                .native_request(request)
+                .unwrap_err()
+                .to_string()
+                .contains("image requests")
+        );
+        assert!(state.request_accounting.lock().is_empty());
     }
 }

@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 All new performance-model features must enter through AISimulate's canonical
 `ForwardPassPerfModelConfig` and `ForwardPassPerfModel::best_available(config)`.
-Python uses `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`.
+Python uses `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)`.
 Do not add parallel constructors, revive removed `from_native` / `from_regression`
 APIs, or construct a private native engine to bypass this interface.
 

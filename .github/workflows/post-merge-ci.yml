@@ -88,7 +88,7 @@ jobs:
   # ============================================================================
   operator:
     name: Operator
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     outputs:
       operator_default_tag: ${{ steps.build.outputs.image_tag }}
     steps:
@@ -124,7 +124,7 @@ jobs:
   power-agent:
     name: Power Agent
     if: github.event_name != 'workflow_dispatch'
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

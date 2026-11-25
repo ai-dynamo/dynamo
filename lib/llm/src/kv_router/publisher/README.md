@@ -8,6 +8,10 @@ processor publishes normalized events through the configured event plane.
 
 - `zmq_listener.rs`: receives engine ZMQ batches and converts wire events into
   placement-aware events.
+- `zmq_recovery.rs`: opt-in replay recovery that catches a ZMQ source up from
+  the engine's replay buffer and reports whether the local index is complete.
+  A completed handshake does not prove the live subscription is active; a batch
+  lost in that window is repaired at the next live gap (see `ZmqRecoveryConfig`).
 - `event_processor.rs`: owns the async receive loop and preserves event ordering.
 - `batching.rs`: coalesces adjacent store/remove events before publish.
 - `dedup.rs`: gates duplicate removes with per-rank, per-tier refcounts.
@@ -41,6 +45,21 @@ pending across native lists until the deadline or another flush condition.
 `dedup.rs` is applied during flush. Stores update refcounts and still pass
 through. Removes only pass through when the refcount for a block reaches zero;
 unknown removes pass through defensively.
+
+Worker-domain events are not counted on any tier when the ZMQ source sets
+`idempotent_stores`, as Dynamo's SGLang worker, the SGLang sidecar and
+`sglang_hicache_v1` state-agent slots do. SGLang emits one remove per block
+however many times it stored it: it announces a host block again when a later
+auxiliary backup covers the same node, and some storage backends re-announce a
+parent node after a split. A counted block would outlive its only remove. vLLM
+emits a remove per store and keeps the refcount. Do not set it for an engine
+that can hold two copies of a block under one published hash in one tier.
+SGLang itself does when a cache salt is set: its event hash then omits the rest
+of `extra_key`, so two subtrees that differ only by an `extra_key` suffix (elastic
+EP, an unnamed LoRA) share a published hash. Refcounting kept such a block until
+both copies were removed; with `idempotent_stores` the first remove drops it from
+the index while the other copy is still held. That is a missed reuse, not a wrong
+hit.
 
 `sinks.rs` applies the emitted router event to the optional local indexer before
 publishing it externally. Both side effects receive the same `RouterEvent`.

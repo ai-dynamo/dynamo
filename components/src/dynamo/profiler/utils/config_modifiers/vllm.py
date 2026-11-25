@@ -89,28 +89,6 @@ def _parse_human_readable_int(value: str) -> int:
     return int(number) * multiplier
 
 
-def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
-    """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
-    tokens = break_arguments(args)
-    # AIC may still emit the removed vLLM role flags. Normalize them at this
-    # ingestion boundary so they never reach the backend CLI.
-    cleaned_args = [
-        arg
-        for arg in tokens
-        if arg not in ("--is-prefill-worker", "--is-decode-worker")
-    ]
-    finalized = set_unique_argument_value(
-        cleaned_args, "--disaggregation-mode", role.value
-    )
-    if _get_valued_arg(finalized, "--kv-transfer-config") is None:
-        finalized = set_unique_argument_value(
-            finalized,
-            "--kv-transfer-config",
-            DEFAULT_VLLM_KV_TRANSFER_CONFIG[role],
-        )
-    return finalized
-
-
 def _remove_disaggregation_mode_args(args: list[str]) -> list[str]:
     filtered_args: list[str] = []
     index = 0
@@ -144,31 +122,27 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         return update_image(config, image)
 
     @classmethod
-    def _apply_disagg_workers(
-        cls,
-        cfg: Config,
-        prefill_cli_args: list[str],
-        prefill_replicas: int,
-        prefill_gpus: int,
-        decode_cli_args: list[str],
-        decode_replicas: int,
-        decode_gpus: int,
-        num_gpus_per_node: int | None = None,
-    ) -> None:
-        super()._apply_disagg_workers(
-            cfg,
-            prefill_cli_args=_finalize_disagg_cli_args(
-                prefill_cli_args, SubComponentType.PREFILL
-            ),
-            prefill_replicas=prefill_replicas,
-            prefill_gpus=prefill_gpus,
-            decode_cli_args=_finalize_disagg_cli_args(
-                decode_cli_args, SubComponentType.DECODE
-            ),
-            decode_replicas=decode_replicas,
-            decode_gpus=decode_gpus,
-            num_gpus_per_node=num_gpus_per_node,
+    def _finalize_disagg_cli_args(
+        cls, args: list[str], role: SubComponentType
+    ) -> list[str]:
+        tokens = break_arguments(args)
+        # AIC may still emit the removed vLLM role flags. Normalize them at this
+        # ingestion boundary so they never reach the backend CLI.
+        cleaned_args = [
+            arg
+            for arg in tokens
+            if arg not in ("--is-prefill-worker", "--is-decode-worker")
+        ]
+        finalized = set_unique_argument_value(
+            cleaned_args, "--disaggregation-mode", role.value
         )
+        if _get_valued_arg(finalized, "--kv-transfer-config") is None:
+            finalized = set_unique_argument_value(
+                finalized,
+                "--kv-transfer-config",
+                DEFAULT_VLLM_KV_TRANSFER_CONFIG[role],
+            )
+        return finalized
 
     @classmethod
     def convert_config(

@@ -83,7 +83,8 @@ aisimulate predict \
   --output-dir /tmp/dynosim-prefix
 ```
 
-Compare the prefix-cache reuse and latency metrics with the independent-request run.
+Each later turn's prompt starts with the session's earlier prompts and outputs. Compare the
+prefix-cache reuse and latency metrics with the independent-request run.
 
 </Step>
 <Step title="Replay a saved trace" id="replay-a-saved-trace">

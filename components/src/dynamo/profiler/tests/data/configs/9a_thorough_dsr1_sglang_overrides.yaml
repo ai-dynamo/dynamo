@@ -37,7 +37,6 @@ overrides:
               args:
                 - --mem-fraction-static
                 - "0.75"
-                - --prefill-round-robin-balance
                 - --watchdog-timeout
                 - "3600"
         prefill:

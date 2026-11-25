@@ -106,7 +106,7 @@ class AisPerfConfigBase(ConfigBase):
         if missing:
             raise ValueError("AIS perf config requires " + ", ".join(missing))
         # The upstream class preserves estimator_config, ordered roots and policy.
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+        from aisim_core.sdk import ForwardPassPerfModelConfig
 
         rates = getattr(self, "ais_nextn_accept_rates", None)
         if config.get("nextn", 0) and rates is not None:

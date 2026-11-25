@@ -545,6 +545,8 @@ The benchmark replays the Weka-format agentic trace described in [perf/README.md
 </table>
 </div>
 
+The vLLM disaggregated results for B200, GB200, B300, and GB300 were measured before [PR #17977](https://github.com/ai-dynamo/dynamo/pull/17977) removed the decode CPU KV cache.
+
 The VR200 rows replay SWE-bench Pro agentic multi-turn traces. Throughput is raw output tokens.
 Each VR200 row is the highest output per GPU with at least 50 output tokens/s per user (P50) and TTFT P50 under 5 s.
 The VR200 results used a synthetic MTP acceptance length of 4.063 with five draft tokens.

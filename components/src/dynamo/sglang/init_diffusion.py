@@ -13,6 +13,7 @@ from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import WorkerType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import diffusers_text_encoder_precision_kwargs
 from dynamo.sglang.args import Config, _diffusion_generator_kwargs
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
@@ -143,7 +144,9 @@ async def init_image_diffusion(
         raise ValueError("--model is required for diffusion workers")
 
     generator = DiffGenerator.from_pretrained(
-        **_diffusion_generator_kwargs(server_args)
+        **diffusers_text_encoder_precision_kwargs(
+            _diffusion_generator_kwargs(server_args)
+        )
     )
 
     fs_url = dynamo_args.media_output_fs_url
@@ -220,7 +223,9 @@ async def init_video_diffusion(
         raise ValueError("--model is required for video generation workers")
 
     generator = DiffGenerator.from_pretrained(
-        **_diffusion_generator_kwargs(server_args)
+        **diffusers_text_encoder_precision_kwargs(
+            _diffusion_generator_kwargs(server_args)
+        )
     )
 
     fs_url = dynamo_args.media_output_fs_url

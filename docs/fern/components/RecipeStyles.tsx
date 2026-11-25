@@ -212,6 +212,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-upstage:checked ~ .dynamo-recipe-browser label[for="provider-upstage"],
 #provider-meta:checked ~ .dynamo-recipe-browser label[for="provider-meta"],
 #provider-minimax:checked ~ .dynamo-recipe-browser label[for="provider-minimax"],
+#provider-mistral:checked ~ .dynamo-recipe-browser label[for="provider-mistral"],
 #provider-motif:checked ~ .dynamo-recipe-browser label[for="provider-motif"],
 #provider-reflection:checked ~ .dynamo-recipe-browser label[for="provider-reflection"],
 /* provider-chip-rules:end */
@@ -699,6 +700,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-upstage:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="upstage"]),
 #provider-meta:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="meta"]),
 #provider-minimax:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="minimax"]),
+#provider-mistral:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="mistral"]),
 #provider-motif:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="motif"]),
 #provider-reflection:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="reflection"]),
 /* provider-filter-rules:end */
@@ -2263,7 +2265,9 @@ body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) [data-varian
 body:has(input[name="recipe-variant"][value="standard"]:checked) [data-variant]:not([data-variant~="standard"]),
 body:has(input[name="recipe-variant"][value="efa"]:checked) [data-variant]:not([data-variant~="efa"]),
 body:has(input[name="recipe-variant"][value="kv-router"]:checked) [data-variant]:not([data-variant~="kv-router"]),
-body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]) {
+body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]),
+body:has(input[name="recipe-variant"][value="round-robin"]:checked) [data-variant]:not([data-variant~="round-robin"]),
+body:has(input[name="recipe-variant"][value="session-affinity"]:checked) [data-variant]:not([data-variant~="session-affinity"]) {
     display: none;
 }
 

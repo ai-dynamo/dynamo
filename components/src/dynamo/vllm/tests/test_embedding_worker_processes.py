@@ -207,8 +207,10 @@ def test_process_group_reports_unexpected_child_exit():
 
 
 def _assert_names_verified_versions(message):
-    for version in processes._VERIFIED_VLLM_VERSIONS:
-        assert version in message
+    # Match the whole phrase. The message also starts with the installed
+    # vLLM version, and that alone passes a check of each version.
+    verified = " and ".join(processes._VERIFIED_VLLM_VERSIONS)
+    assert f"verified against vLLM {verified};" in message
 
 
 def test_unpack_core_engine_launch_names_a_renamed_field():
@@ -251,8 +253,21 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
+    # Stand in for vLLM's supervisor-bound EngineZmqListeners.
+    zmq_listeners = SimpleNamespace(
+        addresses=addresses,
+        inputs=[
+            SimpleNamespace(socket=Mock(**{"fileno.return_value": 100 + i}))
+            for i in range(process_count)
+        ],
+        outputs=[
+            SimpleNamespace(socket=Mock(**{"fileno.return_value": 200 + i}))
+            for i in range(process_count)
+        ],
+        cleanup=Mock(),
+    )
     monkeypatch.setattr(
-        engine_utils, "get_engine_zmq_addresses", lambda *_: addresses, raising=False
+        engine_utils, "bind_engine_zmq_listeners", lambda *_: zmq_listeners
     )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
@@ -281,6 +296,7 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     assert len(children) == process_count - 1
     assert group.engine_manager is engine_manager
     group.cleanup()
+    zmq_listeners.cleanup.assert_called_once()
 
 
 def test_child_attaches_without_launching_engine(monkeypatch):

@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::*;
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 
 use crate::kv_router::metrics::kv_publisher_metrics;
 
@@ -17,16 +17,18 @@ use super::batching::BatchingState;
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
+    mut rx: mpsc::UnboundedReceiver<super::PublisherInput>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
+    worker_dedup_policy: EventDedupPolicy,
 ) {
-    let mut batching_state = BatchingState::new(max_batch_blocks);
+    let mut batching_state = BatchingState::new(max_batch_blocks, worker_dedup_policy);
     let mut dedup = EventDedupFilter::new();
     let mut last_raw_input_id: Option<u64> = None;
 
@@ -46,6 +48,34 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                     batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                     publish_output(&publisher, worker_id, &output).await;
                     break;
+                };
+                let event_batch = match event_batch {
+                    super::PublisherInput::Events(events) => events,
+                    super::PublisherInput::Barrier(done) => {
+                        let mut output = Vec::new();
+                        batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                        // Recovery applies events like live ingestion, then waits for the index to finish them.
+                        let result = tokio::select! {
+                            biased;
+                            _ = cancellation_token.cancelled() => Err(anyhow::anyhow!("KV event publisher cancelled during recovery")),
+                            result = flush_local_indexer(&local_indexer) => result,
+                        };
+                        if let Err(error) = &result {
+                            if cancellation_token.is_cancelled() {
+                                tracing::debug!(%error, "KV recovery barrier cancelled");
+                            } else {
+                                tracing::error!(%error, "KV recovery barrier failed; stopping KV event publisher");
+                            }
+                        }
+                        let has_failed = result.is_err();
+                        let _ = done.send(result);
+                        if has_failed {
+                            // Keep the shared token alive so the listener can report the failure.
+                            break;
+                        }
+                        publish_output(&publisher, worker_id, &output).await;
+                        continue;
+                    }
                 };
                 let mut output = Vec::new();
 
@@ -102,7 +132,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                             dedup.clear_rank_domain(
                                 event.dp_rank,
                                 residency_domain,
-                                EventDedupPolicy::RefCounted,
+                                batching_state.dedup_policy(residency_domain),
                             );
                             let applied = emit(
                                 &local_indexer,
@@ -166,6 +196,13 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     }
 }
 
+async fn flush_local_indexer(local_indexer: &Option<Arc<LocalKvIndexer>>) -> anyhow::Result<()> {
+    let indexer = local_indexer
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("KV recovery requires a local indexer"))?;
+    Ok(indexer.flush_and_wait().await?)
+}
+
 async fn publish_output<P: RouterEventBatchSink>(
     publisher: &P,
     worker_id: u64,
@@ -188,9 +225,10 @@ pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
+    rx: mpsc::UnboundedReceiver<super::PublisherInput>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
+    worker_dedup_policy: EventDedupPolicy,
 ) {
     run_event_processor_loop(
         publisher,
@@ -200,6 +238,7 @@ pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
         local_indexer,
         batching_timeout_ms,
         DEFAULT_MAX_BATCH_BLOCKS,
+        worker_dedup_policy,
     )
     .await
 }

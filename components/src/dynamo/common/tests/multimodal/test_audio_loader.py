@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import errno
 import logging
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
@@ -193,6 +199,115 @@ async def test_load_audio_batch_prioritizes_typed_client_error(client_error):
         )
 
     assert exc_info.value is client_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        RuntimeError("Error opening <_io.BytesIO>: Format not recognised."),
+        (np.array([], dtype=np.float32), 16000.0),
+    ],
+    ids=["undecodable", "empty_waveform"],
+)
+async def test_load_audio_batch_preserves_invalid_audio_value_error(bad_result):
+    """Bad client audio must stay a ValueError through the batch: the bindings
+    map ValueError to InvalidArgument (4xx), the generic aggregate to Unknown."""
+    good = (np.zeros(8000, dtype=np.float32), 16000.0)
+
+    async def _fetch(url):
+        """Return valid audio or simulate a decoder failure."""
+        if url.endswith("good.wav"):
+            return good
+        if isinstance(bad_result, Exception):
+            raise bad_result
+        return bad_result
+
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    loader._load_audio_with_vllm = _fetch  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="Failed to"):
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/good.wav"},
+                {"Url": "https://example.com/bad.wav"},
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_value_error_outranks_generic_failure():
+    """Invalid audio stays a client error even when another item fails."""
+    loader = AudioLoader()
+    value_error = ValueError("Decoded waveform is empty.")
+    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("nixl read failed"), value_error]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/one.wav"},
+                {"Url": "https://example.com/empty.wav"},
+            ]
+        )
+
+    assert exc_info.value is value_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        HttpTimeoutError("Timeout loading https://example.com/bad.wav"),
+        HttpConnectionError("Connection error loading https://example.com/bad.wav"),
+        "vllm_missing",
+    ],
+    ids=["fetch_timeout", "connection_error", "vllm_missing"],
+)
+async def test_load_audio_batch_server_failure_is_not_client_error(
+    monkeypatch, failure
+):
+    """A failed fetch or a missing vLLM says nothing about the audio: it must
+    not take the ValueError branch, which the bindings map to InvalidArgument."""
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    if failure == "vllm_missing":
+        monkeypatch.setattr(audio_loader_module, "AudioMediaIO", None)
+    else:
+        monkeypatch.setattr(loader, "_create_vllm_audio_io", lambda: object())
+        monkeypatch.setattr(
+            audio_loader_module, "fetch_bytes", AsyncMock(side_effect=failure)
+        )
+
+    with pytest.raises(Exception) as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
+
+    assert type(exc_info.value) is Exception
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MemoryError("Out of memory"),
+        OSError(errno.ENOMEM, "Cannot allocate memory"),
+        OSError(errno.EMFILE, "Too many open files"),
+        OSError(errno.ENFILE, "Too many open files in system"),
+    ],
+    ids=["memory_error", "enomem", "emfile", "enfile"],
+)
+async def test_load_audio_batch_resource_failure_is_not_client_error(failure):
+    """Host resource exhaustion must remain a server error in a batch."""
+    loader = AudioLoader()
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=failure
+    )
+
+    with pytest.raises(Exception, match="Failed to load audio") as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
+
+    assert type(exc_info.value) is Exception
+    assert str(failure) in str(exc_info.value)
 
 
 @pytest.mark.asyncio

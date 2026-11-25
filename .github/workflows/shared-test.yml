@@ -304,6 +304,7 @@ jobs:
         shell: bash
         env:
           LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_FRAMEWORK: ${{ inputs.framework }}
           LANE_TYPE: ${{ inputs.test_type }}
           LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
           LANE_PLATFORM: ${{ matrix.platform }}
@@ -319,7 +320,11 @@ jobs:
             printf '%s' "${s%-}"
           }
           lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
-          echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          # Kept as two dimensions: test_suite_name is a suite label, not a
+          # framework (it also takes planner, triton, *-efa, xpu-*).
+          # Neither may be tagged test_suite: -- ddtrace reserves that key as
+          # an object and silently drops a conflicting string tag.
+          echo "DD_TAGS=team:dynamo,lane:${lane},framework:$(slug "${LANE_FRAMEWORK}"),suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
           echo "Datadog lane tag: ${lane}"
 
       - name: Run Sanity Check on Runtime Image

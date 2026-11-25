@@ -80,7 +80,14 @@ def _purl_type(purl: str | None) -> str:
 # They're first-party, not third-party, so they're absent from osrb-deps.csv by
 # design — skip them instead of flagging them as attribution gaps. Keep roughly
 # in sync with collect_sources._FIRST_PARTY_* (which feeds source archival).
-_FIRST_PARTY_PREFIXES = ("aisimulate-", "dynamo-", "kvbm-", "nixl-", "velo-")
+_FIRST_PARTY_PREFIXES = (
+    "aisim-",
+    "aisimulate-",
+    "dynamo-",
+    "kvbm-",
+    "nixl-",
+    "velo-",
+)
 _FIRST_PARTY_GO_PREFIXES = ("github.com/ai-dynamo/",)
 _FIRST_PARTY_NAMES = {"service-metrics", "system-metrics", "hello-world", "velo"}
 

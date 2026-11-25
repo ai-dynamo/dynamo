@@ -95,6 +95,7 @@ async def worker(argv: list[str] | None = None):
         )
 
     shutdown_event = asyncio.Event()
+    terminal_event = asyncio.Event()
     shutdown_endpoints: list = []
     runtime, loop = create_runtime(
         discovery_backend=dynamo_args.discovery_backend,
@@ -110,7 +111,7 @@ async def worker(argv: list[str] | None = None):
         )
 
     run_deferred_handlers = install_graceful_shutdown(
-        loop, runtime, shutdown_endpoints, shutdown_event
+        loop, runtime, shutdown_endpoints, shutdown_event, terminal_event=terminal_event
     )
     logger.info(
         "Signal handlers set up for graceful shutdown "
@@ -179,6 +180,7 @@ async def worker(argv: list[str] | None = None):
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
             attached_engine=attached_engine,
+            terminal_event=terminal_event,
         )
     else:
         await init_prefill(
@@ -189,6 +191,7 @@ async def worker(argv: list[str] | None = None):
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
             attached_engine=attached_engine,
+            terminal_event=terminal_event,
         )
 
 

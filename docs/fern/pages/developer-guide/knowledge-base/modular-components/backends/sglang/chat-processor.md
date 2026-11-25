@@ -37,6 +37,14 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 ```
 
+## DeepSeek Prompt Encoding
+
+For DeepSeek V4 and V4.1 checkpoints identified by checkpoint metadata, the processor prefers SGLang's recipe renderer when that module is available, including when the tokenizer has a chat template. An explicit `--chat-template` override takes precedence over checkpoint encoding. This path requires the checkpoint's fast tokenizer and the `deepseek-recipe` package supplied by the SGLang installation. SGLang v0.5.22 keeps the existing V4 encoder path. V4.1 checkpoints without a chat template require the recipe renderer available in SGLang v0.5.23 or newer; they cannot fall back to the V4 encoder.
+
+Recipe encoding rejects `continue_final_message=true` combined with thinking because the current output parser does not track the continued prompt's reasoning state. Continuation with thinking disabled remains supported.
+
+Dynamo continues to own sampling settings, constrained decoding, and output parsing. Image URLs must match the recipe's placeholder order; requests with a different order or UUID-only images are rejected before inference.
+
 ## Frontend Arguments
 
 These arguments are passed to the **frontend** (not the worker) when using `--dyn-chat-processor sglang`:
@@ -46,11 +54,13 @@ These arguments are passed to the **frontend** (not the worker) when using `--dy
 | `--dyn-chat-processor sglang` | (none) | Enable the SGLang chat processor |
 | `--tool-call-parser` | `None` | Tool call parser name (any SGLang-supported parser) |
 | `--reasoning-parser` | `None` | Reasoning parser name (any SGLang-supported parser) |
+| `--isolate-tool-call-markers` | `false` | Opt-in: tokenize message content that contains the parser's tool-call delimiters as plain sub-words (see [Echoed delimiters](#echoed-delimiters)) |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DYN_ISOLATE_TOOL_CALL_MARKERS` | `false` | Same as `--isolate-tool-call-markers`. |
 | `DYN_SGLANG_STREAM_INTERVAL` | `20` | Number of tokens to accumulate before detokenizing. Higher values improve throughput. The first chunk always emits immediately (interval=1) to minimize time-to-first-token. |
 
 ## Tool Calling
@@ -110,6 +120,23 @@ Response:
   }]
 }
 ```
+
+### Echoed delimiters
+
+Most tool-call formats open and close a call with a delimiter that the tokenizer stores as one added token (for example `<tool_call>` for Qwen3 and Hermes). That token is not reserved: a literal `<tool_call>` inside a tool result or a pasted file encodes to the same id the model emits to open a call, and SGLang's detectors work on text, so on their own they cannot tell a call the model issued from a delimiter it reproduced from its input. An attacker who controls a tool result can therefore make the client execute a call the model never issued.
+
+The processor uses the token ids to keep the two apart.
+
+**Parsing by token id** is always on when both delimiters of the configured parser are single tokens of the served model's tokenizer (Hunyuan's suffixed delimiters are resolved from that tokenizer). The tool-call parser is opened only by the opening delimiter's token id and closed by the closing id; a delimiter the model spells out of ordinary sub-words is returned as `content`, and a call that contains a spelled-out delimiter is returned as `content` whole. When the delimiters are not single tokens, the parser keeps its previous text-only behavior and the frontend logs a warning once.
+
+**`--isolate-tool-call-markers`** (opt-in) tokenizes message content that contains a delimiter without added-token matching, so the model sees `<`, `tool`, `_call`, `>` and has no single token to copy back. Delimiters the chat template itself emits (the tool instructions, earlier assistant `tool_calls`) keep their ids, and content without a delimiter tokenizes exactly as before. A request is rejected instead of being encoded with the delimiter ids when:
+
+- the chat template rewrites the delimiter-bearing content in a way that cannot be aligned with the original;
+- the parser's delimiters are not single tokens for this tokenizer (parsing by token id is not possible for that parser either);
+- its `chat_template_kwargs` set `padding`, a non-empty `tokenizer_kwargs`, or `return_tensors` (`truncation` and `max_length` are honored);
+- the native DeepSeek-V4/V4.1 or Kimi K3 encoder renders the prompt: every request is rejected while the option is on.
+
+Before enabling it in production, evaluate the option against your model: it changes the tokens the model sees for delimiter-bearing content.
 
 ## Reasoning Parsing
 

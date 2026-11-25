@@ -40,7 +40,7 @@ def ctx_factory():
         *,
         failure_threshold: int = 3,
         cooldown_seconds: float = 30.0,
-        tick_max_duration_seconds: float = 30.0,
+        tick_max_duration_seconds: Optional[float] = 30.0,
     ):
         clk = VirtualClock()
         cb = CircuitBreaker(

@@ -22,8 +22,11 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -76,7 +79,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaulter := NewDCDDefaulter()
+			defaulter := NewDCDDefaulter("1.7.0")
 
 			err := defaulter.Default(tt.ctx, tt.dcd)
 			if (err != nil) != tt.wantErr {
@@ -107,7 +110,7 @@ func TestDCDDefaulter_DefaultsMultinodeRoleReplicasOnUpdate(t *testing.T) {
 		},
 	}
 
-	defaulter := NewDCDDefaulter()
+	defaulter := NewDCDDefaulter("1.7.0")
 	if err := defaulter.Default(admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoComponentDeploymentGVK), dcd); err != nil {
 		t.Fatalf("Default() unexpected error: %v", err)
 	}
@@ -122,9 +125,37 @@ func TestDCDDefaulter_DefaultsMultinodeRoleReplicasOnUpdate(t *testing.T) {
 }
 
 func TestDCDDefaulter_DefaultRejectsWrongType(t *testing.T) {
-	defaulter := NewDCDDefaulter()
+	defaulter := NewDCDDefaulter("1.7.0")
 
 	if err := defaulter.Default(admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK), &corev1.Pod{}); err == nil {
 		t.Fatal("Default() error = nil, want type error")
+	}
+}
+
+func TestDCDDefaulter_CreationOrigin(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		operation  admissionv1.Operation
+		origin     string
+		graphChild bool
+		want       string
+	}{
+		{name: "update preserves creation origin", operation: admissionv1.Update, origin: "1.6.0", want: "1.6.0"},
+		{name: "graph child create does not acquire current origin", operation: admissionv1.Create, graphChild: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dcd := &nvidiacomv1beta1.DynamoComponentDeployment{Name: "frontend"}
+			if tt.origin != "" {
+				dcd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: tt.origin}
+			}
+			if tt.graphChild {
+				dcd.OwnerReferences = []metav1.OwnerReference{{Kind: "DynamoGraphDeployment", Name: "graph"}}
+			}
+			err := NewDCDDefaulter("1.7.0").Default(admissionCtx(tt.operation, nvidiacomv1beta1.DynamoComponentDeploymentGVK), dcd)
+			require.NoError(t, err)
+			origin, exists := dcd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+			require.Equal(t, tt.want, origin)
+			require.Equal(t, tt.want != "", exists)
+		})
 	}
 }

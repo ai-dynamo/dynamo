@@ -167,13 +167,24 @@ def _containing_mapping(
     mapping_bases: tuple[int, ...],
 ) -> LocalMapping | None:
     storage = tensor.untyped_storage()
-    storage_start = int(storage.data_ptr())
+    try:
+        storage_start = int(storage.data_ptr())
+    except RuntimeError:
+        # FakeTensors left alive by torch.compile have no device storage.
+        return None
     storage_end = storage_start + int(storage.nbytes())
     index = bisect_right(mapping_bases, storage_start) - 1
     if index < 0:
         return None
     mapping = mappings[index]
-    if storage_end <= mapping.base + mapping.aligned_size:
+    # A tensor may span slabs that are mapped back to back.
+    end = mapping.base + mapping.aligned_size
+    while storage_end > end and index + 1 < len(mappings):
+        index += 1
+        if mappings[index].base != end:
+            return None
+        end = mappings[index].base + mappings[index].aligned_size
+    if storage_end <= end:
         return mapping
     return None
 

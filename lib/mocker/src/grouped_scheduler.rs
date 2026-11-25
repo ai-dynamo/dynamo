@@ -11,18 +11,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
-use aisimulate_core::engine::KvEventData;
-use aisimulate_core::engine::generalized::{
+use aisim_core::engine::KvEventData;
+use aisim_core::engine::generalized::{
     EngineEffects, EngineIdentity, EnginePassCompleted, GeneralizedMockerEngine, RankIdentity,
     SchedulerCommand as EngineSchedulerCommand,
 };
-use aisimulate_core::engine::{
+use aisim_core::engine::{
     Admission, Command, CommandEffects, CommandResult, ForwardPassMetrics, KvEvent, Metrics,
     PassCompletionEffects,
 };
 use anyhow::{Context, Result, anyhow, ensure};
 #[cfg(test)]
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
 use futures::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -296,6 +296,10 @@ fn create_grouped_scheduler_from_components(
             .as_ref()
             .is_none_or(|host| host.scope != G2Scope::ClusterShared),
         "cluster_shared native_host_offload is supported only in offline replay"
+    );
+    ensure!(
+        !components.rank.sglang.host_loop,
+        "sglang.host_loop is supported only in offline replay"
     );
     let factory = engine_factory(components.rank, components.timing)?;
     // Existing live schedulers seed every process-local worker from DP rank.
@@ -690,7 +694,7 @@ fn translate_command(
 ) -> Result<TranslatedCommand> {
     let (command, on_success, on_suppressed_output, on_error) = match command {
         SchedulerCommand::Submit(request) => {
-            let request = compatibility.native_request(request);
+            let request = compatibility.native_request(request)?;
             let request_id = request.request_id;
             (
                 Command::Submit(request),
@@ -712,8 +716,8 @@ fn translate_command(
             handoff_id,
             request,
         } => {
+            let request = compatibility.native_request(request)?;
             let engine_handoff = compatibility.engine_handoff(handoff_id)?;
-            let request = compatibility.native_request(request);
             let request_id = request.request_id;
             compatibility.mark_source(handoff_id, request_id);
             (
@@ -749,8 +753,8 @@ fn translate_command(
             handoff_id,
             request,
         } => {
+            let request = compatibility.native_request(request)?;
             let engine_handoff = compatibility.engine_handoff(handoff_id)?;
-            let request = compatibility.native_request(request);
             let request_id = request.request_id;
             compatibility.mark_destination(handoff_id, request_id);
             (

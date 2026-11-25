@@ -557,6 +557,7 @@ mod tests {
     async fn route_span_covers_attempt_lifecycle_and_retry_metadata() {
         let captured = Arc::new(Captured::default());
         // Do not install a global LogTracer: other tests initialize logging.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(CaptureLayer(captured.clone())),
         );

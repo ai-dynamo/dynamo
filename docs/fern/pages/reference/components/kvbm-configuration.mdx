@@ -5,6 +5,10 @@ title: KVBM Configuration Reference
 subtitle: Field reference for the KV Block Manager environment variables and the layered KVBM_* / TOML configuration system.
 ---
 
+<Warning>
+The TensorRT-LLM KVBM connector and event consolidator have been removed. These settings do not apply to TensorRT-LLM workers. Native TensorRT-LLM KV-event publishing and KV-aware routing remain supported.
+</Warning>
+
 The KV Block Manager (KVBM) is configured through two layers:
 
 - **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, object storage, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
@@ -125,7 +129,7 @@ In multi-worker deployments, one KVBM leader coordinates the worker cache tiers 
 </ParamField>
 
 <ParamField path="DYN_KVBM_LEADER_ZMQ_PUB_PORT" type="integer" default="56001">
-  ZMQ publish port for the KVBM leader. The TRT-LLM integration derives its port from this value.
+  ZMQ publish port for the KVBM leader.
 </ParamField>
 
 <ParamField path="DYN_KVBM_LEADER_ZMQ_ACK_PORT" type="string" default="unset">

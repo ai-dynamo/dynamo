@@ -59,7 +59,7 @@ spec:
           resources:
             requests:
               cpu: '16'
-              memory: 128Gi
+              memory: 16Gi
   - name: Worker
     type: worker
     replicas: 2

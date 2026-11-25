@@ -150,6 +150,8 @@ mod tests {
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 messages,
                 model: "test".to_string(),

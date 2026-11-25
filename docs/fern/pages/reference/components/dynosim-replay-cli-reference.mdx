@@ -42,7 +42,7 @@ aisimulate predict --stack dynamo --config prediction.yaml
   not supported.
 </ParamField>
 
-<ParamField path="--output-dir" type="path" default="./aisimulate-output">
+<ParamField path="--output-dir" type="path" default="./aisim-output">
   Directory for `prediction.json` and optional per-request output.
 </ParamField>
 
@@ -129,7 +129,8 @@ evaluation:
 - Omitting the entire section creates 100 independent synthetic requests at concurrency 10, with
   1,024 input tokens and 128 output tokens per request.
 - `source.type: synthetic` creates independent requests with `input_tokens` and `output_tokens`.
-- `source.type: synthetic-session` creates ordered multi-turn sessions.
+- `source.type: synthetic-session` creates ordered multi-turn sessions. Each later turn's prompt
+  starts with the session's earlier prompts and outputs.
 - `source.type: trace` reads one or more paths. Supported formats include `mooncake`,
   `mooncake-delta`, `agentic_mooncake`, `weka`, `applied_compute_agentic`, and `dynamo`.
 - `load.type: concurrency` keeps a fixed number of requests or sessions active.
@@ -221,14 +222,22 @@ Use `json.dumps` and `json.loads` to save and restore configuration mappings. Ke
 `num_gpu_blocks_is_explicit` when saving a normalized configuration: `false` preserves automatic
 AISimulate capacity estimation. Providing `engine.num_gpu_blocks` without that marker selects an
 explicit capacity. Set `engine.max_num_seqs` or `engine.max_num_batched_tokens` to `null` (`None` in Python)
-for an unlimited scheduler limit; omit the field to use the engine default.
+for an unlimited scheduler limit; omit the field to use the engine default. With the SGLang
+backend, a `null` `engine.max_num_seqs` is not unlimited: the engine derives the limit from the KV
+capacity and the context length.
+
+A vLLM engine models async scheduling by default, except with MTP and native host offload: a
+request that arrives while the engine is busy is admitted later than with synchronous scheduling,
+one pass later in offline replay and up to two passes later in online replay. Set
+`engine.async_scheduling` to `false` (`False` in Python) to model synchronous scheduling. SGLang
+and TensorRT-LLM engines reject the field.
 
 ### Typed agentic replay through the Dynamo API
 
 AISimulate owns public Weka ingestion, validation, and lowering into the canonical
 `ValidatedAgenticGraph`. The lower-level
 `dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
-but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router
+but delegates graph construction directly to `aisim-core` before Dynamo composes its Router
 and Mocker runtime behavior.
 
 Use `weka_nested_timestamp_basis="absolute"` or `"relative"` to override nested timestamp
@@ -344,11 +353,28 @@ hardware offload recipe.
   configuration. Default KV block sizes are 64 for vLLM, 1 for SGLang, and 32 for TensorRT-LLM.
 - Scheduler defaults are 8,192 batched tokens for every role and 256 sequences for aggregated and
   decode workers. Prefill workers default to one sequence.
-- `timing.type: default` uses the AIConfigurator forward-pass model shipped in the `aisimulate`
+- `timing.type: default` uses the AIConfigurator forward-pass model shipped in the `aisim`
   wheel. `fixed` requires both `prefill_ms` and `decode_ms`; `polynomial` selects the built-in
   polynomial model.
 - `router.policy: kv_router` supports one or more routable workers. Set
   `router.prefill_load_model.type` to `none` or `aic`.
+- `router.use_kv_events: false` replays a router started with `--no-router-kv-events`: it indexes
+  its own routing decisions, forgets them 120 s (the frontend's `--router-ttl-secs` default) after
+  the last one, and reads no engine KV events. Offline replay only.
+- With `router.policy: kv_router`, `router.policy_config` (`predict` only) names the router policy
+  YAML that the live router takes with `--router-policy-config`. The
+  [worker-selection policy](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies)
+  it selects replaces the default cost function. The replay seed does not reach that policy, a
+  policy that reads the clock reads wall time, and `router.conversation_affinity` pins a session's
+  worker under every policy.
+- With `router.policy: kv_router`, each vLLM aggregated or prefill worker that sets
+  `engine.workers.<role>.kv_cache.kvcr` gets the `kv.fetch` hint that the production
+  [KV router](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints)
+  chooses, so it pulls the prompt prefix it lacks from the named peer's G2 (see
+  [KV Cache Runner (KVCR) peer fetch](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-cache.md#kvcr-peer-fetch)).
+  `round_robin` sends no hints, and neither does `router.overlap_score_credit: 0`, which reads no KV
+  index; the router then logs one warning. Replay treats all workers as one transfer island and
+  models no cache-owner sources.
 - `planner.policy` is `disabled` or `enabled`. Enabled settings use the production
   `PlannerConfig` defaults and normalization. The default target is `throughput`, which enables
   load scaling and disables throughput scaling. Throughput scaling with `target: sla` requires
@@ -362,6 +388,24 @@ hardware offload recipe.
   intervals, including the load interval used for performance-model updates.
 - `evaluation.sla` accepts either `e2e_ms` alone or `ttft_ms` and `itl_ms` together. The two forms
   are mutually exclusive.
+
+### Conversation Affinity
+
+For AgentX trace replay, `router.conversation_affinity` uses Dynamo's native hard binding
+with `kv_router` and fixed aggregated or disaggregated worker pools. Online replay and
+Planner-enabled replay are unsupported. Omitting the field preserves normal routing.
+
+```yaml
+router:
+  policy: kv_router
+  conversation_affinity: {mode: session, ttl_seconds: 300}
+planner: {policy: disabled}
+```
+
+`session` (the default) binds each conversation. `sibling_group` binds siblings sharing a parent
+within the same play and requires unambiguous lineage; the parent keeps its own binding.
+Prefill and decode pools bind independently. `ttl_seconds` is the idle expiry in simulated
+seconds, defaults to 300, and must be finite and between 1 and 31,536,000 inclusive.
 
 ## Overrides
 
@@ -384,14 +428,21 @@ configuration shape, such as `traffic.source`.
 The output directory contains:
 
 ```text
-aisimulate-output/
+aisim-output/
 ├── prediction.json
-└── requests.jsonl
+├── requests.jsonl
+├── resource-runtime.json
+├── execution-events.jsonl
+└── resource-plan.json
 ```
 
 `prediction.json` preserves the Dynamo runner report, including summary metrics and available
-Planner diagnostics. `requests.jsonl` is present only with `--capture-per-request`. `--format`
-changes standard output but not durable files.
+Planner diagnostics. `requests.jsonl` is present only with `--capture-per-request`.
+`resource-runtime.json` records the supervised execution: its status, resource budget,
+`peak_observed_rss_bytes`, and wall time. `execution-events.jsonl` records the execution's progress
+events, starting with its resource plan. `resource-plan.json` is written only when the run is
+refused for resources before it starts. `--format` changes standard output but not durable files.
 
 The command exits with `0` on success, `1` for execution failure, `2` for CLI or configuration
-errors, and `130` when interrupted.
+errors, `3` when the run is refused or stopped by its `execution.resources` limits, `124` when
+execution start-up or shutdown times out, and `130` when interrupted.

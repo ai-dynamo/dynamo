@@ -174,6 +174,18 @@ def _normalize_prefill_dp_limits(args: list[str]) -> list[str]:
     )
 
 
+# Disagg blueprint defaults that AIC engine tuning may omit. SGLang binds the
+# prefill bootstrap server to --host, whose default (127.0.0.1) decode workers
+# in other pods cannot reach. Without a fixed bootstrap port, dynamo.sglang
+# reserves a free one per process, and SGLang before 0.5.12 does not sync rank
+# 0's port to the other ranks of a multinode prefill worker.
+_DISAGG_DEFAULT_ARGS = (
+    ("--disaggregation-transfer-backend", "nixl"),
+    ("--disaggregation-bootstrap-port", "12345"),
+    ("--host", "0.0.0.0"),
+)
+
+
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
 
@@ -187,31 +199,20 @@ class SGLangConfigModifier(BaseConfigModifier):
         return update_image(config, image)
 
     @classmethod
-    def _apply_disagg_workers(
-        cls,
-        cfg: Config,
-        prefill_cli_args: list[str],
-        prefill_replicas: int,
-        prefill_gpus: int,
-        decode_cli_args: list[str],
-        decode_replicas: int,
-        decode_gpus: int,
-        num_gpus_per_node: int | None = None,
-    ) -> None:
-        # Rename before the prefill safety check so it sees generated values.
-        prefill_cli_args = _normalize_prefill_dp_limits(
-            _rename_legacy_cuda_graph_args(prefill_cli_args)
+    def _finalize_disagg_cli_args(
+        cls, args: list[str], role: SubComponentType
+    ) -> list[str]:
+        if role == SubComponentType.PREFILL:
+            # Rename before the prefill safety check so it sees generated values.
+            args = _normalize_prefill_dp_limits(_rename_legacy_cuda_graph_args(args))
+        # SGLang treats a missing --disaggregation-mode as aggregated serving.
+        finalized = set_unique_argument_value(
+            break_arguments(args), "--disaggregation-mode", role.value
         )
-        super()._apply_disagg_workers(
-            cfg,
-            prefill_cli_args=prefill_cli_args,
-            prefill_replicas=prefill_replicas,
-            prefill_gpus=prefill_gpus,
-            decode_cli_args=decode_cli_args,
-            decode_replicas=decode_replicas,
-            decode_gpus=decode_gpus,
-            num_gpus_per_node=num_gpus_per_node,
-        )
+        for key, value in _DISAGG_DEFAULT_ARGS:
+            if not _has_arg(finalized, key):
+                finalized = append_argument(finalized, [key, value])
+        return finalized
 
     @classmethod
     def _apply_worker_config(

@@ -117,13 +117,13 @@ spec:
         - name: CONCURRENCY
           value: ''
         - name: BENCHMARK_DURATION
-          value: ''
+          value: '3600'
         - name: WARMUP_GRACE_PERIOD
-          value: ''
+          value: '1800'
         - name: REQUEST_TIMEOUT_SECONDS
-          value: ''
+          value: '7200'
         - name: MAX_CONTEXT_LENGTH
-          value: ''
+          value: '1048576'
         - name: ARTIFACT_DIR
           value: ''
         - name: CACHE_SALT

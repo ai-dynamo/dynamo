@@ -252,7 +252,6 @@ class ApiTester:
 
 class ServerType(str, Enum):
     vllm = "vllm"
-    trtllm = "trtllm"
 
 
 class DeterminismTester(ApiTester):
@@ -341,8 +340,6 @@ class DeterminismTester(ApiTester):
             seed = int(os.environ.get("KVBM_SEED", "42"))
 
         top_k = -1
-        if check_module_available("tensorrt_llm"):
-            top_k = 1  # TensorRT-LLM requires top_k>=0 and dynamo frontend does not support top_k=0
         # For determinism: use temperature=0 which should trigger greedy decoding in vLLM
         # Setting top_p=1.0 and top_k=-1 to avoid any sampling/filtering
         return super().make_request(
@@ -556,13 +553,8 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     # Detect available server type
     if check_module_available("vllm"):
         server_type = ServerType.vllm
-    elif check_module_available("tensorrt_llm"):
-        server_type = ServerType.trtllm
-        pytest.skip("TensorRT-LLM tests are disabled for this test")
     else:
-        pytest.skip(
-            "Neither vllm nor tensorrt_llm module is available in the current environment."
-        )
+        pytest.skip("The vllm module is not available in the current environment.")
 
     # Use dynamic port allocation to avoid conflicts (pytest-xdist safe)
     # Note: ZMQ ports are allocated in lower range due to i16 limit (max 32767) in port_utils

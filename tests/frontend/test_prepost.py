@@ -20,6 +20,7 @@ HAS_QWEN3_TOOL_PARSER = check_module_available(
     "vllm.tool_parsers.qwen3_engine_tool_parser"
 ) or check_module_available("vllm.tool_parsers.qwen3coder_tool_parser")
 if HAS_VLLM:
+    from vllm.entrypoints.generate.base.protocol import FunctionDefinition
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
         ChatCompletionToolsParam,
@@ -29,7 +30,6 @@ if HAS_VLLM:
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
     from dynamo.frontend.prepost import StreamingPostProcessor, _prepare_request
-    from dynamo.frontend.vllm_protocol import FunctionDefinition
 else:
     # Fake some types so that `pre-commit` passes
     class CompletionOutput:

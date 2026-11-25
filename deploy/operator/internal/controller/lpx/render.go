@@ -77,7 +77,7 @@ func (r *graphReconciler) resolveWorkloads(
 		}
 		workloads[groupName] = workload
 
-		plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
+		plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment), dgd.GetComponentByName(workload.ServingComponentName()))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -103,7 +103,7 @@ func (r *graphReconciler) resolveWorkloads(
 }
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
-// runtime ConfigMaps and, for Kubernetes discovery, serving Services.
+// serving Services for Kubernetes discovery.
 // Inputs must be non-nil except existingPCS, which is nil during creation.
 // Workloads must contain every component group.
 // Plans must have finalized names and use the same keys as workloads.
@@ -133,10 +133,13 @@ func (r *graphReconciler) renderPodCliqueSet(
 			return nil, nil, err
 		}
 
-		// Discovery selects only this workload's conductor; all auxiliary roles stay private.
+		// Discovery selects only this workload's serving role; all auxiliary roles stay private.
 		serving := plan.ConductorTemplate
 		if serving == "" {
 			serving = plan.CyborgTemplate
+		}
+		if serving == "" {
+			serving = plan.Agents[len(plan.Agents)-1].TemplateName
 		}
 		for _, clique := range rendered.Cliques {
 			if token := deployment.Annotations[dynamo.LPXRestartAnnotation]; token != "" {
@@ -155,7 +158,6 @@ func (r *graphReconciler) renderPodCliqueSet(
 		// Keep workload templates in canonical component order.
 		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, rendered.Cliques...)
 		pcs.Spec.Template.PodCliqueScalingGroupConfigs = append(pcs.Spec.Template.PodCliqueScalingGroupConfigs, rendered.ScalingGroup)
-		resources = append(resources, rendered.Resources...)
 
 		// Kubernetes discovery exposes only this workload's serving role within its PCS.
 		if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dgd.Annotations) {

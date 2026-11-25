@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import hashlib
+import inspect
 import json
 import logging
 import subprocess
@@ -25,12 +26,14 @@ import time
 import uuid
 from collections import deque
 from dataclasses import asdict, replace
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
 import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+import zmq
 from vllm.config import CUDAGraphMode  # noqa: E402
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -66,6 +69,7 @@ def _isolate_synthetic_content_env(monkeypatch):
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
+from dynamo.common.forward_pass_metrics import decode  # noqa: E402
 from dynamo.vllm.benchmark_points import (  # noqa: E402
     BenchmarkPoints,
     PrefillPointCandidate,
@@ -354,6 +358,7 @@ def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("graph_observation", ["observed", "absent", "incomplete"])
+@pytest.mark.parametrize("skip_drafts", [None, False, True])
 def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     monkeypatch,
     phase,
@@ -362,6 +367,7 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     expected_start,
     expected_wall,
     graph_observation,
+    skip_drafts,
 ):
     point = BenchmarkPoint(
         phase,
@@ -406,9 +412,10 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     monotonic = MagicMock(return_value=20.0)
     monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", monotonic)
 
-    result = stub.update_from_output(
-        SimpleNamespace(total_num_scheduled_tokens=80), model_output
-    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=80)
+    if skip_drafts is not None:
+        scheduler_output.skip_drafts = skip_drafts
+    result = stub.update_from_output(scheduler_output, model_output)
 
     assert result == "parent-result"
     raw = stub._bench_current_fpms[-1]
@@ -416,6 +423,7 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     sample = raw["benchmark_sample"]
     assert sample["sample_index"] == int(steady)
     assert sample["forward_index"] == 12
+    assert sample["scheduler_skip_drafts"] is skip_drafts
     assert sample["timing"] == {
         "basis": expected_basis,
         "start_monotonic": expected_start,
@@ -1594,11 +1602,17 @@ def test_benchmark_synchronizer_gives_armed_rank_time_to_receive_go():
 
 
 def test_fpm_publisher_drops_benchmark_metrics_until_resumed():
+    """Keep benchmark frames out of the publisher until live serving resumes."""
     publisher = instrumented_scheduler_module._FpmPublisherThread.__new__(
         instrumented_scheduler_module._FpmPublisherThread
     )
     publisher._running = True
     publisher._publishing = threading.Event()
+    publisher._heartbeat_lock = threading.Lock()
+    publisher._heartbeat_state = (
+        instrumented_scheduler_module.QueuedRequestMetrics(),
+        False,
+    )
     publisher._queue = instrumented_scheduler_module.queue.Queue()
     metrics = instrumented_scheduler_module.ForwardPassMetrics()
 
@@ -1608,6 +1622,408 @@ def test_fpm_publisher_drops_benchmark_metrics_until_resumed():
     publisher.resume()
     publisher.publish(metrics)
     assert publisher._queue.get_nowait() is metrics
+
+
+def _recv_fpm_until(sub, predicate, timeout_s: float = 10.0):
+    """Decode FPM frames from ``sub`` until one matches ``predicate``."""
+    seen = []
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not sub.poll(timeout=200):
+            continue
+        frame = decode(sub.recv_multipart()[2])
+        assert frame is not None
+        seen.append(frame)
+        if predicate(frame):
+            return frame, seen
+    pytest.fail(f"no matching FPM frame within {timeout_s}s; saw {seen!r}")
+
+
+@pytest.mark.timeout(60)
+def test_fpm_heartbeat_reports_latest_queued_snapshot(monkeypatch):
+    """A heartbeat sent during a long pass must not hide the waiting queue."""
+    publisher_cls = instrumented_scheduler_module._FpmPublisherThread
+    monkeypatch.setattr(publisher_cls, "HEARTBEAT_INTERVAL", 0.2)
+    queued = instrumented_scheduler_module.QueuedRequestMetrics(
+        num_prefill_requests=1, sum_prefill_tokens=30000
+    )
+    publisher = publisher_cls(
+        "tcp://127.0.0.1:*", worker_id="w", dp_rank=0, start_paused=True
+    )
+    sub = None
+    try:
+        sub = zmq.Context.instance().socket(zmq.SUB)
+        sub.setsockopt(zmq.SUBSCRIBE, b"")
+        sub.connect(publisher.endpoint)
+        publisher.resume()
+        publisher.set_heartbeat_state(queued, True)
+
+        busy, seen = _recv_fpm_until(sub, lambda f: f.queued_requests == queued)
+        for frame in seen:
+            assert frame.wall_time == 0.0
+            assert (
+                frame.scheduled_requests
+                == instrumented_scheduler_module.ScheduledRequestMetrics()
+            )
+        assert busy.worker_id == "w"
+        assert not busy.is_idle()
+
+        publisher.set_heartbeat_state(
+            instrumented_scheduler_module.QueuedRequestMetrics(), False
+        )
+        idle, _ = _recv_fpm_until(sub, lambda f: f.is_idle())
+        assert idle.wall_time == 0.0
+    finally:
+        publisher.shutdown()
+        if sub is not None:
+            sub.close(linger=0)
+
+
+@pytest.fixture
+def heartbeat_scheduler(monkeypatch):
+    """Drive real scheduler instrumentation and publisher frames with a fake clock."""
+    clock = {"now": 10.0}
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time, "monotonic", lambda: clock["now"]
+    )
+    publisher_cls = instrumented_scheduler_module._FpmPublisherThread
+    publisher = publisher_cls.__new__(publisher_cls)
+    publisher._running = True
+    publisher._publishing = threading.Event()
+    publisher._heartbeat_lock = threading.Lock()
+    publisher._heartbeat_state = (
+        instrumented_scheduler_module.QueuedRequestMetrics(),
+        False,
+    )
+    publisher._queue = instrumented_scheduler_module.queue.Queue()
+    publisher._seq = count()
+    publisher._worker_id = "w"
+    publisher._dp_rank = 0
+    publisher._pub = MagicMock()
+    publisher.resume()
+
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.waiting = deque()
+    stub.skipped_waiting = deque()
+    stub.running = []
+    stub.requests = {}
+    stub.finished_req_ids = set()
+    stub.connector = None
+    stub.ec_connector = None
+    stub._bench_active = False
+    stub._bench_phase = _BenchPhase.IDLE
+    stub._schedule_times = deque()
+    stub._last_update_time = 0.0
+    stub._inflight_outputs = {}
+    stub._heartbeat_queued = instrumented_scheduler_module.QueuedRequestMetrics()
+    stub._heartbeat_snapshot_time = float("-inf")
+    stub._cleanup_finished = MagicMock()
+    stub._publisher = publisher
+    stub._extract_scheduled = (
+        lambda output: instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=int(output.total_num_scheduled_tokens > 0),
+            sum_prefill_tokens=output.total_num_scheduled_tokens,
+        )
+    )
+    stub._compute_queued = MagicMock(wraps=stub._compute_queued)
+    stub._fpm_worker_id = "w"
+    stub._fpm_dp_rank = 0
+
+    def parent_schedule(self, *_args):
+        """Dispatch one waiting request without constructing a vLLM engine."""
+        if self.waiting:
+            self.running.append(self.waiting.popleft())
+        return SimpleNamespace(total_num_scheduled_tokens=30000)
+
+    def parent_finish(self, _request_ids, _finished_status):
+        """Remove scheduler-visible requests while batches may still be in flight."""
+        aborted = list(self.waiting) + self.running
+        self.waiting.clear()
+        self.skipped_waiting.clear()
+        self.running.clear()
+        return aborted
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "schedule", parent_schedule
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "finish_requests", parent_finish
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "add_request",
+        lambda self, request: self.waiting.append(request),
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "has_unfinished_requests",
+        lambda self: bool(self.running or self.waiting or self.skipped_waiting),
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "get_request_counts",
+        lambda self: (len(self.running), len(self.waiting) + len(self.skipped_waiting)),
+    )
+
+    def heartbeat():
+        """Run the publisher through one timeout and decode every emitted frame."""
+        messages = []
+        while not publisher._queue.empty():
+            messages.append(publisher._queue.get_nowait())
+        steps = iter(messages + [instrumented_scheduler_module.queue.Empty, None])
+
+        def next_message(timeout):
+            """Advance the clock at the timeout without sleeping."""
+            item = next(steps)
+            if item is instrumented_scheduler_module.queue.Empty:
+                clock["now"] += publisher.HEARTBEAT_INTERVAL
+                raise instrumented_scheduler_module.queue.Empty
+            return item
+
+        sent_before = len(publisher._pub.send_multipart.call_args_list)
+        with monkeypatch.context() as patch:
+            patch.setattr(publisher._queue, "get", next_message)
+            publisher._run()
+        frames = [
+            decode(args.args[0][2])
+            for args in publisher._pub.send_multipart.call_args_list[sent_before:]
+        ]
+        assert all(frame is not None for frame in frames)
+        return frames
+
+    return stub, clock, heartbeat
+
+
+def test_long_pass_without_waiting_never_emits_idle(heartbeat_scheduler):
+    """One scheduled request must not produce false idle before its output."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    output = stub.schedule()
+    assert not stub.waiting
+    assert heartbeat() == []
+    assert heartbeat() == []
+
+    stub.running.clear()
+    stub.update_from_output(output, object())
+    frames = heartbeat()
+    assert frames[0].wall_time > 0
+    assert frames[-1].is_idle()
+
+
+def test_long_pass_reports_waiting_requests(heartbeat_scheduler):
+    """The first long pass reports queued work without a second per-step scan."""
+    stub, _, heartbeat = heartbeat_scheduler
+    for _ in range(2):
+        stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    assert stub._compute_queued.call_count == 0
+    stub.schedule()
+    frames = heartbeat()
+    assert len(frames) == 1
+    assert not frames[0].is_idle()
+    assert frames[0].wall_time == 0
+    assert (
+        frames[0].scheduled_requests
+        == instrumented_scheduler_module.ScheduledRequestMetrics()
+    )
+    assert frames[0].queued_requests.num_prefill_requests == 1
+    assert frames[0].queued_requests.sum_prefill_tokens == 30000
+
+
+@pytest.mark.parametrize("out_of_order", [False, True])
+def test_async_batches_remain_busy_until_matching_outputs(
+    heartbeat_scheduler, out_of_order
+):
+    """Completing one batch, or a duplicate output, cannot drain another batch."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    first, second = stub.schedule(), stub.schedule()
+    if out_of_order:
+        first, second = second, first
+    stub.running.clear()
+    stub.update_from_output(first, object())
+    assert all(not frame.is_idle() for frame in heartbeat())
+    stub.update_from_output(first, object())
+    assert all(not frame.is_idle() for frame in heartbeat())
+    stub.update_from_output(second, object())
+    assert heartbeat()[-1].is_idle()
+
+
+def test_abort_does_not_forget_inflight_batch(heartbeat_scheduler):
+    """Removing all requests cannot report idle until the batch returns."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    output = stub.schedule()
+    stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
+    assert not stub.waiting and not stub.running
+    assert heartbeat() == []
+    stub.update_from_output(output, object())
+    assert heartbeat()[-1].is_idle()
+
+
+@pytest.mark.parametrize("pending_work", ["retained_request", "kv_push", "ec_push"])
+def test_connector_work_prevents_idle_until_drained(heartbeat_scheduler, pending_work):
+    """Connector cleanup and pushes remain busy after the last batch returns."""
+    stub, _, heartbeat = heartbeat_scheduler
+    request = _make_request(RequestStatus.WAITING, num_tokens=30000)
+    stub.add_request(request)
+    output = stub.schedule()
+    stub.running.clear()
+
+    connector = SimpleNamespace(has_pending_push_work=lambda: False)
+    if pending_work == "retained_request":
+        request.status = RequestStatus.FINISHED_STOPPED
+        stub.requests["r0"] = request
+        stub.connector = connector
+    else:
+        connector.has_pending_push_work = lambda: True
+        if pending_work == "kv_push":
+            stub.connector = connector
+        else:
+            stub.ec_connector = connector
+
+    assert heartbeat() == []
+    stub.update_from_output(output, object())
+    assert not stub.waiting and not stub.running and not stub._inflight_outputs
+    frames = heartbeat()
+    assert len(frames) == 1
+    assert frames[0].wall_time > 0
+    assert not frames[0].is_idle()
+    assert heartbeat() == []
+
+    stub.requests.clear()
+    connector.has_pending_push_work = lambda: False
+    stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=0), object())
+    frames = heartbeat()
+    assert len(frames) == 1
+    assert frames[0].is_idle()
+    assert frames[0].wall_time == 0
+    assert (
+        frames[0].scheduled_requests
+        == instrumented_scheduler_module.ScheduledRequestMetrics()
+    )
+
+
+def test_failed_output_processing_keeps_heartbeat_busy(
+    heartbeat_scheduler, monkeypatch
+):
+    """A failed output update leaves completion uncertain after an abort."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    output = stub.schedule()
+    stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
+
+    def fail_update(*_):
+        raise RuntimeError("output processing failed")
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "update_from_output", fail_update
+    )
+    with pytest.raises(RuntimeError, match="output processing failed"):
+        stub.update_from_output(output, object())
+    assert heartbeat() == []
+
+
+def test_waiting_abort_restores_idle_without_a_scheduled_batch(heartbeat_scheduler):
+    """A request aborted before dispatch leaves a genuinely drained scheduler."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    # No snapshot is required on arrival: an empty heartbeat is suppressed.
+    assert heartbeat() == []
+    stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
+    assert heartbeat()[-1].is_idle()
+
+
+@pytest.mark.parametrize(
+    "queue_name", ["skipped_waiting", "kv_holding_waiting", "async_kv_waiting"]
+)
+def test_secondary_waiting_queue_prevents_idle(heartbeat_scheduler, queue_name):
+    """Supported vLLM secondary waiting queues contribute to heartbeats."""
+    stub, _, heartbeat = heartbeat_scheduler
+    setattr(
+        stub,
+        queue_name,
+        deque([_make_request(RequestStatus.WAITING, num_tokens=30000)]),
+    )
+    stub.schedule()
+    frames = heartbeat()
+    assert frames and all(not frame.is_idle() for frame in frames)
+    assert frames[-1].queued_requests.num_prefill_requests == 1
+
+
+def test_new_long_pass_refreshes_recent_empty_snapshot(heartbeat_scheduler):
+    """Waiting load is reported even just after a completed empty snapshot."""
+    stub, clock, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    previous = stub.schedule()
+    stub.running.clear()
+    stub.update_from_output(previous, object())
+    clock["now"] += 0.1 * stub._publisher.HEARTBEAT_INTERVAL
+    for _ in range(2):
+        stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    stub.schedule()
+    frames = heartbeat()
+    assert frames[-1].queued_requests.num_prefill_requests == 1
+    assert frames[-1].queued_requests.sum_prefill_tokens == 30000
+    assert not frames[-1].is_idle()
+
+
+def test_heartbeat_extra_scans_are_bounded_and_reuse_output_snapshot(
+    heartbeat_scheduler,
+):
+    """Ordinary scheduling does not scan waiting requests a second time per step."""
+    stub, clock, heartbeat = heartbeat_scheduler
+    stub.waiting.extend(
+        _make_request(RequestStatus.WAITING, num_tokens=30000) for _ in range(30)
+    )
+    outputs = [stub.schedule() for _ in range(10)]
+    assert stub._compute_queued.call_count == 1
+    # Even a reused snapshot cannot send false zero while requests remain.
+    assert all(not frame.is_idle() for frame in heartbeat())
+    stub.schedule()
+    assert stub._compute_queued.call_count == 2
+    stub.update_from_output(outputs[0], object())
+    assert stub._compute_queued.call_count == 3
+    clock["now"] += 0.5 * stub._publisher.HEARTBEAT_INTERVAL
+    stub.schedule()
+    assert stub._compute_queued.call_count == 3
+
+
+def test_benchmark_requests_never_reach_live_heartbeats(
+    heartbeat_scheduler, monkeypatch
+):
+    """Synthetic batches neither publish frames nor poison resumed activity."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub._bench_active = True
+    stub._bench_active_warmup = None
+    stub._bench_eager_warmup = None
+    stub._bench_synchronize_output = lambda _: None
+    stub._bench_should_record_scheduled = lambda _: False
+    stub._publish_or_record_metrics = MagicMock()
+    stub.waiting.append(_make_request(RequestStatus.WAITING, num_tokens=4096))
+    stub._publisher._publishing.clear()
+    output = stub.schedule()
+    stub.update_from_output(output, object())
+    stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
+    assert stub._publisher._queue.empty()
+    assert not stub._inflight_outputs
+
+    # Exercise the real paused loop without burning a wall-clock interval.
+    def remain_paused(timeout):
+        stub._publisher._running = False
+        return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(stub._publisher._publishing, "wait", remain_paused)
+        assert heartbeat() == []
+    stub._publisher._running = True
+    stub._bench_active = False
+    stub._publisher.resume()
+    assert heartbeat()[-1].is_idle()
 
 
 def test_benchmark_fpm_uses_benchmark_id_and_is_not_published():
@@ -2221,6 +2637,7 @@ def _explicit_grid_stub(mode="agg", points=None):
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    stub.num_spec_tokens = 0
     stub._bench_skipped_points = []
     stub._bench_explicit_points = BenchmarkPoints.model_validate(
         points
@@ -2388,7 +2805,10 @@ def test_explicit_runtime_failure_is_not_silently_skipped():
 # ---------------------------------------------------------------------------
 
 
-def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
+@pytest.mark.parametrize("hash_lookahead", [None, 0, 1, 3])
+def test_benchmark_hasher_uses_vllm_hash_granularity(
+    monkeypatch, tmp_path, hash_lookahead
+):
     parent_init_args = {}
 
     def fake_parent_init(self, **kwargs):
@@ -2442,6 +2862,8 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
             "benchmark": {"output_path": str(tmp_path / "benchmark.json")}
         },
     )
+    if hash_lookahead is not None:
+        vllm_config.num_hash_lookahead_tokens = hash_lookahead
     scheduler = InstrumentedScheduler(
         vllm_config=vllm_config,
         kv_cache_config=object(),
@@ -2453,7 +2875,10 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     assert parent_init_args["hash_block_size"] == 16
     assert scheduler._bench_hash_block_size == 16
     assert scheduler._bench_block_hasher is block_hasher
-    block_hasher_factory.assert_called_once_with(16, caching_hash_fn)
+    expected_kwargs = (
+        {"num_hash_lookahead_tokens": hash_lookahead} if hash_lookahead else {}
+    )
+    block_hasher_factory.assert_called_once_with(16, caching_hash_fn, **expected_kwargs)
 
 
 def test_agg_resolves_piecewise_prefill_and_full_decode_capture_views(tmp_path):
@@ -2586,6 +3011,7 @@ def _prefill_grid_stub(
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    stub.num_spec_tokens = 0
     _install_test_capacity_preflight(
         stub,
         _benchmark_capacity(
@@ -3684,6 +4110,68 @@ def test_prefill_real_seed_switch_parsing(monkeypatch):
         assert InstrumentedScheduler._bench_realseed_on(stub) is True
     monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", "off")
     assert InstrumentedScheduler._bench_realseed_on(stub) is False
+
+
+def _realseed_layout_stub(*specs):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.kv_cache_manager = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    kv_cache_spec=type(spec, (), {})()
+                    if isinstance(spec, str)
+                    else spec
+                )
+                for spec in specs
+            ]
+        )
+    )
+    return stub
+
+
+@pytest.mark.parametrize("value", [None, "auto", "AUTO"])
+def test_prefill_real_seed_auto_follows_recurrent_state_layout(monkeypatch, value):
+    """Synthetic prefix blocks carry no recurrent state, so a hybrid layout
+    never hits them; auto seeds real KV there and keeps fake seeding for
+    attention-only layouts."""
+    if value is None:
+        monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
+    else:
+        monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    state_subclass = type(
+        "GatedDeltaStateSpec", (instrumented_scheduler_module.MambaSpec,), {}
+    )
+    hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
+    hybrid_subclass = _realseed_layout_stub(
+        "FullAttentionSpec", state_subclass.__new__(state_subclass)
+    )
+    dense = _realseed_layout_stub("FullAttentionSpec", "SlidingWindowSpec")
+    assert InstrumentedScheduler._bench_realseed_on(hybrid) is True
+    assert InstrumentedScheduler._bench_realseed_on(hybrid_subclass) is True
+    assert InstrumentedScheduler._bench_realseed_on(dense) is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("off", False), ("0", False), ("on", True)]
+)
+def test_prefill_real_seed_explicit_value_overrides_layout(
+    monkeypatch, value, expected
+):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
+    dense = _realseed_layout_stub("FullAttentionSpec")
+    assert InstrumentedScheduler._bench_realseed_on(hybrid) is expected
+    assert InstrumentedScheduler._bench_realseed_on(dense) is expected
+
+
+@pytest.mark.parametrize(("value", "expected"), [("auto", False), ("on", True)])
+def test_prefill_real_seed_auto_stays_off_under_attention_dp(
+    monkeypatch, value, expected
+):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
+    hybrid._bench_dp_size = 2
+    assert InstrumentedScheduler._bench_realseed_on(hybrid) is expected
 
 
 def test_seed_regime_for_prefill_rows():
@@ -8599,8 +9087,11 @@ def test_json_safe_coerces_enums_dtypes_and_dataclasses():
     assert coerce(_ProvenanceNumpyScalar(42)) == 42
 
 
-def test_bench_capture_engine_records_requested_engine_facts():
+@pytest.mark.parametrize("hash_lookahead", [None, 0, 3])
+def test_bench_capture_engine_records_requested_engine_facts(hash_lookahead):
     vllm_config, kv_cache_config = _provenance_vllm_config()
+    if hash_lookahead is not None:
+        vllm_config.num_hash_lookahead_tokens = hash_lookahead
 
     engine = instrumented_scheduler_module._bench_capture_engine(
         vllm_config,
@@ -8635,6 +9126,7 @@ def test_bench_capture_engine_records_requested_engine_facts():
         "cache_dtype": "fp8_ds_mla",
         "block_size": 64,
         "enable_prefix_caching": True,
+        "num_hash_lookahead_tokens": hash_lookahead or 0,
         "kv_cache_layout": "LBNHC",
         "groups": [
             {
@@ -9259,7 +9751,16 @@ def realseed_prefix_cache(monkeypatch):
 
     monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-root"), raising=False)
 
-    def build(point, *, drop=0, seq=0, block_size=32):
+    def build(point, *, drop=0, seq=0, block_size=32, hash_lookahead=0):
+        if (
+            hash_lookahead
+            and "num_hash_lookahead_tokens"
+            not in inspect.signature(kv_cache_utils.get_request_block_hasher).parameters
+        ):
+            pytest.skip("lookahead block hashing requires vLLM 0.33+")
+        hash_kwargs = (
+            {"num_hash_lookahead_tokens": hash_lookahead} if hash_lookahead else {}
+        )
         stub, _ = _realseed_prefill_stub(point, monkeypatch, seq=seq, drop=drop)
         del stub._bench_inject_prefill
         del stub._bench_synthetic_token_ids
@@ -9268,8 +9769,9 @@ def realseed_prefix_cache(monkeypatch):
         stub._bench_vocab_size = 4096
         stub._bench_content_seed = "0"
         stub._fpm_dp_rank = 0
+        stub.num_hash_lookahead_tokens = hash_lookahead
         stub._bench_block_hasher = kv_cache_utils.get_request_block_hasher(
-            block_size, sha256
+            block_size, sha256, **hash_kwargs
         )
         stub.kv_cache_manager = KVCacheManager(
             KVCacheConfig(
@@ -9292,6 +9794,7 @@ def realseed_prefix_cache(monkeypatch):
             hash_block_size=block_size,
             enable_caching=True,
             use_eagle=bool(drop),
+            **hash_kwargs,
         )
         stub.add_request = lambda req: stub.requests.__setitem__(req.request_id, req)
         stub._bench_results = []
@@ -9346,27 +9849,70 @@ def _complete_realseed_cache_shot(stub):
     return requests, hits
 
 
-@pytest.mark.parametrize(("new_tokens", "kv_read_tokens"), [(1, 16), (16, 64)])
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 3])
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[1, 16]],
+        [[1, 16], [2, 0]],
+        [[1, 0]],
+        [[2, 16]],
+    ],
+)
+def test_prefill_grid_excludes_cached_single_token_speculative_admissions(
+    num_spec_tokens, rows
+):
+    grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
+    grid.num_spec_tokens = num_spec_tokens
+    grid.num_hash_lookahead_tokens = 0
+    grid.kv_cache_manager.use_eagle = False
+    padded = num_spec_tokens > 0 and any(new == 1 and kv > 0 for new, kv in rows)
+
+    assert grid._bench_prefill_point_feasible(
+        sum(new for new, _ in rows),
+        len(rows),
+        sum(kv for _, kv in rows),
+        rows=rows,
+    ) == (not padded)
+    assert grid._bench_seed_prompt_len(16) == 16
+    assert grid._bench_seed_prompt_len(0) == 0
+
+
+@pytest.mark.parametrize(
+    ("drop", "hash_lookahead", "new_tokens", "kv_read_tokens"),
+    [(16, 0, 1, 16), (16, 0, 16, 64), (0, 1, 1, 16), (0, 3, 3, 64)],
+)
 def test_prefill_grid_rejects_eagle_points_without_a_measurable_tail(
-    new_tokens, kv_read_tokens
+    drop, hash_lookahead, new_tokens, kv_read_tokens
 ):
     grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
     grid.max_model_len = 4096
-    grid.kv_cache_manager.use_eagle = True
+    grid.kv_cache_manager.use_eagle = bool(drop)
+    grid.num_hash_lookahead_tokens = hash_lookahead
     _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
     assert not grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
 
 
 @pytest.mark.parametrize(
-    ("drop", "new_tokens", "kv_read_tokens"),
-    [(0, 1, 16), (0, 16, 64), (16, 17, 16), (16, 32, 1024)],
+    ("drop", "hash_lookahead", "new_tokens", "kv_read_tokens"),
+    [
+        (0, 0, 1, 16),
+        (0, 0, 16, 64),
+        (16, 0, 17, 16),
+        (16, 0, 32, 1024),
+        (0, 1, 2, 16),
+        (0, 1, 16, 64),
+        (0, 3, 4, 64),
+        (0, 3, 32, 1024),
+    ],
 )
 def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
-    realseed_prefix_cache, kv_read_tokens, drop, new_tokens
+    realseed_prefix_cache, kv_read_tokens, drop, hash_lookahead, new_tokens
 ):
     grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
     grid.max_model_len = 4096
     grid.kv_cache_manager.use_eagle = bool(drop)
+    grid.num_hash_lookahead_tokens = hash_lookahead
     _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
     assert grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
 
@@ -9376,18 +9922,54 @@ def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
         total_kv_read_tokens=kv_read_tokens,
         batch_size=1,
     )
-    scheduler = realseed_prefix_cache(point, drop=drop, block_size=16)
+    scheduler = realseed_prefix_cache(
+        point, drop=drop, block_size=16, hash_lookahead=hash_lookahead
+    )
     del scheduler._bench_eagle_cache_drop_tokens
     scheduler._bench_realseed_stage_point(point, [kv_read_tokens], [new_tokens])
     seeded, _ = _complete_realseed_cache_shot(scheduler)
-    assert [request.num_tokens for request in seeded] == [kv_read_tokens + drop]
+    seed_len = kv_read_tokens + drop + hash_lookahead
+    assert [request.num_tokens for request in seeded] == [seed_len]
 
+    shots = []
     for _ in ("warm", "measure"):
         assert scheduler._bench_realseed_pending_step()
         requests, hits = _complete_realseed_cache_shot(scheduler)
         assert hits == [kv_read_tokens]
         assert requests[0].num_tokens - hits[0] == new_tokens
+        assert requests[0].prompt_token_ids[:seed_len] == seeded[0].prompt_token_ids
+        shots.append(requests[0].prompt_token_ids)
 
+    if hash_lookahead:
+        assert shots[0][seed_len:] != shots[1][seed_len:]
+
+    assert scheduler._bench_skipped_points == []
+    assert len(scheduler._bench_results) == 1
+
+
+@pytest.mark.parametrize("hash_lookahead", [0, 1, 3])
+def test_fake_prefix_lookahead_preserves_mixed_zero_and_cached_rows(
+    monkeypatch, realseed_prefix_cache, hash_lookahead
+):
+    point = BenchmarkPoint(
+        "prefill",
+        batch_size=2,
+        total_prefill_tokens=48,
+        total_kv_read_tokens=32,
+        rows=[[16, 0], [32, 32]],
+    )
+    scheduler = realseed_prefix_cache(
+        point, block_size=16, hash_lookahead=hash_lookahead
+    )
+    del scheduler._bench_cache_fake_prefixes
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", "off")
+    scheduler._bench_step_prefill()
+    requests, hits = _complete_realseed_cache_shot(scheduler)
+    assert hits == [0, 32]
+    assert [request.num_tokens - hit for request, hit in zip(requests, hits)] == [
+        16,
+        32,
+    ]
     assert scheduler._bench_skipped_points == []
     assert len(scheduler._bench_results) == 1
 
@@ -9437,9 +10019,9 @@ def test_real_seed_aligned_zero_kv_repeats_keep_content_and_miss_cache(
 
 
 @pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
-@pytest.mark.parametrize("drop", [0, 32])
+@pytest.mark.parametrize(("drop", "hash_lookahead"), [(0, 0), (32, 0), (0, 1), (0, 3)])
 def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
-    monkeypatch, realseed_prefix_cache, content, drop
+    monkeypatch, realseed_prefix_cache, content, drop, hash_lookahead
 ):
     monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", content)
     new_tokens = [128, 32 + drop]
@@ -9450,7 +10032,7 @@ def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
         batch_size=2,
         rows=[[new_tokens[0], 0], [new_tokens[1], 64]],
     )
-    stub = realseed_prefix_cache(point, drop=drop)
+    stub = realseed_prefix_cache(point, drop=drop, hash_lookahead=hash_lookahead)
     if content == "zeros":
         stub._bench_vocab_size = 1
     elif content == "sharegpt":
@@ -9657,7 +10239,7 @@ def test_prompt_evidence_does_not_claim_observed_decode_continuations():
     assert [len(row.prompt_token_ids) for row in output.scheduled_new_reqs] == [17, 18]
 
 
-@pytest.mark.parametrize("different", ["seed", "content", "pool_tag"])
+@pytest.mark.parametrize("different", ["seed", "content", "pool_tag", "hash_lookahead"])
 def test_grid_invariants_include_measurement_content_policy(different, monkeypatch):
     first = _digest_stub(max_num_running_reqs=8)
     first._bench_vocab_size = 4096
@@ -9666,6 +10248,8 @@ def test_grid_invariants_include_measurement_content_policy(different, monkeypat
         first._bench_content_seed = "second-content-draw"
     elif different == "content":
         monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
+    elif different == "hash_lookahead":
+        first.num_hash_lookahead_tokens = 3
     else:
         monkeypatch.setenv("DYN_BENCH_POOL_TAG", "different-pool")
     assert first._bench_grid_invariants_digest() != original

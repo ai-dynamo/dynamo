@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: cli-aggregated
+  namespace: cli-e2e
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --tensor-parallel-size
+          - '1'
+          - --pipeline-parallel-size
+          - '1'
+          - --data-parallel-size
+          - '1'
+          - --block-size
+          - '64'
+          - --num-gpu-blocks-override
+          - '256'
+          - --max-num-seqs
+          - '4'
+          - --max-num-batched-tokens
+          - '8192'
+          - --cudagraph-capture-sizes
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - --model
+          - components/src/dynamo/aisimulate/tests/dgd/e2e/fixtures/tiny-model
+          - --served-model-name
+          - components/src/dynamo/aisimulate/tests/dgd/e2e/fixtures/tiny-model
+          - --max-model-len
+          - '2048'
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: '1'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret

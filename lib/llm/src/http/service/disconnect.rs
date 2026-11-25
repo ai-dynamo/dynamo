@@ -152,6 +152,7 @@ impl StreamErrorSignal {
             ErrorType::Cancelled => return,
             ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
             ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::UnsupportedModality => ErrorClass::UnsupportedMedia,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
         crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
@@ -357,8 +358,6 @@ async fn connection_monitor(
     }
 }
 
-type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
-
 struct StreamMonitorOptions {
     activity_rx: Option<mpsc::UnboundedReceiver<()>>,
     error_signal: Option<StreamErrorSignal>,
@@ -467,7 +466,7 @@ pub(crate) fn monitor_for_disconnects_with_error(
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -553,6 +552,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
     stream_handle: ConnectionHandle,
     activity_rx: mpsc::UnboundedReceiver<()>,
     error_signal: StreamErrorSignal,
+    emit_done_sentinel: bool,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -564,7 +564,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
         StreamMonitorOptions {
             activity_rx: Some(activity_rx),
             error_signal: Some(error_signal),
-            ..Default::default()
+            emit_done_sentinel,
         },
     )
 }
@@ -594,7 +594,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
     options: StreamMonitorOptions,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
@@ -978,6 +978,7 @@ mod tests {
                     handle,
                     rx,
                     StreamErrorSignal::default(),
+                    true,
                 ))
                 .await
             } else {
@@ -1331,6 +1332,42 @@ mod tests {
         assert_eq!(
             body["error"]["code"],
             crate::http::service::error::overload_status_code().as_u16()
+        );
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_sse_body() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported video media");
+        assert_eq!(body["error"]["code"], 415);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text_in_sse() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported media type");
+        assert_eq!(body["error"]["code"], 415);
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret")
         );
     }
 

@@ -306,6 +306,26 @@ class TestVllmXargs:
         assert sp.extra_args == {"keep": 1}
 
 
+class TestLogitBias:
+    @staticmethod
+    def _build(sampling_options):
+        from dynamo.vllm.handlers import build_sampling_params
+
+        return build_sampling_params(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_options": sampling_options,
+                "stop_conditions": {},
+                "output_options": {},
+            },
+            {},
+        )
+
+    def test_logit_bias_applied_with_int_keys(self):
+        sp = self._build({"logit_bias": {"18": -100.0, "42": 5.5}})
+        assert sp.logit_bias == {18: -100.0, 42: 5.5}
+
+
 class TestFlattenLogprobs:
     def test_nested_lists_are_fully_flattened(self):
         from dynamo.vllm.handlers import _flatten_logprobs

@@ -57,7 +57,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
@@ -84,7 +84,10 @@ from .embedding_worker_processes import (
     is_embedding_process_child,
     start_embedding_parent_watchdog,
 )
-from .engine_generate import publish_engine_generate_capability
+from .engine_generate import (
+    publish_engine_generate_capability,
+    publish_json_multimodal_capability,
+)
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -100,7 +103,7 @@ from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine
+from .snapshot import apply_restore_served_model_name, prepare_snapshot_engine
 from .state_agent import (
     StateAgentLifecycle,
     start_attachment_owner,
@@ -165,6 +168,24 @@ def publish_vllm_structural_tag_reasoning_policy(
         TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(has_reasoning_parser and not enable_in_reasoning),
     )
+
+
+def configure_muse_structural_tag_reasoning(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Activate Muse's native grammar before the model chooses a recipient.
+
+    Muse's engine reasoner leaves reasoning only after a tool channel opens.
+    Deferring a required/named grammar until then cannot force a call. The
+    Dynamo ATEM grammar includes the reasoning channel, so it owns that boundary.
+    Unguided requests are unaffected by this structured-output setting.
+    """
+    spark = ("muse_spark_open", "muse_spark")
+    # Match the frontend's effective parser selection for reasoning-only Spark.
+    if config.dyn_tool_call_parser in spark or (
+        config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
+    ):
+        vllm_config.structured_outputs_config.enable_in_reasoning = True
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -254,6 +275,7 @@ async def worker(argv: list[str] | None = None) -> None:
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
         config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        apply_restore_served_model_name(config)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -741,6 +763,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    configure_muse_structural_tag_reasoning(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -930,6 +953,9 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_json_multimodal_capability(
+        runtime_config, model_input, worker_type, config.enable_multimodal
+    )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
@@ -981,6 +1007,11 @@ async def register_vllm_model(
         )
         num_gpu_blocks = 0
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
+    runtime_config.cache_owner_capacity_blocks = kvcr_host_capacity_blocks(
+        config.engine_args,
+        runtime_values["block_size"],
+        runtime_values["kv_event_block_size"],
+    )
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     runtime_config.enable_local_indexer = config.enable_local_indexer

@@ -609,6 +609,7 @@ async fn main() -> Result<()> {
         },
         seed: args.seed,
         arrival_seed: args.seed,
+        images: None,
     })?;
     let sessions = workload.sessions;
 

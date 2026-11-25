@@ -25,6 +25,7 @@ import (
 	"sort"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -102,11 +103,11 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.ProviderOverride = workerTemplateProviderOverride(spec.ProviderOverride)
 	spec.ScalingAdapter = nil
 	if spec.IsLPX() {
-		// Agent-only replicas expand speculative models; conductor replicas scale engines.
+		// Shared-draft replicas expand speculative models; serving component replicas scale engines.
 		spec.LPX.Scheduling = nil
 		if conductor := spec.ComponentRole(v1beta1.ComponentRoleLPXConductor); conductor != nil {
 			conductor.Replicas = nil
-		} else {
+		} else if !dynamolpx.ServesEndpoint(&spec.DynamoComponentDeploymentSharedSpec) {
 			spec.Replicas = new(ptr.Deref(dcd.Spec.Replicas, 1))
 		}
 	}
@@ -177,6 +178,10 @@ func resolvedRoleRuntimeVersionsForHash(component *v1beta1.DynamoComponentDeploy
 		role := &component.Roles[i]
 		effective, err := EffectiveComponentForRole(component, Role(role.Name))
 		if err != nil {
+			continue
+		}
+		// A compute-only engine image does not select Dynamo runtime features.
+		if GetComponentDynamoSidecar(component) != nil && GetDynamoSidecar(effective) == nil {
 			continue
 		}
 		version := resolvedRuntimeVersionForHash(effective)

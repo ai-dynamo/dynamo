@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +27,12 @@ from dynamo.mocker.config import (
 from dynamo.replay.config import canonical_upstream_config
 
 if TYPE_CHECKING:
-    from dynamo.planner.core.types import EngineCapabilities
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.core.types import (
+        EngineCapabilities,
+        RetuneInputs,
+        TrafficObservation,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -201,8 +206,19 @@ def prepare_planner_replay(
     benchmark_granularity: int = 8,
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,
+    retune_inputs_factory: Callable[[PlannerConfig], RetuneInputs] | None = None,
+    warmup_observations: Sequence[TrafficObservation] | None = None,
 ):
-    """Create and bootstrap the scaling component for an offline replay."""
+    """Create and bootstrap the scaling component for an offline replay.
+
+    ``retune_inputs_factory`` builds the retune inputs (trace, time axis and
+    pinned engine) from the parsed planner config. It is required when the
+    config sets ``retune``; only trace replay entry points that support
+    retune provide one. ``warmup_observations``, when set, warm the load
+    predictor instead of the config's ``load_predictor_warmup_trace``. An
+    ``advisory`` config replays as a live advisory planner runs: the
+    deployment stays fixed and the recommendations are only recorded.
+    """
 
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
@@ -212,7 +228,6 @@ def prepare_planner_replay(
     )
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
-    planner_config.advisory = True
 
     if planner_config.mode == "agg":
         extra_engine_args = normalize_mocker_config(extra_engine_args)
@@ -234,9 +249,19 @@ def prepare_planner_replay(
             f"got {planner_config.mode!r}"
         )
 
-    warmup_observations = None
-    if planner_config.load_predictor_warmup_trace is not None:
-        warmup_observations = extract_traffic_observations_from_trace(
+    retune_inputs = None
+    if planner_config.retune is not None:
+        if retune_inputs_factory is None:
+            raise ValueError(
+                "planner.retune is only supported by run_trace_replay with "
+                "trace_format='dynamo' (in aisimulate predict, traffic.source "
+                "type: trace with format: dynamo), not by synthetic replay"
+            )
+        retune_inputs = retune_inputs_factory(planner_config)
+
+    warmup = None if warmup_observations is None else list(warmup_observations)
+    if warmup is None and planner_config.load_predictor_warmup_trace is not None:
+        warmup = extract_traffic_observations_from_trace(
             planner_config.load_predictor_warmup_trace,
             planner_config.throughput_adjustment_interval_seconds,
         )
@@ -245,11 +270,13 @@ def prepare_planner_replay(
         planner_config=planner_config,
         capabilities=capabilities,
         benchmark_granularity=benchmark_granularity,
-        warmup_observations=warmup_observations,
+        warmup_observations=warmup,
         capture_details=capture_details,
+        retune_inputs=retune_inputs,
     )
     adapter.set_bootstrap_metadata({"status": "not_required"})
-    if adapter._is_easy_mode():
+    # A retune-only planner (no scaling) never uses the throughput regression.
+    if adapter._is_easy_mode() or not planner_config.scaling_enabled():
         return adapter
 
     perf_configs = _ais_performance_model_configs(
@@ -381,6 +408,8 @@ def planner_replay_adapter(
     benchmark_granularity: int = 8,
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,
+    retune_inputs_factory: Callable[[PlannerConfig], RetuneInputs] | None = None,
+    warmup_observations: Sequence[TrafficObservation] | None = None,
 ) -> Iterator:
     """Own Planner preparation, replay execution, and cleanup as one scope."""
 
@@ -392,6 +421,8 @@ def planner_replay_adapter(
         performance_model_metadata=performance_model_metadata,
         benchmark_granularity=benchmark_granularity,
         capture_details=capture_details,
+        retune_inputs_factory=retune_inputs_factory,
+        warmup_observations=warmup_observations,
     )
     with adapter:
         yield adapter

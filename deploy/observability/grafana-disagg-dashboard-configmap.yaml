@@ -1999,7 +1999,6 @@ data:
               },
               "unit": "GBs",
               "min": 0,
-              "max": 50,
               "decimals": 2
             },
             "overrides": []
@@ -2033,14 +2032,14 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "(rate(DCGM_FI_PROF_NVLINK_TX_BYTES[1m]) + rate(DCGM_FI_PROF_NVLINK_RX_BYTES[1m])) / 1e9",
+              "expr": "(DCGM_FI_PROF_NVLINK_TX_BYTES + DCGM_FI_PROF_NVLINK_RX_BYTES) / 1e9",
               "legendFormat": "GPU {{gpu}} - {{Hostname}}",
               "refId": "A"
             }
           ],
           "title": "NVLink Bandwidth (GB/s)",
           "type": "timeseries",
-          "description": "NVLink transfer bandwidth in GB/s (rate of change), measured from DCGM profiling metrics. Shows total bidirectional bandwidth (TX + RX) per GPU. This includes intra-pod TP communication (TP=2 for prefill, TP=4 for decode). Low bandwidth (<1 GB/s) indicates inter-pod NIXL KV cache transfers may be using host memory copies instead of direct NVLink/GPUDirect."
+          "description": "NVLink transfer bandwidth in GB/s, measured from DCGM profiling metrics (already reported as bytes per second, so no rate() is applied). Shows total bidirectional bandwidth (TX + RX) per GPU. This includes intra-pod TP communication (TP=2 for prefill, TP=4 for decode). NIXL KV transfers are bursty, so a low average does not by itself mean they avoid NVLink; compare with the NIXL transfer metrics before drawing conclusions about the transport."
         }
       ],
       "refresh": "10s",

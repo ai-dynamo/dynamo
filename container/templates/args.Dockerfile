@@ -65,7 +65,11 @@ ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
 # NIXL configuration
+{% if "nixl_ucx_ref" in context[framework].get(device_key, {}) -%}
+ARG NIXL_UCX_REF={{ context[framework][device_key].nixl_ucx_ref }}
+{% else -%}
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
+{% endif -%}
 {# Resolved most-specific first: per-target, then per-device, then framework. #}
 {% if "nixl_ref" in context[framework].get(target, {}) -%}
 ARG NIXL_REF={{ context[framework][target].nixl_ref }}
@@ -101,7 +105,6 @@ ARG PLANNER_PYTHON_VERSION={{ context.dynamo.planner_python_version }}
 {% endif %}
 
 {% if framework == "vllm" -%}
-ARG MAX_JOBS={{ context.vllm.max_jobs }}
 {% if context.vllm[device_key].transformers_version is defined -%}
 ARG TRANSFORMERS_VERSION={{ context.vllm[device_key].transformers_version }}
 ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
@@ -109,9 +112,6 @@ ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
 ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
 {% if device == "cuda" -%}
-# If left blank, then we will fallback to vLLM defaults
-ARG DEEPGEMM_REF=""
-
 # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
 ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% endif %}
@@ -120,14 +120,6 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% if framework in ["vllm", "sglang"] -%}
 # ModelExpress Python client for model loading (optional)
 ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
-{%- endif -%}
-
-{% if framework == "sglang" and device == "xpu" -%}
-# SGLang XPU build: clone and build from source (no pre-built runtime image)
-ARG SGLANG_GIT_URL={{ context.sglang.xpu.sglang_git_url }}
-ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
-ARG SGLANG_KERNEL_GIT_URL={{ context.sglang.xpu.sglang_kernel_git_url }}
-ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
 {%- endif -%}
 
 {% if make_efa == true %}
