@@ -676,9 +676,10 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
-                        if !alive_tx.is_closed() && context.cancel_on_peer_eof() {
+                        if !alive_tx.is_closed() && !context.is_stopped() {
                             cancellation_seen = true;
                             record_upstream_cancellation(context.as_ref(), "eof");
+                            context.kill();
                         }
                         break;
                     }

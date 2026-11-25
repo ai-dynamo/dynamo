@@ -155,19 +155,6 @@ pub trait AsyncEngineContext: Send + Sync + Debug {
     /// specific and may not be supported by all engines.
     fn kill(&self);
 
-    /// Cancel generation when the peer closes a live response stream.
-    /// Return true when this call requests cancellation for a live context.
-    /// The default requests a graceful stop so a concurrent Stop cannot be
-    /// upgraded to Kill. Controllers that can atomically claim a live request
-    /// may kill it immediately.
-    fn cancel_on_peer_eof(&self) -> bool {
-        if self.is_stopped() {
-            return false;
-        }
-        self.stop();
-        true
-    }
-
     /// Links child AsyncEngineContext to this AsyncEngineContext. If the `stop_generating`, `stop`
     /// or `kill` on this AsyncEngineContext is called, the same method is called on all linked
     /// child AsyncEngineContext, in the order they are linked, and then the method on this
