@@ -46,6 +46,8 @@ def test_local_ingress_needs_no_socket_thread_or_directory(tmp_path, monkeypatch
     ingress = scoring.Ingress(path, in_process=True)
     reader = scoring.EventStreamReader(path, receiver=ingress.journal)
     try:
+        with pytest.raises(ValueError, match="program_id"):
+            ingress.emit("request_arrived", 1, request_id="q")
         ingress.emit(
             "request_arrived",
             1,
@@ -56,14 +58,32 @@ def test_local_ingress_needs_no_socket_thread_or_directory(tmp_path, monkeypatch
             prompt_tokens=8,
         )
         ingress.emit("request_completed", 2, request_id="q")
+        ingress.emit(
+            "agent_end",
+            3,
+            program_id="p",
+            root="r",
+            agent="a",
+            prompt_tokens=8,
+            unrelated="ignored",
+        )
         ingress.close()
         rows = reader.read()
         assert [row["event"] for row in rows] == [
             "request_arrived",
             "request_completed",
+            "agent_end",
             "footer",
         ]
-        assert [row["sequence"] for row in rows] == [1, 2, 3]
+        assert [row["sequence"] for row in rows] == [1, 2, 3, 4]
+        assert rows[2] == {
+            "sequence": 3,
+            "event": "agent_end",
+            "time": 3,
+            "program_id": "p",
+            "root": "r",
+            "agent": "a",
+        }
         assert reader.closed
         assert reader.read() == []
         assert not path.exists()

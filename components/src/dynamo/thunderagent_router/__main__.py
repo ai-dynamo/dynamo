@@ -251,6 +251,7 @@ class ThunderAgentRouterHandler:
         decision = await self._scheduler.before_request(
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
+            request_id=context.id() if context is not None else None,
         )
         replica_pin = decision.assigned_replica_hint
         logger.debug(

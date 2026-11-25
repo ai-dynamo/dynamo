@@ -150,11 +150,11 @@ class Ingress:
             return
         if event == "request_arrived":
             _program_id(fields)
-        keys = (
-            ("request_id", "program_id", "root", "agent", "prompt_tokens")
-            if event == "request_arrived"
-            else ("request_id", "program_id", "root")
-        )
+            keys = ("request_id", "program_id", "root", "agent", "prompt_tokens")
+        elif event == "agent_end":
+            keys = ("request_id", "program_id", "root", "agent")
+        else:
+            keys = ("request_id", "program_id", "root")
         self.sequence += 1
         self.journal.submit(
             "record",

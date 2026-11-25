@@ -22,17 +22,21 @@ pytestmark = [
 def test_compact_coordinates_and_clock_ordering(tmp_path):
     feed = CompactFeed(tmp_path)
     clock_started, clock_written = threading.Event(), threading.Event()
+    allow_clock_write = threading.Event()
     original_emit = feed.emit
 
     def emit(event, **fields):
-        if event == "u_clock":
+        observed_clock = event == "u_clock" and not clock_started.is_set()
+        if observed_clock:
             clock_started.set()
+            assert allow_clock_write.wait(timeout=1)
         original_emit(event, **fields)
-        if event == "u_clock":
+        if observed_clock:
             clock_written.set()
 
     try:
         with patch.object(feed, "emit", emit):
+            assert clock_started.wait(timeout=1)
             with feed.lock:
                 end = time.time()
                 step = work_step(
@@ -44,14 +48,15 @@ def test_compact_coordinates_and_clock_ordering(tmp_path):
                     end=end,
                     prompt_tokens=999,
                 )
-                # The real clock thread attempts a write while the callback owns
-                # the lock. Its newer timestamp must follow accepted work.
-                assert clock_started.wait(timeout=1)
+                # Release the intercepted tick only while capture owns the lock.
+                # Its write cannot complete before the accepted work below.
+                allow_clock_write.set()
                 feed.capture(
                     "accepted_output", dict(steps=[step, dict(step, accepted=False)])
                 )
             assert clock_written.wait(timeout=1)
     finally:
+        allow_clock_write.set()
         feed.close()
     tail = Tail(tmp_path / "compact-work.jsonl")
     rows = tail.read()
@@ -74,6 +79,61 @@ def test_feed_error_still_closes_writer(tmp_path):
     assert not feed.thread.is_alive()
     assert not feed.journal.thread.is_alive()
     assert feed.journal.proc.returncode == 0
+
+
+def test_close_keeps_footer_last_with_pending_clock(tmp_path):
+    feed = CompactFeed(tmp_path)
+    clock_started = threading.Event()
+    original_emit = feed.emit
+    original_join = feed.thread.join
+    path = tmp_path / "compact-work.jsonl"
+
+    def emit(event, **fields):
+        if event == "u_clock":
+            clock_started.set()
+        original_emit(event, **fields)
+
+    try:
+        with patch.object(feed, "emit", emit):
+            with feed.lock:
+                assert clock_started.wait(timeout=1)
+                # Simulate the join timeout while the real clock is blocked.
+                with patch.object(
+                    feed.thread,
+                    "join",
+                    side_effect=lambda timeout: original_join(timeout=0),
+                ):
+                    feed.close()
+                assert feed.thread.is_alive()
+                assert Tail(path).read()[-1]["event"] == "footer"
+            original_join(timeout=1)
+            assert not feed.thread.is_alive()
+        rows = Tail(path).read()
+        assert feed.error is None
+        assert rows[-1]["event"] == "footer"
+        assert sum(row["event"] == "footer" for row in rows) == 1
+        assert feed.journal.closed
+        assert not feed.journal.thread.is_alive()
+        assert feed.journal.proc.returncode == 0
+    finally:
+        feed.stop.set()
+        original_join(timeout=1)
+        if not feed.journal.closed:
+            feed.close()
+
+
+def test_closed_feed_rejects_producers_and_is_idempotent(tmp_path):
+    feed = CompactFeed(tmp_path)
+    feed.close()
+    path = tmp_path / "compact-work.jsonl"
+    rows = Tail(path).read()
+
+    with pytest.raises(RuntimeError, match="feed is closed"):
+        feed.capture("accepted_output", dict(steps=[work_step()]))
+    feed.close()
+
+    assert Tail(path).read() == rows
+    assert feed.error is None
 
 
 def test_flush_preserves_order_and_writes_only_event_stream(tmp_path):
