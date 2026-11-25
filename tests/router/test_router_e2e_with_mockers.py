@@ -1907,17 +1907,29 @@ def _velo_worker_metrics(system_port: int) -> tuple[float, float]:
     return handler_requests, response_records
 
 
-def _settle_worker_metrics(system_port: int) -> tuple[float, float]:
-    """Wait for the readiness request and its response to leave the counters."""
-    previous = _velo_worker_metrics(system_port)
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        time.sleep(0.2)
-        current = _velo_worker_metrics(system_port)
-        if current == previous:
+VELO_QUIET_WINDOW_S = 0.5
+VELO_COUNTER_POLL_S = 0.05
+VELO_COUNTER_DEADLINE_S = 10.0
+
+
+def _stable_worker_metrics(system_port: int) -> tuple[float, float]:
+    """Wait until both worker counters have been unchanged for the quiet window."""
+    deadline = time.monotonic() + VELO_COUNTER_DEADLINE_S
+    current = _velo_worker_metrics(system_port)
+    quiet_since = time.monotonic()
+    while True:
+        time.sleep(VELO_COUNTER_POLL_S)
+        latest = _velo_worker_metrics(system_port)
+        now = time.monotonic()
+        if latest != current:
+            current = latest
+            quiet_since = now
+        elif now - quiet_since >= VELO_QUIET_WINDOW_S:
             return current
-        previous = current
-    return previous
+        if now >= deadline:
+            raise AssertionError(
+                "worker counters did not settle within " f"{VELO_COUNTER_DEADLINE_S}s"
+            )
 
 
 async def _send_velo_plane_requests(frontend_url: str, count: int) -> None:
@@ -1992,25 +2004,15 @@ def test_mocker_velo_request_plane(
                 )
             )
 
-            before_requests, before_frames = _settle_worker_metrics(system_port)
+            before_requests, before_frames = _stable_worker_metrics(system_port)
             asyncio.run(_send_velo_plane_requests(frontend_url, VELO_REQUESTS))
+            after_requests, after_frames = _stable_worker_metrics(system_port)
 
-            deadline = time.monotonic() + 10
-            while True:
-                after_requests, after_frames = _velo_worker_metrics(system_port)
-                if (
-                    after_requests - before_requests >= VELO_REQUESTS
-                    and after_frames - before_frames >= VELO_REQUESTS
-                ):
-                    break
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.1)
-
-            assert after_requests - before_requests >= VELO_REQUESTS, (
+            assert after_requests - before_requests == VELO_REQUESTS, (
                 "worker dynamo_request handler count grew by "
-                f"{after_requests - before_requests}, expected at least "
-                f"{VELO_REQUESTS}"
+                f"{after_requests - before_requests}, expected exactly "
+                f"{VELO_REQUESTS}; a readiness or retry increment landed in the "
+                "measured window"
             )
             assert after_frames - before_frames >= VELO_REQUESTS, (
                 'worker velo_streaming_mux_records_sent_total{record_type="data"} '
