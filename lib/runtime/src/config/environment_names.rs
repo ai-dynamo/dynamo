@@ -174,6 +174,16 @@ pub mod runtime {
         pub const PREFIX: &str = "DYN_COMPUTE_";
     }
 
+    /// Worker validation gates
+    pub mod validation {
+        /// Comma-separated loopback check URLs that hold the worker's model
+        /// card until each answers 200. Unset adds no gate.
+        pub const DYN_PUBLISH_GATE: &str = "DYN_PUBLISH_GATE";
+        /// Serve the loopback validation endpoint on this port for the
+        /// worker's lifetime, for a sidecar that checks the worker itself.
+        pub const DYN_VALIDATION_ENDPOINT_PORT: &str = "DYN_VALIDATION_ENDPOINT_PORT";
+    }
+
     /// Canary deployment configuration
     pub mod canary {
         /// Wait time in seconds for canary deployments

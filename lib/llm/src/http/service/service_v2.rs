@@ -1134,6 +1134,12 @@ impl HttpService {
         Ok(())
     }
 
+    /// Wrap every route, for example in a layer that adds a response header.
+    pub(crate) fn map_router(mut self, f: impl FnOnce(axum::Router) -> axum::Router) -> Self {
+        self.router = f(self.router);
+        self
+    }
+
     /// Documentation of exposed HTTP endpoints
     pub fn route_docs(&self) -> &[RouteDoc] {
         &self.route_docs
