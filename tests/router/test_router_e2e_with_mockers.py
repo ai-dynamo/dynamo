@@ -516,7 +516,7 @@ def test_mocker_router(
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize("router_mode", ["kv", "round-robin", "random"])
+@pytest.mark.parametrize("router_mode", ["kv", "round-robin", "random", "least-loaded"])
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_router_soak(
     request,

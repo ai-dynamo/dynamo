@@ -13,7 +13,7 @@ use dynamo_runtime::{
     DistributedRuntime,
     discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
     pipeline::{
-        ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
+        ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
     },
     protocols::{EndpointId, annotated::Annotated},
@@ -27,7 +27,10 @@ use crate::{
     discovery::{LoadThresholdHandle, RuntimeConfigWatch, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     kv_router::plugins::RouterPluginBuilder,
-    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, role_routing},
+    kv_router::{
+        EncoderRouter, PrefillRouter, RolePolicy, RouterLoadSource, RoutingLoadContext,
+        RoutingPolicy, role_routing,
+    },
     local_model::runtime_config::{
         DISAGG_PREFILL_CANCEL_ANYTIME_V1, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -645,11 +648,14 @@ impl ModelWatcher {
                 None
             };
 
-            // Create the KV router whenever any routed pipeline will be built.
+            // Resolve the set's policy whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
             // need the shared chooser in KV mode.
-            let kv_chooser =
-                if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
+            let policy = match needs_preprocessed_routing
+                .then(|| role_routing::role_policy(router_config.router_mode))
+                .transpose()?
+            {
+                Some(RolePolicy::Kv) => {
                     let mut chooser = self
                         .manager
                         .kv_chooser_for_with_plugins_and_client(
@@ -679,10 +685,11 @@ impl ModelWatcher {
                     Arc::get_mut(&mut chooser)
                         .expect("new KV chooser must have one owner")
                         .set_teardown_task_guard(allocator_trim.clone());
-                    Some(chooser)
-                } else {
-                    None
-                };
+                    Some(RoutingPolicy::Kv(chooser))
+                }
+                Some(RolePolicy::Ready(policy)) => Some(policy),
+                None => None,
+            };
 
             // Only a typed Decode endpoint participates in the namespace-level
             // P/D rendezvous. Aggregated and Encode endpoints are independent
@@ -783,11 +790,10 @@ impl ModelWatcher {
                     entrypoint::input::build_preprocessed_routing_with_session_affinity_mode(
                         &client,
                         self.manager.clone(),
-                        router_config.router_mode,
+                        policy.expect("routing policy must exist"),
                         load_context
                             .clone()
                             .expect("routing load context must exist"),
-                        kv_chooser.clone(),
                         prefill_chooser.clone(),
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
@@ -1722,7 +1728,7 @@ mod tests {
     use crate::session_affinity::SessionAffinityMode;
     use dynamo_runtime::discovery::DiscoveryEvent;
     use dynamo_runtime::engine::AsyncEngine;
-    use dynamo_runtime::pipeline::Error;
+    use dynamo_runtime::pipeline::{Error, RouterMode};
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
 

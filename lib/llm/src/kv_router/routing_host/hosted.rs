@@ -41,7 +41,8 @@ impl RoutingHost {
                     device_aware_telemetry: None,
                 })
             }
-            RoutingPolicy::Hosted(picker) => {
+            RoutingPolicy::Hosted(hosted) => {
+                let picker = hosted.picker();
                 let preferred_worker = preferred_worker()?;
                 if picker.inputs().contains(WorkerInputs::ACTIVE_REQUESTS) {
                     let occupancy = self
@@ -422,8 +423,8 @@ mod tests {
     use dynamo_worker_selection::host::HostedWorkerPicker;
     use std::collections::{HashMap, HashSet};
 
-    use super::super::builder::hosted_picker;
     use super::*;
+    use crate::kv_router::role_routing::hosted_picker;
 
     fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {
         let mut config = ModelRuntimeConfig::default();
