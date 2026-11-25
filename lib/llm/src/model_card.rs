@@ -1224,9 +1224,11 @@ pub struct ModelDeploymentCard {
     #[serde(default)]
     pub media_fetcher: Option<MediaFetcher>,
 
-    /// Per-worker-set router configuration override.
-    /// When set, the frontend watcher uses this instead of the global frontend router config.
-    /// Falls back to the frontend-level config when absent.
+    /// Per-worker-set router configuration override. Deprecated: the frontend's policy file
+    /// configures each role, and workers stop writing this field in v1.9.
+    /// A frontend without a policy file uses this instead of its own router config, and
+    /// falls back to its own when absent. A frontend with a policy file ignores it, except
+    /// on a text-input card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
 

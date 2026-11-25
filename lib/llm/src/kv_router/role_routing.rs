@@ -7,6 +7,10 @@
 //! prefill pool in front of a decode set. A role's settings come from the frontend's
 //! [`RouterConfig`], from the frontend's policy file, and from the `router_config` its workers
 //! advertise on their model card. The rules that combine them live here.
+//!
+//! Advertising a `router_config` is deprecated. A frontend with a policy file ignores it (see
+//! [`advertised_routing`]), so the `advertised` inputs below are set on a frontend without one,
+//! and for text-input workers.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -18,8 +22,82 @@ use dynamo_runtime::pipeline::RouterMode;
 
 use crate::discovery::LoadThresholdConfig;
 use crate::entrypoint::RouterConfig;
+use crate::model_card::ModelDeploymentCard;
+use crate::model_type::ModelInput;
 use crate::session_affinity::SessionAffinityMode;
 use crate::worker_type::WorkerType;
+
+/// What a host does with the `router_config` a model card advertises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdvertisedRouting {
+    /// The host routes the card's role from its own configuration.
+    Ignored,
+    /// The card routes its worker set. `replaceable` is false while a policy file cannot
+    /// express what the card asks for.
+    Honored { replaceable: bool },
+}
+
+/// What `host` does with the `router_config` on `card`; `None` when the card advertises nothing.
+///
+/// A host with a policy file routes every role from its own configuration and ignores the
+/// card. The Python frontend accepts a file only in KV mode; an embedder that sets one beside
+/// another mode ignores cards as well.
+///
+/// A text-input card is still honored there. A policy file routes on the KV path, which needs
+/// frontend tokenization, so until a file can pick the path per role the card's mode is the
+/// only way such a worker set is served.
+pub(crate) fn advertised_routing(
+    card: &ModelDeploymentCard,
+    host: Option<&KvRouterConfig>,
+) -> Option<AdvertisedRouting> {
+    let advertised = card.router_config.as_ref()?;
+    let text_input = card.model_input == ModelInput::Text;
+    if !text_input && host.is_some_and(|host| host.router_policy_config.is_some()) {
+        return Some(AdvertisedRouting::Ignored);
+    }
+    // A policy file cannot select these two modes yet.
+    let replaceable = !text_input
+        && !matches!(
+            advertised.router_mode,
+            RouterMode::Direct | RouterMode::DeviceAwareWeighted
+        );
+    Some(AdvertisedRouting::Honored { replaceable })
+}
+
+/// Warn that a worker set's cards advertise a `router_config`, and say what the host does with
+/// it. Callers log this once per worker set, not per card.
+pub(crate) fn warn_advertised_routing(
+    model_name: &str,
+    worker_set: &str,
+    advertised: AdvertisedRouting,
+) {
+    // The honored wording holds for a worker that admission then rejects, too.
+    let consequence = match advertised {
+        AdvertisedRouting::Ignored => {
+            "is ignored because this router has a policy file (--router-policy-config): \
+             configure the role under worker_selection there. Router flags on workers are \
+             deprecated and will be removed in v1.9"
+        }
+        AdvertisedRouting::Honored { replaceable: true } => {
+            "is deprecated and will be removed in v1.9. This router still routes a worker set \
+             by what its admitted workers advertise. Remove the router flags from the workers \
+             and configure the role under worker_selection in the frontend's \
+             --router-policy-config"
+        }
+        AdvertisedRouting::Honored { replaceable: false } => {
+            "is deprecated and will be removed in v1.9. This router still routes a worker set \
+             by what its admitted workers advertise. A policy file cannot replace this \
+             advertisement yet (router mode direct or device-aware-weighted, or text-input \
+             workers): until it can, keep the worker flags, or set --router-mode on a frontend \
+             without a policy file"
+        }
+    };
+    tracing::warn!(
+        model_name,
+        %worker_set,
+        "Worker model cards advertise router_config, which {consequence}"
+    );
+}
 
 /// Resolve the routing settings of a serving worker set (aggregated or decode).
 ///
@@ -176,7 +254,9 @@ pub(crate) struct RoleBusyThresholds {
 /// is not checked, whatever a card or a flag says. A role without the key keeps `inherited`,
 /// the thresholds of the serving set's [`serving_set_routing`] result, and reports
 /// `inherited_from`. For the prefill pool that is the decode set's result, never the file's
-/// `decode` entry: a role's entry in the file applies to that role alone.
+/// `decode` entry: a role's entry in the file applies to that role alone. A card's thresholds
+/// are part of its `router_config`, so they reach `inherited` only where the card is honored
+/// (see [`advertised_routing`]).
 ///
 /// Pass the frontend's own configuration, as for [`policy_file_session_affinity`].
 pub(crate) fn role_busy_thresholds(

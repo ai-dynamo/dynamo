@@ -27,8 +27,10 @@ use crate::{
     discovery::{LoadThresholdHandle, RuntimeConfigWatch, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     kv_router::plugins::RouterPluginBuilder,
-    kv_router::role_routing::{self, BusyThresholdSource, RoleBusyThresholds},
-    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
+    kv_router::{
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext,
+        role_routing::{self, AdvertisedRouting, BusyThresholdSource, RoleBusyThresholds},
+    },
     local_model::runtime_config::{
         DISAGG_PREFILL_CANCEL_ANYTIME_V1, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -223,6 +225,9 @@ pub struct ModelWatcher {
     generate_engine_capabilities: Vec<&'static str>,
     systemone_enabled: bool,
     plugins: RouterPluginBuilder,
+    /// Worker sets already warned about the `router_config` their cards advertise.
+    /// `normalize` runs for every instance on every event and reconciliation.
+    warned_advertised_routing: parking_lot::Mutex<HashSet<String>>,
 }
 
 pub(crate) struct PreparedWorkerSet {
@@ -336,6 +341,7 @@ impl ModelWatcher {
             generate_engine_capabilities: Vec::new(),
             systemone_enabled: false,
             plugins,
+            warned_advertised_routing: parking_lot::Mutex::new(HashSet::new()),
         }
     }
 
@@ -1294,6 +1300,14 @@ impl ControllerHost for ModelWatcher {
         card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
+        // An ignored advertisement is dropped before the checksum is taken, so workers that
+        // advertise and workers that do not share a worker set.
+        // TODO(v1.9): Drop it on every frontend, for as long as an N-2 worker can write it.
+        let advertised =
+            role_routing::advertised_routing(&card, Some(&self.router_config.kv_router_config));
+        if advertised == Some(AdvertisedRouting::Ignored) {
+            card.router_config = None;
+        }
         let router_mode =
             role_routing::serving_set_routing(card.router_config.as_ref(), &self.router_config)
                 .router_mode;
@@ -1313,6 +1327,15 @@ impl ControllerHost for ModelWatcher {
             model_name: card.name().to_string(),
             worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
         };
+        if let Some(advertised) = advertised
+            && self.warned_advertised_routing.lock().insert(group_key.id())
+        {
+            role_routing::warn_advertised_routing(
+                &group_key.model_name,
+                &group_key.worker_set_key,
+                advertised,
+            );
+        }
         let mdc_checksum = card.mdcsum().to_string();
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
         let video_contract = qwen_video_contract_digest(&card);
@@ -2205,17 +2228,40 @@ worker_selection:
   decode: {type: default, busy_threshold: {active_decode_blocks: 0.5}}
   prefill: {type: default, busy_threshold: {active_prefill_tokens_frac: 0.25}}
 "#;
-        for (index, router_mode, worker_type, policy_file) in [
-            (0, RouterMode::RoundRobin, WorkerType::Decode, None),
-            (1, RouterMode::Direct, WorkerType::Decode, None),
-            (2, RouterMode::RoundRobin, WorkerType::Aggregated, None),
+        // A policy file without `busy_threshold` leaves the flags in place, also when the
+        // decode workers advertise thresholds of their own: their card is ignored.
+        let no_thresholds = "worker_selection:\n  decode: default\n";
+        for (index, router_mode, worker_type, policy_file, advertises) in [
+            (0, RouterMode::RoundRobin, WorkerType::Decode, None, false),
+            (1, RouterMode::Direct, WorkerType::Decode, None, false),
+            (
+                2,
+                RouterMode::RoundRobin,
+                WorkerType::Aggregated,
+                None,
+                false,
+            ),
             (
                 3,
                 RouterMode::RoundRobin,
                 WorkerType::Decode,
                 Some(per_role),
+                false,
             ),
-            (4, RouterMode::Direct, WorkerType::Decode, Some(per_role)),
+            (
+                4,
+                RouterMode::Direct,
+                WorkerType::Decode,
+                Some(per_role),
+                false,
+            ),
+            (
+                5,
+                RouterMode::RoundRobin,
+                WorkerType::Decode,
+                Some(no_thresholds),
+                true,
+            ),
         ] {
             let mut router_config = RouterConfig::new(router_mode, Default::default())
                 .with_load_threshold_config(configured.clone());
@@ -2244,6 +2290,12 @@ worker_selection:
             card.model_input = ModelInput::Tokens;
             card.model_type = ModelType::Chat;
             card.worker_type = Some(worker_type);
+            if advertises {
+                card.router_config = Some(
+                    RouterConfig::new(router_mode, Default::default())
+                        .with_load_threshold_config(prefill_tokens(1)),
+                );
+            }
             let worker_id = watcher.drt.discovery().instance_id();
             let DiscoveryEvent::Added(discovery) = discovered_card(&namespace, worker_id, &card)
             else {
@@ -2280,7 +2332,10 @@ worker_selection:
             assert_eq!(serving.is_enabled(), enabled);
             assert_eq!(prefill.is_enabled(), enabled);
             assert_eq!(prefill.is_configured(), enabled);
-            if policy_file.is_none() {
+            if advertises {
+                assert_eq!(serving.get(), configured);
+                assert_eq!(prefill.get(), configured);
+            } else if policy_file.is_none() {
                 assert_eq!(serving.get(), prefill.get());
             } else if enabled {
                 assert_eq!(
@@ -2927,6 +2982,81 @@ worker_selection:
             drop(events);
             task.await.unwrap();
         }
+        runtime.shutdown();
+    }
+
+    /// With a policy file the frontend drops an advertised `router_config` before taking the
+    /// checksum, so it cannot split a worker set. Without one the same cards are two cohorts.
+    /// A text-input card keeps its advertisement on either frontend.
+    #[tokio::test]
+    async fn policy_file_frontend_ignores_advertised_router_config() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let normalize = |frontend: &RouterConfig, card: &ModelDeploymentCard| {
+            ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                frontend.clone(),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            )
+            .normalize(
+                DiscoveryInstance::Model {
+                    namespace: "ns1".to_string(),
+                    component: "workers".to_string(),
+                    endpoint: "generate".to_string(),
+                    instance_id: 1,
+                    card_json: serde_json::to_value(card).unwrap(),
+                    model_suffix: None,
+                },
+                &NamespaceFilter::Global,
+            )
+            .map(|desired| desired.expect("in the namespace"))
+        };
+        let mut with_policy_file = RouterConfig {
+            router_mode: RouterMode::KV,
+            ..Default::default()
+        };
+        with_policy_file.kv_router_config.router_policy_config = Some("policy.yaml".to_string());
+        let without = RouterConfig {
+            router_mode: RouterMode::KV,
+            ..Default::default()
+        };
+
+        let mut silent = ModelDeploymentCard::with_name_only("model");
+        silent.model_input = ModelInput::Tokens;
+        silent.model_type = ModelType::Chat;
+        silent.worker_type = Some(WorkerType::Decode);
+        let mut advertising = silent.clone();
+        advertising.router_config = Some(RouterConfig {
+            session_affinity_ttl_secs: Some(300),
+            ..Default::default()
+        });
+
+        let ignored = normalize(&with_policy_file, &advertising).unwrap();
+        assert!(ignored.card.router_config.is_none());
+        assert_eq!(
+            ignored.mdc_checksum,
+            normalize(&with_policy_file, &silent).unwrap().mdc_checksum
+        );
+
+        let honored = normalize(&without, &advertising).unwrap();
+        assert!(honored.card.router_config.is_some());
+        assert_ne!(
+            honored.mdc_checksum,
+            normalize(&without, &silent).unwrap().mdc_checksum
+        );
+
+        // A policy file routes on the KV path, which text-input workers cannot use, so their
+        // advertised mode is still what admits them.
+        advertising.model_input = ModelInput::Text;
+        let text_input = normalize(&with_policy_file, &advertising).unwrap();
+        assert!(text_input.card.router_config.is_some());
         runtime.shutdown();
     }
 

@@ -26,6 +26,11 @@ responsible for ensuring workers admitted to one WorkerSet serve the same
 weights. The independent LoRA projection fingerprint is separate from
 WorkerSet compatibility.
 
+Boundary normalization clears a card's `router_config` when the frontend has a
+policy file, because that frontend ignores the field. A text-input card keeps
+it: a policy file cannot route such a worker set yet. `mdcsum()` itself still
+hashes it, so a frontend without a policy file keeps the strictness below.
+
 Checksum equality is intentionally stricter than equivalent serving behavior.
 Different advertised router settings or absent versus explicit defaults may
 reject a newcomer even if its effective serving configuration would match. A
@@ -66,8 +71,10 @@ Every discovery-managed frontend routing hop, including prefill and encoder,
 must use the committed target's admission receiver and selected card. Intersect
 endpoint discovery with admitted worker IDs. Resolve advertised routing mode,
 KV block size, and other configuration from that selected card; do not relist
-arbitrary endpoint cards. Identify a binding by group and successful build
-generation, so succession rebuilds it even when the endpoint is unchanged.
+arbitrary endpoint cards. The selected card carries an advertised routing mode
+only on a frontend without a policy file. Identify a binding by group and
+successful build generation, so succession rebuilds it even when the endpoint
+is unchanged.
 Compatible membership changes update admissions without rebuilding bindings.
 Public explicit-endpoint constructors retain a separate legacy adapter path;
 discovery-managed topology must never fall back to unrestricted discovery.
