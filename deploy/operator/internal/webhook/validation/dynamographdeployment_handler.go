@@ -96,7 +96,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
-	// Caller identity is decoded once for ordinary and terminating updates.
+	// Unavailable caller identity must not grant replica or provider ownership permissions.
 	var userInfo *authenticationv1.UserInfo
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
@@ -115,7 +115,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 		return validator.ValidateTerminatingUpdate(ctx, oldObj, newObj, userInfo, h.operatorPrincipal)
 	}
 
-	// Run complete new-state and comparative validation in one request traversal.
+	// Return validation warnings even when the update is rejected.
 	warnings, err := validator.ValidateUpdate(
 		ctx,
 		oldObj,

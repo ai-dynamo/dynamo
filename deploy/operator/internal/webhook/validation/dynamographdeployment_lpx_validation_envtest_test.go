@@ -25,7 +25,7 @@ func lpxDGDAdmissionCases(t *testing.T) []dgdAdmissionTestCase {
 	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
 	const lpxOnDeleteErr = `metadata.annotations[nvidia.com/grove-update-strategy]: Invalid value: "OnDelete": must be "Coherent" or "RollingRecreate" when LPX components are configured`
 
-	// Change only replicas on a valid existing LPX component while its gate is disabled.
+	t.Log("Prepare a replica-only update while LPX is disabled")
 	lpxReplicaEditOld := betaLPXDGDForAdmission(nil)
 	lpxReplicaEditNew := lpxReplicaEditOld.DeepCopy()
 	lpxReplicaEditNew.Spec.Components[0].Replicas = new(int32(2))

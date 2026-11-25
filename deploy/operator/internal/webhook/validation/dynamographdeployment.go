@@ -136,7 +136,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	}
 	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(newAlpha, oldAlpha)...)
 
-	// Stateful rules share the same receiver and compatibility projections.
+	// New-state failures must not hide independent update errors.
 	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)...)
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		allErrs = append(allErrs, validation.validateDynamoGraphDeploymentSpecUpdateV1alpha1(
