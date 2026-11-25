@@ -4207,20 +4207,25 @@ def _test_disagg_per_role_session_affinity(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    router_policy_config: str | None = None,
+    affine_role: str = "prefill",
 ):
     """Validate that session affinity is configured per hop, not per deployment.
 
-    The prefill workers advertise a session-affinity TTL; the decode workers
-    advertise the same router mode without one. Both hops then run round-robin,
-    so the only thing that can pin a session is its own affinity setting:
+    Without ``router_policy_config``, the prefill workers advertise a
+    session-affinity TTL; the decode workers advertise the same router mode
+    without one. With it, no worker advertises anything and the frontend takes
+    only the policy file, which sets ``session_affinity`` on ``affine_role``.
+    Both hops run round-robin, so the only thing that can pin a session is its
+    own affinity setting:
 
-    1. Repeated requests carrying one session id stay on ONE prefill worker,
-       because that hop has affinity.
-    2. The same requests spread across MULTIPLE decode workers, because that hop
-       does not -- round-robin rotates.
+    1. Repeated requests carrying one session id stay on ONE worker of the
+       affine role, because that hop has affinity.
+    2. The same requests spread across MULTIPLE workers of the other role,
+       because that hop does not -- round-robin rotates.
 
-    Assertion 2 is the one that fails if the two hops share a TTL: decode would
-    pin alongside prefill.
+    Assertion 2 is the one that fails if the two hops share a setting: the other
+    role would pin alongside the affine one.
 
     This covers configurability, not expiry. Proving a TTL elapses would mean
     sleeping past it and asserting a rebind, which is timing-dependent and can
@@ -4235,7 +4240,8 @@ def _test_disagg_per_role_session_affinity(
         decode_workers.namespace,
         store_backend,
         request_plane=request_plane,
-        router_mode="round-robin",
+        router_mode=None if router_policy_config is not None else "round-robin",
+        router_policy_config=router_policy_config,
         min_initial_workers=decode_workers.num_workers,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
@@ -4304,18 +4310,22 @@ def _test_disagg_per_role_session_affinity(
             len(decode_ids) == num_requests
         ), f"Expected {num_requests} decode_worker_ids, got {len(decode_ids)}."
 
-        assert len(set(prefill_ids)) == 1, (
-            f"Prefill advertised a session-affinity TTL, so one session must stay "
-            f"pinned to one prefill worker; got {set(prefill_ids)}. Full: {prefill_ids}"
+        pinned_ids, free_ids = (
+            (prefill_ids, decode_ids)
+            if affine_role == "prefill"
+            else (decode_ids, prefill_ids)
         )
-        assert len(set(decode_ids)) > 1, (
-            f"Decode advertised no session-affinity TTL, so the same session must "
-            f"not be pinned there; all {num_requests} requests landed on "
-            f"{set(decode_ids)}. That means the hops are sharing one TTL."
+        assert len(set(pinned_ids)) == 1, (
+            f"The {affine_role} role has session affinity, so one session must stay "
+            f"pinned to one of its workers; got {set(pinned_ids)}. Full: {pinned_ids}"
+        )
+        assert len(set(free_ids)) > 1, (
+            f"Only the {affine_role} role has session affinity, so the same session "
+            f"must not be pinned on the other role; all {num_requests} requests "
+            f"landed on {set(free_ids)}. That means the hops share one setting."
         )
 
         logger.info(
-            "Verified per-hop session affinity: prefill pinned to "
-            f"{set(prefill_ids)} (TTL advertised) while decode spread across "
-            f"{set(decode_ids)} (no TTL)"
+            f"Verified per-hop session affinity: {affine_role} pinned to "
+            f"{set(pinned_ids)} while the other role spread across {set(free_ids)}"
         )

@@ -20,7 +20,7 @@ use crate::{
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{SessionAffinityMode, create_affinity_coordinator},
+    session_affinity::{SessionAffinityMode, SessionAffinitySpec, create_affinity_coordinator},
     types::{
         Annotated,
         openai::{
@@ -137,8 +137,11 @@ pub async fn build_preprocessed_routing(
         prefill_chooser,
         encoder_chooser,
         enable_multimodal_cache_indexer,
-        session_affinity_ttl_secs,
-        SessionAffinityMode::Hard,
+        session_affinity_ttl_secs.map(|ttl_secs| SessionAffinitySpec {
+            ttl: Duration::from_secs(ttl_secs),
+            mode: SessionAffinityMode::Hard,
+            max_entries: None,
+        }),
     )
     .await
 }
@@ -153,8 +156,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
-    session_affinity_ttl_secs: Option<u64>,
-    session_affinity_mode: SessionAffinityMode,
+    session_affinity: Option<SessionAffinitySpec>,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -162,7 +164,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     validate_router_mode_for_lora(
         router_mode,
         model_manager.lora_enabled(),
-        session_affinity_ttl_secs.is_some(),
+        session_affinity.is_some(),
     )?;
     let runtime_lora_enabled = crate::lora::runtime::RuntimeLoraConfig::from_env()?.enabled;
     let min_initial_workers = min_initial_workers_from_env()?;
@@ -180,14 +182,13 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         None
     };
 
-    let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
-    let affinity = match (ttl, chooser.as_ref()) {
-        (Some(ttl), Some(chooser)) => {
-            let affinity = chooser.affinity_coordinator(ttl, session_affinity_mode)?;
+    let affinity = match (session_affinity, chooser.as_ref()) {
+        (Some(spec), Some(chooser)) => {
+            let affinity = chooser.affinity_coordinator_with(spec)?;
             affinity.enable_replica_sync(router_client.clone()).await?;
             Some(affinity)
         }
-        _ => create_affinity_coordinator(ttl, session_affinity_mode, router_client.clone()).await?,
+        _ => create_affinity_coordinator(session_affinity, router_client.clone()).await?,
     };
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
@@ -206,8 +207,8 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         PrefillRouter::disabled_with_session_affinity_mode(
             model_manager.clone(),
             router_mode,
-            session_affinity_ttl_secs,
-            session_affinity_mode,
+            session_affinity.map(|spec| spec.ttl.as_secs()),
+            session_affinity.map_or(SessionAffinityMode::Hard, |spec| spec.mode),
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);

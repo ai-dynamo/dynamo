@@ -42,6 +42,7 @@ def test_frontend_passes_batch_gateway_explicitly(
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
         "DYN_SYSTEM_PORT",
         "DYN_ROUTER_MIN_INITIAL_WORKERS",
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES",
         "NATS_TLS_INSECURE",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -78,3 +79,6 @@ def test_frontend_passes_batch_gateway_explicitly(
     assert entrypoint_args.call_args.kwargs["batch_gateway_url"] == gateway_url
     assert os.environ["DYN_BATCH_GATEWAY_URL"] == "http://later-environment"
     assert run_input.call_args.args[1] == "http"
+    # A frontend parser built later in this process must not see a deprecated
+    # variable the user never set.
+    assert "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES" not in os.environ

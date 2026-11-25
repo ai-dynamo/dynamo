@@ -21,7 +21,8 @@ and the booking lifecycle these rules protect.
 - `request_lease.rs`: one request-liveness coordinator and reaper per `KvRouter`. Holds booking
   leases and releases them on completion or expiry.
 - `role_routing.rs`: the routing settings each worker role runs with: how a serving set's or
-  prefill pool's advertised `router_config` combines with the frontend's.
+  prefill pool's advertised `router_config` combines with the frontend's, and each role's
+  session affinity (the frontend's policy file, then the card, then the flags).
 - `routing_load.rs`: the load context shared by a worker set's scheduler and its load metrics.
 - `routing_host.rs`: `RoutingHost`, the pipeline's terminal engine. Owns selection, dispatch,
   and response cleanup for one worker set.

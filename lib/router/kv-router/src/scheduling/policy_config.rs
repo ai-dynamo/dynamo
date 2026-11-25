@@ -433,9 +433,12 @@ mod tests {
 
     use super::*;
     use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
+    use crate::plugins::worker_selection::{SessionAffinitySetting, SessionAffinitySpec};
     use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
     use dynamo_admission::UnknownPolicyClassError;
+    use dynamo_router_protocol::WorkerType;
     use dynamo_scheduler::KvSchedulerError;
+    use dynamo_session_affinity::SessionAffinityMode;
     use dynamo_slot_tracker::WorkerLoadProjection;
 
     fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
@@ -611,6 +614,13 @@ worker_selection:
 worker_selection:
   aggregated:
     type: default
+    parameters: {threshold: 1}
+"#,
+            r#"
+worker_selection:
+  aggregated:
+    type: default
+    hints: []
 "#,
             r#"
 worker_selection:
@@ -640,12 +650,100 @@ worker_selection:
       type: alpha
       parameters: 1
 "#,
+            r#"
+worker_selection:
+  aggregated: alpha
+  instances:
+    - name: alpha
+      type: alpha
+      session_affinity: true
+"#,
         ] {
             assert!(
                 RouterPolicyConfig::from_yaml(yaml).is_err(),
                 "unexpectedly accepted {yaml}"
             );
         }
+    }
+
+    fn decode_session_affinity(
+        value: &str,
+    ) -> Result<Option<SessionAffinitySetting>, RouterPolicyConfigError> {
+        let yaml =
+            format!("worker_selection:\n  decode: {{type: alpha, session_affinity: {value}}}\n");
+        Ok(RouterPolicyConfig::from_yaml(&yaml)?
+            .worker_selection()
+            .unwrap()
+            .session_affinity(WorkerType::Decode))
+    }
+
+    #[test]
+    fn session_affinity_is_set_per_role() {
+        let enabled = SessionAffinitySetting::Enabled(SessionAffinitySpec {
+            ttl: Duration::from_secs(300),
+            mode: SessionAffinityMode::Hard,
+            max_entries: None,
+        });
+        assert_eq!(decode_session_affinity("true").unwrap(), Some(enabled));
+        assert_eq!(decode_session_affinity("{}").unwrap(), Some(enabled));
+        assert_eq!(
+            decode_session_affinity("false").unwrap(),
+            Some(SessionAffinitySetting::Disabled)
+        );
+        assert_eq!(
+            decode_session_affinity("{ttl_secs: 60, mode: soft, max_entries: 8}").unwrap(),
+            Some(SessionAffinitySetting::Enabled(SessionAffinitySpec {
+                ttl: Duration::from_secs(60),
+                mode: SessionAffinityMode::Soft,
+                max_entries: std::num::NonZeroUsize::new(8),
+            }))
+        );
+
+        // `default` takes the key in its mapping form, and a role that omits it sets nothing.
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  aggregated: {type: default, session_affinity: true}
+  prefill: {type: alpha}
+  decode: alpha
+"#,
+        )
+        .unwrap();
+        let selection = config.worker_selection().unwrap();
+        assert!(selection.aggregated().unwrap().is_default());
+        assert_eq!(
+            selection.session_affinity(WorkerType::Aggregated),
+            Some(enabled)
+        );
+        assert_eq!(selection.session_affinity(WorkerType::Prefill), None);
+        assert_eq!(selection.session_affinity(WorkerType::Decode), None);
+    }
+
+    #[test]
+    fn rejects_invalid_session_affinity() {
+        for value in [
+            "300",
+            "soon",
+            "[true]",
+            "{ttl_secs: 0}",
+            "{ttl_secs: 31536001}",
+            "{mode: sticky}",
+            "{max_entries: 0}",
+            "{ttl: 300}",
+        ] {
+            let error = decode_session_affinity(value).unwrap_err().to_string();
+            assert!(
+                error.contains("worker_selection.decode.session_affinity"),
+                "{value}: {error}"
+            );
+        }
+
+        let error = RouterPolicyConfig::from_yaml(
+            "worker_selection:\n  encode: {type: alpha, session_affinity: true}\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not supported for encode"), "{error}");
     }
 
     #[test]

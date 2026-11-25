@@ -4,6 +4,7 @@
 """Tests for the worker-side router advertisement group."""
 
 import argparse
+import warnings
 
 import pytest
 
@@ -71,6 +72,28 @@ def test_frontend_only_arguments_are_not_offered_to_workers():
     assert "--router-mode" in flags
     assert "--router-session-affinity-ttl-secs" in flags
     assert "--router-kv-events" in flags
+
+
+def test_worker_session_affinity_flags_are_not_deprecated():
+    """Only the frontend's copies moved to the policy file.
+
+    A worker still advertises its TTL and mode with these flags, so they must
+    not warn until the card's `router_config` itself is deprecated.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        config, _ = parse_worker_router_config(
+            [
+                "--router-mode",
+                "round-robin",
+                "--router-session-affinity-ttl-secs",
+                "600",
+                "--router-session-affinity-mode",
+                "soft",
+            ]
+        )
+    assert config.session_affinity_ttl_secs == 600
+    assert config.session_affinity_mode == "soft"
 
 
 def test_router_arg_group_refuses_to_guess_its_caller():

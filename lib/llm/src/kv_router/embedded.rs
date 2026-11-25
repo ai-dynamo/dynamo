@@ -396,12 +396,11 @@ impl EmbeddedSelection {
 
     pub(crate) fn affinity_coordinator(
         &self,
-        ttl: Duration,
-        mode: crate::session_affinity::SessionAffinityMode,
+        spec: crate::session_affinity::SessionAffinitySpec,
     ) -> Result<crate::session_affinity::AffinityCoordinator> {
         let table = self
             .partition
-            .session_affinity(crate::session_affinity::affinity_config(ttl, mode)?)?;
+            .session_affinity(crate::session_affinity::affinity_config(spec)?)?;
         Ok(self
             .affinity
             .get_or_init(|| crate::session_affinity::AffinityCoordinator::wrap(table))
