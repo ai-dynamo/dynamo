@@ -753,6 +753,153 @@ fn reset_full_ranks(
     }
 }
 
+/// Whether every eligible rank is past `limits`, judged on the same `LOAD` row worker
+/// selection reads.
+fn all_eligible_workers_full<C: WorkerConfigLike>(
+    worker_loads: &WorkerLoadReader<'_>,
+    configs: &HashMap<WorkerId, C>,
+    limits: BusyThresholds,
+    eligibility: RoutingEligibility<'_>,
+) -> bool {
+    let has_room = |worker: WorkerWithDpRank, config: &C| {
+        let load =
+            WorkerLoadInput::from_observed(worker_loads.get(worker), WorkerLoadProjection::default);
+        limits.has_room(&load, WorkerCapacity::of(config))
+    };
+
+    if let Some(worker) = eligibility.pinned_worker() {
+        let Ok(config) = eligibility.validate_worker_rank(configs, worker) else {
+            return false;
+        };
+        return !has_room(worker, config);
+    }
+
+    let mut checked_any = false;
+    let has_available = eligibility.any_eligible_worker_rank(configs, |worker, config| {
+        checked_any = true;
+        has_room(worker, config)
+    });
+
+    checked_any && !has_available
+}
+
+/// Whether `request` may dispatch on capacity: one of its eligible ranks is under `limits`,
+/// read now. A refusal says what the head waits for: room on its eligible ranks, or, its
+/// exclusive target no longer eligible, room anywhere.
+fn capacity_check<P: SequencePublisher + 'static, C: WorkerConfigLike>(
+    slots: &ActorSlots<P>,
+    eligibility: &QueueEligibility,
+    workers: &watch::Receiver<HashMap<WorkerId, C>>,
+    full_ranks: &FullRankCounts,
+    request: &SchedulingRequest,
+    limits: BusyThresholds,
+    decay_now: Instant,
+) -> LaneCheck {
+    eligibility.with(
+        request,
+        workers,
+        full_ranks,
+        false,
+        |configs, routing, _, _, _| {
+            if !all_eligible_workers_full(
+                &slots.worker_load_reader(decay_now),
+                configs,
+                limits,
+                routing,
+            ) {
+                LaneCheck::Dispatch
+            } else if eligibility.exclusive
+                && request.pinned_worker.is_none()
+                && request
+                    .affinity_target
+                    .is_some_and(|target| !routing.affinity_target_is_eligible(configs, target))
+            {
+                // The exclusive target is gone: the head may go anywhere with room, so it
+                // competes on every pass.
+                LaneCheck::Blocked(BlockReason::Fallback)
+            } else {
+                LaneCheck::Blocked(BlockReason::Capacity)
+            }
+        },
+    )
+}
+
+/// One pass over the ready lane heads, asking whether each may dispatch now: the gate
+/// first, then capacity for a class that queues on it.
+///
+/// Load is read per head, so a head sees the bookings made earlier in the drain. Within
+/// the pass, the ranks past the host's reject thresholds are recorded at most once, when a
+/// head first needs a capacity check, and unconstrained heads share one room answer per
+/// class, so a pass costs one walk of the ranks per class, not one per lane.
+struct DispatchPass<'a, P: SequencePublisher, C> {
+    slots: &'a ActorSlots<P>,
+    eligibility: &'a QueueEligibility,
+    workers: &'a watch::Receiver<HashMap<WorkerId, C>>,
+    gate: Option<&'a dyn DispatchGate>,
+    /// The earliest recheck a held head asked for.
+    gate_recheck_at: &'a Cell<Option<Instant>>,
+    /// The host's reject thresholds, judged only while an affinity lane waits.
+    reject: Option<&'a RejectThresholdsProvider>,
+    full_ranks: &'a mut FullRankCounts,
+    /// Whether this pass has recorded `full_ranks` yet.
+    full_ranks_fresh: bool,
+    /// Per class, the room answer its unconstrained heads share; all None as the pass starts.
+    class_room: &'a mut [Option<bool>],
+    decay_now: Instant,
+}
+
+impl<P: SequencePublisher + 'static, C: WorkerConfigLike> DispatchPass<'_, P, C> {
+    fn check(
+        &mut self,
+        class_index: usize,
+        class: &PolicyClassConfig,
+        queued: &QueuedRequest,
+    ) -> LaneCheck {
+        if let Some(gate) = self.gate
+            && !gate_allows(gate, &class.name, queued, self.gate_recheck_at)
+        {
+            return LaneCheck::Blocked(BlockReason::Gate);
+        }
+        if !class.queueing_enabled() {
+            return LaneCheck::Dispatch;
+        }
+        let shared_answer = unconstrained(&queued.request, self.eligibility.exclusive);
+        if shared_answer && let Some(room) = self.class_room[class_index] {
+            return if room {
+                LaneCheck::Dispatch
+            } else {
+                LaneCheck::Blocked(BlockReason::SharedCapacity)
+            };
+        }
+        if !self.full_ranks_fresh {
+            let rejecting = reset_full_ranks(self.full_ranks, reject_limits(self.reject));
+            if let Some(full_ranks) = rejecting {
+                self.slots
+                    .record_full_worker_ranks_at(self.decay_now, full_ranks);
+            }
+            self.full_ranks_fresh = true;
+        }
+        let check = capacity_check(
+            self.slots,
+            self.eligibility,
+            self.workers,
+            self.full_ranks,
+            &queued.request,
+            class.busy_thresholds,
+            self.decay_now,
+        );
+        if shared_answer {
+            self.class_room[class_index] = Some(check == LaneCheck::Dispatch);
+            if check == LaneCheck::Blocked(BlockReason::Capacity) {
+                // Every unconstrained head of the class shares this refusal, so the queue
+                // probes one of them on the next capacity change.
+                return LaneCheck::Blocked(BlockReason::SharedCapacity);
+            }
+        }
+        check
+    }
+}
+
 /// How an arrival's attempt to enter its class queue ended.
 enum Insertion {
     /// The arrival entered the queue.
@@ -2449,20 +2596,15 @@ impl<
                         self.slots
                             .record_full_worker_ranks_at(decay_now, full_ranks);
                     }
-                    self.eligibility.with(
-                        &request,
+                    capacity_check(
+                        &self.slots,
+                        &self.eligibility,
                         &self.workers_with_configs,
                         &self.gate_full_ranks,
-                        false,
-                        |configs, eligibility, _, _, _| {
-                            Self::all_eligible_workers_full(
-                                &self.slots.worker_load_reader(decay_now),
-                                configs,
-                                class.busy_thresholds,
-                                eligibility,
-                            )
-                        },
-                    )
+                        &request,
+                        class.busy_thresholds,
+                        decay_now,
+                    ) != LaneCheck::Dispatch
                 });
             if !should_queue {
                 return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
@@ -2749,67 +2891,28 @@ impl<
     /// recheck, so a newly exposed root is woken at its own deadline.
     fn has_dispatchable_ready_head(&mut self) -> bool {
         let decay_now = Instant::now();
-        let slots = &self.slots;
-        let eligibility = &self.eligibility;
-        let exclusive = eligibility.exclusive;
-        let workers = &self.workers_with_configs;
-        let full_ranks = &mut self.gate_full_ranks;
-        let reject = self
-            .pending
-            .has_affinity_backlog()
-            .then_some(self.reject_thresholds.as_ref())
-            .flatten();
-        let mut gate_fresh = false;
-        let gate = self.dispatch_gate.get();
         let gate_recheck_at = Cell::new(self.gate_recheck_at);
-        // As in the dispatch pass: unconstrained heads share one room answer per class, so a
-        // cleanup batch with a lane per session costs one walk per class, not one per lane.
-        let class_room = &mut self.class_room;
-        class_room.clear();
-        class_room.resize(self.pending.class_count(), None);
-        let dispatchable = self.pending.any_ready_head(|class_index, class, queued| {
-            if let Some(gate) = gate
-                && !gate_allows(gate.as_ref(), &class.name, queued, &gate_recheck_at)
-            {
-                return LaneCheck::Blocked(BlockReason::Gate);
-            }
-            if !class.queueing_enabled() {
-                return LaneCheck::Dispatch;
-            }
-            let shared_answer = unconstrained(&queued.request, exclusive);
-            if shared_answer && let Some(room) = class_room[class_index] {
-                return if room {
-                    LaneCheck::Dispatch
-                } else {
-                    LaneCheck::Blocked(BlockReason::SharedCapacity)
-                };
-            }
-            if !gate_fresh {
-                let rejecting = reset_full_ranks(full_ranks, reject_limits(reject));
-                if let Some(full_ranks) = rejecting {
-                    slots.record_full_worker_ranks_at(decay_now, full_ranks);
-                }
-                gate_fresh = true;
-            }
-            let room = eligibility.with(
-                &queued.request,
-                workers,
-                full_ranks,
-                false,
-                |configs, eligibility, _, _, _| {
-                    !Self::all_eligible_workers_full(
-                        &slots.worker_load_reader(decay_now),
-                        configs,
-                        class.busy_thresholds,
-                        eligibility,
-                    )
-                },
-            );
-            if shared_answer {
-                class_room[class_index] = Some(room);
-            }
-            LaneCheck::from(room)
-        });
+        self.class_room.clear();
+        self.class_room.resize(self.pending.class_count(), None);
+        let mut pass = DispatchPass {
+            slots: &self.slots,
+            eligibility: &self.eligibility,
+            workers: &self.workers_with_configs,
+            gate: self.dispatch_gate.get().map(|gate| gate.as_ref()),
+            gate_recheck_at: &gate_recheck_at,
+            reject: self
+                .pending
+                .has_affinity_backlog()
+                .then_some(self.reject_thresholds.as_ref())
+                .flatten(),
+            full_ranks: &mut self.gate_full_ranks,
+            full_ranks_fresh: false,
+            class_room: &mut self.class_room,
+            decay_now,
+        };
+        let dispatchable = self
+            .pending
+            .any_ready_head(|class_index, class, queued| pass.check(class_index, class, queued));
         self.gate_recheck_at = gate_recheck_at.get();
         dispatchable
     }
@@ -2910,81 +3013,26 @@ impl<
             // two reads, as they can right after the gate.
             let gate_recheck_at = Cell::new(self.gate_recheck_at);
             let extracted = {
-                let slots = &self.slots;
-                let eligibility = &self.eligibility;
-                let exclusive = eligibility.exclusive;
-                let workers = &self.workers_with_configs;
-                let full_ranks = &mut self.gate_full_ranks;
-                let reject = self
-                    .pending
-                    .has_affinity_backlog()
-                    .then_some(self.reject_thresholds.as_ref())
-                    .flatten();
-                let mut gate_fresh = false;
-                let gate = gate.as_deref();
-                let class_room = &mut self.class_room;
-                class_room.clear();
-                class_room.resize(self.pending.class_count(), None);
+                self.class_room.clear();
+                self.class_room.resize(self.pending.class_count(), None);
+                let mut pass = DispatchPass {
+                    slots: &self.slots,
+                    eligibility: &self.eligibility,
+                    workers: &self.workers_with_configs,
+                    gate: gate.as_deref(),
+                    gate_recheck_at: &gate_recheck_at,
+                    reject: self
+                        .pending
+                        .has_affinity_backlog()
+                        .then_some(self.reject_thresholds.as_ref())
+                        .flatten(),
+                    full_ranks: &mut self.gate_full_ranks,
+                    full_ranks_fresh: false,
+                    class_room: &mut self.class_room,
+                    decay_now,
+                };
                 self.pending.extract_next(|class_index, class, queued| {
-                    if let Some(gate) = gate
-                        && !gate_allows(gate, &class.name, queued, &gate_recheck_at)
-                    {
-                        return LaneCheck::Blocked(BlockReason::Gate);
-                    }
-                    if !class.queueing_enabled() {
-                        return LaneCheck::Dispatch;
-                    }
-                    let shared_answer = unconstrained(&queued.request, exclusive);
-                    if shared_answer && let Some(room) = class_room[class_index] {
-                        return if room {
-                            LaneCheck::Dispatch
-                        } else {
-                            LaneCheck::Blocked(BlockReason::SharedCapacity)
-                        };
-                    }
-                    if !gate_fresh {
-                        let rejecting = reset_full_ranks(full_ranks, reject_limits(reject));
-                        if let Some(full_ranks) = rejecting {
-                            slots.record_full_worker_ranks_at(decay_now, full_ranks);
-                        }
-                        gate_fresh = true;
-                    }
-                    let check = eligibility.with(
-                        &queued.request,
-                        workers,
-                        full_ranks,
-                        false,
-                        |configs, eligibility, _, _, _| {
-                            if !Self::all_eligible_workers_full(
-                                &slots.worker_load_reader(decay_now),
-                                configs,
-                                class.busy_thresholds,
-                                eligibility,
-                            ) {
-                                LaneCheck::Dispatch
-                            } else if exclusive
-                                && queued.request.pinned_worker.is_none()
-                                && queued.request.affinity_target.is_some_and(|target| {
-                                    !eligibility.affinity_target_is_eligible(configs, target)
-                                })
-                            {
-                                // The exclusive target is gone: the head may go anywhere with
-                                // room, so it competes on every pass.
-                                LaneCheck::Blocked(BlockReason::Fallback)
-                            } else {
-                                LaneCheck::Blocked(BlockReason::Capacity)
-                            }
-                        },
-                    );
-                    if shared_answer {
-                        class_room[class_index] = Some(check == LaneCheck::Dispatch);
-                        if check == LaneCheck::Blocked(BlockReason::Capacity) {
-                            // Every unconstrained head of the class shares this refusal, so
-                            // the queue probes one of them on the next capacity change.
-                            return LaneCheck::Blocked(BlockReason::SharedCapacity);
-                        }
-                    }
-                    check
+                    pass.check(class_index, class, queued)
                 })
             };
             self.gate_recheck_at = gate_recheck_at.get();
@@ -3686,38 +3734,6 @@ impl<
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
         })
-    }
-
-    /// Whether every eligible rank is past `limits`, judged on the same `LOAD` row worker
-    /// selection reads.
-    fn all_eligible_workers_full(
-        worker_loads: &WorkerLoadReader<'_>,
-        configs: &HashMap<WorkerId, C>,
-        limits: BusyThresholds,
-        eligibility: RoutingEligibility<'_>,
-    ) -> bool {
-        let has_room = |worker: WorkerWithDpRank, config: &C| {
-            let load = WorkerLoadInput::from_observed(
-                worker_loads.get(worker),
-                WorkerLoadProjection::default,
-            );
-            limits.has_room(&load, WorkerCapacity::of(config))
-        };
-
-        if let Some(worker) = eligibility.pinned_worker() {
-            let Ok(config) = eligibility.validate_worker_rank(configs, worker) else {
-                return false;
-            };
-            return !has_room(worker, config);
-        }
-
-        let mut checked_any = false;
-        let has_available = eligibility.any_eligible_worker_rank(configs, |worker, config| {
-            checked_any = true;
-            has_room(worker, config)
-        });
-
-        checked_any && !has_available
     }
 
     fn add_class_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
