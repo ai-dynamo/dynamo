@@ -150,13 +150,15 @@ def _resolve_pooling_metadata_files(
     try:
         from huggingface_hub import try_to_load_from_cache
         from huggingface_hub.errors import HFValidationError
-
+    except ImportError:
+        return None
+    try:
         revision = getattr(model_cfg, "revision", None)
         cached = [
             try_to_load_from_cache(repo_id=repo_id, filename=name, revision=revision)
             for name in _POOLING_METADATA_FILES
         ]
-    except (ImportError, HFValidationError, OSError) as exc:
+    except (HFValidationError, OSError) as exc:
         logger.debug(
             "HF cache lookup for pooling metadata (%s) failed: %s", repo_id, exc
         )

@@ -3673,7 +3673,7 @@ impl OpenAIPreprocessor {
         Ok((prompt_ids, label_ids, encoding_bytes))
     }
 
-    fn single_systemone_token_id(
+    pub(crate) fn systemone_single_token_id(
         &self,
         token: &str,
         err_msg: &'static str,
@@ -3719,26 +3719,19 @@ impl OpenAIPreprocessor {
     }
 
     /// Render a joint pooling-classifier decision sequence through the model's
-    /// chat template, tokenize it without truncation, and locate the exact
-    /// inline readout marker positions.
-    #[allow(clippy::too_many_arguments)]
+    /// chat template, tokenize it without truncation, and locate inline readout markers.
     pub(crate) fn render_systemone_pooling_prompt(
         &self,
         model: &str,
-        system_prompt: &str,
         user_content: &str,
         chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
-        marker: &str,
+        marker_id: TokenIdType,
         expected_markers: usize,
         max_encoding_bytes: usize,
     ) -> anyhow::Result<(Vec<TokenIdType>, Vec<usize>, usize)> {
-        let marker_id = self.single_systemone_token_id(
-            marker,
-            "pooling decision readout marker must encode to a single token",
-        )?;
         let prompt = self.render_systemone_pooling_chat(
             model,
-            system_prompt,
+            crate::protocols::systemone::POOLING_SYSTEM_PROMPT,
             user_content,
             true,
             chat_template_kwargs,
@@ -3761,24 +3754,18 @@ impl OpenAIPreprocessor {
     }
 
     /// Render the shared context chunk for `joint-chunked-readout-v1` (protocol v4).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_systemone_chunked_pooling_context(
         &self,
         model: &str,
-        system_prompt: &str,
         state_text: &str,
-        sentinel: &str,
         chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
-        separator: &str,
+        separator_id: TokenIdType,
         max_encoding_bytes: usize,
     ) -> anyhow::Result<(Vec<TokenIdType>, usize)> {
-        let separator_id = self.single_systemone_token_id(
-            separator,
-            "pooling decision separator must encode to a single token",
-        )?;
+        let sentinel = crate::protocols::systemone::CHUNKED_CONTEXT_END_SENTINEL;
         let prompt = self.render_systemone_pooling_chat(
             model,
-            system_prompt,
+            crate::protocols::systemone::CHUNKED_POOLING_SYSTEM_PROMPT,
             &format!("{state_text}{sentinel}"),
             false,
             chat_template_kwargs,
@@ -3804,18 +3791,14 @@ impl OpenAIPreprocessor {
     pub(crate) fn encode_systemone_chunked_pooling_question(
         &self,
         question_text: &str,
-        marker: &str,
+        marker_id: TokenIdType,
         max_encoding_bytes: usize,
-    ) -> anyhow::Result<(Vec<TokenIdType>, TokenIdType, usize)> {
-        let marker_id = self.single_systemone_token_id(
-            marker,
-            "pooling decision readout marker must encode to a single token",
-        )?;
+    ) -> anyhow::Result<(Vec<TokenIdType>, usize)> {
         let encoding_bytes = question_text.len();
         Self::check_systemone_encoding_bytes(encoding_bytes, max_encoding_bytes)?;
         let mut ids = self.tokenize(question_text)?.token_ids().to_vec();
         ids.push(marker_id);
-        Ok((ids, marker_id, encoding_bytes))
+        Ok((ids, encoding_bytes))
     }
 
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.

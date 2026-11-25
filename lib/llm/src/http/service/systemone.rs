@@ -37,7 +37,6 @@ use crate::{
         },
         response_merge::PREFILL_OUTPUT_ANNOTATION,
         systemone::{
-            CHUNKED_CONTEXT_END_SENTINEL, CHUNKED_POOLING_SYSTEM_PROMPT, POOLING_SYSTEM_PROMPT,
             PoolingDecisionConfig, ScoringBackend, VllmScoreCollector, build_native_score_request,
             build_pooling_request, causal_scoring_request, extract_marker_logits,
             format_chunked_question_text, format_joint_user_prompt, format_pooling_state_text,
@@ -1040,6 +1039,159 @@ fn measured_cached_tokens(
     Ok(Some(count))
 }
 
+struct PoolingPrep<'a> {
+    request: &'a CanonicalRequest,
+    selection: &'a SystemOneExecutionSelection,
+    config: &'a PoolingDecisionConfig,
+    marker_id: u32,
+    max_seq_len: usize,
+    max_per_batch: usize,
+    remaining_encoding_bytes: usize,
+    batches: Vec<PreparedPoolingBatch>,
+}
+
+impl<'a> PoolingPrep<'a> {
+    fn prepare_chunked(
+        &mut self,
+        questions: &[&dynamo_decisions::CanonicalQuestion],
+    ) -> Result<(), (StatusCode, String)> {
+        let separator = self.config.separator.as_deref().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "chunked pooling decision config missing separator".to_string(),
+            )
+        })?;
+        let separator_id = self
+            .selection
+            .preprocessor
+            .systemone_single_token_id(
+                separator,
+                "pooling decision separator must encode to a single token",
+            )
+            .map_err(map_pooling_render_error)?;
+        let state_text = format_pooling_state_text(
+            &self.request.input,
+            self.config,
+            self.selection.card.special_tokens(),
+        );
+        let (context_ids, ctx_bytes) = self
+            .selection
+            .preprocessor
+            .render_systemone_chunked_pooling_context(
+                &self.selection.canonical_model,
+                &state_text,
+                Some(&self.request.chat_template_kwargs),
+                separator_id,
+                self.remaining_encoding_bytes,
+            )
+            .map_err(map_pooling_render_error)?;
+        self.remaining_encoding_bytes = self.remaining_encoding_bytes.saturating_sub(ctx_bytes);
+
+        self.batches.reserve(questions.len());
+        for question in questions {
+            let question_text = format_chunked_question_text(
+                question,
+                self.request.dialect,
+                self.config,
+                self.selection.card.special_tokens(),
+            )
+            .map_err(|cause| (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string()))?;
+            let (q_ids, q_bytes) = self
+                .selection
+                .preprocessor
+                .encode_systemone_chunked_pooling_question(
+                    &question_text,
+                    self.marker_id,
+                    self.remaining_encoding_bytes,
+                )
+                .map_err(map_pooling_render_error)?;
+            self.remaining_encoding_bytes = self.remaining_encoding_bytes.saturating_sub(q_bytes);
+
+            let mut token_ids = Vec::with_capacity(context_ids.len() + q_ids.len());
+            token_ids.extend_from_slice(&context_ids);
+            token_ids.extend_from_slice(&q_ids);
+
+            let marker_count = token_ids.iter().filter(|&&t| t == self.marker_id).count();
+            if marker_count != 1 || token_ids.last() != Some(&self.marker_id) {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "readout markers ({marker_count}) did not match expected question after tokenization"
+                    ),
+                ));
+            }
+            if token_ids.len() > self.max_seq_len {
+                return Err(pooling_overlength_error(
+                    question,
+                    token_ids.len(),
+                    self.max_seq_len,
+                ));
+            }
+            let marker_pos = token_ids.len() - 1;
+            self.batches.push(PreparedPoolingBatch {
+                question_indices: vec![question.ordinal],
+                token_ids,
+                markers: vec![marker_pos],
+            });
+        }
+        Ok(())
+    }
+
+    fn bisect(
+        &mut self,
+        questions: &[&dynamo_decisions::CanonicalQuestion],
+    ) -> Result<(), (StatusCode, String)> {
+        if questions.len() > self.max_per_batch {
+            let mid = questions.len() / 2;
+            self.bisect(&questions[..mid])?;
+            return self.bisect(&questions[mid..]);
+        }
+
+        let user_content = format_joint_user_prompt(
+            &self.request.input,
+            questions,
+            self.request.dialect,
+            self.config,
+            self.selection.card.special_tokens(),
+        )
+        .map_err(|cause| (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string()))?;
+
+        let (token_ids, markers, encoding_bytes) = self
+            .selection
+            .preprocessor
+            .render_systemone_pooling_prompt(
+                &self.selection.canonical_model,
+                &user_content,
+                Some(&self.request.chat_template_kwargs),
+                self.marker_id,
+                questions.len(),
+                self.remaining_encoding_bytes,
+            )
+            .map_err(map_pooling_render_error)?;
+        self.remaining_encoding_bytes =
+            self.remaining_encoding_bytes.saturating_sub(encoding_bytes);
+
+        if token_ids.len() <= self.max_seq_len {
+            self.batches.push(PreparedPoolingBatch {
+                question_indices: questions.iter().map(|q| q.ordinal).collect(),
+                token_ids,
+                markers,
+            });
+            return Ok(());
+        }
+        if questions.len() == 1 {
+            return Err(pooling_overlength_error(
+                questions[0],
+                token_ids.len(),
+                self.max_seq_len,
+            ));
+        }
+        let mid = questions.len() / 2;
+        self.bisect(&questions[..mid])?;
+        self.bisect(&questions[mid..])
+    }
+}
+
 fn prepare_pooling_batches(
     request: &CanonicalRequest,
     selection: &SystemOneExecutionSelection,
@@ -1051,6 +1203,13 @@ fn prepare_pooling_batches(
             "missing pooling decision config for selected worker".to_string(),
         )
     })?;
+    let marker_id = selection
+        .preprocessor
+        .systemone_single_token_id(
+            &config.marker,
+            "pooling decision readout marker must encode to a single token",
+        )
+        .map_err(map_pooling_render_error)?;
     let context_length = selection.card.effective_context_length() as usize;
     let max_seq_len = match (context_length, config.max_length) {
         (0, Some(limit)) => limit,
@@ -1058,40 +1217,30 @@ fn prepare_pooling_batches(
         (ctx, Some(limit)) => ctx.min(limit),
         (ctx, None) => ctx,
     };
-    let max_per_batch = config.max_questions.unwrap_or(usize::MAX);
     let questions: Vec<&dynamo_decisions::CanonicalQuestion> = request.questions.iter().collect();
-    let mut batches = Vec::new();
-    let mut remaining_encoding_bytes = MAX_TOKENIZATION_TEXT_BYTES;
+    let mut prep = PoolingPrep {
+        request,
+        selection,
+        config,
+        marker_id,
+        max_seq_len,
+        max_per_batch: config.max_questions.unwrap_or(usize::MAX),
+        remaining_encoding_bytes: MAX_TOKENIZATION_TEXT_BYTES,
+        batches: Vec::new(),
+    };
     if config.is_chunked() {
-        prepare_chunked_pooling_batches(
-            request,
-            selection,
-            config,
-            &questions,
-            max_seq_len,
-            &mut remaining_encoding_bytes,
-            &mut batches,
-        )?;
+        prep.prepare_chunked(&questions)?;
     } else {
-        bisect_pooling_questions(
-            request,
-            selection,
-            config,
-            &questions,
-            max_seq_len,
-            max_per_batch,
-            &mut remaining_encoding_bytes,
-            &mut batches,
-        )?;
+        prep.bisect(&questions)?;
     }
 
     let mut total_input_tokens = 0_usize;
-    for batch in &batches {
+    for batch in &prep.batches {
         total_input_tokens =
             add_input_tokens(total_input_tokens, batch.token_ids.len(), max_input_tokens)
                 .map_err(|message| (StatusCode::UNPROCESSABLE_ENTITY, message))?;
     }
-    Ok(batches)
+    Ok(prep.batches)
 }
 
 fn map_pooling_render_error(cause: anyhow::Error) -> (StatusCode, String) {
@@ -1130,180 +1279,16 @@ fn pooling_overlength_error(
     )
 }
 
-fn prepare_chunked_pooling_batches(
-    request: &CanonicalRequest,
-    selection: &SystemOneExecutionSelection,
-    config: &PoolingDecisionConfig,
-    questions: &[&dynamo_decisions::CanonicalQuestion],
-    max_seq_len: usize,
-    remaining_encoding_bytes: &mut usize,
-    out: &mut Vec<PreparedPoolingBatch>,
-) -> Result<(), (StatusCode, String)> {
-    let separator = config.separator.as_deref().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "chunked pooling decision config missing separator".to_string(),
-        )
-    })?;
-    let state_text =
-        format_pooling_state_text(&request.input, config, selection.card.special_tokens());
-    let (context_ids, ctx_bytes) = selection
-        .preprocessor
-        .render_systemone_chunked_pooling_context(
-            &selection.canonical_model,
-            CHUNKED_POOLING_SYSTEM_PROMPT,
-            &state_text,
-            CHUNKED_CONTEXT_END_SENTINEL,
-            Some(&request.chat_template_kwargs),
-            separator,
-            *remaining_encoding_bytes,
-        )
-        .map_err(map_pooling_render_error)?;
-    *remaining_encoding_bytes = remaining_encoding_bytes.saturating_sub(ctx_bytes);
-
-    out.reserve(questions.len());
-    for question in questions {
-        let question_text = format_chunked_question_text(
-            question,
-            request.dialect,
-            config,
-            selection.card.special_tokens(),
-        )
-        .map_err(|cause| (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string()))?;
-        let (q_ids, marker_id, q_bytes) = selection
-            .preprocessor
-            .encode_systemone_chunked_pooling_question(
-                &question_text,
-                &config.marker,
-                *remaining_encoding_bytes,
-            )
-            .map_err(map_pooling_render_error)?;
-        *remaining_encoding_bytes = remaining_encoding_bytes.saturating_sub(q_bytes);
-
-        let mut token_ids = Vec::with_capacity(context_ids.len() + q_ids.len());
-        token_ids.extend_from_slice(&context_ids);
-        token_ids.extend_from_slice(&q_ids);
-
-        let marker_count = token_ids.iter().filter(|&&tok| tok == marker_id).count();
-        if marker_count != 1 || token_ids.last() != Some(&marker_id) {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "readout markers ({marker_count}) did not match expected question after tokenization"
-                ),
-            ));
-        }
-        if token_ids.len() > max_seq_len {
-            return Err(pooling_overlength_error(
-                question,
-                token_ids.len(),
-                max_seq_len,
-            ));
-        }
-        let marker_pos = token_ids.len() - 1;
-        out.push(PreparedPoolingBatch {
-            question_indices: vec![question.ordinal],
-            token_ids,
-            markers: vec![marker_pos],
-        });
+fn link_child_or_cancelled(
+    parent: &Arc<dyn AsyncEngineContext>,
+    child: Arc<dyn AsyncEngineContext>,
+) -> Result<(), DispatchError> {
+    parent.link_child(child.clone());
+    if parent.is_killed() {
+        child.kill();
+        return Err(DispatchError::cancelled());
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn bisect_pooling_questions(
-    request: &CanonicalRequest,
-    selection: &SystemOneExecutionSelection,
-    config: &PoolingDecisionConfig,
-    questions: &[&dynamo_decisions::CanonicalQuestion],
-    max_seq_len: usize,
-    max_per_batch: usize,
-    remaining_encoding_bytes: &mut usize,
-    out: &mut Vec<PreparedPoolingBatch>,
-) -> Result<(), (StatusCode, String)> {
-    if questions.len() > max_per_batch {
-        let mid = questions.len() / 2;
-        bisect_pooling_questions(
-            request,
-            selection,
-            config,
-            &questions[..mid],
-            max_seq_len,
-            max_per_batch,
-            remaining_encoding_bytes,
-            out,
-        )?;
-        return bisect_pooling_questions(
-            request,
-            selection,
-            config,
-            &questions[mid..],
-            max_seq_len,
-            max_per_batch,
-            remaining_encoding_bytes,
-            out,
-        );
-    }
-
-    let user_content = format_joint_user_prompt(
-        &request.input,
-        questions,
-        request.dialect,
-        config,
-        selection.card.special_tokens(),
-    )
-    .map_err(|cause| (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string()))?;
-
-    let (token_ids, markers, encoding_bytes) = selection
-        .preprocessor
-        .render_systemone_pooling_prompt(
-            &selection.canonical_model,
-            POOLING_SYSTEM_PROMPT,
-            &user_content,
-            Some(&request.chat_template_kwargs),
-            &config.marker,
-            questions.len(),
-            *remaining_encoding_bytes,
-        )
-        .map_err(map_pooling_render_error)?;
-    *remaining_encoding_bytes = remaining_encoding_bytes.saturating_sub(encoding_bytes);
-
-    if token_ids.len() <= max_seq_len {
-        out.push(PreparedPoolingBatch {
-            question_indices: questions.iter().map(|q| q.ordinal).collect(),
-            token_ids,
-            markers,
-        });
-        return Ok(());
-    }
-    if questions.len() == 1 {
-        return Err(pooling_overlength_error(
-            questions[0],
-            token_ids.len(),
-            max_seq_len,
-        ));
-    }
-    let mid = questions.len() / 2;
-    bisect_pooling_questions(
-        request,
-        selection,
-        config,
-        &questions[..mid],
-        max_seq_len,
-        max_per_batch,
-        remaining_encoding_bytes,
-        out,
-    )?;
-    bisect_pooling_questions(
-        request,
-        selection,
-        config,
-        &questions[mid..],
-        max_seq_len,
-        max_per_batch,
-        remaining_encoding_bytes,
-        out,
-    )
 }
 
 async fn dispatch_pooling(
@@ -1324,7 +1309,6 @@ async fn dispatch_pooling(
             dialect,
         );
     };
-    let effective_temperature = config.temperature * request.temperature;
     let fanout_started = Instant::now();
 
     let mut futures_stream =
@@ -1337,7 +1321,6 @@ async fn dispatch_pooling(
                 request_id.clone(),
                 parent_context.clone(),
                 request.clone(),
-                effective_temperature,
             )
         }))
         .buffer_unordered(MAX_CONCURRENT_SIBLINGS);
@@ -1389,7 +1372,6 @@ async fn dispatch_pooling(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_pooling_batch(
     selection: SystemOneExecutionSelection,
     config: PoolingDecisionConfig,
@@ -1398,7 +1380,6 @@ async fn run_pooling_batch(
     request_id: String,
     parent_context: Arc<dyn AsyncEngineContext>,
     request: Arc<CanonicalRequest>,
-    effective_temperature: f64,
 ) -> Result<(usize, Vec<(usize, QuestionOutcome)>), DispatchError> {
     selection.validate_dispatch(None).map_err(|_| {
         DispatchError::unavailable("selected worker revision is no longer available")
@@ -1415,31 +1396,23 @@ async fn run_pooling_batch(
         "token_classify"
     };
     let pooling_req = build_pooling_request(&selection.canonical_model, batch.token_ids, task);
-    let branch_id = format!("{request_id}-p{batch_idx}");
-    let context = Context::with_id_and_metadata(pooling_req, branch_id, Default::default());
-    let branch_context = context.context();
-    parent_context.link_child(branch_context.clone());
-    if parent_context.is_killed() {
-        branch_context.kill();
-        return Err(DispatchError::cancelled());
-    }
+    let context = Context::with_id_and_metadata(
+        pooling_req,
+        format!("{request_id}-p{batch_idx}"),
+        Default::default(),
+    );
+    link_child_or_cancelled(&parent_context, context.context())?;
     let mut stream = run_until_killed(parent_context.as_ref(), pooling_engine.generate(context))
         .await
         .ok_or_else(DispatchError::cancelled)?
         .map_err(|cause| backend_error::classify(cause.as_ref()))?;
-    let stream_context = stream.context();
-    parent_context.link_child(stream_context.clone());
-    if parent_context.is_killed() {
-        stream_context.kill();
-        return Err(DispatchError::cancelled());
-    }
+    link_child_or_cancelled(&parent_context, stream.context())?;
 
     let mut response = None;
-    loop {
-        let frame = run_until_killed(parent_context.as_ref(), stream.next())
-            .await
-            .ok_or_else(DispatchError::cancelled)?;
-        let Some(frame) = frame else { break };
+    while let Some(frame) = run_until_killed(parent_context.as_ref(), stream.next())
+        .await
+        .ok_or_else(DispatchError::cancelled)?
+    {
         if let Some(payload) = frame.into_data().map_err(stream_error)? {
             if response.replace(payload).is_some() {
                 return Err(DispatchError::malformed(
@@ -1463,6 +1436,7 @@ async fn run_pooling_batch(
     )
     .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
 
+    let effective_temperature = config.temperature * request.temperature;
     let mut outcomes = Vec::with_capacity(batch.question_indices.len());
     for (&ordinal, row) in batch.question_indices.iter().zip(&rows) {
         let question = request
