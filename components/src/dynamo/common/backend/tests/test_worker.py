@@ -50,6 +50,21 @@ def _clear_plane_env(monkeypatch):
         monkeypatch.delenv(name)
 
 
+async def test_tls_refusal_preserves_the_host_response_plane(monkeypatch):
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    monkeypatch.setenv("DYN_TCP_TLS_INSECURE", "true")
+    config = worker_module.WorkerConfig(
+        namespace="test",
+        configure_logging=False,
+        discovery_backend="mem",
+        request_plane="velo",
+        response_plane="velo",
+    )
+    with pytest.raises(Exception, match="(?i)velo"):
+        await worker_module.Worker(MagicMock(), config).run()
+    assert os.environ["DYN_RESPONSE_PLANE"] == "quic"
+
+
 async def test_run_rejects_velo_request_with_tcp_response_before_env_write(monkeypatch):
     _clear_plane_env(monkeypatch)
     monkeypatch.setenv("DYN_RESPONSE_PLANE", "velo")

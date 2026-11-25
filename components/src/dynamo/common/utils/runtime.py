@@ -53,7 +53,8 @@ def create_runtime(
 
     Args:
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
-        request_plane: Request distribution method (nats, tcp).
+        request_plane: Request distribution method (nats, tcp, or velo). velo
+            requires the velo response plane.
         event_plane: Event publishing method (nats, zmq). When None, the Rust
             runtime reads DYN_EVENT_PLANE and defaults to ZMQ.
         use_kv_events: Deprecated. NATS enablement is now determined automatically

@@ -238,7 +238,11 @@ class Worker:
                 stacklevel=2,
             )
 
-        request_plane = normalize_plane(self.config.request_plane) or "tcp"
+        # Keep an empty value as it is: the runtime refuses it, where "tcp"
+        # would start a worker on a plane the caller did not ask for.
+        request_plane = normalize_plane(self.config.request_plane)
+        if request_plane is None:
+            request_plane = "tcp"
         response_plane = (
             normalize_plane(self.config.response_plane)
             or normalize_plane(os.environ.get("DYN_RESPONSE_PLANE"))
@@ -248,6 +252,7 @@ class Worker:
         # caller must not change the process environment on a configuration
         # error.
         validate_request_plane(request_plane, response_plane)
+        previous_response_plane = os.environ.get("DYN_RESPONSE_PLANE")
         if response_plane is not None:
             if response_plane not in {"tcp", "quic", "velo"}:
                 raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
@@ -296,4 +301,13 @@ class Worker:
         # LLMEngine. The Rust Worker validates model_input against the kind.
         is_raw = isinstance(self.engine, RawEngine)
         worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
-        await worker.run()
+        try:
+            await worker.run()
+        except BaseException:
+            # The runtime can still refuse the pair, for example when a TLS
+            # setting rules velo out. Leave the caller's environment as it was.
+            if previous_response_plane is None:
+                os.environ.pop("DYN_RESPONSE_PLANE", None)
+            else:
+                os.environ["DYN_RESPONSE_PLANE"] = previous_response_plane
+            raise

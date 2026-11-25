@@ -99,6 +99,25 @@ def test_reads_the_argument_list_of_another_mocker(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
+async def test_mocker_refuses_an_explicitly_empty_request_plane(monkeypatch):
+    from dynamo.common.utils.runtime import create_runtime
+
+    monkeypatch.setenv("DYN_REQUEST_PLANE", "")
+    try:
+        args = parse_args(["--discovery-backend", "mem"])
+        runtime, _ = create_runtime(
+            args.discovery_backend, args.request_plane, response_plane="tcp"
+        )
+    except SystemExit as error:
+        assert error.code == 2
+    except Exception as error:
+        assert "request plane" in str(error).lower()
+    else:
+        runtime.shutdown()
+        pytest.fail(f"empty DYN_REQUEST_PLANE started a {args.request_plane!r} runtime")
+
+
 def test_conflicting_uses_are_an_error_of_the_given_parser():
     class Raising(argparse.ArgumentParser):
         def error(self, message):
