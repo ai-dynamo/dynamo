@@ -23,6 +23,7 @@ from pathlib import Path
 CAPACITY = 16 * 1024 * 1024
 MAX_FRAME = 2 * 1024 * 1024
 _LENGTH = struct.Struct("!I")
+_PEERCRED = struct.Struct("iII")
 
 
 def transport():
@@ -78,10 +79,10 @@ class InProcessChannel:
                 )
             if len(self.queue) >= self.max_records:
                 raise RuntimeError("Duru accounting queue overflow")
+            if self.recording is not None:
+                self.recording.submit(kind, value)
             self.queue.append(frame)
             self.pending_bytes += len(frame)
-        if self.recording is not None:
-            self.recording.submit(kind, value)
 
     def read(self, budget=4 * 1024 * 1024):
         frames = []
@@ -118,17 +119,21 @@ class Sender:
         self.error = None
         self.peer = None
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bound = False
         try:
             self.listener.bind(str(path))
+            bound = True
             self.listener.listen(1)
             self.listener.settimeout(0.1)
+            self.thread = threading.Thread(
+                target=self._send, name="duru-events", daemon=True
+            )
+            self.thread.start()
         except BaseException:
             self.listener.close()
+            if bound:
+                Path(path).unlink(missing_ok=True)
             raise
-        self.thread = threading.Thread(
-            target=self._send, name="duru-events", daemon=True
-        )
-        self.thread.start()
 
     def check(self):
         if self.error is not None:
@@ -150,13 +155,13 @@ class Sender:
                 raise RuntimeError(
                     "Duru accounting buffer overflow; scorer must catch up"
                 )
-            try:
-                self.queue.put_nowait(frame)
-            except queue.Full as exc:
-                raise RuntimeError("Duru accounting queue overflow") from exc
-            self.pending_bytes += len(frame)
+            # Other submitters and close are gated by this lock; only draining can race.
+            if self.queue.full():
+                raise RuntimeError("Duru accounting queue overflow")
             if self.recording is not None:
                 self.recording.submit(kind, value)
+            self.queue.put_nowait(frame)
+            self.pending_bytes += len(frame)
 
     def _send(self):
         connection = None
@@ -325,17 +330,21 @@ class ScorePublisher:
         self._stop = threading.Event()
         self._error = None
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bound = False
         try:
             self._listener.bind(str(path))
+            bound = True
             self._listener.listen(16)
             self._listener.settimeout(0.1)
+            self._thread = threading.Thread(
+                target=self._serve, name="duru-score-publisher", daemon=True
+            )
+            self._thread.start()
         except BaseException:
             self._listener.close()
+            if bound:
+                self._path.unlink(missing_ok=True)
             raise
-        self._thread = threading.Thread(
-            target=self._serve, name="duru-score-publisher", daemon=True
-        )
-        self._thread.start()
 
     def publish(self, snapshot):
         if self._error is not None:
@@ -441,6 +450,15 @@ class ScoreSubscriber:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
                     peer.settimeout(0.2)
                     peer.connect(self._path)
+                    # Authenticate each connected peer before decoding pickle data.
+                    credentials = peer.getsockopt(
+                        socket.SOL_SOCKET, socket.SO_PEERCRED, _PEERCRED.size
+                    )
+                    _, uid, _ = _PEERCRED.unpack(credentials)
+                    if uid != os.getuid():
+                        raise PermissionError(
+                            "Duru score server belongs to another user"
+                        )
                     size = _LENGTH.unpack(_receive(peer, _LENGTH.size))[0]
                     if size > MAX_FRAME:
                         raise ValueError(

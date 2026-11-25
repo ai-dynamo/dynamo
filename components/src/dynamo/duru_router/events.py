@@ -63,10 +63,18 @@ class AsyncJournal:
             )
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous)
-        self.thread = threading.Thread(
-            target=self._send, name="duru-events", daemon=True
-        )
-        self.thread.start()
+        try:
+            self.thread = threading.Thread(
+                target=self._send, name="duru-events", daemon=True
+            )
+            self.thread.start()
+        except BaseException:
+            self.closed = True
+            self.proc.kill()
+            self.proc.wait(timeout=5)
+            self.proc.stdin.close()
+            self.proc.stdout.close()
+            raise
         atexit.register(self.close)
 
     def check(self):

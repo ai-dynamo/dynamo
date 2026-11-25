@@ -3,18 +3,27 @@
 
 """Score calculation, router-owned accounting, and lifecycle regressions."""
 
+import gc
 import json
 import tempfile
 import threading
 import time
+import weakref
+from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
 from dynamo.duru_router import scoring
 from dynamo.duru_router.scoring import Ingress, LiveU, priority_key, run
-from dynamo.duru_router.tests.helpers import arrival_record, configuration, event_feeds
+from dynamo.duru_router.tests.helpers import (
+    Tail,
+    arrival_record,
+    configuration,
+    event_feeds,
+)
 from dynamo.duru_router.tests.helpers import memory_mode as memory_mode
 from dynamo.duru_router.tests.helpers import replay_accounting, work_step
 
@@ -25,6 +34,52 @@ def make_book(capacity=4):
     book = LiveU(capacity, {})
     book.cost = lambda phase, p, d, k: 2.0 if phase == "prefill" else 1.0
     return book
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("capacity", [0, -1, True, 1.5, "1"])
+def test_invalid_capacity_is_rejected(capacity):
+    with pytest.raises(ValueError, match="Capacity must be a positive integer"):
+        LiveU(capacity, {})
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "request_id,root,agent,prompt_tokens,message",
+    [
+        ("q", "root", "agent", 8, "Request ID already active"),
+        ("new", "other", "agent", 8, "Agent root changed"),
+        ("new", "root", "agent", 0, "Prompt tokens"),
+        ("new", "root", "agent", -1, "Prompt tokens"),
+        ("new", "root", "agent", True, "Prompt tokens"),
+        ("new", "root", "agent", 1.5, "Prompt tokens"),
+    ],
+)
+def test_invalid_arrival_does_not_advance_or_mutate_accounting(
+    request_id, root, agent, prompt_tokens, message
+):
+    book = make_book()
+    book.submit("q", "root", "agent", 8, 10)
+    before = deepcopy(vars(book))
+    with pytest.raises(ValueError, match=message):
+        book.submit(request_id, root, agent, prompt_tokens, 20)
+    assert vars(book) == before
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_regressing_clock_does_not_rewind_entitlement():
+    book = make_book()
+    book.submit("q", "root", "agent", 8, 10)
+    book.advance(20)
+    with pytest.raises(ValueError, match="Accounting time regressed"):
+        book.advance(19)
+    assert book.last == 20
+    assert book.entitlement == {"root": 10}
+    book.advance(21)
+    assert book.entitlement == {"root": 11}
 
 
 @pytest.mark.pre_merge
@@ -150,6 +205,17 @@ def make_grid_book():
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+def test_cost_cache_does_not_retain_finished_accounting_session():
+    book = make_grid_book()
+    book.cost("decode", 1, 4, 5)
+    reference = weakref.ref(book)
+    del book
+    gc.collect()
+    assert reference() is None
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
 def test_grid_edges_and_extrapolated_prefill_decode():
     book = make_grid_book()
     for p, d in ((1, 0), (2, 2), (3, 4), (5, 2), (2, 8), (5, 8)):
@@ -239,6 +305,35 @@ def read_rows(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_tail_retries_partial_record_and_rejects_truncation(tmp_path):
+    path = tmp_path / "events.jsonl"
+    row = dict(sequence=1, time=10, event="u_clock")
+    path.write_text(json.dumps(row))
+    tail = Tail(path)
+    assert tail.read() == []
+    assert tail.offset == 0
+    path.write_text(json.dumps(row) + "\n")
+    assert tail.read() == [row]
+    path.write_text("")
+    with pytest.raises(ValueError, match="Journal truncated"):
+        tail.read()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_tail_rejects_sequence_gap_before_updating_progress(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps(dict(sequence=2, time=10, event="footer")) + "\n")
+    tail = Tail(path)
+    with pytest.raises(ValueError, match="Journal gap"):
+        tail.read()
+    assert tail.sequence == 0
+    assert tail.received_through == 0
+    assert not tail.closed
+
+
 @pytest.fixture
 def config(tmp_path):
     return configuration(tmp_path)
@@ -323,6 +418,120 @@ def test_invalid_worker_configuration_is_rejected(config, monkeypatch):
 def test_live_accounting_rejects_journal_transport(config):
     with pytest.raises(ValueError, match="requires IPC"):
         run(config[0])
+
+
+@pytest.fixture
+def cleanup_participants(config, monkeypatch):
+    path, cfg = config
+    cfg["ledgers"].append(str(path.parent / "second-worker.jsonl"))
+    path.write_text(json.dumps(cfg))
+    monkeypatch.setenv("DURU_RECORD_EVENTS", "1")
+    sources = [
+        SimpleNamespace(read=lambda: [], close=Mock(), closed=False, received_through=0)
+        for _ in range(3)
+    ]
+    audit = SimpleNamespace(submit=Mock(), close=Mock())
+    publisher = SimpleNamespace(publish=Mock(), close=Mock())
+    source_factory = Mock(side_effect=sources)
+    audit_factory = Mock(return_value=audit)
+    publisher_factory = Mock(return_value=publisher)
+    monkeypatch.setattr(scoring, "EventStreamReader", source_factory)
+    monkeypatch.setattr(scoring, "open_journal", audit_factory)
+    monkeypatch.setattr(scoring, "ScorePublisher", publisher_factory)
+    stop = threading.Event()
+    stop.set()
+    return SimpleNamespace(
+        path=path,
+        stop=stop,
+        sources=sources,
+        audit=audit,
+        publisher=publisher,
+        source_factory=source_factory,
+        audit_factory=audit_factory,
+        publisher_factory=publisher_factory,
+        router_publish=Mock(),
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_accounting_rejects_late_work_before_charging_it(
+    cleanup_participants, monkeypatch
+):
+    participants = cleanup_participants
+    book = make_book()
+    book.submit("q", "root", "agent", 8, 90)
+    book.advance(100)
+    before = deepcopy(vars(book))
+    monkeypatch.setattr(scoring, "LiveU", Mock(return_value=book))
+    for source in participants.sources:
+        source.received_through = 100
+    participants.sources[1].read = Mock(
+        return_value=[dict(event="accepted_output", steps=[work_step(end=99)])]
+    )
+    with pytest.raises(ValueError, match="Late compact event"):
+        run(participants.path, participants.stop)
+    assert vars(book) == before
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["audit", "source", "router_publish", "publisher"])
+def test_accounting_attempts_every_cleanup_after_failure(cleanup_participants, failure):
+    participants = cleanup_participants
+    failing_close = {
+        "audit": participants.audit.close,
+        "source": participants.sources[1].close,
+        "router_publish": participants.router_publish,
+        "publisher": participants.publisher.close,
+    }[failure]
+    failing_close.side_effect = RuntimeError("injected cleanup failure")
+    with pytest.raises(RuntimeError, match="injected cleanup failure"):
+        run(
+            participants.path,
+            participants.stop,
+            router_publish=participants.router_publish,
+        )
+    participants.audit.close.assert_called_once_with()
+    for source in participants.sources:
+        source.close.assert_called_once_with()
+    participants.router_publish.assert_called_once_with({})
+    participants.publisher.close.assert_called_once_with()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["source", "audit", "publisher"])
+def test_accounting_closes_acquired_resources_after_setup_failure(
+    cleanup_participants, failure
+):
+    participants = cleanup_participants
+    error = RuntimeError("injected setup failure")
+    if failure == "source":
+        participants.source_factory.side_effect = [participants.sources[0], error]
+    else:
+        factory = {
+            "audit": participants.audit_factory,
+            "publisher": participants.publisher_factory,
+        }[failure]
+        factory.side_effect = error
+    with pytest.raises(RuntimeError, match="injected setup failure"):
+        run(
+            participants.path,
+            participants.stop,
+            router_publish=participants.router_publish,
+        )
+    acquired = 1 if failure == "source" else 3
+    for source in participants.sources[:acquired]:
+        source.close.assert_called_once_with()
+    for source in participants.sources[acquired:]:
+        source.close.assert_not_called()
+    if failure == "publisher":
+        participants.audit.close.assert_called_once_with()
+    else:
+        participants.audit.close.assert_not_called()
+    participants.publisher.close.assert_not_called()
+    participants.router_publish.assert_called_once_with({})
 
 
 @pytest.mark.usefixtures("journal_validation_mode")
@@ -478,7 +687,8 @@ def test_accounting_failure_invalidates_local_scores(monkeypatch):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(1)  # About 0.2s per case locally; round up the 3x allowance.
 @pytest.mark.parametrize(
     "record,diagnostics", [(False, False), (False, True), (True, False)]
 )
@@ -491,6 +701,9 @@ def test_router_owned_accounting_matches_worker_snapshot(
     monkeypatch.setenv("DURU_RECORD_EVENTS", "1" if record else "0")
     monkeypatch.setenv("DURU_DIAGNOSTICS", "1" if diagnostics else "0")
     now = time.monotonic()
+    # Keep freshness independent of IPC startup time while real test deadlines
+    # continue to use this module's clock.
+    monkeypatch.setattr(scoring, "time", SimpleNamespace(monotonic=lambda: now + 0.01))
     ingress_rows = [
         arrival_record(now - 0.01, "q", "p", root="r", agent="a"),
         dict(event="footer", time=now + 0.002),
@@ -520,14 +733,18 @@ def test_router_owned_accounting_matches_worker_snapshot(
             while time.monotonic() < deadline:
                 snapshot = owner.reader.refresh()
                 engine_snapshot = engine_reader.refresh()
-                if snapshot.get("accepted_steps") == 1 and engine_snapshot.get(
-                    "requests"
+                if (
+                    snapshot.get("accepted_steps") == 1
+                    and engine_snapshot.get("requests")
+                    and engine_snapshot["observation_time"]
+                    == snapshot["observation_time"]
                 ):
                     break
                 time.sleep(0.01)
             else:
                 pytest.fail("Router accounting failed to publish")
             assert not Path(cfg["scores"]).exists()
+            assert engine_snapshot["observation_time"] == snapshot["observation_time"]
             assert engine_snapshot["requests"] == {
                 rid: {"score": row["score"]}
                 for rid, row in snapshot["requests"].items()
@@ -546,7 +763,9 @@ def test_router_owned_accounting_matches_worker_snapshot(
             )
             assert owner.reader.refresh()["programs"]["p"]["U"] is not None
         finally:
-            owner.close()
-            engine_reader.close()
+            try:
+                owner.close()
+            finally:
+                engine_reader.close()
         assert not owner._thread.is_alive()
         assert owner._snapshot == {}

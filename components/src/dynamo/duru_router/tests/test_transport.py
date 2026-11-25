@@ -42,6 +42,45 @@ pytestmark = [pytest.mark.gpu_0]
 
 
 @pytest.mark.pre_merge
+@pytest.mark.integration
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("factory", [Sender, ScorePublisher])
+@pytest.mark.parametrize("existing_path", [False, True])
+def test_publisher_start_failure_closes_listener_and_only_its_path(
+    tmp_path, factory, existing_path
+):
+    path = channel_path(tmp_path / "startup")
+    if existing_path:
+        path.write_text("existing owner")
+    listeners = []
+    original_socket = socket.socket
+
+    def make_socket(*args, **kwargs):
+        listener = original_socket(*args, **kwargs)
+        listeners.append(listener)
+        return listener
+
+    try:
+        with (
+            patch.object(transport.socket, "socket", side_effect=make_socket),
+            patch.object(
+                threading.Thread, "start", side_effect=RuntimeError("start failed")
+            ),
+        ):
+            with pytest.raises(OSError if existing_path else RuntimeError):
+                factory(path)
+        assert len(listeners) == 1
+        assert listeners[0].fileno() == -1
+        if existing_path:
+            assert path.read_text() == "existing owner"
+        else:
+            assert not path.exists()
+    finally:
+        for listener in listeners:
+            listener.close()
+
+
+@pytest.mark.pre_merge
 @pytest.mark.unit
 def test_local_ingress_needs_no_socket_thread_or_directory(tmp_path, monkeypatch):
     def unexpected(*args, **kwargs):
@@ -122,6 +161,75 @@ def test_local_channel_snapshots_values_and_drains_after_close():
 
 
 @pytest.mark.pre_merge
+@pytest.mark.integration
+@pytest.mark.timeout(15)
+@pytest.mark.parametrize("ipc", [False, True])
+def test_recording_rejection_never_publishes_live_event(tmp_path, ipc):
+    recorded = []
+
+    def record(kind, value):
+        if value["event"] == "rejected":
+            raise RuntimeError("recording queue overflow")
+        recorded.append(dict(value))
+
+    recording = SimpleNamespace(submit=record, close=lambda: None)
+    with ExitStack() as receivers, ExitStack() as cleanup:
+        if ipc:
+            path = channel_path(tmp_path / "recorded-events")
+            feed = Sender(path, recording=recording)
+            cleanup.callback(feed.close)
+            receiver = Receiver(path)
+            receivers.callback(receiver.close)
+        else:
+            feed = InProcessChannel(recording=recording)
+            cleanup.callback(feed.close)
+            receiver = feed
+        rows = [dict(sequence=1, event="u_clock"), dict(sequence=2, event="footer")]
+        feed.submit("record", rows[0])
+        with pytest.raises(RuntimeError, match="recording queue overflow"):
+            feed.submit("record", dict(sequence=2, event="rejected"))
+        feed.submit("record", rows[1])
+        feed.close()
+        assert receiver.read() == rows
+        assert recorded == rows
+        assert feed.pending_bytes == 0
+
+
+@pytest.mark.pre_merge
+@pytest.mark.integration
+@pytest.mark.timeout(15)
+@pytest.mark.parametrize("ipc", [False, True])
+def test_live_queue_rejection_never_records_event(tmp_path, ipc):
+    recorded = []
+    recording = SimpleNamespace(
+        submit=lambda kind, value: recorded.append(dict(value)), close=lambda: None
+    )
+    with ExitStack() as receivers, ExitStack() as cleanup:
+        if ipc:
+            path = channel_path(tmp_path / "full-recorded-events")
+            feed = Sender(path, recording=recording)
+            feed.queue = queue.Queue(maxsize=1)
+        else:
+            feed = InProcessChannel(recording=recording, max_records=1)
+        cleanup.callback(feed.close)
+        row = dict(sequence=1, event="footer")
+        try:
+            feed.submit("record", row)
+            with pytest.raises(RuntimeError, match="queue overflow"):
+                feed.submit("record", dict(sequence=2, event="rejected"))
+        finally:
+            if ipc:
+                # Connect only after the capacity check so the sender cannot drain it.
+                receiver = Receiver(path)
+                receivers.callback(receiver.close)
+            else:
+                receiver = feed
+            feed.close()
+        assert recorded == [row]
+        assert receiver.read() == [row]
+
+
+@pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.parametrize("limit", ["bytes", "records"])
 def test_local_channel_overflow_preserves_accepted_records(limit):
@@ -162,11 +270,11 @@ def test_local_channel_rejects_oversized_frames(monkeypatch):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.timeout(15)
 def test_local_channel_concurrent_producer_and_consumer():
     channel = InProcessChannel()
     started = threading.Event()
     first_read = threading.Event()
-    errors = []
 
     def produce():
         try:
@@ -176,22 +284,19 @@ def test_local_channel_concurrent_producer_and_consumer():
                     started.set()
                     if not first_read.wait(5):
                         raise TimeoutError("Consumer did not read the first record")
-        except Exception as exc:
-            errors.append(exc)
         finally:
+            started.set()
             channel.close()
 
-    producer = threading.Thread(target=produce)
-    producer.start()
     rows = []
-    try:
-        assert started.wait(5)
-        rows.extend(channel.read())
-    finally:
-        first_read.set()
-        producer.join(5)
-    assert not producer.is_alive()
-    assert not errors
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        producer = executor.submit(produce)
+        try:
+            assert started.wait(5)
+            rows.extend(channel.read())
+        finally:
+            first_read.set()
+            producer.result(timeout=5)
     rows.extend(channel.read())
     assert [row["number"] for row in rows] == list(range(100))
     assert channel.pending_bytes == 0
@@ -273,7 +378,8 @@ def test_receiver_retains_partial_frames_without_blocking(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(10)
 def test_receiver_budget_preserves_fifo_and_footer(event_connection):
     receiver, peer = event_connection
     rows = [
@@ -289,7 +395,8 @@ def test_receiver_budget_preserves_fifo_and_footer(event_connection):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(10)
 @pytest.mark.parametrize("valid_prefix", [False, True])
 @pytest.mark.parametrize(
     "suffix, error, message",
@@ -372,6 +479,7 @@ finally:
 
 @pytest.mark.pre_merge
 @pytest.mark.integration
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("record", [False, True])
 def test_sender_close_rejects_late_records_and_drains(tmp_path, record):
     journal = open_journal(tmp_path, name="recording") if record else None
@@ -415,7 +523,8 @@ def test_sender_close_rejects_late_records_and_drains(tmp_path, record):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(15)
 def test_sender_close_drains_full_queue_without_holding_submit_lock(
     tmp_path, monkeypatch
 ):
@@ -501,14 +610,26 @@ def test_memory_sequence_gap_fails_closed(tmp_path):
 
 
 def run_memory(path, *, ingress_source=None):
-    stop = threading.Event()
-    timer = threading.Timer(0.3, stop.set)
-    timer.start()
-    try:
+    sources = []
+    expected = 1 + len(json.loads(Path(path).read_text())["ledgers"])
+    deadline = time.monotonic() + 5
+
+    def reader(*args, **kwargs):
+        source = EventStreamReader(*args, **kwargs)
+        sources.append(source)
+        return source
+
+    class CompletedInputs(threading.Event):
+        def is_set(self):
+            if len(sources) == expected and all(source.closed for source in sources):
+                self.set()
+            if not super().is_set() and time.monotonic() >= deadline:
+                raise TimeoutError("Accounting did not receive all input footers")
+            return super().is_set()
+
+    stop = CompletedInputs()
+    with patch.object(scoring, "EventStreamReader", side_effect=reader):
         run(path, stop, ingress_source=ingress_source)
-    finally:
-        timer.cancel()
-        timer.join()
 
 
 @pytest.mark.pre_merge
@@ -545,7 +666,8 @@ def test_root_cleanup_retains_tool_gap_then_releases_all_history():
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("completed", [False, True])
 @pytest.mark.parametrize("in_process", [False, True])
 def test_identical_events_have_identical_u_in_ipc_and_recorded_replay(
@@ -621,7 +743,8 @@ def test_identical_events_have_identical_u_in_ipc_and_recorded_replay(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(15)
 @pytest.mark.parametrize("producer", ["ingress", "local_ingress", "worker"])
 def test_pending_limit_applies_with_missing_peer_watermark(
     tmp_path, monkeypatch, producer
@@ -752,6 +875,54 @@ def test_latest_only_projection_and_no_score_file(endpoint):
 
 @pytest.mark.pre_merge
 @pytest.mark.integration
+@pytest.mark.timeout(20)
+@pytest.mark.parametrize("rejection", ["wrong_uid", "credentials_unavailable"])
+def test_score_server_identity_checked_before_decode(endpoint, monkeypatch, rejection):
+    _, address = endpoint
+    trusted = threading.Event()
+    original_getsockopt = socket.socket.getsockopt
+
+    def getsockopt(peer, level, option, *args):
+        credentials = original_getsockopt(peer, level, option, *args)
+        if level == socket.SOL_SOCKET and option == socket.SO_PEERCRED:
+            if not trusted.is_set():
+                if rejection == "credentials_unavailable":
+                    raise OSError("Peer credentials unavailable")
+                pid, uid, gid = struct.unpack("iII", credentials)
+                return struct.pack("iII", pid, uid + 1, gid)
+        return credentials
+
+    monkeypatch.setattr(socket.socket, "getsockopt", getsockopt)
+    with ExitStack() as cleanup:
+        publisher = ScorePublisher(address)
+        cleanup.callback(publisher.close)
+        publisher.publish(snapshot(7))
+        decoded = cleanup.enter_context(
+            patch.object(pickle, "loads", wraps=pickle.loads)
+        )
+        reader = Reader()
+        cleanup.callback(reader.close)
+        wait(reader, lambda s: bool(s) or reader._subscriber.failures > 0)
+        assert reader._subscriber.failures > 0
+        assert reader.refresh() == {}
+        decoded.assert_not_called()
+
+        trusted.set()
+        wait(reader, lambda s: s.get("requests", {}).get("r", {}).get("score") == 7)
+        assert decoded.called
+
+        failures = reader._subscriber.failures
+        trusted.clear()
+        wait(reader, lambda s: reader._subscriber.failures > failures)
+        assert reader.refresh() == {}
+        calls = decoded.call_count
+        failures = reader._subscriber.failures
+        wait(reader, lambda s: reader._subscriber.failures > failures)
+        assert decoded.call_count == calls
+
+
+@pytest.mark.pre_merge
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "invalid_fields",
     [
@@ -809,16 +980,15 @@ def test_missing_stale_future_and_disconnect_never_use_file(endpoint, monkeypatc
         assert reader.refresh() == {}
         publisher = ScorePublisher(address)
         publisher.publish(snapshot(1, time.monotonic() - 10))
-        wait(reader, lambda s: reader.reason == "stale_snapshot")
+        assert wait(reader, lambda s: reader.reason == "stale_snapshot") == {}
         assert reader.snapshot["requests"]["r"]["score"] == 1
         publisher.publish(snapshot(2, time.monotonic() + 10))
-        wait(reader, lambda s: reader.reason == "future_snapshot")
+        assert wait(reader, lambda s: reader.reason == "future_snapshot") == {}
         publisher.publish(snapshot(3))
         wait(reader, lambda s: bool(s))
         publisher.close()
         publisher = None
-        wait(reader, lambda s: not s)
-        assert reader.reason == "missing_snapshot"
+        assert wait(reader, lambda s: reader.reason == "missing_snapshot") == {}
     finally:
         reader.close()
         if publisher is not None:
@@ -834,6 +1004,7 @@ def test_scores_reach_separate_worker_processes(endpoint):
 from dynamo.duru_router.scoring import Reader
 r=Reader();deadline=time.monotonic()+5
 try:
+ print('READY',flush=True)
  while time.monotonic()<deadline:
   s=r.refresh()
   if s.get('requests',{}).get('r',{}).get('score')==7:
@@ -845,7 +1016,6 @@ finally: r.close()
     with ExitStack() as cleanup:
         publisher = ScorePublisher(address)
         cleanup.callback(publisher.close)
-        publisher.publish(snapshot(7))
         processes = []
         for _ in range(3):
             process = cleanup.enter_context(
@@ -859,6 +1029,14 @@ finally: r.close()
             # Kill unfinished workers before Popen.__exit__ waits and closes pipes.
             cleanup.callback(process.kill)
             processes.append(process)
+        deadline = time.monotonic() + 5
+        for process in processes:
+            ready, _, _ = select.select(
+                [process.stdout], [], [], max(0, deadline - time.monotonic())
+            )
+            assert ready, "Worker did not become ready"
+            assert process.stdout.readline() == "READY\n"
+        publisher.publish(snapshot(7))
         for process in processes:
             output, error = process.communicate(timeout=10)
             assert process.returncode == 0, error
@@ -891,13 +1069,12 @@ def test_bad_frame_fails_closed(endpoint, frame):
             with peer:
                 peer.sendall(frame)
 
-    thread = threading.Thread(target=serve)
-    thread.start()
-    reader = Reader()
-    try:
-        wait(reader, lambda s: reader._subscriber.failures > 0)
-        assert reader.refresh() == {}
-    finally:
-        reader.close()
-        thread.join(3)
-    assert not thread.is_alive()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        serving = executor.submit(serve)
+        reader = Reader()
+        try:
+            wait(reader, lambda s: reader._subscriber.failures > 0)
+            assert reader.refresh() == {}
+        finally:
+            reader.close()
+            serving.result(timeout=3)

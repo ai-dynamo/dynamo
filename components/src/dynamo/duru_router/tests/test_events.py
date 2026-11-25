@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -67,7 +68,9 @@ def test_compact_coordinates_and_clock_ordering(tmp_path):
     assert accepted[0]["p"] == 12
     assert "prompt_tokens" not in accepted[0]
     assert all(row["time"] <= end for row in rows[:index] if row["event"] == "u_clock")
-    assert any(row["event"] == "u_clock" for row in rows[index + 1 :])
+    assert any(
+        row["event"] == "u_clock" and row["time"] > end for row in rows[index + 1 :]
+    )
     assert tail.sequence == len(rows)
     assert tail.received_through > end
 
@@ -220,14 +223,52 @@ def test_journal_shutdown_rejects_late_records_and_drains_accepted(
 
 def test_writer_failure_surfaces_and_close_releases_resources(tmp_path):
     journal = open_journal(tmp_path, name="events")
-    journal.proc.kill()
-    journal.proc.wait(timeout=5)
-    with pytest.raises(RuntimeError, match="writer is closed"):
-        journal.submit("record", {"event": "u_clock"})
-    with pytest.raises(RuntimeError):
-        journal.close()
+    try:
+        journal.proc.kill()
+        journal.proc.wait(timeout=5)
+        with pytest.raises(RuntimeError, match="writer is closed"):
+            journal.submit("record", {"event": "u_clock"})
+    finally:
+        with pytest.raises(RuntimeError):
+            journal.close()
     assert journal.closed
     assert not journal.thread.is_alive()
+
+
+def test_journal_thread_start_failure_reaps_child(tmp_path):
+    processes = []
+    original_popen = subprocess.Popen
+
+    def popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    try:
+        with (
+            patch("dynamo.duru_router.events.subprocess.Popen", side_effect=popen),
+            patch.object(
+                threading.Thread, "start", side_effect=RuntimeError("start failed")
+            ),
+            patch("dynamo.duru_router.events.atexit.register") as register,
+            patch("dynamo.duru_router.events.atexit.unregister") as unregister,
+        ):
+            with pytest.raises(RuntimeError, match="start failed"):
+                open_journal(tmp_path, name="events")
+            register.assert_not_called()
+            unregister.assert_not_called()
+        assert len(processes) == 1
+        process = processes[0]
+        assert process.poll() is not None
+        assert process.stdin.closed
+        assert process.stdout.closed
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stdin.close()
+            process.stdout.close()
 
 
 @pytest.fixture(autouse=True)

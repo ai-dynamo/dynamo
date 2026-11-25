@@ -58,9 +58,12 @@ def predict_prefill_table(table, p, d, *, extrapolate=False):
 
 
 def predict(table, step):
-    """Continue edge slopes across outer ranges, flooring extrapolated costs at zero.
+    """Continue edge slopes across outer ranges without blending graph regimes.
 
-    In-grid interpolation and separation of graph regimes remain unchanged.
+    Invalid extrapolation falls back to the nearest calibrated boundary cost.
+    Below the decode grid, use the line from (0, 0) to the first measured point
+    instead, so short-context costs scale with K.
+    Valid interpolation and positive finite extrapolation remain unchanged.
     """
     if step["phase"] == "prefill":
         value = predict_prefill_table(table, step["p"], step["d"], extrapolate=True)
@@ -68,16 +71,24 @@ def predict(table, step):
             table["P"][0] <= step["p"] <= table["P"][-1]
             and table["D"][0] <= step["d"] <= table["D"][-1]
         )
+        if outside and (not math.isfinite(value) or value <= 0):
+            anchor_p = min(max(step["p"], table["P"][0]), table["P"][-1])
+            anchor_d = min(max(step["d"], table["D"][0]), table["D"][-1])
+            value = predict_prefill_table(table, anchor_p, anchor_d)
     elif step["phase"] == "decode":
         grid = table["grid"]
         axis = [row["K"] for row in grid]
         lo, hi, weight = bracket(axis, step["k"], extrapolate=True)
         value = (1 - weight) * grid[lo]["wall_ms"] + weight * grid[hi]["wall_ms"]
         outside = not axis[0] <= step["k"] <= axis[-1]
+        if outside and (not math.isfinite(value) or value <= 0):
+            value = (
+                grid[0]["wall_ms"] * (step["k"] / axis[0])
+                if step["k"] < axis[0]
+                else grid[-1]["wall_ms"]
+            )
     else:
         raise ValueError("Unknown calibration phase")
-    if outside:
-        value = max(0.0, value)
     return value, outside
 
 

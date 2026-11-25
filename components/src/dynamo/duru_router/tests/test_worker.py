@@ -140,6 +140,7 @@ def worker(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setenv("DURU_SCORES", "unused")
+    monkeypatch.delenv("DURU_ENABLE_SCORING", raising=False)
     monkeypatch.setenv("DURU_WORK_DIR", "unused")
     monkeypatch.setattr(module, "CompactFeed", Feed)
     return module
@@ -198,6 +199,54 @@ def test_native_queues_and_missing_scores_restored(scheduler, monkeypatch, fail)
     assert list(scheduler.waiting) == [missing, ready]
     assert list(scheduler.kv_holding_waiting) == [holder]
     assert scheduler.u_reader.pinned is None
+
+
+def test_calibration_without_scores_keeps_native_scheduling_and_work_records(
+    worker, monkeypatch
+):
+    monkeypatch.setenv("DURU_ENABLE_SCORING", "0")
+    monkeypatch.delenv("DURU_SCORES", raising=False)
+
+    def unexpected_reader():
+        pytest.fail("Calibration must not create a score reader")
+
+    monkeypatch.setattr(worker, "Reader", unexpected_reader)
+    scheduler = worker.DuruScheduler()
+    probe = Request(extra={"duru_request_id": "duru-calibration-probe"})
+    holder = Request("holder")
+    try:
+        scheduler.add_request(probe)
+        scheduler.waiting.append(probe)
+        scheduler.kv_holding_waiting.append(holder)
+        assert type(scheduler.waiting) is NativeQueue
+        assert type(scheduler.kv_holding_waiting) is NativeQueue
+        assert scheduler.schedule() == ([probe], [holder])
+        batch = scheduled(count=8)
+        scheduler._update_after_schedule(batch)
+        scheduler.update_from_output(batch, output(count=1))
+        event, fields = scheduler.compact_feed.events[0]
+        assert event == "accepted_output"
+        assert fields["steps"][0]["client_request_id"] == "duru-calibration-probe"
+        assert fields["steps"][0]["generated_tokens"] == 1
+    finally:
+        scheduler.shutdown()
+    assert scheduler.stopped
+    assert scheduler.compact_feed.closed
+
+
+@pytest.mark.parametrize("setting", [None, "1"])
+def test_serving_still_requires_score_channel(worker, monkeypatch, setting):
+    monkeypatch.delenv("DURU_SCORES", raising=False)
+    if setting is not None:
+        monkeypatch.setenv("DURU_ENABLE_SCORING", setting)
+    with pytest.raises(ValueError, match="DURU_SCORES"):
+        worker.DuruScheduler()
+
+
+def test_invalid_scoring_switch_is_rejected(worker, monkeypatch):
+    monkeypatch.setenv("DURU_ENABLE_SCORING", "invalid")
+    with pytest.raises(ValueError, match="DURU_ENABLE_SCORING"):
+        worker.DuruScheduler()
 
 
 def test_identity_and_priority_exclude_running_requests(scheduler, monkeypatch):

@@ -39,15 +39,25 @@ class Queue(FCFSRequestQueue):
 
 
 class DuruScheduler(AsyncScheduler):
-    """Preserve native scheduling while recording only work accepted by the engine."""
+    """Record accepted engine work, with score-based scheduling enabled by default.
+
+    Set DURU_ENABLE_SCORING=0 for isolated calibration: native scheduling runs
+    without a score reader while accepted-work recording remains enabled.
+    Use DURU_ACCOUNTING_TRANSPORT=journal to collect calibration work without
+    a live accounting consumer.
+    """
 
     def __init__(self, *args, **kwargs):
-        self.u_reader = Reader()
+        scoring = os.environ.get("DURU_ENABLE_SCORING", "1")
+        if scoring not in ("0", "1"):
+            raise ValueError("DURU_ENABLE_SCORING must be 0 or 1")
+        self.u_reader = Reader() if scoring == "1" else None
         super().__init__(*args, **kwargs)
         if self.num_spec_tokens or self.num_sampled_tokens_per_step != 1:
             raise ValueError("Duru requires non-speculative autoregressive generation")
-        self.waiting = Queue(self.waiting, self)
-        self.kv_holding_waiting = Queue(self.kv_holding_waiting, self)
+        if self.u_reader is not None:
+            self.waiting = Queue(self.waiting, self)
+            self.kv_holding_waiting = Queue(self.kv_holding_waiting, self)
         self._pending_work = {}
         self.compact_feed = CompactFeed(os.environ["DURU_WORK_DIR"])
 
@@ -79,6 +89,8 @@ class DuruScheduler(AsyncScheduler):
         return priority_key(score, request.arrival_time, index)
 
     def schedule(self, *args, **kwargs):
+        if self.u_reader is None:
+            return super().schedule(*args, **kwargs)
         snapshot = self.u_reader.refresh()
         held = []
         try:
@@ -198,4 +210,5 @@ class DuruScheduler(AsyncScheduler):
             try:
                 self.compact_feed.close()
             finally:
-                self.u_reader.close()
+                if self.u_reader is not None:
+                    self.u_reader.close()
