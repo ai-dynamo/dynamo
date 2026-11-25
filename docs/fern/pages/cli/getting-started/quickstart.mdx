@@ -81,22 +81,23 @@ Dynamo is backend-agnostic and Kubernetes-native without being Kubernetes-only. 
       -H "Content-Type: application/json" \
       -d '{"model": "Qwen/Qwen3-0.6B",
            "messages": [{"role": "user", "content": "Hello!"}],
-           "max_tokens": 50}'
+           "chat_template_kwargs": {"enable_thinking": false},
+           "temperature": 0,
+           "max_tokens": 128}'
     ```
 
-    ```json title="Response"
+    ```json title="Example response (excerpt)"
     {
-      "id": "chatcmpl-...",
-      "model": "Qwen/Qwen3-0.6B",
       "choices": [{
         "index": 0,
         "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
         "finish_reason": "stop"
-      }],
-      "usage": {"prompt_tokens": 9, "completion_tokens": 10, "total_tokens": 19}
+      }]
     }
     ```
     </CodeBlocks>
+
+    Look for a complete greeting in `choices[0].message.content` and a `finish_reason` of `stop`.
 
     <Info>
     Connection refused? The frontend takes a few seconds to start — retry. For production liveness and readiness probes, see [Health Check Reference](../../reference/observability/health-checks.mdx).
