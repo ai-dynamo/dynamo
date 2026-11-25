@@ -16,12 +16,9 @@ use tokio::{
     sync::{Mutex, OnceCell, Semaphore},
     time::Instant,
 };
-use velo::{Handler, PeerInfo};
+use velo::{Handler, InstanceId, PeerInfo, Velo, WorkerAddress, WorkerId};
 
-use super::{
-    PEER_HANDLER, REQUEST_HANDLER, STAGED_WINDOW, decode_identity, decode_worker_address,
-    encode_identity,
-};
+use super::{PEER_HANDLER, REQUEST_HANDLER, STAGED_WINDOW, decode_identity, decode_worker_address};
 use crate::{
     error::{DynamoError, ErrorType},
     pipeline::network::{ACK_UNAVAILABLE_PREFIX, velo_response::VeloResponseService},
@@ -30,6 +27,7 @@ use crate::{
 // Keep this below Velo's 30-second hello timeout.
 pub(in crate::pipeline::network) const HELLO_CAP: Duration = Duration::from_secs(25);
 const CONFIRMED: u64 = 1;
+const FAILURE_TTL: Duration = Duration::from_secs(1);
 
 pub(in crate::pipeline::network) struct PeerState {
     pub(in crate::pipeline::network) ready: OnceCell<()>,
@@ -37,6 +35,8 @@ pub(in crate::pipeline::network) struct PeerState {
     pub(in crate::pipeline::network) last_used: AtomicU64,
     pub(in crate::pipeline::network) pinned: AtomicBool,
     pub(in crate::pipeline::network) route: RouteState,
+    pub(in crate::pipeline::network) retired: AtomicBool,
+    pub(in crate::pipeline::network) registered_address: parking_lot::Mutex<Option<WorkerAddress>>,
     /// Limits staged sends in flight at the caller.
     pub(in crate::pipeline::network) staged: Semaphore,
 }
@@ -49,15 +49,35 @@ impl Default for PeerState {
             last_used: AtomicU64::new(0),
             pinned: AtomicBool::new(false),
             route: RouteState::default(),
+            retired: AtomicBool::new(false),
+            registered_address: parking_lot::Mutex::new(None),
             staged: Semaphore::new(STAGED_WINDOW),
         }
+    }
+}
+
+impl PeerState {
+    pub(in crate::pipeline::network) fn register(
+        &self,
+        velo: &Velo,
+        target: PeerInfo,
+    ) -> Result<()> {
+        let mut recorded = self.registered_address.lock();
+        anyhow::ensure!(
+            !self.retired.load(Ordering::Acquire),
+            "Velo request peer has departed"
+        );
+        let address = target.worker_address().clone();
+        velo.register_peer(target)?;
+        *recorded = Some(address);
+        Ok(())
     }
 }
 
 #[derive(Default)]
 pub(in crate::pipeline::network) struct RouteState {
     epoch: AtomicU64,
-    first_contact: Mutex<()>,
+    first_contact: Mutex<Option<(Instant, DynamoError)>>,
 }
 
 impl RouteState {
@@ -88,22 +108,49 @@ pub(in crate::pipeline::network) fn register_peer_handler(
     let handler = Handler::unary_handler(PEER_HANDLER, move |ctx| {
         let result = (|| {
             let identity = decode_identity(&ctx.payload)?;
-            anyhow::ensure!(
-                identity.instance_id.worker_id() == ctx.sender_worker_id(),
-                "sender identity mismatch"
-            );
+            let id = identity.instance_id;
+            check_identity(ctx.sender_instance_id(), ctx.sender_worker_id(), id)?;
             let address = decode_worker_address(identity.worker_address)?;
             let service = weak
                 .upgrade()
                 .ok_or_else(|| anyhow::anyhow!("worker is shutting down"))?;
             #[cfg(test)]
             service.peer_pin_calls.fetch_add(1, Ordering::Relaxed);
+            loop {
+                let peer = service.peer_state(id);
+                let mut recorded = peer.registered_address.lock();
+                let known = ctx.sender_instance_id();
+                check_identity(known, ctx.sender_worker_id(), id)?;
+                anyhow::ensure!(
+                    known.is_none()
+                        || recorded
+                            .as_ref()
+                            .is_none_or(|existing| existing == &address),
+                    "identity already registered"
+                );
 
-            // A sweep may have just removed the address. Pin before restoring it.
-            service.pin(identity.instance_id);
-            service
-                .velo
-                .register_peer(PeerInfo::new(identity.instance_id, address))
+                // The shard also orders this pin against the sweep's unregister.
+                let Some(was_pinned) = service.pin_current(id, &peer)? else {
+                    continue;
+                };
+                if known.is_none() {
+                    #[cfg(test)]
+                    if let Some(hook) = service.before_request_peer_register.lock().clone() {
+                        hook(id);
+                    }
+                    if let Err(error) = service
+                        .velo
+                        .register_peer(PeerInfo::new(id, address.clone()))
+                    {
+                        if !was_pinned {
+                            service.rollback_pin(id, &peer);
+                        }
+                        return Err(error);
+                    }
+                    *recorded = Some(address);
+                }
+                return Ok(());
+            }
         })();
         let ack = match result {
             Ok(()) => Bytes::new(),
@@ -115,32 +162,68 @@ pub(in crate::pipeline::network) fn register_peer_handler(
     service.velo.messenger().register_streaming_handler(handler)
 }
 
+fn check_identity(known: Option<InstanceId>, sender: WorkerId, claimed: InstanceId) -> Result<()> {
+    // The frame identity is a consistency check. It comes from the sender.
+    let matches = known.map_or_else(|| claimed.worker_id() == sender, |id| id == claimed);
+    anyhow::ensure!(matches, "sender identity mismatch");
+    Ok(())
+}
+
 pub(in crate::pipeline::network) async fn establish_route(
     service: &VeloResponseService,
-    target: &PeerInfo,
+    id: InstanceId,
+    address: &str,
     deadline: Instant,
 ) -> Result<(Arc<PeerState>, u64), DynamoError> {
-    let id = target.instance_id();
     if let Some(route) = service.confirmed_peer(id) {
         return Ok(route);
     }
 
-    let peer = service.pin(id);
+    let lease = service.reserve_peer(id);
+    let peer = &lease.peer;
     let epoch = {
-        let _contact = by_deadline(deadline, peer.route.first_contact.lock()).await?;
+        let mut recent = by_deadline(deadline, peer.route.first_contact.lock()).await?;
         if let Some(epoch) = peer.route.confirmed_epoch() {
             epoch
         } else {
-            contact(service, target, deadline, HELLO_CAP).await?;
+            if let Some((failed_at, cause)) = recent.as_ref()
+                && failed_at.elapsed() < FAILURE_TTL
+            {
+                return Err(cause.clone());
+            }
+            if let Err(cause) = contact(service, peer, id, address, deadline, HELLO_CAP).await {
+                if matches!(
+                    cause.error_type(),
+                    ErrorType::ConnectionTimeout
+                        | ErrorType::CannotConnect
+                        | ErrorType::WorkerUnavailable
+                ) {
+                    *recent = Some((Instant::now(), cause.clone()));
+                }
+                return Err(cause);
+            }
+            *recent = None;
+            let _address = peer.registered_address.lock();
+            service
+                .pin_current(id, peer)
+                .map_err(|err| error(ErrorType::WorkerUnavailable, err.to_string()))?
+                .ok_or_else(|| {
+                    error(
+                        ErrorType::WorkerUnavailable,
+                        "Velo request peer has departed",
+                    )
+                })?;
             peer.route.confirm()
         }
     };
-    Ok((peer, epoch))
+    Ok((Arc::clone(peer), epoch))
 }
 
 async fn contact(
     service: &VeloResponseService,
-    target: &PeerInfo,
+    peer: &PeerState,
+    id: InstanceId,
+    address: &str,
     deadline: Instant,
     hello_cap: Duration,
 ) -> Result<(), DynamoError> {
@@ -150,18 +233,19 @@ async fn contact(
             "Velo request ACK slots are full",
         )
     })?;
-    let identity = encode_identity(&service.velo.peer_info()).map_err(|err| {
+    let identity = service
+        .request_identity
+        .clone()
+        .ok_or_else(|| error(ErrorType::InvalidArgument, "Velo request plane is disabled"))?;
+    let address = decode_worker_address(address).map_err(|err| {
         error(
             ErrorType::InvalidArgument,
-            format!("cannot encode Velo peer identity: {err}"),
+            format!("invalid Velo worker address: {err}"),
         )
     })?;
-    let id = target.instance_id();
-    service
-        .velo
-        .register_peer(target.clone())
+    peer.register(&service.velo, PeerInfo::new(id, address))
         .map_err(transport_error)?;
-    let ack = by_deadline(deadline, async {
+    let ack = by_deadline(deadline.min(Instant::now() + hello_cap), async {
         service
             .velo
             .messenger()
@@ -226,66 +310,144 @@ fn error(kind: ErrorType, message: impl Into<String>) -> DynamoError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::network::velo_response::ResponseTransport;
+    use crate::pipeline::network::velo_request::encode_worker_address;
+    use crate::pipeline::network::velo_response::{ResponseTransport, VeloServiceOptions};
     use tokio::sync::Notify;
+
+    async fn request_peer() -> Arc<VeloResponseService> {
+        VeloResponseService::new_with_options(
+            ResponseTransport::Tcp,
+            "127.0.0.1:0".parse().unwrap(),
+            VeloServiceOptions {
+                request_plane_enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    fn stall_handler(
+        service: &VeloResponseService,
+        name: &'static str,
+    ) -> (Arc<AtomicUsize>, Arc<Notify>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let count = calls.clone();
+        let barrier = release.clone();
+        service
+            .velo
+            .messenger()
+            .register_streaming_handler(
+                Handler::unary_handler_async(name, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    let barrier = barrier.clone();
+                    async move {
+                        barrier.notified().await;
+                        Ok(None)
+                    }
+                })
+                .build(),
+            )
+            .unwrap();
+        (calls, release)
+    }
+
+    #[test]
+    fn exact_sender_id_takes_precedence_over_the_frame_hash() {
+        let claimed = InstanceId::new_v4();
+        let known = InstanceId::new_v4();
+        assert!(check_identity(Some(known), claimed.worker_id(), claimed).is_err());
+        assert!(check_identity(Some(claimed), known.worker_id(), claimed).is_ok());
+        assert!(check_identity(None, claimed.worker_id(), claimed).is_ok());
+        assert!(check_identity(None, known.worker_id(), claimed).is_err());
+    }
+
+    async fn assert_contact_timeout(handler: &'static str, deadline: Duration, cap: Duration) {
+        let frontend = request_peer().await;
+        let worker = request_peer().await;
+        if handler == PEER_HANDLER {
+            worker
+                .velo
+                .register_peer(frontend.velo.peer_info())
+                .unwrap();
+        }
+        let (seen, release) = stall_handler(&worker, handler);
+        let target = worker.velo.peer_info();
+        let address = encode_worker_address(target.worker_address()).unwrap();
+        let peer = frontend.reserve_peer(target.instance_id());
+        let start = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(850),
+            contact(
+                &frontend,
+                &peer.peer,
+                target.instance_id(),
+                &address,
+                start + deadline,
+                cap,
+            ),
+        )
+        .await;
+        release.notify_waiters();
+        assert_eq!(
+            result
+                .expect("contact exceeded its shorter timer")
+                .unwrap_err()
+                .error_type(),
+            ErrorType::ConnectionTimeout
+        );
+        assert!(start.elapsed() >= deadline.min(cap));
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
+        assert_eq!(frontend.velo.response_slots_in_use(), 0);
+    }
 
     #[tokio::test]
     async fn silent_hello_is_bounded_below_the_request_deadline() {
-        let address = "127.0.0.1:0".parse().unwrap();
-        let frontend = VeloResponseService::new(ResponseTransport::Tcp, address)
-            .await
-            .unwrap();
-        let worker = VeloResponseService::new(ResponseTransport::Tcp, address)
-            .await
-            .unwrap();
-        let release = Arc::new(Notify::new());
-        let seen = Arc::new(AtomicUsize::new(0));
-        {
-            let release = release.clone();
-            let seen = seen.clone();
-            worker
-                .velo
-                .messenger()
-                .register_streaming_handler(
-                    Handler::unary_handler_async("_hello", move |_| {
-                        let release = release.clone();
-                        async move {
-                            release.notified().await;
-                            Ok(None)
-                        }
-                    })
-                    .build(),
-                )
-                .unwrap();
-            worker
-                .velo
-                .register_handler(
-                    Handler::unary_handler(REQUEST_HANDLER, move |_| {
-                        seen.fetch_add(1, Ordering::Relaxed);
-                        Ok(None)
-                    })
-                    .build(),
-                )
-                .unwrap();
-        }
-        let start = Instant::now();
-        let error = contact(
-            &frontend,
-            &worker.velo.peer_info(),
-            start + Duration::from_secs(3),
-            Duration::from_secs(1),
+        assert_contact_timeout("_hello", Duration::from_secs(2), Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn silent_hello_obeys_a_request_deadline_shorter_than_the_cap() {
+        assert_contact_timeout("_hello", Duration::from_millis(200), Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn silent_pin_ack_has_its_own_cap() {
+        assert_contact_timeout(
+            PEER_HANDLER,
+            Duration::from_secs(2),
+            Duration::from_millis(200),
         )
-        .await
-        .unwrap_err();
-        let elapsed = start.elapsed();
-        release.notify_one();
+        .await;
+    }
+
+    #[tokio::test]
+    async fn waiters_share_a_recent_first_contact_failure() {
+        let frontend = request_peer().await;
+        let worker = request_peer().await;
+        let (seen, release) = stall_handler(&worker, PEER_HANDLER);
+        let target = worker.velo.peer_info();
+        let id = target.instance_id();
+        let address = encode_worker_address(target.worker_address()).unwrap();
+        let start = Instant::now();
+        let (leader, waiters) = tokio::join!(
+            establish_route(&frontend, id, &address, start + Duration::from_millis(250)),
+            futures::future::join_all((0..12).map(|_| establish_route(
+                &frontend,
+                id,
+                &address,
+                start + Duration::from_millis(750)
+            ))),
+        );
+        release.notify_waiters();
+        let error = leader.err().unwrap();
         assert_eq!(error.error_type(), ErrorType::ConnectionTimeout);
         assert!(
-            elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(3),
-            "hello elapsed {elapsed:?}"
+            waiters
+                .into_iter()
+                .all(|result| result.err().is_some_and(|cause| cause == error))
         );
-        assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(seen.load(Ordering::Relaxed), 0);
-        assert_eq!(frontend.velo.response_slots_in_use(), 0);
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
     }
 }

@@ -27,7 +27,8 @@ const MAX_PEER_IDENTITY: usize = MAX_WORKER_ADDRESS + 128;
 
 #[derive(Debug)]
 pub(super) struct RequestAddress<'a> {
-    pub(super) peer: PeerInfo,
+    pub(super) instance_id: InstanceId,
+    pub(super) worker_address: &'a str,
     pub(super) path: &'a str,
 }
 
@@ -58,19 +59,20 @@ pub(super) fn decode_address(address: &str) -> Result<RequestAddress<'_>> {
         .context("missing Velo endpoint path")?;
     ensure!(
         path.len() <= MAX_ENDPOINT_PATH,
-        "Velo request path for endpoint {path} exceeds {MAX_ENDPOINT_PATH} bytes"
+        "Velo request path for endpoint {path:.80} exceeds {MAX_ENDPOINT_PATH} bytes"
     );
     ensure!(id.len() == 36, "expected a hyphenated Velo instance ID");
     let id = InstanceId::from(Uuid::parse_str(id).context("invalid Velo instance ID")?);
-    let address = decode_worker_address(encoded)
+    check_encoded_address(encoded)
         .with_context(|| format!("invalid Velo address for endpoint {path}"))?;
     Ok(RequestAddress {
-        peer: PeerInfo::new(id, address),
+        instance_id: id,
+        worker_address: encoded,
         path,
     })
 }
 
-fn encode_worker_address(address: &WorkerAddress) -> Result<String> {
+pub(super) fn encode_worker_address(address: &WorkerAddress) -> Result<String> {
     let size = base64::encoded_len(address.as_bytes().len(), false);
     ensure!(
         size.is_some_and(|size| size <= MAX_WORKER_ADDRESS),
@@ -79,12 +81,17 @@ fn encode_worker_address(address: &WorkerAddress) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(address.as_bytes()))
 }
 
-fn decode_worker_address(encoded: &str) -> Result<WorkerAddress> {
+fn check_encoded_address(encoded: &str) -> Result<()> {
     ensure!(!encoded.is_empty(), "empty Velo worker address");
     ensure!(
         encoded.len() <= MAX_WORKER_ADDRESS,
         "encoded Velo worker address exceeds {MAX_WORKER_ADDRESS} bytes"
     );
+    Ok(())
+}
+
+fn decode_worker_address(encoded: &str) -> Result<WorkerAddress> {
+    check_encoded_address(encoded)?;
     Ok(WorkerAddress::from_encoded(
         URL_SAFE_NO_PAD.decode(encoded)?,
     ))
@@ -132,7 +139,11 @@ mod tests {
         let other_instance = encode_address(&peer, &endpoint("c", "a/b"), 2).unwrap();
         let other_endpoint = encode_address(&peer, &endpoint("c/a", "b"), 1).unwrap();
         let decoded = decode_address(&first).unwrap();
-        assert_eq!(decoded.peer, peer);
+        assert_eq!(decoded.instance_id, peer.instance_id());
+        assert_eq!(
+            &decode_worker_address(decoded.worker_address).unwrap(),
+            peer.worker_address()
+        );
         assert_eq!(decoded.path, "1/space/c/a%2Fb");
         assert_ne!(decoded.path, decode_address(&other_instance).unwrap().path);
         assert_ne!(decoded.path, decode_address(&other_endpoint).unwrap().path);
@@ -174,5 +185,24 @@ mod tests {
         assert!(
             format!("{:#}", decode_address(&oversized).unwrap_err()).contains("1/space/c/generate")
         );
+    }
+
+    #[test]
+    fn address_rejects_a_compact_id_and_empty_worker_address() {
+        let id = InstanceId::new_v4();
+        let compact = id.as_uuid().simple();
+        assert!(decode_address(&format!("velo://{compact}/gA/path")).is_err());
+        assert!(decode_address(&format!("velo://{id}//path")).is_err());
+    }
+
+    #[test]
+    fn identity_rejects_an_oversized_msgpack_body() {
+        let oversized = "A".repeat(MAX_PEER_IDENTITY);
+        let payload = rmp_serde::to_vec_named(&PeerIdentity {
+            instance_id: InstanceId::new_v4(),
+            worker_address: &oversized,
+        })
+        .unwrap();
+        assert!(decode_identity(&payload).is_err());
     }
 }

@@ -127,7 +127,7 @@ impl ResponsePlaneMode {
 
     /// Velo has no TLS, so a Velo selection gives way to tcp while any
     /// `DYN_TCP_TLS_*` setting is present.
-    pub fn tcp_under_tls(self) -> Self {
+    pub(crate) fn tcp_under_tls(self) -> Self {
         self.tcp_if_tls_set(&velo_response::tcp_tls_settings())
     }
 
@@ -1633,16 +1633,6 @@ where
                     "Velo ingress must be bound to a live runtime endpoint".into(),
                 )
             })?;
-        if owner.is_closed() {
-            let service = owner
-                .service_for_ingress()
-                .await
-                .map_err(|error| PipelineError::Generic(error.to_string()))?;
-            return Ok(self
-                .velo_response_service
-                .get_or_init(|| async { service })
-                .await);
-        }
         self.velo_response_service
             .get_or_try_init(|| owner.service_for_ingress())
             .await
