@@ -763,7 +763,8 @@ mod cached_multimodal_uuid {
 
         #[cfg(feature = "mm-routing")]
         {
-            let mut builder = dynamo_llm::preprocessor::PreprocessedRequest::builder();
+            let mut builder =
+                dynamo_llm::protocols::common::preprocessor::PreprocessedRequest::builder();
             let mm_image_entries = preprocessor
                 .gather_multi_modal_data(&request, &mut builder, None, &[])
                 .await

@@ -207,7 +207,7 @@ impl ResponseStreamConverter {
         converter
     }
 
-    pub(crate) fn keep_parser_confirmed_calls(&mut self, keep: bool) {
+    pub fn keep_parser_confirmed_calls(&mut self, keep: bool) {
         self.keep_parser_confirmed = keep;
     }
 

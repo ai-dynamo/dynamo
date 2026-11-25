@@ -1,30 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::super::test_fixtures::{TEMPLATE, formatter, namespace, request};
 use super::super::*;
-use dynamo_renderer::{ChatTemplate, ContextMixins, OAIPromptFormatter, PromptFormatter};
 use serde_json::{Value, json};
-
-pub(crate) const TEMPLATE: &str =
-    include_str!("../../../../../tests/data/muse_spark_open_deferred_tools.jinja");
-
-pub(crate) fn formatter(template: &str) -> std::sync::Arc<dyn OAIPromptFormatter> {
-    let config: ChatTemplate = serde_json::from_value(json!({"chat_template":template})).unwrap();
-    let PromptFormatter::OAI(formatter) =
-        PromptFormatter::from_parts(config, ContextMixins::new(&[]), true).unwrap();
-    formatter
-}
-
-pub(crate) fn request(tools: Value, input: Value) -> NvCreateResponse {
-    serde_json::from_value(json!({"model":"/model", "input":input, "tools":tools,
-        "chat_template_args":{"current_date":"2026-10-06"}}))
-    .unwrap()
-}
-
-pub(crate) fn namespace(defer: bool) -> Value {
-    json!([{"type":"namespace", "name":"fs", "description":"Files", "defer_loading":defer,
-        "tools":[{"type":"function", "name":"read", "description":"Read files", "parameters":{"type":"object", "properties":{"path":{"type":"string"}},"required":["path"]}}]}])
-}
 
 fn response_params(request: &NvCreateResponse) -> ResponseParams {
     ResponseParams {

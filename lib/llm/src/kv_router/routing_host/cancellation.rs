@@ -12,7 +12,9 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContext, Error},
 };
 
-use crate::{preprocessor::PreprocessedRequest, protocols::common::timing::RequestPhase};
+use crate::{
+    protocols::common::preprocessor::PreprocessedRequest, protocols::common::timing::RequestPhase,
+};
 
 /// How long a disconnected decode request may keep router state alive while it
 /// finishes reaching its worker. On expiry we abandon the operation and release

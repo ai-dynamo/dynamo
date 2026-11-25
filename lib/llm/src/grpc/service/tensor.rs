@@ -308,7 +308,30 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
     }
 }
 
-impl tensor::Tensor {
+/// Fills a tensor from KServe request contents. An extension trait because the tensor
+/// type belongs to the protocols while these conversions are the gRPC service's.
+trait KserveTensorContents {
+    #[allow(clippy::result_large_err)]
+    fn set_data_from_tensor_contents(
+        &mut self,
+        contents: &inference::InferTensorContents,
+    ) -> Result<(), Status>;
+
+    #[allow(clippy::result_large_err)]
+    fn set_data_from_raw_contents(&mut self, raw_input: &[u8]) -> Result<(), Status>;
+
+    #[allow(clippy::result_large_err)]
+    fn raw_input_to_bytes_tensor(
+        &self,
+        element_count: usize,
+        raw_input: &[u8],
+    ) -> Result<tensor::FlattenTensor, Status>;
+
+    #[allow(clippy::result_large_err)]
+    fn raw_input_to_typed_tensor(&self, raw_input: &[u8]) -> Result<tensor::FlattenTensor, Status>;
+}
+
+impl KserveTensorContents for tensor::Tensor {
     #[allow(clippy::result_large_err)]
     fn set_data_from_tensor_contents(
         &mut self,

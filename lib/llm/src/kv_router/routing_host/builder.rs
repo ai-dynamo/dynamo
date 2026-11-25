@@ -32,8 +32,8 @@ use super::{HostedOccupancy, RoutingHost, RoutingPolicy};
 use crate::{
     kv_router::{KvRouter, RoutingLoadContext, metrics::RouterRequestMetrics},
     lora::{LoadEstimator, LoraFilter},
-    preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
+    protocols::common::preprocessor::PreprocessedRequest,
     routing_policy::HostedCandidatePolicy,
     session_affinity::AffinityCoordinator,
 };

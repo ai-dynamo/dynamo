@@ -26,9 +26,6 @@ use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 
 use super::runtime_config_watch;
 
-// Re-export worker type constants from timing.rs (single source of truth)
-pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
-
 /// Clean up load and latency Prometheus metrics for a worker across the specified dp_ranks.
 ///
 /// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.

@@ -8,7 +8,8 @@ mod v2;
 
 use std::borrow::Cow;
 
-use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
+use crate::preprocessor::OpenAIPreprocessor;
+use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
 use dynamo_model_card::local_model::runtime_config::{

@@ -13,7 +13,7 @@ use crate::{
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::{RequestAttemptLease, RequestAttemptRelease},
     },
-    preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
         preprocessor::MigrationState,

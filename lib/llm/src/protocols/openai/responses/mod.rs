@@ -10,7 +10,7 @@ pub mod stream_converter;
 mod template_tools;
 mod tool_names;
 pub use template_tools::ResponsesToolContext;
-pub(crate) use template_tools::effective_response_tools;
+pub use template_tools::effective_response_tools;
 use template_tools::*;
 
 pub use tool_names::ToolNameMap;
@@ -327,7 +327,7 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ResponsesConversionError {
+pub enum ResponsesConversionError {
     #[error("{0}")]
     InvalidArgument(String),
     #[error("{0}")]
@@ -2086,8 +2086,11 @@ pub fn chat_completion_to_response(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    pub(crate) mod native_tools;
+pub mod test_fixtures;
+
+#[cfg(test)]
+mod tests {
+    mod native_tools;
     mod phases_and_tool_search;
     mod tool_adaptation;
 

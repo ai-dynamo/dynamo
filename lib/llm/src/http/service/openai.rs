@@ -1289,10 +1289,10 @@ pub(super) fn attach_upstream_elapsed<T: Send + Sync + 'static>(
 /// router's request classifier (e.g. ThunderAgent) reads the session only from the request field,
 /// so without this every native generate request is classified as session-less.
 pub(super) fn preprocessed_context_from_headers(
-    mut request: crate::preprocessor::PreprocessedRequest,
+    mut request: crate::protocols::common::preprocessor::PreprocessedRequest,
     request_id: String,
     headers: &HeaderMap,
-) -> Result<Context<crate::preprocessor::PreprocessedRequest>, ErrorResponse> {
+) -> Result<Context<crate::protocols::common::preprocessor::PreprocessedRequest>, ErrorResponse> {
     let agent_context = agent_context_from_headers(headers);
     request.agent_context = agent_context.clone();
     context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
@@ -7668,7 +7668,7 @@ mod tests {
     #[test]
     fn test_preprocessed_context_from_headers_attaches_agent_context_to_request() {
         let request = || {
-            crate::preprocessor::PreprocessedRequest::builder()
+            crate::protocols::common::preprocessor::PreprocessedRequest::builder()
                 .model("test-model".to_string())
                 .token_ids(vec![1])
                 .stop_conditions(Default::default())

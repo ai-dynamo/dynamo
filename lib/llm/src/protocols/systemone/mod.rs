@@ -7,7 +7,7 @@ mod native;
 mod vllm;
 
 pub use native::{build_native_score_request, parse_candidate_scores};
-pub(crate) use vllm::VllmScoreCollector;
+pub use vllm::VllmScoreCollector;
 pub use vllm::causal_scoring_request;
 
 #[derive(Debug, thiserror::Error, PartialEq)]

@@ -7,7 +7,7 @@ use dynamo_http_server::metrics::Endpoint;
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
     http::service::service_v2::HttpService,
-    preprocessor::LLMMetricAnnotation,
+    protocols::common::metrics::LLMMetricAnnotation,
     protocols::{
         Annotated,
         openai::chat_completions::{

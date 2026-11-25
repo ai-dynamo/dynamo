@@ -14,7 +14,7 @@ use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 
 /// Identity field on which two chunks for the same `index` disagreed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolCallIdentityField {
+pub enum ToolCallIdentityField {
     Id,
     Type,
     Name,
@@ -22,7 +22,7 @@ pub(crate) enum ToolCallIdentityField {
 
 impl ToolCallIdentityField {
     /// Field name for the streaming `tool_call_dispatch` fail-closed log line.
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Id => "id",
             Self::Type => "type",
@@ -37,7 +37,7 @@ impl ToolCallIdentityField {
 /// field wins and argument fragments are always concatenated. The outcome is
 /// *reporting only* — a caller that ignores it still gets the merged chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolCallMergeOutcome {
+pub enum ToolCallMergeOutcome {
     /// The incoming chunk was consistent with what had already accumulated.
     Merged,
     /// The incoming chunk carried a *different* non-empty value for an
@@ -64,7 +64,7 @@ pub(crate) enum ToolCallMergeOutcome {
 ///
 /// Returns the first identity conflict observed, if any. Conflicts do not
 /// change what is merged; see [`ToolCallMergeOutcome`].
-pub(crate) fn merge_tool_call_chunk(
+pub fn merge_tool_call_chunk(
     existing: &mut ChatCompletionMessageToolCallChunk,
     incoming: ChatCompletionMessageToolCallChunk,
 ) -> ToolCallMergeOutcome {

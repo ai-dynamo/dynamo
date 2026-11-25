@@ -1988,9 +1988,9 @@ fn infer_metric_worker_type(
         || component.to_lowercase().contains("prefill")
         || endpoint.to_lowercase().contains("prefill");
     if endpoint_is_prefill || !track_active_blocks {
-        llm_rs::discovery::WORKER_TYPE_PREFILL
+        llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
     } else {
-        llm_rs::discovery::WORKER_TYPE_DECODE
+        llm_rs::protocols::common::timing::WORKER_TYPE_DECODE
     }
 }
 
@@ -2060,15 +2060,15 @@ mod metric_worker_type_tests {
     fn preserves_prefill_fallback_before_discovery() {
         assert_eq!(
             infer_metric_worker_type("prod", "prefill-workers", "generate", true),
-            llm_rs::discovery::WORKER_TYPE_PREFILL
+            llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
         );
         assert_eq!(
             infer_metric_worker_type("prod", "workers", "generate", false),
-            llm_rs::discovery::WORKER_TYPE_PREFILL
+            llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
         );
         assert_eq!(
             infer_metric_worker_type("prod", "decode-workers", "generate", true),
-            llm_rs::discovery::WORKER_TYPE_DECODE
+            llm_rs::protocols::common::timing::WORKER_TYPE_DECODE
         );
     }
 

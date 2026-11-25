@@ -34,7 +34,7 @@ use crate::{
         KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
         to_worker_selection_session_context,
     },
-    preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
         extensions::SessionAffinityId,

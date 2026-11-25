@@ -79,7 +79,7 @@ impl DeltaGenerator {
     }
 
     /// Only the installed native turn grammar permits implicit tool termination.
-    pub(crate) fn enable_tool_call_eos(&mut self, enabled: bool) {
+    pub fn enable_tool_call_eos(&mut self, enabled: bool) {
         self.tool_call_eos_enabled = enabled;
     }
 

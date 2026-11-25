@@ -1970,7 +1970,8 @@ mod tests {
             total_tokens: 14,
             ..Default::default()
         });
-        chunk.event = Some(dynamo_llm::preprocessor::ANNOTATION_PAYLOAD_USAGE.to_string());
+        chunk.event =
+            Some(dynamo_llm::protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE.to_string());
         chunk
     }
 

@@ -44,7 +44,7 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
     ));
 }
 
-pub(crate) fn system_message_content(content: &AnthropicMessageContent) -> String {
+pub fn system_message_content(content: &AnthropicMessageContent) -> String {
     match content {
         AnthropicMessageContent::Text { content } => content.clone(),
         AnthropicMessageContent::Blocks { content } => content

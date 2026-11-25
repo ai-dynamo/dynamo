@@ -18,7 +18,7 @@ use dynamo_session_affinity::host::WorkerAffinityTarget;
 
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
-    preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
         common::{preprocessor::RoutingHints, timing::RequestPhase},

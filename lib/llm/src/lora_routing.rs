@@ -15,7 +15,7 @@ use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::hosted_request,
     lora::{LoadEstimator, LoraFilter},
-    preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::PreprocessedRequest,
     routing_policy::{
         CandidateSelection, ExecutionRequirements, ExecutionStage, HostedCandidatePolicy,
         KvAdmissionPolicy,

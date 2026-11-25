@@ -8,7 +8,7 @@ use crate::{
     backend::ExecutionContext,
     engines::StreamingEngineAdapter,
     first_token::{FirstTokenNotifier, FirstTokenSource},
-    preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::PreprocessedRequest,
     types::{
         Annotated,
         openai::chat_completions::{

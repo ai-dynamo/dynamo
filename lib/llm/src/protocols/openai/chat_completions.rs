@@ -21,12 +21,12 @@ use crate::protocols::common::extensions::{
 };
 
 pub mod aggregator;
-pub(crate) mod allowed_tools;
-pub(crate) mod custom_tools;
+pub mod allowed_tools;
+pub mod custom_tools;
 mod delta;
-pub(crate) mod tool_call_merge;
+pub mod tool_call_merge;
 pub mod tool_parser_v2;
-pub(crate) mod unified_parser;
+pub mod unified_parser;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
@@ -271,7 +271,7 @@ const THINKING_TOGGLES: [&str; 2] = ["thinking", "enable_thinking"];
 const THINKING_KEYS: [&str; 3] = ["thinking", "enable_thinking", "thinking_mode"];
 
 /// A `chat_template_kwargs` key that the normalizer reads as a thinking control.
-pub(crate) fn is_thinking_control_key(key: &str) -> bool {
+pub fn is_thinking_control_key(key: &str) -> bool {
     THINKING_KEYS.contains(&key) || key == "reasoning_effort"
 }
 
@@ -472,7 +472,7 @@ where
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
 /// Clear copied transport and per-chunk fields so clients do not count them twice.
-pub(crate) fn scrub_synthetic_chunk_metadata(
+pub fn scrub_synthetic_chunk_metadata(
     response: &mut Annotated<NvCreateChatCompletionStreamResponse>,
 ) -> Option<()> {
     response.event = None;

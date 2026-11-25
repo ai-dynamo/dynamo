@@ -26,7 +26,7 @@ pub(crate) fn custom_input_or_raw(arguments: &str) -> String {
     })
 }
 
-pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
+pub fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
     tools
         .iter()
         .map(|tool| ToolDefinition {
@@ -51,7 +51,7 @@ pub enum ToolChoiceError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolChoiceValidation<'a> {
+pub enum ToolChoiceValidation<'a> {
     Unforced,
     Required,
     Named(&'a str),
@@ -65,7 +65,7 @@ pub enum ToolChoiceGuidance {
 }
 
 /// Validate the forced-choice contract shared by wire and parser-facing tool types.
-pub(crate) fn validate_tool_choice_against_names<'a>(
+pub fn validate_tool_choice_against_names<'a>(
     tool_choice: ToolChoiceValidation<'_>,
     tool_names: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), ToolChoiceError> {
@@ -83,7 +83,7 @@ pub(crate) fn validate_tool_choice_against_names<'a>(
 }
 
 /// Validate an OpenAI `tool_choice` against the request's declared tools.
-pub(crate) fn validate_openai_tool_choice(
+pub fn validate_openai_tool_choice(
     tool_choice: Option<&ChatCompletionToolChoiceOption>,
     tools: Option<&[ChatCompletionTool]>,
 ) -> Result<(), ToolChoiceError> {

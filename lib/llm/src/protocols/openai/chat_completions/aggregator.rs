@@ -462,7 +462,7 @@ impl DeltaAggregator {
         Self::apply_with_tool_terminal_policy(stream, parsing_options, false).await
     }
 
-    pub(crate) async fn apply_for_selected_unified_parser(
+    pub async fn apply_for_selected_unified_parser(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
@@ -2538,7 +2538,7 @@ mod tests {
             })),
             strict: None,
         }];
-        for (family, raw) in unified_parser::tests::eight_family_calls("café") {
+        for (family, raw) in unified_parser::test_fixtures::eight_family_calls("café") {
             let (tool, reasoning) = match family {
                 "qwen3" => ("qwen3_coder", "qwen3"),
                 "kimi_k2" => ("kimi_k2", "kimi_k25"),

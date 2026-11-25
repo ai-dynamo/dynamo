@@ -517,7 +517,7 @@ fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow:
 
 /// Merges and validates request tools and tools declared in system messages.
 /// An explicitly empty request list is invalid unless system messages supply tools.
-pub(crate) fn validated_effective_tools(
+pub fn validated_effective_tools(
     request: &CreateChatCompletionRequest,
 ) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
     let dynamic_tools = request

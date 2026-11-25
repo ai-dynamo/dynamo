@@ -125,13 +125,11 @@ use crate::preprocessor::prompt::{
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
-pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
-pub use crate::protocols::common::metrics::{
-    ANNOTATION_LLM_METRICS, ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation,
+use crate::protocols::common::llm_backend::{
+    BackendOutput, EmbeddingsEngineOutput, PreprocessedRequest,
 };
-pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
-
-use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+use crate::protocols::common::metrics::{ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation};
+use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 /// Takes the encoder's token buffer rather than copying it. The tokenizer cache and fastokens
 /// return `Encoding::Sp` with an exactly sized buffer, so a copy only adds a prompt-sized
@@ -4780,7 +4778,7 @@ impl OpenAIPreprocessor {
                     &mut media_map,
                     task.modality,
                     task.slot_idx,
-                    MultimodalData::Decoded(rdma_descriptor),
+                    MultimodalData::Decoded(rdma_descriptor.try_into()?),
                 )?;
             }
         }
@@ -6114,7 +6112,7 @@ impl OpenAIPreprocessor {
         )
         .map_err(|error| invalid_argument_error(format!("{error:#}")))?;
 
-        if selected_version == tool_parser_v2::ParserVersion::V2 {
+        if selected_version == dynamo_runtime::config::ParserVersion::V2 {
             return Err(invalid_argument_error(format!(
                 "{}=2 was requested, but this tool choice requires the v1 tool-call jail",
                 env_llm::DYN_PARSER_VERSION
@@ -10297,6 +10295,7 @@ mod extra_args_media_copy_tests {
 mod tests {
     use super::*;
     use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
+    use crate::protocols::common::metrics::ANNOTATION_LLM_METRICS;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
@@ -11293,7 +11292,8 @@ mod tests {
     #[tokio::test]
     async fn eight_family_request_initialization() {
         use crate::protocols::openai::chat_completions::unified_parser;
-        for (family, native) in unified_parser::tests::eight_family_calls("é initialized") {
+        for (family, native) in unified_parser::test_fixtures::eight_family_calls("é initialized")
+        {
             let (tool, reason) = match family {
                 "qwen3" => ("qwen3_coder", "qwen3"),
                 "kimi_k2" => ("kimi_k2", "kimi_k25"),
@@ -11314,7 +11314,7 @@ mod tests {
             };
             preprocessor.tool_call_parser = Some(tool.into());
             preprocessor.runtime_config.reasoning_parser = Some(reason.into());
-            let (open, close) = unified_parser::tests::reasoning_markers(family);
+            let (open, close) = unified_parser::test_fixtures::reasoning_markers(family);
             for thinking in [false, true] {
                 for prefilled in [false, true] {
                     for choice in [
@@ -11878,10 +11878,12 @@ mod tests {
         );
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let mut failures = Vec::new();
-        for (shape, fields) in unified_parser::tests::write_file_progress_cases() {
+        for (shape, fields) in unified_parser::test_fixtures::write_file_progress_cases() {
             let expected_arguments: serde_json::Value =
-                serde_json::from_str(&unified_parser::tests::ordered_arguments(&fields)).unwrap();
-            for (family, native) in unified_parser::tests::native_write_file_calls(&fields) {
+                serde_json::from_str(&unified_parser::test_fixtures::ordered_arguments(&fields))
+                    .unwrap();
+            for (family, native) in unified_parser::test_fixtures::native_write_file_calls(&fields)
+            {
                 for named in if guided {
                     vec![false, true]
                 } else {
@@ -11891,7 +11893,7 @@ mod tests {
                     let (port, cancel, join) = start_unified_replay(
                         family,
                         native.clone(),
-                        unified_parser::tests::ordered_arguments(&fields),
+                        unified_parser::test_fixtures::ordered_arguments(&fields),
                         Some(release.clone()),
                     )
                     .await;
@@ -12054,7 +12056,7 @@ mod tests {
             return;
         }
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for (family, native) in unified_parser::tests::eight_family_calls("é replay") {
+        for (family, native) in unified_parser::test_fixtures::eight_family_calls("é replay") {
             let (port, cancel, join) = start_unified_replay(
                 family,
                 native,
@@ -15088,7 +15090,7 @@ mod tests {
                 panic!("video must reach the media loader and be decoded");
             };
             assert!(
-                descriptor.content_hash().is_none(),
+                descriptor.content_hash_key().is_none(),
                 "adjacent videos must reach the media loader with hashing disabled"
             );
         }
@@ -22071,7 +22073,7 @@ mod tests {
         use crate::preprocessor::OpenAIPreprocessor;
         use crate::protocols::anthropic::stream_converter::{
             AnthropicStreamConverter,
-            tests::{sse_values, text_chunk},
+            test_fixtures::{sse_values, text_chunk},
         };
         use dynamo_model_card::model_card::ModelDeploymentCard;
         use dynamo_runtime::protocols::annotated::Annotated;
@@ -22140,7 +22142,7 @@ mod tests {
     #[test]
     fn named_tool_rendering_policy_matches_the_production_preprocessor() {
         use crate::preprocessor::OpenAIPreprocessor;
-        use crate::protocols::openai::responses::tests::native_tools::{
+        use crate::protocols::openai::responses::test_fixtures::{
             TEMPLATE, formatter, namespace, request,
         };
         use dynamo_model_card::model_card::ModelDeploymentCard;

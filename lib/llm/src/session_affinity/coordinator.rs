@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 use super::replica_sync::SessionAffinityUpdate;
 use super::{SessionAffinityMode, replica_sync::ReplicaSyncRuntime};
 use crate::{
-    preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::PreprocessedRequest,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         timing::RequestPhase,

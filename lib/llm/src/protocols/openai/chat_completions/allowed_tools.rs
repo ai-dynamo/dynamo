@@ -20,7 +20,7 @@ use super::{
 /// The HTTP adapter consumes the new choice object before the function-oriented
 /// request type sees it. Existing requests use their usual typed deserializer.
 #[derive(Deserialize)]
-pub(crate) struct AllowedToolsRequest {
+pub struct AllowedToolsRequest {
     tool_choice: Choice,
     #[serde(flatten)]
     request: NvCreateChatCompletionRequest,
@@ -53,7 +53,7 @@ enum Tool {
     },
 }
 
-pub(crate) struct ToolAllowlist(HashSet<String>);
+pub struct ToolAllowlist(HashSet<String>);
 
 enum CallState {
     Unnamed(ChatCompletionMessageToolCallChunk),
@@ -61,9 +61,7 @@ enum CallState {
 }
 
 impl AllowedToolsRequest {
-    pub(crate) fn normalize(
-        self,
-    ) -> anyhow::Result<(NvCreateChatCompletionRequest, ToolAllowlist)> {
+    pub fn normalize(self) -> anyhow::Result<(NvCreateChatCompletionRequest, ToolAllowlist)> {
         let Self {
             tool_choice: Choice::AllowedTools { allowed_tools },
             mut request,
@@ -128,7 +126,7 @@ impl AllowedToolsRequest {
 
 impl ToolAllowlist {
     #[allow(deprecated)]
-    pub(crate) fn validate_response(
+    pub fn validate_response(
         &self,
         response: &NvCreateChatCompletionResponse,
     ) -> anyhow::Result<()> {
@@ -155,7 +153,7 @@ impl ToolAllowlist {
         Ok(())
     }
 
-    pub(crate) fn stream(
+    pub fn stream(
         self,
         source: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
         single_tool: bool,
