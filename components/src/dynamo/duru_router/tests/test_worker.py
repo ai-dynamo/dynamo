@@ -14,6 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
+from dynamo.duru_router import events, scoring
+from dynamo.duru_router.transport import InProcessChannel
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
@@ -279,6 +282,45 @@ def test_output_acceptance(scheduler, batch, state):
     step = scheduler.compact_feed.events[-1][1]["steps"][0]
     assert step["accepted"] == (state == "deliver_stale")
     assert step["generated_tokens"] == (1 if state == "deliver_stale" else 0)
+
+
+@pytest.mark.parametrize("wall_jump", [-60, 60])
+def test_accounting_progress_survives_wall_clock_jump(worker, monkeypatch, wall_jump):
+    clock = SimpleNamespace(wall=1000.0, elapsed=100.0)
+    clock_api = SimpleNamespace(
+        time=lambda: clock.wall, monotonic=lambda: clock.elapsed
+    )
+    monkeypatch.setattr(worker, "time", clock_api)
+    monkeypatch.setattr(events, "time", clock_api)
+    channel = InProcessChannel()
+    monkeypatch.setattr(events, "open_feed", lambda *args, **kwargs: channel)
+    monkeypatch.setattr(worker, "CompactFeed", events.CompactFeed)
+    scheduler = worker.DuruScheduler()
+    reader = scoring.EventStreamReader("unused", receiver=channel)
+    try:
+        scheduler.add_request(Request(computed=8))
+        batch = scheduled()
+        scheduler._update_after_schedule(batch)
+        with scheduler.compact_feed.lock:
+            scheduler.compact_feed.emit("u_clock")
+            reader.read()
+            cutoff = reader.received_through
+            clock.wall += wall_jump
+            clock.elapsed += 0.25
+        scheduler.update_from_output(batch, output())
+        rows = reader.read()
+        step = next(row for row in rows if row["event"] == "accepted_output")["steps"][
+            0
+        ]
+
+        assert step["scheduled_at"] == 100.0
+        assert cutoff == 100.0
+        assert step["end"] == 100.25
+        assert cutoff < step["end"] <= reader.received_through
+        assert all(row["time"] == 100.25 for row in rows)
+    finally:
+        scheduler.shutdown()
+        reader.close()
 
 
 def test_inflight_batches_retain_coordinates(scheduler, batch):

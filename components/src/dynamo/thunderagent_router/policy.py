@@ -38,7 +38,8 @@ class ResumeChoice(NamedTuple):
 class ResumePlan:
     """One ordered queue and its policy hooks; contains no placement decisions.
 
-    Native packing tries its capacity shortlist in decreasing footprint order,
+    All candidates share resume_ceiling. Native packing tries its capacity
+    shortlist in decreasing footprint order,
     then considers excluded programs in policy order for forced admission only.
     """
 
@@ -48,9 +49,6 @@ class ResumePlan:
 
     def before_attempt(self, program: Program) -> None:
         """Optional policy bookkeeping before the host checks capacity."""
-
-    def ceiling(self, program: Program) -> float:
-        return self.resume_ceiling
 
     def may_force_admit(self, program: Program) -> bool:
         """Authorize an exception after failed fit, including shortlist exclusion."""

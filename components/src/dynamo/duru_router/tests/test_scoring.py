@@ -490,7 +490,7 @@ def test_router_owned_accounting_matches_worker_snapshot(
     monkeypatch.setenv("DURU_SCORES", cfg["scores"])
     monkeypatch.setenv("DURU_RECORD_EVENTS", "1" if record else "0")
     monkeypatch.setenv("DURU_DIAGNOSTICS", "1" if diagnostics else "0")
-    now = time.time()
+    now = time.monotonic()
     ingress_rows = [
         arrival_record(now - 0.01, "q", "p", root="r", agent="a"),
         dict(event="footer", time=now + 0.002),

@@ -179,6 +179,8 @@ def score_channel():
 
 
 class Reader:
+    """Read scores whose observation_time uses this host's monotonic clock."""
+
     def __init__(self, snapshot_source=None):
         self.snapshot_source = snapshot_source
         self.path = None if snapshot_source is not None else score_channel()
@@ -210,7 +212,7 @@ class Reader:
                 self._subscriber = ScoreSubscriber(channel_path(self.path))
             self.snapshot = self._subscriber.snapshot()
         self.age = (
-            time.time() - self.snapshot.get("observation_time", 0)
+            time.monotonic() - self.snapshot.get("observation_time", 0)
             if self.snapshot
             else None
         )
@@ -275,7 +277,7 @@ def _program_id(fields):
 
 
 class Ingress:
-    """Publish request lifecycle events with explicit router program identity."""
+    """Publish lifecycle events with program identity and monotonic timestamps."""
 
     def __init__(self, path, *, in_process=False):
         if in_process:
@@ -305,11 +307,11 @@ class Ingress:
             return
         if event == "request_arrived":
             _program_id(fields)
-        keys = (
-            ("request_id", "program_id", "root", "agent", "prompt_tokens")
-            if event == "request_arrived"
-            else ("request_id", "program_id", "root")
-        )
+            keys = ("request_id", "program_id", "root", "agent", "prompt_tokens")
+        elif event == "agent_end":
+            keys = ("request_id", "program_id", "root", "agent")
+        else:
+            keys = ("request_id", "program_id", "root")
         self.sequence += 1
         self.journal.submit(
             "record",
@@ -323,7 +325,7 @@ class Ingress:
 
     def close(self):
         try:
-            self.emit("footer", time.time())
+            self.emit("footer", time.monotonic())
         finally:
             self.journal.close()
 
@@ -552,7 +554,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                     schema=1,
                     run_id=run_id,
                     extrapolated_cost_evaluations=book.extrapolated_cost_evaluations,
-                    time=time.time(),
+                    time=time.monotonic(),
                     observation_time=accounting_cutoff,
                     capacity=book.capacity,
                     accounting_state=dict(
@@ -617,7 +619,7 @@ def run(config, stop=None, *, router_publish=None, ingress_source=None):
                         sequence=sequence,
                         event="footer",
                         run_id=run_id,
-                        time=time.time(),
+                        time=time.monotonic(),
                         last_snapshot=last_snapshot,
                         pending_events=len(heap),
                         inputs_closed=all(source.closed for source in sources),

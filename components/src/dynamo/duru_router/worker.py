@@ -106,7 +106,7 @@ class DuruScheduler(AsyncScheduler):
         if scheduler_output.scheduled_spec_decode_tokens:
             raise ValueError("Speculative work is outside Duru's accounting model")
         with self.compact_feed.lock:
-            started = time.time()
+            started = time.monotonic()
             pending = {}
             for request_id, count in scheduler_output.num_scheduled_tokens.items():
                 request = self.requests[request_id]
@@ -153,7 +153,7 @@ class DuruScheduler(AsyncScheduler):
                 )
                 acceptance[request_id] = (accepted, request.num_output_tokens)
             result = super().update_from_output(scheduler_output, runner_output)
-            ended = time.time()
+            ended = time.monotonic()
             steps = []
             for request_id, (request, step) in pending.items():
                 accepted, previous_tokens = acceptance[request_id]
