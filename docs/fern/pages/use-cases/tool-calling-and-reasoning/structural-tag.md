@@ -45,14 +45,27 @@ a tool call with `<tool_call>`, the engine allows only `get_weather`, the closin
 and, by default, arguments that follow the declared schema. With
 `parallel_tool_calls: false`, the tag also stops after the first call.
 
-This page uses these terms:
+The **native tool-call format** is the markup a model family uses, for example
+`<tool_call>...</tool_call>`. The **chat processor** renders prompts and builds
+tags for that format. The `dynamo` processor uses Dynamo's parsers; the `vllm`
+and `sglang` [engine-fallback processors](chat-processors.mdx) use the engine's
+own tool parser.
 
-| Term | Meaning |
-|---|---|
-| Native tool-call format | The markup a model family uses for tool calls, for example `<tool_call>...</tool_call>`. The `--dyn-tool-call-parser` you set on the worker selects it. |
-| Scope | Which `tool_choice` values get a structural tag. The default is `always`. See [Tool Choice and Scope](#tool-choice-and-scope). |
-| Schema mode | Which tool argument schemas the tag enforces. The default is `auto`. See [Argument Schemas](#argument-schemas). |
-| Chat processor | The frontend component that renders prompts and builds tags. The default is `dynamo`. The `vllm` and `sglang` [engine-fallback processors](chat-processors.mdx) build tags through the engine's own tool parser. |
+### Settings and Defaults
+
+| Setting | Where to set it | Default and purpose |
+|---|---|---|
+| `--dyn-tool-call-parser` | Worker | Unset. Selects the native tool-call format for the `dynamo` chat processor. |
+| `--dyn-structural-tag` or `DYN_STRUCTURAL_TAG` | Worker | Enabled on regular workers. Accepts a boolean or JSON object. Sidecar defaults differ; see [Backend and Path Compatibility](#backend-and-path-compatibility). |
+| `scope` field in `--dyn-structural-tag` | Worker JSON, for example `'{"scope":"always"}'` | `always`. Selects which request `tool_choice` values get a tag; see [Tool Choice and Scope](#tool-choice-and-scope). |
+| `schema` field in `--dyn-structural-tag` | Worker JSON, for example `'{"schema":"auto"}'` | `auto`. Selects which tool argument schemas the tag enforces; see [Argument Schemas](#argument-schemas). |
+| `--dyn-chat-processor` or `DYN_CHAT_PROCESSOR` | Frontend | `dynamo`. Selects Dynamo's processor or an engine-fallback processor. |
+| `DYN_PARSER_VERSION` | Frontend and workers that build parser-dependent guidance | `auto`. Prefers a compatible V2 parser route; see [Supported Parsers](#supported-parsers). |
+| `tool_choice` | Request body | `auto` when tools are present. Lets the model choose whether to call a tool. |
+| `tools[].function.strict` | Request body, per tool | Omitted. Under schema mode `auto`, Dynamo enforces the declared schema with the regex exceptions below. |
+
+Scope `auto`, schema mode `auto`, parser version `auto`, and request
+`tool_choice="auto"` are separate settings.
 
 ## Quick Start
 
@@ -107,7 +120,11 @@ it, TensorRT-LLM ignores structural tags. See
 
 ### Tool Choice and Scope
 
-| `tool_choice` | Scope `always` (default) | Scope `auto` (legacy) |
+Set scope through the worker's `--dyn-structural-tag` JSON, for example
+`'{"scope":"auto"}'`. The table compares that worker setting with the
+request's `tool_choice`:
+
+| Request `tool_choice` | Worker scope `always` (default) | Worker scope `auto` (legacy) |
 |---|---|---|
 | `required` or named | Tag | Tag |
 | `auto` | Tag attempted; the model can still answer without calling a tool | Tag only when a tool sets `strict: true` or the request sets `parallel_tool_calls: false` |
@@ -151,19 +168,25 @@ structural tags enabled, and check answer quality for your model.
 
 ### Argument Schemas
 
-Schema mode `auto` (default):
+Set schema mode through the worker's `--dyn-structural-tag` JSON, for example
+`'{"schema":"auto"}'`. In schema mode `auto` (the default):
 
-- A tool with omitted `strict` or `strict: true` has its declared parameter
-  schema enforced.
+- A tool with omitted `strict` has its declared parameter schema enforced,
+  except that Dynamo leaves out regex constraints the backend cannot compile.
+  An unsupported `pattern` is removed from the argument grammar; an unsupported
+  `patternProperties` key relaxes that tool's entire argument schema. See
+  [Regex constructs the backend cannot compile](#regex-constructs-the-backend-cannot-compile).
+- A tool with `strict: true` keeps its declared parameter schema, including
+  regex constraints. A backend compilation error can reject the request.
 - A tool with `strict: false` keeps the tool-call envelope, but its argument
-  content is relaxed instead of following the declared schema. `strict: false`
-  does not disable structural tags; see
-  [Disable Structural Tags](#disable-structural-tags). The `vllm` chat processor
-  is an exception; see
+  content is relaxed instead of following the declared schema. The `vllm`
+  chat processor is an exception; see
   [Backend and Path Compatibility](#backend-and-path-compatibility).
 
-Schema mode `strict` enforces every tool's declared parameter schema and
-ignores `strict: false`.
+Schema mode `strict` enforces every tool's declared parameter schema, keeps
+regex constraints, and ignores `strict: false`. Per-tool `strict: false` does
+not disable structural tags; see
+[Disable Structural Tags](#disable-structural-tags).
 
 If part of a schema cannot be represented safely in the native format, Dynamo
 keeps the strongest safe tool-call envelope and relaxes that argument section.
@@ -207,9 +230,10 @@ With the `dynamo` chat processor, two families reject the request instead:
   outside Beam's grammar, the prompt leaves the final channel open, or explicit
   guided decoding owns the output.
 
-This fallback covers only tags Dynamo cannot build. A tag the engine cannot
-compile can cause the request to be rejected; see
-[Unsupported Schema Constructs](#unsupported-schema-constructs).
+This fallback covers only tags Dynamo cannot build. Dynamo filters unsupported
+regex constraints from automatically enforced argument schemas, but a tag the
+engine still cannot compile can cause the request to be rejected. See
+[Regex constructs the backend cannot compile](#regex-constructs-the-backend-cannot-compile).
 
 ## Configure Structural Tags
 
@@ -270,15 +294,34 @@ disabled, because their native formats have no generic fallback:
 - Kimi K3 named choices
 - Muse Spark `required` and named choices
 
-These tags still enforce tool argument schemas, so they are subject to
-[Unsupported Schema Constructs](#unsupported-schema-constructs). Automatic
-choices for these families, and Kimi K3 `required`, follow the opt-out. The
-`vllm` and `sglang` chat processors respect the opt-out for all tool choices.
+These tags use the same schema policy, including the automatic regex adjustment
+when `strict` is omitted. Explicit strictness can still cause a backend
+compilation error; see
+[Regex constructs the backend cannot compile](#regex-constructs-the-backend-cannot-compile).
+Automatic choices for these families, and Kimi K3 `required`, follow the
+opt-out. The `vllm` and `sglang` chat processors respect the opt-out for all tool
+choices.
 
 ## Supported Parsers
 
 The `dynamo` chat processor builds structural tags for these
 `--dyn-tool-call-parser` values:
+
+**V2 (Unified)** parses reasoning, text, and tool calls with one model-family
+grammar. **V1** uses separate reasoning and tool-call parsers.
+`DYN_PARSER_VERSION=auto` (the default) prefers V2 when the configured tool and
+reasoning selectors form a compatible Unified configuration. If they do not,
+`auto` uses V1 only when every configured selector is available in V1;
+otherwise model setup is rejected. Set `DYN_PARSER_VERSION=1` to select V1, or
+`2` to require V2 without configuration fallback.
+
+Set `DYN_PARSER_VERSION` on the frontend and on workers that build
+parser-dependent guidance. Restart those processes after changing it because
+version selection is cached. A **V2 parser route only** entry below is
+unavailable with explicit `1`, or with a mixed tool/reasoning pair that selects
+V1. See
+[Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing)
+for compatible pairs, aliases, and reasoning-only exceptions.
 
 | Parser | Notes |
 |---|---|
@@ -293,10 +336,6 @@ The `dynamo` chat processor builds structural tags for these
 | `muse_spark`, `muse_spark_open` | V2 parser route only. Some choices keep their tags when structural tags are disabled. |
 | `nemotron_nano`, `qwen3_coder` | |
 
-The default `DYN_PARSER_VERSION=auto` selects the V2 parser route for compatible
-parser names. V2 support needs a compatible V2 route on both the frontend and
-the worker; see
-[Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing).
 When the selected V2 family has no structural-tag support, Dynamo uses the tool
 parser's V1 support if it has one; this does not change which parser reads the
 response. The V2 library has no structural-tag support for `muse_glimmer`,
@@ -356,23 +395,57 @@ with these differences:
 
 ## Limitations
 
-### Unsupported Schema Constructs
+### Regex constructs the backend cannot compile
 
-A valid tool schema can contain constructs that the backend's XGrammar version
-cannot compile, such as a regex lookahead. The engine can then reject the
-request. Dynamo's fallback does not apply, because the tag was built
-successfully.
+A valid JSON Schema can contain regex syntax that XGrammar cannot compile.
+Before building a tool-call tag, Dynamo checks `pattern` values and
+`patternProperties` keys. The Python vLLM and SGLang preprocessors check each
+regex with the installed XGrammar's regex converter. The Rust preprocessor
+checks for constructs that XGrammar rejects in at least one tag format:
 
-XGrammar 0.2.7 and 0.2.8 reject a lookahead when a native-format tag turns a
-string `pattern` into a grammar regex. When the pattern stays inside a JSON
-Schema, these versions warn and ignore the lookahead instead.
+- lookahead `(?=` `(?!` and lookbehind `(?<=` `(?<!`
+- backreferences `\1`–`\9` and `\k<name>`
+- group modifiers other than `(?:` and `(?<name>`, such as `(?i)`, `(?>`, and
+  `(?P<name>`
+- word boundaries `\b` `\B` and Unicode property escapes `\p{…}` `\P{…}`
+  outside a character class
+- the empty class `[]`, a `{` that does not open `{n}`, `{n,}`, or `{n,m}`
+  with counts up to 10^15, and a quantifier followed by another quantifier
+  other than one lazy `?`
 
-To avoid the rejection, set `strict: false` on the tool under schema mode
-`auto`; this works for parsers that honor per-tool strictness. Schema mode
-`strict` overrides this workaround, and so does a parameter-level tool
-strictness setting with the `sglang` chat processor. The workaround is not
-guaranteed on XGrammar 0.1.32. Disabling structural tags does not remove the
-native tags listed in [Disable Structural Tags](#disable-structural-tags).
+The adjustment depends on the worker's schema mode and the tool's `strict`
+field:
+
+| Worker schema mode | Tool `strict` | Effect of a detected unsupported regex |
+|---|---|---|
+| `auto` | Omitted | Remove an unsupported `pattern` from the argument grammar and retain the remaining schema. If a `patternProperties` key is unsupported, relax that tool's entire argument schema, as with `strict: false`. |
+| `auto` | `true` | Keep the declared schema; backend compilation can reject the request. |
+| `auto` | `false` | Arguments are already schema-relaxed. |
+| `strict` | Any value or omitted | Keep the declared schema; backend compilation can reject the request. |
+
+These adjustments affect grammar construction; the request's schema stays
+unchanged. Other tools retain their own schema policy. When the parser builds
+a tag, its tool-call envelope and tool-name policy remain. The `vllm`
+chat processor can return no tag when every tool becomes `strict: false`; see
+[Backend and Path Compatibility](#backend-and-path-compatibility).
+The same policy applies to the native tags retained by
+[Disable Structural Tags](#disable-structural-tags). Adjustments are logged at
+debug level.
+
+The regex check is conservative across tag formats. XGrammar 0.2.7 and 0.2.8
+accept some leading lookaheads, such as `^(?!…)` or `^(?=…)`, when the pattern
+stays inside a JSON Schema. Their regex converter rejects lookahead, and
+lookahead elsewhere in a JSON Schema pattern can still fail. Do not assume
+that the backend ignores every lookahead. Automatic guidance can therefore
+omit a regex that a particular tag format would accept.
+
+If a `strict: true` tool fails backend compilation, either rewrite the regex
+for the installed XGrammar or set that tool's `strict` to `false` under schema
+mode `auto`, if relaxing argument validation is acceptable. Schema mode
+`strict` overrides this opt-out, as does a parameter-level tool strictness
+setting with the `sglang` chat processor. The workaround is not guaranteed on
+XGrammar 0.1.32. Disabling structural tags does not remove the native tags
+listed in [Disable Structural Tags](#disable-structural-tags).
 
 ## See Also
 
