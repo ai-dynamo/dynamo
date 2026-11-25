@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, NamedWorkers, RuntimeConfigWatch,
     SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
@@ -1619,6 +1619,7 @@ impl ModelManager {
     pub fn get_chat_completions_engine_with_parsing(
         &self,
         model: &str,
+        named: NamedWorkers,
     ) -> Result<
         (
             OpenAIChatCompletionsStreamingEngine,
@@ -1631,13 +1632,14 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing()
+            .get_chat_engine_with_parsing(named)
     }
 
     pub fn get_chat_completions_engine_with_parsing_for_capability(
         &self,
         model: &str,
         capability: &str,
+        named: NamedWorkers,
     ) -> Result<
         Option<(
             OpenAIChatCompletionsStreamingEngine,
@@ -1650,12 +1652,13 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing_for_capability(capability)
+            .get_chat_engine_with_parsing_for_capability(capability, named)
     }
 
     pub(crate) fn get_chat_completions_engine_with_input_policy(
         &self,
         model: &str,
+        named: NamedWorkers,
     ) -> Result<
         (
             OpenAIChatCompletionsStreamingEngine,
@@ -1669,12 +1672,13 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_input_policy()
+            .get_chat_engine_with_input_policy(named)
     }
 
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
+        named: NamedWorkers,
     ) -> Result<
         (
             OpenAICompletionsStreamingEngine,
@@ -1687,7 +1691,7 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_completions_engine_with_parsing()
+            .get_completions_engine_with_parsing(named)
     }
 
     pub fn get_generate_engine_with_parsing(

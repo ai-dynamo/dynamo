@@ -55,6 +55,7 @@ use super::{
     response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders},
     service_v2::{self, BackendErrorCheck},
 };
+use crate::discovery::NamedWorkers;
 use crate::engines::ValidateRequest;
 use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
@@ -1358,7 +1359,11 @@ async fn handler_completions(
 
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    check_model_serving_ready_for(
+        &state,
+        &request.inner.model,
+        NamedWorkers::from_request(request.nvext.as_ref(), &headers, state.nvext_enabled()),
+    )?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -1493,7 +1498,10 @@ async fn completions_single(
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing(
+            &model,
+            NamedWorkers::from_nvext(request.nvext.as_ref()),
+        )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1805,7 +1813,10 @@ async fn completions_batch(
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing(
+            &model,
+            NamedWorkers::from_nvext(request.nvext.as_ref()),
+        )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2756,7 +2767,11 @@ async fn handler_chat_completions(
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     if !resolved_model.is_empty()
-        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+        && let Err(error) = check_model_serving_ready_for(
+            &state,
+            resolved_model,
+            NamedWorkers::from_request(request.nvext.as_ref(), &headers, state.nvext_enabled()),
+        )
     {
         lifecycle_request.record_session(&request_id, None);
         terminal.finish(terminal_outcome_for_error_response(&error));
@@ -4348,11 +4363,15 @@ async fn chat_completions(
             .get_chat_completions_engine_with_parsing_for_capability(
                 &model,
                 crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                NamedWorkers::from_nvext(request.nvext.as_ref()),
             )
     } else {
         state
             .manager()
-            .get_chat_completions_engine_with_parsing(&model)
+            .get_chat_completions_engine_with_parsing(
+                &model,
+                NamedWorkers::from_nvext(request.nvext.as_ref()),
+            )
             .map(Some)
     }
     .map_err(|e| ErrorMessage::from_model_error(&e))
@@ -4971,7 +4990,11 @@ async fn handler_responses(
         template.as_ref(),
     );
     if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+        check_model_serving_ready_for(
+            &state,
+            resolved_model,
+            NamedWorkers::from_request(request.nvext.as_ref(), &headers, state.nvext_enabled()),
+        )?;
     }
 
     if !state.nvext_enabled() {
@@ -5234,7 +5257,10 @@ async fn responses(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing(
+            &model,
+            NamedWorkers::from_nvext(request.nvext.as_ref()),
+        )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -5649,12 +5675,22 @@ pub(crate) fn check_model_serving_ready(
     state: &Arc<service_v2::State>,
     model_name: &str,
 ) -> Result<(), ErrorResponse> {
+    check_model_serving_ready_for(state, model_name, NamedWorkers::default())
+}
+
+/// [`check_model_serving_ready`] for a request that may name its worker. Such a request is
+/// served while the named worker is held, when no worker of the model is routable yet.
+pub(crate) fn check_model_serving_ready_for(
+    state: &Arc<service_v2::State>,
+    model_name: &str,
+    named: NamedWorkers,
+) -> Result<(), ErrorResponse> {
     let Some(model) = state.manager().get_committed_model(model_name) else {
         // Not committed — let the per-endpoint engine accessor produce the
         // canonical 404. The readiness gate has nothing to say.
         return Ok(());
     };
-    if model.has_ready_workers() {
+    if model.has_ready_workers_for(named) {
         return Ok(());
     }
     Err(ErrorMessage::service_unavailable_with_body(

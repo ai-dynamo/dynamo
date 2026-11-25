@@ -390,6 +390,23 @@ pub fn upstream_elapsed_from_headers(headers: &HeaderMap) -> Option<Duration> {
     Duration::try_from_secs_f64(millis / 1000.0).ok()
 }
 
+/// The worker and prefill worker IDs named by the routing headers, in that order.
+pub fn worker_id_headers(headers: &HeaderMap) -> (Option<u64>, Option<u64>) {
+    let worker_id = headers
+        .get(HEADER_WORKER_INSTANCE_ID)
+        .or_else(|| headers.get(HEADER_WORKER_INSTANCE_ID_ALIAS))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let prefill_id = headers
+        .get(HEADER_PREFILL_INSTANCE_ID)
+        .or_else(|| headers.get(HEADER_PREFILL_INSTANCE_ID_ALIAS))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    (worker_id, prefill_id)
+}
+
 /// Apply HTTP routing header overrides to nvext.
 ///
 /// Header mappings:
@@ -403,17 +420,7 @@ pub fn upstream_elapsed_from_headers(headers: &HeaderMap) -> Option<Duration> {
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
 pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
-    let worker_id = headers
-        .get(HEADER_WORKER_INSTANCE_ID)
-        .or_else(|| headers.get(HEADER_WORKER_INSTANCE_ID_ALIAS))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-
-    let prefill_id = headers
-        .get(HEADER_PREFILL_INSTANCE_ID)
-        .or_else(|| headers.get(HEADER_PREFILL_INSTANCE_ID_ALIAS))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+    let (worker_id, prefill_id) = worker_id_headers(headers);
 
     let dp_rank = headers
         .get(HEADER_DP_RANK)

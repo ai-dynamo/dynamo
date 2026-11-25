@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::{
-    component::{Client, Endpoint},
+    component::{Client, DispatchableInstances, Endpoint},
     protocols::EndpointId,
 };
 use tokio::sync::watch;
@@ -268,6 +268,10 @@ pub struct WorkerSet {
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
 
+    /// Watcher for the instances a request that names its worker can reach, held ones included.
+    /// None for in-process models, like `instance_count_rx`.
+    dispatch_rx: Option<watch::Receiver<DispatchableInstances>>,
+
     /// Cancels background work created while materializing this WorkerSet.
     lifecycle_cancellation: Option<CancellationToken>,
 
@@ -312,6 +316,7 @@ impl WorkerSet {
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
+            dispatch_rx: None,
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
@@ -549,6 +554,29 @@ impl WorkerSet {
         self.instance_count_rx = Some(rx);
     }
 
+    /// Store the watcher for the dispatchable instances of this set.
+    /// Must be called before the WorkerSet is wrapped in Arc.
+    pub fn set_dispatch_watcher(&mut self, rx: watch::Receiver<DispatchableInstances>) {
+        self.dispatch_rx = Some(rx);
+    }
+
+    /// Whether a request that names `worker_id` can be dispatched to this set. True for a
+    /// held worker, which [`Self::worker_count`] leaves out.
+    pub(crate) fn has_dispatchable_worker(&self, worker_id: u64) -> bool {
+        self.dispatch_rx
+            .as_ref()
+            .is_some_and(|rx| rx.borrow().contains(worker_id))
+    }
+
+    /// Number of workers a request that names its worker can reach, held ones included.
+    /// Falls back to [`Self::worker_count`] where no dispatch watcher is set.
+    pub(crate) fn dispatchable_worker_count(&self) -> usize {
+        match &self.dispatch_rx {
+            Some(rx) => rx.borrow().ids.len(),
+            None => self.worker_count(),
+        }
+    }
+
     pub(crate) fn decision_admissions(&self) -> Option<&watch::Receiver<Vec<u64>>> {
         self.topology_target
             .as_ref()
@@ -666,6 +694,7 @@ impl WorkerSet {
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
+            dispatch_rx: self.dispatch_rx.clone(),
             lifecycle_cancellation: self
                 .lifecycle_cancellation
                 .as_ref()

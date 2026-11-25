@@ -169,6 +169,73 @@ struct NamespaceReadinessEval {
 
 type WorkerSetMap = HashMap<String, Arc<WorkerSet>>;
 
+/// The workers a request names, through `nvext` or the routing headers.
+///
+/// A request that names a worker is served by the worker set that owns it, even while the
+/// worker is held out of automatic routing and so adds nothing to that set's weight or
+/// readiness.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NamedWorkers {
+    /// The decode or aggregated worker: `decode_worker_id`, else `backend_instance_id`.
+    pub worker: Option<u64>,
+    /// The prefill worker: `prefill_worker_id`.
+    pub prefill: Option<u64>,
+}
+
+impl NamedWorkers {
+    /// The workers `nvext` names, once the frontend has merged the routing headers into it.
+    pub fn from_nvext(nvext: Option<&crate::protocols::common::extensions::NvExt>) -> Self {
+        let Some(nvext) = nvext else {
+            return Self::default();
+        };
+        Self {
+            worker: nvext.decode_worker_id.or(nvext.backend_instance_id),
+            prefill: nvext.prefill_worker_id,
+        }
+    }
+
+    /// The workers a request names before the frontend has merged the routing headers into
+    /// its `nvext`. Headers win, as they do in that merge. Names nothing when client `nvext`
+    /// is disabled.
+    pub fn from_request(
+        nvext: Option<&crate::protocols::common::extensions::NvExt>,
+        headers: &axum::http::HeaderMap,
+        nvext_enabled: bool,
+    ) -> Self {
+        if !nvext_enabled {
+            return Self::default();
+        }
+        let body = Self::from_nvext(nvext);
+        let (worker, prefill) = crate::protocols::common::extensions::worker_id_headers(headers);
+        Self {
+            worker: worker.or(body.worker),
+            prefill: prefill.or(body.prefill),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.worker.is_none() && self.prefill.is_none()
+    }
+
+    fn names(&self, worker_set: &WorkerSet) -> bool {
+        self.worker
+            .into_iter()
+            .chain(self.prefill)
+            .any(|worker_id| worker_set.has_dispatchable_worker(worker_id))
+    }
+
+    /// How many workers of `worker_set` this request can use: the routable ones, and the
+    /// held ones too when the request names a worker of the set. A worker type the request
+    /// does not name is selected automatically, so its held workers do not count.
+    fn usable_workers(&self, worker_set: &WorkerSet) -> usize {
+        if self.names(worker_set) {
+            worker_set.dispatchable_worker_count()
+        } else {
+            worker_set.worker_count()
+        }
+    }
+}
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
@@ -505,17 +572,28 @@ impl Model {
     /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
     /// check: ready iff any worker is live. Empty `wsets` is not ready.
     fn evaluate_namespace(&self, wsets: &[&WorkerSet]) -> NamespaceReadinessEval {
+        self.evaluate_namespace_counting(wsets, WorkerSet::worker_count)
+    }
+
+    /// [`Self::evaluate_namespace`] with `count_workers` deciding how many workers of a
+    /// WorkerSet are live. Automatic routing counts the routable workers. A request that
+    /// names its worker also counts the held ones.
+    fn evaluate_namespace_counting(
+        &self,
+        wsets: &[&WorkerSet],
+        count_workers: impl Fn(&WorkerSet) -> usize,
+    ) -> NamespaceReadinessEval {
         let units = wsets
             .iter()
             .map(|ws| match Self::ws_type_and_needs(ws) {
                 Some((worker_type, needs)) => super::readiness::ReadinessUnit {
                     worker_type: Some(worker_type),
-                    live_count: ws.worker_count(),
+                    live_count: count_workers(ws),
                     needs,
                 },
                 None => super::readiness::ReadinessUnit {
                     worker_type: None,
-                    live_count: ws.worker_count(),
+                    live_count: count_workers(ws),
                     needs: Vec::new(),
                 },
             })
@@ -548,6 +626,36 @@ impl Model {
     /// serve traffic.
     pub fn has_ready_workers(&self) -> bool {
         self.first_ready_workers().is_some()
+    }
+
+    /// Whether this model can serve a request that names `named`: some namespace is ready, or
+    /// the namespace that owns a named worker is ready once the held workers of the named
+    /// WorkerSets count.
+    pub fn has_ready_workers_for(&self, named: NamedWorkers) -> bool {
+        self.has_ready_workers()
+            || !Self::named_namespaces(self, &self.worker_sets.load(), named).is_empty()
+    }
+
+    /// The namespaces that own a worker `named` names and are ready for that request, in
+    /// sorted order. See [`NamedWorkers::usable_workers`].
+    fn named_namespaces<'a>(
+        &self,
+        worker_sets: &'a WorkerSetMap,
+        named: NamedWorkers,
+    ) -> Vec<&'a str> {
+        if named.is_empty() {
+            return Vec::new();
+        }
+        Self::sorted_namespaces(worker_sets)
+            .into_iter()
+            .filter(|namespace| {
+                let wsets = Self::sets_in_namespace(worker_sets, namespace);
+                wsets.iter().any(|ws| named.names(ws))
+                    && self
+                        .evaluate_namespace_counting(&wsets, |ws| named.usable_workers(ws))
+                        .ready
+            })
+            .collect()
     }
 
     /// Structured per-namespace worker readiness for this model — the data
@@ -887,13 +995,15 @@ impl Model {
 
     pub fn get_chat_engine_with_parsing(
         &self,
+        named: NamedWorkers,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.get_chat_engine_with_input_policy()
+        self.get_chat_engine_with_input_policy(named)
             .map(|(engine, parsing, _)| (engine, parsing))
     }
 
     pub(crate) fn get_chat_engine_with_input_policy(
         &self,
+        named: NamedWorkers,
     ) -> Result<
         (
             OpenAIChatCompletionsStreamingEngine,
@@ -902,7 +1012,7 @@ impl Model {
         ),
         ModelManagerError,
     > {
-        self.select_worker_set_with(|ws| {
+        self.select_worker_set_for(named, |ws| {
             ws.chat_engine
                 .clone()
                 .map(|engine| (engine, ws.parsing_options(), ws.input_policy()))
@@ -915,6 +1025,7 @@ impl Model {
     pub fn get_chat_engine_with_parsing_for_capability(
         &self,
         capability: &str,
+        named: NamedWorkers,
     ) -> Result<Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
     {
         if !self.has_chat_engine_for_capability(capability) {
@@ -924,7 +1035,7 @@ impl Model {
                 Err(self.engine_error(false))
             };
         }
-        self.select_worker_set_with(|ws| {
+        self.select_worker_set_for(named, |ws| {
             ws.supports_runtime_capability(capability)
                 .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
                 .flatten()
@@ -935,8 +1046,9 @@ impl Model {
 
     pub fn get_completions_engine_with_parsing(
         &self,
+        named: NamedWorkers,
     ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| {
+        self.select_worker_set_for(named, |ws| {
             ws.completions_engine
                 .clone()
                 .map(|e| (e, ws.parsing_options()))
@@ -1029,6 +1141,50 @@ impl Model {
         self.select_worker_set_with_worker_count(extract, WorkerSet::worker_count)
     }
 
+    /// [`Self::select_worker_set_with`] for a request that may name its worker.
+    ///
+    /// The WorkerSet that owns the named decode or aggregated worker serves the request. A
+    /// request that names only a prefill worker is served by a WorkerSet of that worker's
+    /// namespace. Either way the held workers of a named WorkerSet count. A request that
+    /// names no worker, or one that no WorkerSet owns, is selected as usual. The routing host
+    /// then rejects a name it does not know.
+    fn select_worker_set_for<T, F>(&self, named: NamedWorkers, extract: F) -> Option<T>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+    {
+        if !named.is_empty() {
+            let worker_sets = self.worker_sets.load();
+            let namespaces = self.named_namespaces(&worker_sets, named);
+            let candidates = |owners_only: bool| -> Vec<(T, usize)> {
+                worker_sets
+                    .values()
+                    .filter(|ws| namespaces.contains(&ws.namespace()))
+                    .filter(|ws| {
+                        !owners_only
+                            || named
+                                .worker
+                                .is_some_and(|worker_id| ws.has_dispatchable_worker(worker_id))
+                    })
+                    .filter_map(|ws| {
+                        let count = named.usable_workers(ws);
+                        (count > 0)
+                            .then(|| extract(ws))
+                            .flatten()
+                            .map(|val| (val, count))
+                    })
+                    .collect()
+            };
+            let mut eligible = candidates(true);
+            if eligible.is_empty() {
+                eligible = candidates(false);
+            }
+            if let Some(selected) = Self::pick_weighted(eligible) {
+                return Some(selected);
+            }
+        }
+        self.select_worker_set_with(extract)
+    }
+
     fn select_worker_set_with_worker_count<T, F, C>(
         &self,
         extract: F,
@@ -1084,6 +1240,11 @@ impl Model {
             })
             .collect();
 
+        Self::pick_weighted(eligible)
+    }
+
+    /// Pick one value at random, weighted by its worker count.
+    fn pick_weighted<T>(eligible: Vec<(T, usize)>) -> Option<T> {
         if eligible.is_empty() {
             return None;
         }
@@ -1447,7 +1608,9 @@ mod tests {
         for native_active in [false, true] {
             standard_tx.send_replace(if native_active { vec![] } else { vec![1] });
             native_tx.send_replace(if native_active { vec![2] } else { vec![] });
-            let (engine, parsing, policy) = model.get_chat_engine_with_input_policy().unwrap();
+            let (engine, parsing, policy) = model
+                .get_chat_engine_with_input_policy(NamedWorkers::default())
+                .unwrap();
             assert!(Arc::ptr_eq(
                 &engine,
                 if native_active {
@@ -1517,14 +1680,20 @@ mod tests {
         };
         let model = Model::new("custom".to_string());
         assert!(matches!(
-            model.get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY),
+            model.get_chat_engine_with_parsing_for_capability(
+                JSON_MULTIMODAL_CAPABILITY,
+                NamedWorkers::default(),
+            ),
             Err(ModelManagerError::ModelNotFound(_))
         ));
 
         model.add_worker_set("text".to_string(), chat_set("text", false));
         assert!(
             model
-                .get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY)
+                .get_chat_engine_with_parsing_for_capability(
+                    JSON_MULTIMODAL_CAPABILITY,
+                    NamedWorkers::default(),
+                )
                 .unwrap()
                 .is_none()
         );
@@ -1541,7 +1710,10 @@ mod tests {
         idle.chat_engine = Some(make_test_chat_engine());
         model.add_worker_set("idle".to_string(), Arc::new(idle));
         assert!(matches!(
-            model.get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY),
+            model.get_chat_engine_with_parsing_for_capability(
+                JSON_MULTIMODAL_CAPABILITY,
+                NamedWorkers::default(),
+            ),
             Err(ModelManagerError::ModelUnavailable(_))
         ));
 
@@ -1550,7 +1722,10 @@ mod tests {
         model.add_worker_set("vllm".to_string(), flagged);
         for _ in 0..32 {
             let (engine, _) = model
-                .get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY)
+                .get_chat_engine_with_parsing_for_capability(
+                    JSON_MULTIMODAL_CAPABILITY,
+                    NamedWorkers::default(),
+                )
                 .unwrap()
                 .unwrap();
             assert!(Arc::ptr_eq(&engine, &flagged_engine));
@@ -2835,5 +3010,324 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    /// Build a serving WorkerSet whose `held_ids` are discovered but held out of automatic
+    /// routing: they are dispatchable and absent from the routable instance watcher.
+    fn ws_with_held(
+        namespace: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        routable_ids: Vec<u64>,
+        held_ids: Vec<u64>,
+    ) -> (
+        Arc<WorkerSet>,
+        watch::Sender<Vec<u64>>,
+        watch::Sender<dynamo_runtime::component::DispatchableInstances>,
+    ) {
+        ws_with_held_keyed(
+            namespace,
+            &format!("mdc-{namespace}"),
+            worker_type,
+            needs,
+            routable_ids,
+            held_ids,
+        )
+    }
+
+    /// [`ws_with_held`] with `mdcsum` naming the WorkerSet, to tell apart two sets of one
+    /// namespace.
+    fn ws_with_held_keyed(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        routable_ids: Vec<u64>,
+        held_ids: Vec<u64>,
+    ) -> (
+        Arc<WorkerSet>,
+        watch::Sender<Vec<u64>>,
+        watch::Sender<dynamo_runtime::component::DispatchableInstances>,
+    ) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        let mut ids = [routable_ids.clone(), held_ids.clone()].concat();
+        ids.sort_unstable();
+        let (routable_tx, routable_rx) = watch::channel(routable_ids);
+        let (dispatch_tx, dispatch_rx) =
+            watch::channel(dynamo_runtime::component::DispatchableInstances {
+                ids,
+                held: held_ids,
+            });
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(routable_rx);
+        ws.set_dispatch_watcher(dispatch_rx);
+        if worker_type != WorkerType::Prefill {
+            ws.chat_engine = Some(make_test_chat_engine());
+        }
+        (Arc::new(ws), routable_tx, dispatch_tx)
+    }
+
+    fn namespace_of(ws: &WorkerSet) -> Option<String> {
+        ws.chat_engine.as_ref().map(|_| ws.namespace().to_string())
+    }
+
+    fn named(worker: u64) -> NamedWorkers {
+        NamedWorkers {
+            worker: Some(worker),
+            prefill: None,
+        }
+    }
+
+    /// A worker set whose workers are all held is discovered and has its pipeline, but it
+    /// must draw no automatic request and must not make the model look ready.
+    #[test]
+    fn held_workers_add_no_weight_and_no_readiness() {
+        let model = Model::new("llama".to_string());
+        let (old, _old_routable, _old_dispatch) =
+            ws_with_held("old", WorkerType::Aggregated, vec![], vec![1], vec![]);
+        let (new, _new_routable, _new_dispatch) =
+            ws_with_held("new", WorkerType::Aggregated, vec![], vec![], vec![7]);
+        model.add_worker_set("old".to_string(), old);
+        model.add_worker_set("new".to_string(), new);
+
+        assert!(model.is_workers_ready("old"));
+        assert!(!model.is_workers_ready("new"));
+        for _ in 0..200 {
+            assert_eq!(
+                model.select_worker_set_with(namespace_of).as_deref(),
+                Some("old")
+            );
+        }
+
+        model.remove_worker_set("old");
+        assert!(!model.has_ready_workers());
+        assert!(!model.is_ready_to_serve());
+        assert!(!model.is_displayable());
+        assert!(
+            model
+                .get_chat_engine_with_parsing(NamedWorkers::default())
+                .is_err()
+        );
+    }
+
+    /// A request that names a held worker is served by the worker set that owns it, whatever
+    /// the weights say, and a released worker joins automatic selection.
+    #[test]
+    fn a_named_held_worker_selects_the_worker_set_that_owns_it() {
+        let model = Model::new("llama".to_string());
+        let (old, _old_routable, _old_dispatch) =
+            ws_with_held("old", WorkerType::Aggregated, vec![], vec![1, 2, 3], vec![]);
+        let (new, new_routable, new_dispatch) =
+            ws_with_held("new", WorkerType::Aggregated, vec![], vec![], vec![7]);
+        model.add_worker_set("old".to_string(), old);
+        model.add_worker_set("new".to_string(), new);
+
+        for _ in 0..50 {
+            assert_eq!(
+                model
+                    .select_worker_set_for(named(7), namespace_of)
+                    .as_deref(),
+                Some("new")
+            );
+            // A routable worker is named the same way.
+            assert_eq!(
+                model
+                    .select_worker_set_for(named(2), namespace_of)
+                    .as_deref(),
+                Some("old")
+            );
+            // A name no worker set owns is selected as usual; the routing host rejects it.
+            assert_eq!(
+                model
+                    .select_worker_set_for(named(99), namespace_of)
+                    .as_deref(),
+                Some("old")
+            );
+        }
+
+        // With only the held worker set left, the model serves the named request alone.
+        model.remove_worker_set("old");
+        assert!(!model.has_ready_workers());
+        assert!(model.has_ready_workers_for(named(7)));
+        assert!(!model.has_ready_workers_for(named(99)));
+        assert!(!model.has_ready_workers_for(NamedWorkers::default()));
+        assert!(model.get_chat_engine_with_parsing(named(7)).is_ok());
+        assert!(model.get_chat_engine_with_parsing(named(99)).is_err());
+
+        // Release: the worker becomes routable and the set takes automatic requests.
+        new_routable.send(vec![7]).unwrap();
+        new_dispatch
+            .send(dynamo_runtime::component::DispatchableInstances {
+                ids: vec![7],
+                held: vec![],
+            })
+            .unwrap();
+        assert!(model.has_ready_workers());
+        assert_eq!(
+            model.select_worker_set_with(namespace_of).as_deref(),
+            Some("new")
+        );
+    }
+
+    /// Two WorkerSets of one namespace: the request goes to the one that owns the named
+    /// worker, not to its larger sibling, which would reject a worker it does not know.
+    #[test]
+    fn a_named_worker_selects_its_worker_set_within_a_namespace() {
+        let model = Model::new("llama".to_string());
+        let (large, _large_routable, _large_dispatch) = ws_with_held_keyed(
+            "ns",
+            "large",
+            WorkerType::Aggregated,
+            vec![],
+            vec![1, 2, 3],
+            vec![],
+        );
+        let (held, _held_routable, _held_dispatch) = ws_with_held_keyed(
+            "ns",
+            "held",
+            WorkerType::Aggregated,
+            vec![],
+            vec![],
+            vec![7],
+        );
+        model.add_worker_set("ns:large".to_string(), large);
+        model.add_worker_set("ns:held".to_string(), held);
+        let mdcsum_of = |ws: &WorkerSet| ws.chat_engine.as_ref().map(|_| ws.mdcsum().to_string());
+
+        for _ in 0..50 {
+            assert_eq!(
+                model.select_worker_set_for(named(7), mdcsum_of).as_deref(),
+                Some("held")
+            );
+            assert_eq!(
+                model.select_worker_set_for(named(2), mdcsum_of).as_deref(),
+                Some("large")
+            );
+            // Automatic selection never reaches the held set.
+            assert_eq!(
+                model.select_worker_set_with(mdcsum_of).as_deref(),
+                Some("large")
+            );
+        }
+    }
+
+    /// A named worker is served only by a namespace that is complete for that request: the
+    /// held workers of a WorkerSet count only when the request names one of them, because
+    /// the other worker types are selected automatically.
+    #[test]
+    fn a_named_worker_needs_a_namespace_that_is_complete_for_its_request() {
+        let model = Model::new("llama".to_string());
+        let (decode, decode_routable, decode_dispatch) = ws_with_held(
+            "new",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![],
+            vec![7],
+        );
+        model.add_worker_set("new".to_string(), decode);
+
+        // Decode alone: the namespace has no prefill worker, held or not.
+        assert!(!model.has_ready_workers_for(named(7)));
+        assert_eq!(model.select_worker_set_for(named(7), namespace_of), None);
+
+        let (prefill, _prefill_routable, _prefill_dispatch) = ws_with_held(
+            "new",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![],
+            vec![8],
+        );
+        model.add_worker_set("new:prefill".to_string(), prefill);
+        assert!(!model.is_workers_ready("new"));
+
+        // Naming one of the two held workers leaves the other to automatic selection, which
+        // skips it.
+        let prefill_only = NamedWorkers {
+            worker: None,
+            prefill: Some(8),
+        };
+        for one_named in [named(7), prefill_only] {
+            assert!(!model.has_ready_workers_for(one_named));
+            assert_eq!(model.select_worker_set_for(one_named, namespace_of), None);
+        }
+
+        // Naming both reaches the pair.
+        let both = NamedWorkers {
+            worker: Some(7),
+            prefill: Some(8),
+        };
+        assert!(model.has_ready_workers_for(both));
+        assert_eq!(
+            model.select_worker_set_for(both, namespace_of).as_deref(),
+            Some("new")
+        );
+
+        // With the decode worker released, naming the held prefill worker is enough, and
+        // the request is served by the namespace's decode WorkerSet.
+        decode_routable.send(vec![7]).unwrap();
+        decode_dispatch
+            .send(dynamo_runtime::component::DispatchableInstances {
+                ids: vec![7],
+                held: vec![],
+            })
+            .unwrap();
+        assert!(!model.has_ready_workers());
+        assert!(model.has_ready_workers_for(prefill_only));
+        assert_eq!(
+            model
+                .select_worker_set_for(prefill_only, namespace_of)
+                .as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn named_workers_follow_the_routing_header_merge() {
+        use crate::protocols::common::extensions::{
+            HEADER_PREFILL_INSTANCE_ID, HEADER_WORKER_INSTANCE_ID, NvExt,
+        };
+
+        let nvext = NvExt {
+            backend_instance_id: Some(1),
+            decode_worker_id: Some(2),
+            prefill_worker_id: Some(3),
+            ..Default::default()
+        };
+        // The decode worker wins over the generic backend instance, as it does when routing.
+        assert_eq!(
+            NamedWorkers::from_nvext(Some(&nvext)),
+            NamedWorkers {
+                worker: Some(2),
+                prefill: Some(3),
+            }
+        );
+        let backend_only = NvExt {
+            backend_instance_id: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(NamedWorkers::from_nvext(Some(&backend_only)), named(1));
+        assert!(NamedWorkers::from_nvext(None).is_empty());
+
+        // Headers override the body, and nothing is named when client nvext is disabled.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "7".parse().unwrap());
+        assert_eq!(
+            NamedWorkers::from_request(Some(&nvext), &headers, true),
+            NamedWorkers {
+                worker: Some(7),
+                prefill: Some(3),
+            }
+        );
+        headers.insert(HEADER_PREFILL_INSTANCE_ID, "8".parse().unwrap());
+        assert_eq!(
+            NamedWorkers::from_request(None, &headers, true),
+            NamedWorkers {
+                worker: Some(7),
+                prefill: Some(8),
+            }
+        );
+        assert!(NamedWorkers::from_request(Some(&nvext), &headers, false).is_empty());
     }
 }
