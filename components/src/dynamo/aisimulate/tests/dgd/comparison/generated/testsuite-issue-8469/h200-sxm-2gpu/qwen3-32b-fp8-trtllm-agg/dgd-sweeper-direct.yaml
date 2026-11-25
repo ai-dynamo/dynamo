@@ -5,8 +5,6 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen3-32b-fp8-trtllm-agg
-  annotations:
-    nvidia.com/sweeper-evaluation-context: '{"aic_nextn":null,"gpu_budget":2,"hardware_sku":"h200_sxm","min_gpu_budget":null,"startup_time":null}'
 spec:
   components:
   - name: Frontend
@@ -45,7 +43,6 @@ spec:
           - Qwen/Qwen3-32B-FP8
           - --extra-engine-args
           - ./examples/backends/trtllm/engine_configs/qwen3/agg.yaml
-          - --publish-kv-events
           - --trtllm.tensor_parallel_size
           - '2'
           - --trtllm.kv_cache_config.tokens_per_block

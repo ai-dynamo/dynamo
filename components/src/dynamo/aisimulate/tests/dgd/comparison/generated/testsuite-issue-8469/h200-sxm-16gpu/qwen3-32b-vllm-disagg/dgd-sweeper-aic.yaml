@@ -23,7 +23,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: decode
+  - name: VllmDecodeWorker
     type: decode
     replicas: 2
     podTemplate:
@@ -43,8 +43,8 @@ spec:
           - '1'
           - --data-parallel-size
           - '1'
-          - --gpu-memory-utilization
-          - '0.9'
+          - --block-size
+          - '64'
           - --max-num-seqs
           - '512'
           - --max-num-batched-tokens
@@ -562,16 +562,15 @@ spec:
           - '510'
           - '511'
           - '512'
+          - --no-enable-prefix-caching
           - --disaggregation-mode
           - decode
-          - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           - --model
           - Qwen/Qwen3-32B
           - --served-model-name
           - Qwen/Qwen3-32B
           - --max-model-len
-          - '131072'
+          - '40960'
           resources:
             limits:
               nvidia.com/gpu: '2'
@@ -581,7 +580,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: prefill
+  - name: VllmPrefillWorker
     type: prefill
     replicas: 2
     podTemplate:
@@ -601,8 +600,8 @@ spec:
           - '1'
           - --data-parallel-size
           - '1'
-          - --gpu-memory-utilization
-          - '0.9'
+          - --block-size
+          - '64'
           - --max-num-seqs
           - '128'
           - --max-num-batched-tokens
@@ -739,13 +738,13 @@ spec:
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - --model
           - Qwen/Qwen3-32B
           - --served-model-name
           - Qwen/Qwen3-32B
           - --max-model-len
-          - '131072'
+          - '40960'
           resources:
             limits:
               nvidia.com/gpu: '2'

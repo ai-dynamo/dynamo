@@ -21,5 +21,3 @@ sweep:
   candidates_per_round: 2
   parallel_evals: 1
   max_eval_seconds: 120
-  algorithm: bayesian
-  seed: 42

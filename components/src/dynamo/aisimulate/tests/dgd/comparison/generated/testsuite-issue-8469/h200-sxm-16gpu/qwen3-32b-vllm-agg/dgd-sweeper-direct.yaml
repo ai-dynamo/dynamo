@@ -5,8 +5,6 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen3-32b-vllm-agg
-  annotations:
-    nvidia.com/sweeper-evaluation-context: '{"aic_nextn":null,"gpu_budget":16,"hardware_sku":"h200_sxm","min_gpu_budget":null,"startup_time":null}'
 spec:
   components:
   - name: Frontend
@@ -25,7 +23,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: worker
+  - name: VllmDecodeWorker
     type: worker
     replicas: 2
     podTemplate:
@@ -54,8 +52,6 @@ spec:
           - '16384'
           - --served-model-name
           - Qwen/Qwen3-32B
-          - --max-model-len
-          - '131072'
           resources:
             limits:
               nvidia.com/gpu: '4'

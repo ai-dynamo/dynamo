@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Expected rejection: A100 does not support the model's required FP8 tensor-core compute mode.
+# Evidence: none
+command:
+- '{python}'
+- -m
+- aisim
+- recommend
+- --stack
+- dynamo
+- --config
+- config.yaml
+- --output-dir
+- '{output}'
+- --format
+- json
+- --output
+- dgd
+exit_code: nonzero
+diagnostic: (?s)GPU a100_sxm .* does not support FP8 tensor-core compute.*no feasible candidate found
+mirrors:
+  model/config.json: https://huggingface.co/Qwen/Qwen3-32B-FP8/resolve/aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df/config.json

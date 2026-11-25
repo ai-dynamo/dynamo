@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from comparison import run_cases
+
+from dynamo.aisimulate.tests.dgd.comparison import run_cases
 
 pytestmark = [
     pytest.mark.unit,
@@ -130,138 +131,6 @@ def test_load_case_composes_hardware_and_derives_dgd_options(
     assert case.generated_dir == tmp_path / "output/h200-sxm-8gpu/qwen"
 
 
-def test_recommendation_config_preserves_comparison_intent(
-    monkeypatch, tmp_path
-) -> None:
-    case_path, _ = _write_case_and_hardware(tmp_path, monkeypatch)
-    (case_path / "sweeper.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "search_space": {
-                    "model_name": "Qwen/Qwen3-32B",
-                    "deployment_mode": ["disagg"],
-                    "backend": ["vllm"],
-                    "context_length": 131072,
-                },
-                "workload": {
-                    "isl": 1024,
-                    "osl": 128,
-                    "request_rate": 10,
-                    "num_request_ratio": 10,
-                },
-                "goal": {
-                    "target": "goodput_per_gpu",
-                    "sla": {"ttft_ms": 2000, "itl_ms": 25},
-                },
-                "sweep": {
-                    "max_rounds": 2,
-                    "candidates_per_round": 3,
-                    "parallel_evals": 1,
-                    "max_eval_seconds": 120,
-                    "algorithm": "bayesian",
-                    "seed": 42,
-                },
-            }
-        )
-    )
-    case = run_cases.load_case(
-        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
-    )
-
-    assert run_cases.recommendation_config(case) == {
-        "traffic": {
-            "source": {
-                "type": "synthetic",
-                "input_tokens": 1024,
-                "output_tokens": 128,
-            },
-            "load": {"type": "constant_rate", "requests_per_second": 10},
-            "stop": {"requests": 1},
-        },
-        "engine": {
-            "mode": "disaggregated",
-            "model": "Qwen/Qwen3-32B",
-            "hardware": "h200_sxm",
-            "backend": "vllm",
-            "context_length": 131072,
-            "workers": {
-                "prefill": {"parallelism": {"preset": "default"}},
-                "decode": {"parallelism": {"preset": "default"}},
-            },
-        },
-        "evaluation": {"sla": {"ttft_ms": 2000, "itl_ms": 25}},
-        "optimization": {
-            "target": "goodput_per_gpu",
-            "constraints": {"max_candidate_gpus": 8},
-        },
-        "optimizer": {
-            "algorithm": "bayesian",
-            "max_trials": 1,
-            "parallelism": 1,
-            "candidate_timeout_seconds": 120,
-            "seed": 42,
-        },
-    }
-
-
-def test_recommendation_config_uses_reproducible_model_and_parallelism(
-    monkeypatch, tmp_path
-) -> None:
-    fixture_path = tmp_path / "fixtures" / "qwen-revision"
-    fixture_path.mkdir(parents=True)
-    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
-    monkeypatch.setattr(run_cases, "_MODEL_FIXTURES_ROOT", tmp_path / "fixtures")
-    monkeypatch.setattr(run_cases, "_LOCAL_MODEL_INPUTS", {"qwen": "qwen-revision"})
-    monkeypatch.setattr(run_cases, "_BACKEND_VERSION_OVERRIDES", {"qwen": "previous"})
-    preset = {
-        "prefill": {
-            "replicas": 1,
-            "tensor": 8,
-            "pipeline": 1,
-            "attention_data": 1,
-            "moe_tensor": 1,
-            "moe_expert": 8,
-        },
-        "decode": {
-            "replicas": 1,
-            "tensor": 1,
-            "pipeline": 1,
-            "attention_data": 8,
-            "moe_tensor": 1,
-            "moe_expert": 8,
-        },
-    }
-    monkeypatch.setattr(run_cases, "_PARALLELISM_PRESETS", {"qwen": preset})
-    case = SimpleNamespace(
-        name="qwen",
-        sweeper_input={
-            "search_space": {
-                "model_name": "Qwen/Qwen3-32B",
-                "deployment_mode": ["disagg"],
-                "backend": ["sglang"],
-                "hardware_sku": "h200_sxm",
-                "gpu_budget": 16,
-            },
-            "workload": {
-                "isl": 1024,
-                "osl": 128,
-                "request_rate": 10,
-                "num_request_ratio": 10,
-            },
-            "goal": {"target": "goodput_per_gpu"},
-            "sweep": {"max_eval_seconds": 120},
-        },
-    )
-
-    engine = run_cases.recommendation_config(case)["engine"]
-
-    assert engine["model"] == "fixtures/qwen-revision"
-    assert engine["backend_version"] == "previous"
-    assert engine["workers"] == {
-        role: {"parallelism": {"preset": [values]}} for role, values in preset.items()
-    }
-
-
 def test_discovered_recipe_requirements_preserve_source_and_merge_proposals(
     monkeypatch, tmp_path
 ) -> None:
@@ -354,12 +223,7 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
         yaml.safe_dump(
             {
                 "source": "https://github.com/ai-dynamo/dynamo/issues/8469",
-                "tests": [
-                    {
-                        "case": "qwen",
-                        "hardware": "h200-sxm-8gpu",
-                    }
-                ],
+                "tests": [{"case": "qwen", "hardware": "h200-sxm-8gpu"}],
             }
         )
     )
@@ -375,13 +239,11 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
 def test_repository_suite_rows_have_paired_inputs(tmp_path) -> None:
     for entry in run_cases.load_suite(run_cases._ROOT / "testsuite-issue-8469.yaml"):
         assert run_cases.missing_case_inputs(entry.case) == (), entry.case
-        case = run_cases.load_case(
+        run_cases.load_case(
             entry.case,
             run_cases.load_hardware(entry.hardware),
             output_root=tmp_path / "out",
         )
-        assert case.sweeper_input["sweep"]["algorithm"] == "bayesian"
-        assert case.sweeper_input["sweep"]["seed"] == 42
 
 
 def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> None:
@@ -446,40 +308,6 @@ def test_load_suite_parses_expected_renderer_failure(tmp_path) -> None:
         match="TEP.*not implemented",
     )
     assert entry.exception_for("render", "sweeper-aic") is None
-
-
-def test_load_suite_parses_expected_recommend_failure(tmp_path) -> None:
-    suite = tmp_path / "suite.yaml"
-    suite.write_text(
-        yaml.safe_dump(
-            {
-                "tests": [
-                    {
-                        "case": "qwen",
-                        "hardware": "h200-sxm-8gpu",
-                        "exceptions": {
-                            "recommend": {
-                                "aic": {
-                                    "status": "broken",
-                                    "reason": "The request is intentionally infeasible.",
-                                    "match": "no feasible candidate",
-                                }
-                            },
-                        },
-                    }
-                ]
-            },
-            sort_keys=False,
-        )
-    )
-
-    [entry] = run_cases.load_suite(suite)
-
-    assert entry.exception_for("recommend", "aic") == run_cases.SuiteException(
-        status="broken",
-        reason="The request is intentionally infeasible.",
-        match="no feasible candidate",
-    )
 
 
 @pytest.mark.parametrize(
@@ -556,8 +384,7 @@ def test_profiler_forwards_progress_before_child_exit(
         "if not ready or sys.stdin.readline() != 'continue\\n':\n"
         "    raise RuntimeError('Progress was not forwarded before profiler exit')\n"
         "output = Path(sys.argv[sys.argv.index('--output-dir') + 1])\n"
-        "(output / 'final_config.yaml').write_text("
-        "'kind: DynamoGraphDeployment\\nmetadata:\\n  name: vllm-agg-deadbeef\\n')\n",
+        "(output / 'final_config.yaml').write_text('kind: DynamoGraphDeployment\\n')\n",
         stdin=subprocess.PIPE,
     )
     observed = []
@@ -577,31 +404,7 @@ def test_profiler_forwards_progress_before_child_exit(
     run_cases._run_v1_profiler(case)
 
     assert observed == ["Profiler progress\n"]
-    generated = yaml.safe_load(
-        (case.generated_dir / "dgd-profiler-v1beta1.yaml").read_text()
-    )
-    assert generated["metadata"]["name"] == "vllm-agg-144884bd"
-
-
-def test_normalize_profiler_dgd_stabilizes_generated_name() -> None:
-    case = SimpleNamespace(
-        name="qwen",
-        hardware=SimpleNamespace(name="h200-sxm-8gpu"),
-    )
-
-    normalized = yaml.safe_load(
-        run_cases._normalize_profiler_dgd(
-            "kind: DynamoGraphDeployment\n"
-            "metadata:\n"
-            "  name: vllm-agg-deadbeef\n"
-            "spec:\n"
-            "  components: []\n",
-            case,
-        )
-    )
-
-    assert normalized["metadata"]["name"] == "vllm-agg-144884bd"
-    assert normalized["spec"] == {"components": []}
+    assert (case.generated_dir / "dgd-profiler-v1beta1.yaml").is_file()
 
 
 @pytest.mark.timeout(10)

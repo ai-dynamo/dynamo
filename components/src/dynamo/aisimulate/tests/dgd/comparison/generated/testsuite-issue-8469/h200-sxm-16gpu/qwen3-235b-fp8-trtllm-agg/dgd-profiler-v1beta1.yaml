@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: trtllm-disagg-3bf6eb6e
+  name: trtllm-disagg-b5ee2aab
 spec:
   components:
   - name: Frontend
@@ -45,9 +45,9 @@ spec:
           - '8'
           - --enable-attention-dp
           - --max-batch-size
-          - '12'
+          - '16'
           - --max-num-tokens
-          - '64'
+          - '32'
           - --trtllm.moe_tensor_parallel_size
           - '1'
           - --trtllm.moe_config.backend
@@ -68,8 +68,6 @@ spec:
           - 'false'
           - --trtllm.print_iter_log
           - 'false'
-          - --disaggregation-mode
-          - decode
           - --model-path
           - Qwen/Qwen3-235B-A22B-FP8
           - --served-model-name
@@ -106,7 +104,7 @@ spec:
           - --max-batch-size
           - '1'
           - --max-num-tokens
-          - '4544'
+          - '4512'
           - --trtllm.moe_tensor_parallel_size
           - '1'
           - --trtllm.moe_config.backend
@@ -127,9 +125,6 @@ spec:
           - 'true'
           - --trtllm.print_iter_log
           - 'false'
-          - --disaggregation-mode
-          - prefill
-          - --publish-kv-events
           - --model-path
           - Qwen/Qwen3-235B-A22B-FP8
           - --served-model-name

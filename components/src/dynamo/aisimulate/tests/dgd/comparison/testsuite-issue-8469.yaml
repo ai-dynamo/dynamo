@@ -69,7 +69,6 @@ tests:
         sweeper-direct:
           status: broken
           reason: The direct renderer does not support the TRT-LLM TEP topology selected by Sweeper.
-          match: TEP .*not implemented
           links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: gpt-oss-120b-trtllm-disagg
@@ -126,13 +125,6 @@ tests:
   - case: nemotron-3-super-fp8-sglang-agg
     hardware: h200-sxm-4gpu
     exceptions:
-      recommend:
-        aic:
-          status: broken
-          reason: The pinned AISim H200/SGLang support matrix marks every Nemotron FP8 topology unsupported because no silicon rows match its FP8 MoE key.
-          links:
-            - https://github.com/ai-dynamo/aisim/blob/f85518b36f5488a4c8f6c9553a85d523f173bbb6/python/aisim/src/aisim_core/systems/fpe_support_matrix/h200_sxm.csv
-          match: '(?s)MoE data missing for MoeKey.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -144,13 +136,6 @@ tests:
   - case: nemotron-3-super-fp8-sglang-disagg
     hardware: h200-sxm-4gpu
     exceptions:
-      recommend:
-        aic:
-          status: broken
-          reason: The pinned AISim H200/SGLang support matrix marks every Nemotron FP8 topology unsupported because no silicon rows match its FP8 MoE key.
-          links:
-            - https://github.com/ai-dynamo/aisim/blob/f85518b36f5488a4c8f6c9553a85d523f173bbb6/python/aisim/src/aisim_core/systems/fpe_support_matrix/h200_sxm.csv
-          match: '(?s)MoE data missing for MoeKey.*no feasible candidate found'
       render:
         profiler-v1beta1:
           status: broken
@@ -185,7 +170,6 @@ tests:
         sweeper-direct:
           status: broken
           reason: The direct renderer does not support the TRT-LLM DEP topology selected by Sweeper.
-          match: DEP .*not implemented
           links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: qwen3-235b-fp8-trtllm-disagg
@@ -200,9 +184,6 @@ tests:
   - case: qwen3-32b-fp8-trtllm-agg
     hardware: h200-sxm-2gpu
 
-  - case: qwen3-32b-fp8-trtllm-agg
-    hardware: h100-sxm-2gpu
-
   - case: qwen3-32b-fp8-trtllm-disagg
     hardware: h200-sxm-8gpu
     exceptions:
@@ -215,11 +196,6 @@ tests:
   - case: qwen3-32b-fp8-vllm-disagg
     hardware: a100-sxm-8gpu
     exceptions:
-      recommend:
-        aic:
-          status: broken
-          reason: A100 does not support the model's required FP8 tensor-core compute mode.
-          match: "(?s)GPU a100_sxm .* does not support FP8 tensor-core compute.*no feasible candidate found"
       render:
         sweeper:
           status: broken

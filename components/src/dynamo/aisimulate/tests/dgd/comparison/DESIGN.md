@@ -283,28 +283,13 @@ Composed inputs and Candidates are useful for explaining a diff, but are not sta
 goldens. No custom report schema is defined; process output and the test framework carry execution
 status.
 
-Every suite row is an automatic public-CLI gate. Its case input explicitly pins the search algorithm
-and seed, while the Planner test image pins AISimulate's model metadata, performance inputs,
-sampler, and renderers. Each pytest case composes the case and hardware input, executes
-`aisim recommend --stack dynamo --output dgd`, and requires either:
+Exact Sweeper goldens require reproducible search inputs and search ordering. Until that is proven,
+CI must distinguish deterministic renderer checks from end-to-end search evidence rather than make
+a stochastic search an exact-diff gate.
 
-- a successful default-AIC output matching `dgd-sweeper-aic.yaml`; or
-- an explicit `exceptions.recommend.aic` negative expectation with a precise diagnostic regex.
-
-The table is split across two pytest modules so both Planner CPU workers run it concurrently. Each
-row evaluates one seeded suggestion against a single simulated request: enough to exercise the
-model/backend/hardware and AIC output path without architecture-sensitive winner selection between
-candidates or a full performance run. Each case writes to `tmp_path`, compares parsed YAML against
-the owning suite's checked-in AIC golden, and leaves that golden unchanged. A missing or changed
-golden produces an adjacent `.new.yaml` proposal plus a unified diff and acceptance command in the
-failure output.
-
-The full comparison runner remains available for manual profiler/AIC/direct generation and
-cross-generator investigation. Its unit tests cover composition and failure isolation. Direct
-renderer failures never remove a row from mandatory Recommend/AIC coverage. The model corpus
-complements the smaller public [DGD CLI E2E table](../e2e/test_dgd_cli.py), which uses tiny fixed
-searches. DGDR v1beta2 Request, Run, Candidate, and Job orchestration is covered separately by
-`tests/deploy/test_dgdr_v1beta2.py`.
+The comparison runner is a manual corpus-generation tool. Its unit tests cover composition and
+failure isolation. The automatic public Recommend-to-DGD coverage lives in the
+[DGD CLI E2E table](../e2e/test_dgd_cli.py), using small fixed searches.
 
 ## Non-goals
 

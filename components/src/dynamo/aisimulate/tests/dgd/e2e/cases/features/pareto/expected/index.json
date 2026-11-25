@@ -1,0 +1,12 @@
+{
+  "renderer": "aic",
+  "output": "kustomize",
+  "artifacts": [
+    {
+      "path": "candidate-000"
+    },
+    {
+      "path": "candidate-001"
+    }
+  ]
+}

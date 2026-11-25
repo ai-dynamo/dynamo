@@ -38,12 +38,11 @@ spec:
           - dynamo.trtllm
           args:
           - --tensor-parallel-size
-          - '2'
+          - '4'
           - --pipeline-parallel-size
           - '1'
           - --expert-parallel-size
-          - '2'
-          - --enable-attention-dp
+          - '4'
           - --max-batch-size
           - '512'
           - --max-num-tokens
@@ -53,9 +52,11 @@ spec:
           - --trtllm.moe_tensor_parallel_size
           - '1'
           - --trtllm.moe_config.backend
-          - AUTO
+          - WIDEEP
           - --trtllm.kv_cache_config.dtype
           - auto
+          - --trtllm.kv_cache_config.tokens_per_block
+          - '64'
           - --trtllm.kv_cache_config.enable_block_reuse
           - 'true'
           - --trtllm.cuda_graph_config.enable_padding
@@ -70,14 +71,12 @@ spec:
           - openai/gpt-oss-120b
           - --trtllm.enable_chunked_prefill
           - 'true'
-          - --max-seq-len
-          - '131072'
           resources:
             limits:
-              nvidia.com/gpu: '2'
+              nvidia.com/gpu: '4'
             requests:
               ephemeral-storage: 2Gi
-              nvidia.com/gpu: '2'
+              nvidia.com/gpu: '4'
           envFrom:
           - secretRef:
               name: hf-token-secret

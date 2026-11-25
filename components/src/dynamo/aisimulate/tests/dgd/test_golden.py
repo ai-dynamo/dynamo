@@ -4,7 +4,7 @@
 from pathlib import Path
 
 import pytest
-from golden import assert_yaml_golden, repository_root
+from golden import assert_structured_goldens, compare_structured_golden, repository_root
 
 pytestmark = [
     pytest.mark.unit,
@@ -36,33 +36,44 @@ def test_repository_root_prefers_github_workspace(
     assert repository_root() == workspace.resolve()
 
 
-def test_yaml_golden_accepts_parsed_yaml_equivalence(tmp_path: Path) -> None:
-    golden = tmp_path / "expected.yaml"
-    golden.write_text(_EXPECTED)
+@pytest.mark.parametrize(
+    ("suffix", "expected", "actual"),
+    [
+        (".yaml", _EXPECTED, _EXPECTED.replace("name: expected", "name: expected\n")),
+        (".json", '{"value": 1, "other": 2}\n', '{"other": 2, "value": 1}\n'),
+    ],
+)
+def test_structured_golden_accepts_parsed_equivalence(
+    tmp_path: Path, suffix: str, expected: str, actual: str
+) -> None:
+    golden = tmp_path / f"expected{suffix}"
+    output = tmp_path / f"actual{suffix}"
+    golden.write_text(expected)
+    output.write_text(actual)
 
-    assert_yaml_golden(golden, _EXPECTED.replace("name: expected", "name: expected\n"))
-
-    assert not golden.with_name("expected.new.yaml").exists()
+    assert compare_structured_golden(golden, output) is None
+    assert not golden.with_name(f"expected.new{suffix}").exists()
 
 
 @pytest.mark.parametrize("existing", [True, False], ids=["changed", "missing"])
-def test_yaml_golden_writes_proposal_and_reports_diff(
+def test_structured_golden_writes_proposal_and_reports_diff(
     tmp_path: Path, existing: bool
 ) -> None:
     golden = tmp_path / "expected.yaml"
+    actual = tmp_path / "actual.yaml"
     if existing:
         golden.write_text(_EXPECTED)
+    actual.write_text(_CHANGED)
 
-    with pytest.raises(pytest.fail.Exception) as failure:
-        assert_yaml_golden(golden, _CHANGED)
+    message = compare_structured_golden(golden, actual)
 
+    assert message is not None
     proposal = tmp_path / "expected.new.yaml"
     assert proposal.read_text() == _CHANGED
     if existing:
         assert golden.read_text() == _EXPECTED
     else:
         assert not golden.exists()
-    message = str(failure.value)
     assert "expected.yaml" in message
     assert "expected.new.yaml" in message
     assert "mv" in message
@@ -71,3 +82,20 @@ def test_yaml_golden_writes_proposal_and_reports_diff(
     else:
         assert "--- /dev/null" in message
     assert "+  name: changed" in message
+
+
+def test_structured_goldens_report_every_mismatch(tmp_path: Path) -> None:
+    pairs = []
+    for name in ("first", "second"):
+        golden = tmp_path / f"{name}.json"
+        actual = tmp_path / f"{name}.actual.json"
+        golden.write_text('{"value": 1}\n')
+        actual.write_text('{"value": 2}\n')
+        pairs.append((golden, actual))
+
+    with pytest.raises(pytest.fail.Exception) as failure:
+        assert_structured_goldens(pairs)
+
+    message = str(failure.value)
+    assert "first.new.json" in message
+    assert "second.new.json" in message

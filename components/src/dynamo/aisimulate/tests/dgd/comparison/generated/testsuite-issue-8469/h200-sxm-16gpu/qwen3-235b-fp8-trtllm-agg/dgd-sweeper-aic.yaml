@@ -56,6 +56,8 @@ spec:
           - CUTLASS
           - --trtllm.kv_cache_config.dtype
           - auto
+          - --trtllm.kv_cache_config.tokens_per_block
+          - '64'
           - --trtllm.kv_cache_config.enable_block_reuse
           - 'true'
           - --trtllm.cuda_graph_config.enable_padding
@@ -70,14 +72,12 @@ spec:
           - Qwen/Qwen3-235B-A22B-FP8
           - --trtllm.enable_chunked_prefill
           - 'true'
-          - --max-seq-len
-          - '40960'
           resources:
             limits:
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '8'
             requests:
               ephemeral-storage: 2Gi
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '8'
           envFrom:
           - secretRef:
               name: hf-token-secret

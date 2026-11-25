@@ -34,7 +34,6 @@ _CASES_ROOT = _ROOT / "cases"
 _HARDWARE_ROOT = _ROOT / "hardware"
 _DEFAULT_OUTPUT_ROOT = _ROOT / "generated"
 _DEFAULT_MANUAL_OUTPUT_ROOT = _DEFAULT_OUTPUT_ROOT / "manual"
-_MODEL_FIXTURES_ROOT = _ROOT.parent / "fixtures" / "models"
 _DGDR_INPUT = "dgdr-v1beta1.yaml"
 _SWEEPER_INPUT = "sweeper.yaml"
 _DGDR_HARDWARE_PATCH = "dgdr-v1beta1.patch.yaml"
@@ -48,62 +47,11 @@ _YAML_SPDX_HEADER = (
 )
 _EXCEPTION_STATUSES = {"broken", "skipped"}
 _PHASE_VARIANTS = {
-    "recommend": {"aic"},
     "render": {
         "profiler-v1beta1",
         "sweeper",
         "sweeper-aic",
         "sweeper-direct",
-    },
-}
-# Config-only Hugging Face snapshots use the immutable revision prefix in their
-# directory name so model facts and remote-code detection stay reproducible.
-_LOCAL_MODEL_INPUTS = {
-    "deepseek-r1-sglang-disagg-16gpu": "deepseek-r1-56d4cbbb",
-    "deepseek-r1-sglang-disagg-8gpu": "deepseek-r1-56d4cbbb",
-    "deepseek-r1-vllm-disagg": "deepseek-r1-56d4cbbb",
-    "nemotron-3-super-fp8-vllm-agg": "nemotron-3-super-fp8-744b1880",
-}
-_BACKEND_VERSION_OVERRIDES = {
-    "deepseek-r1-sglang-disagg-16gpu": "previous",
-    "deepseek-r1-sglang-disagg-8gpu": "previous",
-}
-_PARALLELISM_PRESETS = {
-    "deepseek-r1-sglang-disagg-8gpu": {
-        "prefill": {
-            "replicas": 1,
-            "tensor": 8,
-            "pipeline": 1,
-            "attention_data": 1,
-            "moe_tensor": 1,
-            "moe_expert": 8,
-        },
-        "decode": {
-            "replicas": 1,
-            "tensor": 1,
-            "pipeline": 1,
-            "attention_data": 8,
-            "moe_tensor": 1,
-            "moe_expert": 8,
-        },
-    },
-    "deepseek-r1-sglang-disagg-16gpu": {
-        "prefill": {
-            "replicas": 1,
-            "tensor": 16,
-            "pipeline": 1,
-            "attention_data": 1,
-            "moe_tensor": 1,
-            "moe_expert": 16,
-        },
-        "decode": {
-            "replicas": 1,
-            "tensor": 1,
-            "pipeline": 1,
-            "attention_data": 16,
-            "moe_tensor": 1,
-            "moe_expert": 16,
-        },
     },
 }
 
@@ -248,27 +196,6 @@ def _dgd_name(case_name: str) -> str:
     return f"{prefix}-{digest}"
 
 
-def _normalize_profiler_dgd(rendered: str, case: ComparisonCase) -> str:
-    document = yaml.safe_load(rendered)
-    if not isinstance(document, dict):
-        raise TypeError("profiler output must contain one YAML mapping")
-    metadata = document.get("metadata")
-    if not isinstance(metadata, dict):
-        raise TypeError("profiler output must contain metadata")
-    generated_name = metadata.get("name")
-    if not isinstance(generated_name, str):
-        raise TypeError("profiler output metadata.name must be a string")
-    match = re.fullmatch(r"(?P<prefix>.+)-[0-9a-f]{8}", generated_name)
-    if match is None:
-        raise ValueError(
-            f"profiler output metadata.name has unexpected format: {generated_name}"
-        )
-    row = f"{case.hardware.name}/{case.name}"
-    digest = hashlib.sha1(row.encode(), usedforsecurity=False).hexdigest()[:8]
-    metadata["name"] = f"{match.group('prefix')}-{digest}"
-    return yaml.safe_dump(document, sort_keys=False)
-
-
 def _case_path(name: str) -> Path:
     name = _required_name(name, field="case", path=_CASES_ROOT)
     path = _CASES_ROOT / name
@@ -382,109 +309,6 @@ def _single_sweeper_backend(sweeper_input: dict[str, Any]) -> str:
     ):
         raise ValueError("comparison cases require exactly one search_space.backend")
     return backends[0]
-
-
-def _single_sweeper_choice(
-    search_space: dict[str, Any], field: str, *, aliases: dict[str, str] | None = None
-) -> str:
-    choices = search_space.get(field)
-    if (
-        not isinstance(choices, list)
-        or len(choices) != 1
-        or not isinstance(choices[0], str)
-    ):
-        raise ValueError(f"comparison cases require exactly one search_space.{field}")
-    value = choices[0]
-    return (aliases or {}).get(value, value)
-
-
-def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
-    """Translate one legacy comparison input to the public recommend schema."""
-    legacy = case.sweeper_input
-    search_space = legacy.get("search_space")
-    workload = legacy.get("workload")
-    goal = legacy.get("goal")
-    sweep = legacy.get("sweep")
-    if not all(
-        isinstance(section, dict) for section in (search_space, workload, goal, sweep)
-    ):
-        raise TypeError(
-            "sweeper input must define search_space, workload, goal, and sweep"
-        )
-
-    mode = _single_sweeper_choice(
-        search_space,
-        "deployment_mode",
-        aliases={"agg": "aggregated", "disagg": "disaggregated"},
-    )
-    backend = _single_sweeper_choice(search_space, "backend")
-    worker = {"parallelism": {"preset": "default"}}
-    workers = (
-        {"aggregated": worker}
-        if mode == "aggregated"
-        else {"prefill": copy.deepcopy(worker), "decode": copy.deepcopy(worker)}
-    )
-    if case.name in _PARALLELISM_PRESETS:
-        workers = {
-            role: {"parallelism": {"preset": [copy.deepcopy(preset)]}}
-            for role, preset in _PARALLELISM_PRESETS[case.name].items()
-        }
-
-    max_eval_seconds = sweep.get("max_eval_seconds", 600.0)
-    sla = goal.get("sla")
-    engine = {
-        "mode": mode,
-        "model": (
-            str(
-                (_MODEL_FIXTURES_ROOT / _LOCAL_MODEL_INPUTS[case.name]).relative_to(
-                    _REPOSITORY_ROOT
-                )
-            )
-            if case.name in _LOCAL_MODEL_INPUTS
-            else search_space["model_name"]
-        ),
-        "hardware": search_space["hardware_sku"],
-        "backend": backend,
-        "workers": workers,
-    }
-    if case.name in _BACKEND_VERSION_OVERRIDES:
-        engine["backend_version"] = _BACKEND_VERSION_OVERRIDES[case.name]
-    if "context_length" in search_space:
-        engine["context_length"] = search_space["context_length"]
-
-    config = {
-        "traffic": {
-            "source": {
-                "type": "synthetic",
-                "input_tokens": workload["isl"],
-                "output_tokens": workload["osl"],
-            },
-            "load": {
-                "type": "constant_rate",
-                "requests_per_second": workload["request_rate"],
-            },
-            "stop": {"requests": 1},
-        },
-        "engine": engine,
-        "optimization": {
-            "target": goal["target"],
-            "constraints": {
-                "max_candidate_gpus": search_space["gpu_budget"],
-            },
-        },
-        "optimizer": {
-            "algorithm": sweep.get("algorithm", "bayesian"),
-            # One seeded suggestion keeps full-table smoke coverage bounded and
-            # avoids architecture-sensitive winner selection between candidates.
-            "max_trials": 1,
-            "parallelism": sweep.get("parallel_evals", 16),
-            "candidate_timeout_seconds": max_eval_seconds,
-            "seed": sweep.get("seed", 42),
-        },
-    }
-    if sla is not None:
-        config["evaluation"] = {"sla": copy.deepcopy(sla)}
-    return config
 
 
 def _derive_runtime_image(profiler_image: str, backend: str) -> str:
@@ -708,15 +532,7 @@ def load_suite(path: Path) -> list[SuiteEntry]:
         field = f"tests[{index}]"
         unknown = sorted(
             set(item)
-            - {
-                "case",
-                "hardware",
-                "status",
-                "reason",
-                "links",
-                "match",
-                "exceptions",
-            }
+            - {"case", "hardware", "status", "reason", "links", "match", "exceptions"}
         )
         if unknown:
             raise ValueError(
@@ -840,9 +656,7 @@ def _run_v1_profiler(case: ComparisonCase) -> None:
             raise RuntimeError(
                 f"v1beta1 profiler succeeded without writing {final_config}"
             )
-        _write_generated_dgd(
-            output_path, _normalize_profiler_dgd(final_config.read_text(), case)
-        )
+        _write_generated_dgd(output_path, final_config.read_text())
 
 
 def _candidate_document(candidate: Any) -> dict[str, Any]:
