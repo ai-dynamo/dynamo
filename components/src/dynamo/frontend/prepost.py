@@ -1803,8 +1803,14 @@ class StreamingPostProcessor:
             if joined.startswith(delta_text[held_len:]):
                 break
         else:
-            # The pieces do not match the worker's text: keep the text whole.
-            return "", [""] * (len(delta_token_ids) - 1) + [delta_text]
+            held_len = len(delta_text)
+            # A large stop buffer can make the whole text held back from
+            # earlier tokens. Only accept that when their decoding ends with it.
+            if not delta_text or not self.tokenizer.decode(
+                self.previous_token_ids, skip_special_tokens=skip_special_tokens
+            ).endswith(delta_text):
+                # The pieces do not match the worker's text: keep it whole.
+                return "", [""] * (len(delta_token_ids) - 1) + [delta_text]
         budget = len(delta_text) - held_len
         for i, text in enumerate(texts):
             texts[i] = text[:budget]

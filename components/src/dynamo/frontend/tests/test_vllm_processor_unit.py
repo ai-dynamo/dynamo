@@ -7222,14 +7222,14 @@ class TestOneTokenReasoningParserStreaming:
         assert run(1) == ("Câu trả lời 😀", "Suy nghĩ 🤔 về câu hỏi.\nBước 2 ✅")
         assert run(chunk_size) == run(1)
 
-    def _deepseek_r1_stream(self, tokenizer, chunks):
+    def _deepseek_r1_stream(self, tokenizer, chunks, include_reasoning=True):
         """Stream (text, token_ids) chunks through the real deepseek_r1 parser."""
         from vllm.reasoning import ReasoningParserManager
 
         post = StreamingPostProcessor(
             tokenizer=tokenizer,
             request_for_sampling=SimpleNamespace(
-                include_reasoning=True, tool_choice="none", model_fields=frozenset()
+                include_reasoning=include_reasoning, tool_choice="none", model_fields=frozenset()
             ),
             sampling_params=SamplingParams(),
             prompt_token_ids=[],
@@ -7268,6 +7268,27 @@ class TestOneTokenReasoningParserStreaming:
             ("ecret</think>A", encode("</think>Answer")),
         ]
         assert self._deepseek_r1_stream(tokenizer, chunks) == ("A", "secret")
+
+    @pytest.mark.parametrize("include_reasoning", [True, False])
+    def test_chunk_of_only_held_back_text_stays_reasoning(
+        self, tokenizer, include_reasoning
+    ):
+        """A large stop buffer holds back all reasoning text, so the chunk that
+        ends reasoning carries only text of earlier tokens."""
+
+        def encode(text):
+            return tokenizer.encode(text, add_special_tokens=False)
+
+        chunks = [
+            ("", encode("<think>ABCDEFGHIJKLMN")),
+            ("ABCDEFGHIJKLMN", encode("</think>Answer")),
+            ("Answer!", encode("!")),
+        ]
+        reasoning = "ABCDEFGHIJKLMN" if include_reasoning else ""
+        assert self._deepseek_r1_stream(tokenizer, chunks, include_reasoning) == (
+            "Answer!",
+            reasoning,
+        )
 
     def test_literal_replacement_character_before_reasoning_end(self, tokenizer):
         text = "<think>x�</think>Answer"
