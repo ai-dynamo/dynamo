@@ -95,8 +95,9 @@ impl<'a> RequestInfo<'a> {
         self.priority_jump
     }
 
-    /// The caller's strict priority tier: the router queue serves a higher tier before a
-    /// lower one. Zero when the caller sent none.
+    /// The caller's strict priority tier. A queue with the `fcfs`, `lcfs`, or `wspt` policy
+    /// serves a higher tier before a lower one; `edf`, the default, does not use it. Zero
+    /// when the caller sent none.
     #[inline]
     pub fn strict_priority(&self) -> u32 {
         self.strict_priority
