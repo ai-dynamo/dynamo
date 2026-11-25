@@ -3,13 +3,16 @@
 
 use std::{
     collections::{HashMap, hash_map::Entry},
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
-use anyhow::Result;
 use futures::StreamExt;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Notify;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use velo::InstanceId;
 
 use super::decode_address;
@@ -47,12 +50,7 @@ impl DiscoveryPeers {
     }
 
     fn remove(&mut self, service: &VeloResponseService, peer: InstanceId) {
-        let Entry::Occupied(mut entry) = self.refs.entry(peer) else {
-            return;
-        };
-        *entry.get_mut() -= 1;
-        if *entry.get() == 0 {
-            entry.remove();
+        if self.release(peer) {
             let now = service.peer_clock();
             self.prune(now);
             self.departed.insert(
@@ -63,64 +61,108 @@ impl DiscoveryPeers {
         }
     }
 
+    fn release(&mut self, peer: InstanceId) -> bool {
+        let Entry::Occupied(mut entry) = self.refs.entry(peer) else {
+            return false;
+        };
+        *entry.get_mut() -= 1;
+        if *entry.get() == 0 {
+            entry.remove();
+            return true;
+        }
+        false
+    }
+
     #[cfg(test)]
     pub(in crate::pipeline::network) fn count(&self, peer: InstanceId) -> usize {
         self.refs.get(&peer).copied().unwrap_or_default()
     }
 }
 
-pub(in crate::pipeline::network) async fn start(
+pub(in crate::pipeline::network) struct RequestPeerWatch {
+    pub(in crate::pipeline::network) ready: Arc<DiscoveryReady>,
+    _cancel: DropGuard,
+}
+
+#[derive(Default)]
+pub(in crate::pipeline::network) struct DiscoveryReady {
+    established: AtomicBool,
+    notify: Notify,
+}
+
+impl DiscoveryReady {
+    pub(super) fn is_established(&self) -> bool {
+        self.established.load(Ordering::Acquire)
+    }
+
+    pub(super) async fn wait(&self) {
+        // Register before checking so the initial snapshot cannot race the wait.
+        let ready = self.notify.notified();
+        if !self.is_established() {
+            ready.await;
+        }
+    }
+
+    fn mark_established(&self) {
+        if !self.established.swap(true, Ordering::Release) {
+            self.notify.notify_waiters();
+        }
+    }
+}
+
+pub(in crate::pipeline::network) fn start(
     service: &Arc<VeloResponseService>,
     discovery: Arc<dyn Discovery>,
     cancel: CancellationToken,
-) -> Result<()> {
-    let mut stream = discovery
-        .list_and_watch(DiscoveryQuery::AllEndpoints, Some(cancel.clone()))
-        .await?;
+) -> RequestPeerWatch {
+    let guard = cancel.clone().drop_guard();
+    let ready = Arc::new(DiscoveryReady::default());
+    let signal = ready.clone();
     let mut watch = PeerWatch {
         service: Arc::downgrade(service),
         endpoints: HashMap::new(),
     };
     service.velo.runtime().spawn(async move {
         loop {
-            let event = tokio::select! {
+            match tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return,
-                event = stream.next() => event,
-            };
-            match event {
-                Some(Ok(event)) => {
-                    let Some(service) = watch.service.upgrade() else {
-                        return;
-                    };
-                    watch.apply(&service, event);
-                }
-                Some(Err(error)) => {
-                    tracing::warn!(%error, "Velo request peer discovery event failed")
-                }
-                None => loop {
-                    let next = tokio::select! {
+                stream = discovery.list_and_watch(DiscoveryQuery::AllEndpoints, Some(cancel.clone())) => stream,
+            } {
+                Ok(mut stream) => loop {
+                    let event = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return,
-                        next = async {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            discovery.list_and_watch(DiscoveryQuery::AllEndpoints, Some(cancel.clone())).await
-                        } => next,
+                        event = stream.next() => event,
                     };
-                    match next {
-                        Ok(next) => {
-                            stream = next;
-                            break;
+                    match event {
+                        Some(Ok(event)) => {
+                            let Some(service) = watch.service.upgrade() else {
+                                return;
+                            };
+                            let is_snapshot = matches!(event, DiscoveryEvent::Resync(_));
+                            watch.apply(&service, event);
+                            if is_snapshot {
+                                signal.mark_established();
+                            }
                         }
-                        Err(error) => {
-                            tracing::warn!(%error, "Velo request peer discovery reconnect failed")
-                        }
+                        Some(Err(error)) => tracing::warn!(%error, "Velo request peer discovery event failed"),
+                        None => break,
                     }
                 },
+                Err(error) => tracing::warn!(%error, "Velo request peer discovery watch failed"),
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
         }
     });
-    Ok(())
+    RequestPeerWatch {
+        ready,
+        _cancel: guard,
+    }
 }
 
 struct PeerWatch {
@@ -201,7 +243,11 @@ impl PeerWatch {
 impl Drop for PeerWatch {
     fn drop(&mut self) {
         if let Some(service) = self.service.upgrade() {
-            self.replace(&service, HashMap::new());
+            // Ending a watch releases its references without recording a discovery delete.
+            let mut refs = service.discovered_request_peers.lock();
+            for (_, peer) in self.endpoints.drain() {
+                refs.release(peer);
+            }
         }
     }
 }

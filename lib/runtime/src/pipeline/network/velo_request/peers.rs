@@ -200,6 +200,8 @@ pub(in crate::pipeline::network) async fn establish_route(
             epoch
         } else {
             if let Some(epoch) = peer.route.confirmed_epoch() {
+                // An expired route must renew its reverse pin. Cache connection
+                // failures and peer refusals even when the previous route worked.
                 peer.route.invalidate(epoch);
             }
             if let Some((failed_at, cause)) = recent.as_ref()

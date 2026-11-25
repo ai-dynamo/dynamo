@@ -19,18 +19,16 @@ use bytes::Bytes;
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Client, Endpoint, StartedEndpoint, TransportType},
-    discovery::DiscoverySpec,
+    discovery::{DiscoveryInstance, DiscoverySpec},
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
     engine::{AsyncEngine, AsyncEngineContextProvider},
     error::{DynamoError, ErrorType, match_error_chain},
+    metrics::MetricsHierarchy,
     pipeline::{
         ManyOut, ResponseStream, SingleIn,
         network::{
             Ingress, ResponsePlaneMode,
-            egress::{
-                addressed_router::{AddressedPushRouter, AddressedRequest},
-                push_router::{PushRouter, RouterMode},
-            },
+            egress::push_router::{PushRouter, RouterMode},
         },
     },
     protocols::maybe_error::MaybeError,
@@ -177,6 +175,34 @@ fn assert_error(result: Result<ManyOut<Item>>, kinds: &[ErrorType]) {
     assert!(match_error_chain(error.as_ref(), kinds, &[]), "{error:#}");
 }
 
+fn velo_request_handler_calls(drt: &DistributedRuntime) -> Result<u64> {
+    let metrics = drt.get_metrics_registry().prometheus_expfmt_combined()?;
+    metrics
+        .lines()
+        .filter(|line| {
+            line.starts_with("velo_messenger_handler_requests_total{")
+                && line.contains("handler=\"dynamo_request\"")
+        })
+        .map(|line| {
+            Ok(line
+                .rsplit_once(' ')
+                .expect("counter value")
+                .1
+                .parse::<u64>()?)
+        })
+        .sum()
+}
+
+fn assert_local_routing_error(result: Result<ManyOut<Item>>) {
+    let err = result.expect_err("mixed transport unexpectedly succeeded");
+    let typed = err
+        .downcast_ref::<DynamoError>()
+        .expect("typed router error");
+    assert_eq!(typed.error_type(), ErrorType::Internal, "{err:#}");
+    assert_eq!(typed.reason().as_str(), "runtime.internal");
+    assert_eq!(err.chain().count(), 1, "error must have no retryable cause");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn velo_request_plane_serves_and_refuses_requests() -> Result<()> {
     temp_env::async_with_vars(
@@ -270,6 +296,11 @@ async fn exercise_request_plane(
     let local = serve(&endpoint(&frontend, "local"), Arc::new(Worker::default())).await?;
     let (local_client, local_router) = router(&endpoint(&frontend, "local")).await?;
     let local_id = local.instance().id();
+    let before_local = velo_request_handler_calls(&frontend)?;
+    assert!(
+        before_local > 0,
+        "remote round trip must count a Velo request"
+    );
     wait_for_instance(&local_client, local_id, true).await;
     assert_items(
         local_router
@@ -278,33 +309,39 @@ async fn exercise_request_plane(
         5,
     )
     .await;
+    assert_eq!(
+        velo_request_handler_calls(&frontend)?,
+        before_local,
+        "self-target dispatch must bypass the Velo messenger and its ACK slot"
+    );
 
     let tcp_worker = Arc::new(Worker::default());
     let tcp_instance = serve(&endpoint(&tcp, "generate"), tcp_worker.clone()).await?;
     let tcp_id = tcp_instance.instance().id();
     wait_for_instance(&client, tcp_id, true).await;
-    assert_error(
+    let before = worker.calls.load(Ordering::Relaxed);
+    assert_local_routing_error(
         timeout(
             Duration::from_secs(1),
             frontend_router.direct(SingleIn::new("".into()), tcp_id),
         )
         .await?,
-        &[ErrorType::WorkerUnavailable],
     );
+    assert!(client.instance_ids_avail().contains(&tcp_id));
     assert_eq!(tcp_worker.calls.load(Ordering::Relaxed), 0);
-    assert!(!client.instance_ids_avail().contains(&tcp_id));
+    assert_eq!(worker.calls.load(Ordering::Relaxed), before);
     let (tcp_client, tcp_router) = router(&endpoint(&tcp, "generate")).await?;
     wait_for_instance(&tcp_client, id, true).await;
-    let before = worker.calls.load(Ordering::Relaxed);
-    assert_error(
+    assert_local_routing_error(
         timeout(
             Duration::from_secs(1),
             tcp_router.direct(SingleIn::new("".into()), id),
         )
         .await?,
-        &[ErrorType::WorkerUnavailable],
     );
+    assert!(tcp_client.instance_ids_avail().contains(&id));
     assert_eq!(worker.calls.load(Ordering::Relaxed), before);
+    assert_eq!(tcp_worker.calls.load(Ordering::Relaxed), 0);
 
     let active = tokio::spawn({
         let router = frontend_router.clone();
@@ -328,7 +365,7 @@ async fn exercise_request_plane(
         &[ErrorType::WorkerOverloaded],
     );
     assert!(client.overloaded_instance_ids().unwrap().contains(&id));
-    assert!(client.instance_ids().contains(&id));
+    assert!(client.instance_ids_avail().contains(&id));
     worker.release.add_permits(1);
     assert_items(active.await??, 5).await;
     timeout(Duration::from_secs(4), async {
@@ -409,23 +446,48 @@ async fn exercise_request_plane(
     )
     .await;
 
+    let backup_address = other.instance().transport.address().to_owned();
+    backup
+        .discovery()
+        .unregister(DiscoveryInstance::Endpoint(other.instance().clone()))
+        .await?;
+    wait_for_instance(&backup_client, backup_id, false).await;
+    // Leave the handler open so a generic worker refusal cannot mask missing retirement.
+    let retired = timeout(Duration::from_secs(3), async {
+        loop {
+            let result = request_client
+                .send_request(
+                    backup_address.clone(),
+                    Bytes::from_static(b"unused envelope"),
+                    Default::default(),
+                )
+                .await;
+            match result {
+                Ok(ack) => assert!(ack.is_empty(), "unexpected handler refusal: {ack:?}"),
+                // A send that races route removal can lose the Velo connection.
+                Err(error)
+                    if match_error_chain(
+                        error.as_ref(),
+                        &[ErrorType::CannotConnect, ErrorType::ConnectionTimeout],
+                        &[],
+                    ) => {}
+                Err(error) => break error,
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let typed = retired
+        .downcast_ref::<DynamoError>()
+        .expect("typed retirement error");
+    assert_eq!(
+        typed.error_type(),
+        ErrorType::WorkerUnavailable,
+        "{retired:#}"
+    );
+    assert_eq!(typed.message(), "Velo request peer has departed");
     other.shutdown().await?;
     worker_second_owner.shutdown();
-    wait_for_instance(&backup_client, backup_id, false).await;
-    let addressed = AddressedPushRouter::from_runtime_provider(&front_endpoint).await?;
-    let stale = SingleIn::new(AddressedRequest::new("".to_owned(), address.clone()));
-    assert_error(
-        timeout(
-            Duration::from_secs(5),
-            AsyncEngine::<_, ManyOut<Item>, Error>::generate(addressed.as_ref(), stale),
-        )
-        .await?,
-        &[
-            ErrorType::CannotConnect,
-            ErrorType::ConnectionTimeout,
-            ErrorType::WorkerUnavailable,
-        ],
-    );
 
     local.shutdown().await?;
     tcp_instance.shutdown().await?;

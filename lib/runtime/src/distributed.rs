@@ -365,12 +365,7 @@ impl DistributedRuntime {
         let network_manager = if response_plane == ResponsePlaneMode::Velo {
             let service = velo_owner.service().await?;
             if velo_requests {
-                let cancel = runtime.primary_token().child_token();
-                let watch = cancel.clone().drop_guard();
-                service
-                    .watch_request_peers(discovery_client.clone(), cancel)
-                    .await?;
-                network_manager.with_velo(service, velo_owner, watch)
+                network_manager.with_velo(service, velo_owner, discovery_client.clone())
             } else {
                 network_manager
             }

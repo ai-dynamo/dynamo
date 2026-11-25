@@ -146,6 +146,8 @@ impl SharedServer {
             Err(ack) => return Ok(ack),
         };
         let limit = get_tcp_max_message_size();
+        // Clients enforce their own limit. A mismatch maps to CannotConnect,
+        // as it does when the TCP decoder drops an oversize request.
         ensure!(
             payload.len() <= limit,
             "request payload {} bytes exceeds DYN_TCP_MAX_MESSAGE_SIZE {limit}",

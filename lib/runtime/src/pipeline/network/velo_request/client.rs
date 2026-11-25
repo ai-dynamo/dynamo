@@ -20,6 +20,7 @@ use crate::{
 
 use super::{
     REQUEST_HANDLER, decode_address,
+    discovery::DiscoveryReady,
     peers::{by_deadline, error, establish_route, transport_error},
     server::ENDPOINT_PATH_HEADER,
 };
@@ -31,6 +32,7 @@ const HEADER_BUDGET: usize = 16 * 1024 - 512;
 pub(in crate::pipeline::network) struct VeloRequestClient {
     service: Arc<VeloResponseService>,
     ack_timeout: Duration,
+    discovery_ready: Option<Arc<DiscoveryReady>>,
 }
 
 impl VeloRequestClient {
@@ -41,7 +43,16 @@ impl VeloRequestClient {
         Self {
             service,
             ack_timeout,
+            discovery_ready: None,
         }
+    }
+
+    pub(in crate::pipeline::network) fn with_discovery(
+        mut self,
+        ready: Arc<DiscoveryReady>,
+    ) -> Self {
+        self.discovery_ready = Some(ready);
+        self
     }
 }
 
@@ -87,6 +98,18 @@ impl RequestPlaneClient for VeloRequestClient {
             return self.service.request_slot.handle_local(payload, headers);
         }
 
+        if let Some(ready) = self
+            .discovery_ready
+            .as_ref()
+            .filter(|ready| !ready.is_established())
+        {
+            by_deadline(deadline, ready.wait()).await.map_err(|_| {
+                error(
+                    ErrorType::Unavailable,
+                    "Velo request discovery did not initialize before the request deadline",
+                )
+            })?;
+        }
         let (peer, epoch) = establish_route(
             &self.service,
             target.instance_id,
@@ -96,9 +119,9 @@ impl RequestPlaneClient for VeloRequestClient {
         .await?;
         let _staged = (payload.len() > self.service.velo.staging_threshold())
             .then(|| {
-                peer.staged
-                    .try_acquire()
-                    .map_err(|_| error(ErrorType::WorkerOverloaded, "staged window to worker full"))
+                peer.staged.try_acquire().map_err(|_| {
+                    error(ErrorType::ResourceExhausted, "staged window to worker full")
+                })
             })
             .transpose()?;
         let _slot = self.service.ack_slots.try_acquire().map_err(|_| {
@@ -224,6 +247,42 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .unwrap_or_else(|| panic!("{error:#}"))
             .error_type()
+    }
+
+    #[tokio::test]
+    async fn live_requests_renew_reverse_pin_after_refresh_interval() {
+        let frontend = service().await;
+        let worker = service().await;
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, |_| Ok(Some(Bytes::from_static(b"ack"))))
+                    .build(),
+            )
+            .unwrap();
+        let client = VeloRequestClient::new(frontend.clone(), Duration::from_secs(2));
+        let target = address(&worker.velo.peer_info());
+        let send = || client.send_request(target.clone(), Bytes::new(), Headers::new());
+        assert_eq!(send().await.unwrap(), "ack");
+        let id = frontend.velo.instance_id();
+        let pin = || {
+            worker
+                .peer_state(id)
+                .reverse_pin_until
+                .load(Ordering::Acquire)
+        };
+        let first_expiry = pin();
+        assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 1);
+
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(301)).await;
+        tokio::time::resume();
+
+        assert_eq!(send().await.unwrap(), "ack");
+        assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 2);
+        assert!(pin() >= first_expiry + 301);
+        assert_eq!(send().await.unwrap(), "ack");
+        assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
@@ -486,7 +545,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            assert_eq!(error_type(result), ErrorType::WorkerOverloaded);
+            assert_eq!(error_type(result), ErrorType::ResourceExhausted);
         }
         assert_eq!(entered.available_permits(), 0);
         release.add_permits(2);

@@ -319,6 +319,7 @@ pub(crate) struct RuntimeService {
     owner: tokio::sync::Mutex<Option<Arc<SharedService>>>,
     options: OnceLock<VeloServiceOptions>,
     request_work: Arc<RequestWork>,
+    request_discovery_shutdown: CancellationToken,
     lease_released: AtomicBool,
 }
 
@@ -337,6 +338,7 @@ impl RuntimeService {
             owner: tokio::sync::Mutex::new(None),
             options: OnceLock::new(),
             request_work: Arc::new(RequestWork::default()),
+            request_discovery_shutdown: CancellationToken::new(),
             lease_released: AtomicBool::new(false),
         }
     }
@@ -353,6 +355,10 @@ impl RuntimeService {
 
     pub(super) fn request_work(&self) -> &Arc<RequestWork> {
         &self.request_work
+    }
+
+    pub(super) fn request_discovery_token(&self) -> CancellationToken {
+        self.request_discovery_shutdown.child_token()
     }
 
     pub(super) async fn existing_service(&self) -> Option<Arc<VeloResponseService>> {
@@ -448,6 +454,7 @@ impl RuntimeService {
 
     pub(crate) async fn shutdown(&self) {
         self.close();
+        self.request_discovery_shutdown.cancel();
         self.request_work.cancel();
         let joined = tokio::time::timeout(JOIN_GRACE, self.request_work.tasks.wait())
             .await
@@ -471,6 +478,7 @@ impl RuntimeService {
             let work = self.request_work.clone();
             self.request_work.finalizers.spawn_on(
                 async move {
+                    // Keep the lease until every handler exits, even if one never yields.
                     work.tasks.wait().await;
                     Self::release_lease(lease).await;
                 },
@@ -778,14 +786,6 @@ impl VeloResponseService {
         {
             peer.reverse_pin_until.store(expiry, Ordering::Release);
         }
-    }
-
-    pub(crate) async fn watch_request_peers(
-        self: &Arc<Self>,
-        discovery: Arc<dyn crate::discovery::Discovery>,
-        cancel: CancellationToken,
-    ) -> Result<()> {
-        super::velo_request::discovery::start(self, discovery, cancel).await
     }
 
     pub(super) fn rediscover_request_peer(&self, id: InstanceId) {
@@ -1966,6 +1966,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_discovery_survives_primary_cancellation_during_drain() {
+        use super::super::velo_request::encode_address;
+        use crate::{
+            DistributedRuntime, Runtime,
+            component::TransportType,
+            discovery::DiscoverySpec,
+            distributed::{DistributedConfig, RequestPlaneMode},
+            pipeline::network::ResponsePlaneMode,
+            protocols::EndpointId,
+        };
+
+        let (_, worker) = request_pair().await;
+        stub_request_handler(&worker, Bytes::from_static(b"ack"));
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(
+            runtime.clone(),
+            DistributedConfig {
+                request_plane: RequestPlaneMode::Velo,
+                response_plane: Some(ResponsePlaneMode::Velo),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
+        let frontend = drt.velo_response_service().await.unwrap();
+        let discovery = drt.discovery();
+        let target = worker.velo.peer_info();
+        let peer_id = target.instance_id();
+        let register = |name: &str| {
+            let endpoint = EndpointId {
+                namespace: "test".into(),
+                component: "worker".into(),
+                name: name.into(),
+            };
+            let address = encode_address(&target, &endpoint, discovery.instance_id()).unwrap();
+            let spec = DiscoverySpec::Endpoint {
+                namespace: endpoint.namespace,
+                component: endpoint.component,
+                endpoint: endpoint.name,
+                transport: TransportType::Velo(address.clone()),
+                device_type: None,
+                request_plane_codec: None,
+            };
+            let discovery = &discovery;
+            async move {
+                discovery.register(spec).await.unwrap();
+                address
+            }
+        };
+        let address = register("generate").await;
+        drt.request_plane_server().await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(frontend.discovered_request_peers.lock().count(peer_id), 0);
+
+        let client = drt.network_manager().create_client().unwrap();
+        let send = || client.send_request(address.clone(), Bytes::new(), Default::default());
+        let service = &frontend;
+        let wait_for_count = |expected| async move {
+            by_deadline(deadline(), async {
+                while service.discovered_request_peers.lock().count(peer_id) != expected {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        };
+        wait_for_count(1).await;
+        assert_eq!(send().await.unwrap(), "ack");
+        let epoch = frontend.confirmed_peer(peer_id).unwrap().1;
+
+        let owner = runtime.velo_response_service();
+        let other = Runtime::from_current().unwrap().velo_response_service();
+        other.set_options(*owner.options.get().unwrap()).unwrap();
+        assert!(Arc::ptr_eq(&other.service().await.unwrap(), &frontend));
+
+        // The main token starts the HTTP drain. The request client is already live.
+        owner.close();
+        runtime.primary_token().cancel();
+        register("tokenize").await;
+        wait_for_count(2).await;
+        assert_eq!(send().await.unwrap(), "ack");
+        assert_eq!(frontend.confirmed_peer(peer_id).unwrap().1, epoch);
+
+        owner.shutdown().await;
+        wait_for_count(0).await;
+        assert_eq!(frontend.confirmed_peer(peer_id).unwrap().1, epoch);
+        assert!(
+            !frontend
+                .discovered_request_peers
+                .lock()
+                .recently_departed(peer_id, frontend.peer_clock())
+        );
+        other.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn last_discovery_delete_retires_request_route_after_response_drains() {
         use super::super::velo_request::encode_address;
         use crate::{
@@ -1977,12 +2073,11 @@ mod tests {
         let (frontend, worker) = request_pair().await;
         stub_request_handler(&worker, Bytes::new());
         let discovery = Arc::new(MockDiscovery::new(None, SharedMockRegistry::new()));
-        let cancel = CancellationToken::new();
-        let _watch = cancel.clone().drop_guard();
-        frontend
-            .watch_request_peers(discovery.clone(), cancel)
-            .await
-            .unwrap();
+        let _watch = super::super::velo_request::discovery::start(
+            &frontend,
+            discovery.clone(),
+            CancellationToken::new(),
+        );
 
         let mut endpoints = Vec::new();
         let peer = worker.velo.peer_info();

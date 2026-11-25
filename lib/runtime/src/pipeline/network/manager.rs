@@ -16,7 +16,11 @@
 use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::shared_tcp_endpoint::SharedTcpServer;
 use super::ingress::unified_server::RequestPlaneServer;
-use super::velo_request::{client::VeloRequestClient, server::VeloRequestServer};
+use super::velo_request::{
+    client::VeloRequestClient,
+    discovery::{self, RequestPeerWatch},
+    server::VeloRequestServer,
+};
 use super::velo_response::{RuntimeService, VeloResponseService};
 use crate::config::environment_names::request_plane;
 use crate::distributed::RequestPlaneMode;
@@ -26,7 +30,7 @@ use async_once_cell::OnceCell;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::sync::CancellationToken;
 
 /// Global storage for the advertised TCP RPC address after binding.
 /// Uses OnceLock since the shared server binds once and never changes.
@@ -119,7 +123,8 @@ impl NetworkConfig {
 struct VeloRequestPlane {
     service: Arc<VeloResponseService>,
     owner: Arc<RuntimeService>,
-    _discovery_watch: DropGuard,
+    discovery: Arc<dyn crate::discovery::Discovery>,
+    discovery_watch: OnceLock<RequestPeerWatch>,
 }
 
 /// Network Manager - Central coordinator for all network resources
@@ -222,12 +227,13 @@ impl NetworkManager {
         mut self,
         service: Arc<VeloResponseService>,
         owner: Arc<RuntimeService>,
-        discovery_watch: DropGuard,
+        discovery: Arc<dyn crate::discovery::Discovery>,
     ) -> Self {
         self.velo = Some(VeloRequestPlane {
             service,
             owner,
-            _discovery_watch: discovery_watch,
+            discovery,
+            discovery_watch: OnceLock::new(),
         });
         self
     }
@@ -281,10 +287,20 @@ impl NetworkManager {
             RequestPlaneMode::Nats => self.create_nats_client(),
             RequestPlaneMode::Velo => {
                 let velo = self.velo()?;
-                Ok(Arc::new(VeloRequestClient::new(
-                    velo.service.clone(),
-                    self.config.tcp_client_config.request_timeout,
-                )))
+                let watch = velo.discovery_watch.get_or_init(|| {
+                    discovery::start(
+                        &velo.service,
+                        velo.discovery.clone(),
+                        velo.owner.request_discovery_token(),
+                    )
+                });
+                Ok(Arc::new(
+                    VeloRequestClient::new(
+                        velo.service.clone(),
+                        self.config.tcp_client_config.request_timeout,
+                    )
+                    .with_discovery(watch.ready.clone()),
+                ))
             }
         }
     }

@@ -674,7 +674,7 @@ where
             _ => return Ok(()),
         };
         Err(DynamoError::builder()
-            .error_type(ErrorType::WorkerUnavailable)
+            .error_type(ErrorType::Internal)
             .message(format!(
                 "request plane '{mode}' cannot route to transport '{foreign}': mixed request planes are unsupported"
             ))
