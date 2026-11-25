@@ -102,7 +102,8 @@ fn worker_set_key(
 }
 
 /// Refresh committed capability records without changing controller admission.
-fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+fn update_member_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+    worker_set.update_max_logprobs(members.iter().map(|member| &member.card));
     if let Some(admission) = &worker_set.image_edit_admission {
         admission.replace(members.iter().map(|member| {
             (
@@ -1312,7 +1313,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
-        update_image_edit_capabilities(&worker_set, members);
+        update_member_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1401,7 +1402,7 @@ impl ControllerHost for ModelWatcher {
             .get_committed_model(&key.model_name)
             .and_then(|model| model.get_worker_set(&key.worker_set_key))
         {
-            update_image_edit_capabilities(&worker_set, members);
+            update_member_capabilities(&worker_set, members);
         }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
@@ -1453,7 +1454,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
-        update_image_edit_capabilities(&worker_set, members);
+        update_member_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -2814,6 +2815,56 @@ mod tests {
             drop(events);
             task.await.unwrap();
         }
+        runtime.shutdown();
+    }
+
+    /// A replica joining or leaving a committed set refreshes the set's
+    /// log-probability limit, the smallest among its admitted workers.
+    #[tokio::test]
+    async fn max_logprobs_follows_replicas_joining_and_leaving() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use dynamo_runtime::discovery::DiscoveryInstanceId;
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut unpublished = ModelDeploymentCard::with_name_only("logprobs-model");
+        unpublished.model_input = ModelInput::Text;
+        unpublished.model_type = ModelType::Chat;
+        unpublished.worker_type = Some(WorkerType::Aggregated);
+        let mut raised = unpublished.clone();
+        raised
+            .runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), 32.into());
+
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) =
+            watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
+        apply_discovery_event(&events, discovered_card("dgd-v1", 1, &raised)).await;
+        wait_for_model(&manager, "logprobs-model", |_| true).await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 32);
+
+        // A replica that publishes nothing counts as the default of 20.
+        apply_discovery_event(&events, discovered_card("dgd-v1", 2, &unpublished)).await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 20);
+
+        let left = ModelCardInstanceId {
+            namespace: "dgd-v1".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 2,
+            model_suffix: None,
+        };
+        apply_discovery_event(
+            &events,
+            DiscoveryEvent::Removed(DiscoveryInstanceId::Model(left)),
+        )
+        .await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 32);
+
+        drop(events);
+        task.await.unwrap();
         runtime.shutdown();
     }
 
