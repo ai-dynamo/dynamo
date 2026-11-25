@@ -577,9 +577,8 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 | Restoring applied Planner parameters after a Planner restart | They live in the Planner process, and a load predictor needs a history warm-up; the next window starts from the configured values |
 | Load-predictor history beyond 1024 buckets of the shortest throughput interval | The warm-up travels inside every Request and Candidate |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
-| Workers advertising router settings that differ from the supplied startup configuration | Live policy-parameter comparison is not a full compatibility check; other settings must retain ordinary SDK defaults |
-| Missing or unsupported Planner launch binding | P4/P10 cannot resolve the operator-provided settings; inspecting launch flags cannot replace the binding |
-| Router overrides hidden in environment values, variable references, shell scripts, or image entrypoints | The remaining direct-flag checks do not reconstruct effective runtime configuration |
+| Workers advertising router settings that conflict with replay | The frontend validates effective router configuration before acknowledging Retune support |
+| Missing or unsupported Planner launch binding | P4/P10 cannot resolve the operator-provided settings; the Planner does not inspect role Pod templates, commands, shell values, or image entrypoints |
 | Raising `overlap_score_credit` on a frontend that starts it at 0: an omitted credit then searches only 0, and a written positive value fails P4 | A live router rejects a positive credit after starting at 0 |
 | Private, fine-tuned or local-path models | The Run Job has no Hugging Face credentials or model mount |
 | Several frontends without router replica sync | AISimulate simulates one router |

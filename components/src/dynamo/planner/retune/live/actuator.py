@@ -628,7 +628,9 @@ class RouterActuator:
             return _PodOutcome(pod=pod, ok=False, get_status=result.status)
         if not self._accepts_contract(result, state):
             return _PodOutcome(pod=pod, ok=False, get_status=200)
-        routers = self._in_scope(pod, result.routers, state)
+        routers = self._in_scope(
+            pod, result.routers, state, contract_matches=self._matches_contract(result)
+        )
         retried = False
         while True:
             final: list[RouterInfo] = []
@@ -653,7 +655,12 @@ class RouterActuator:
                 return _PodOutcome(pod=pod, ok=False, get_status=result.status)
             if not self._accepts_contract(result, state):
                 return _PodOutcome(pod=pod, ok=False, get_status=200)
-            routers = self._in_scope(pod, result.routers, state)
+            routers = self._in_scope(
+                pod,
+                result.routers,
+                state,
+                contract_matches=self._matches_contract(result),
+            )
 
     def _accepts_contract(self, result: PolicyCallResult, state: _Round) -> bool:
         # Cleanup uses historical ownership, not a potentially newer launch contract.
@@ -671,7 +678,12 @@ class RouterActuator:
         )
 
     def _in_scope(
-        self, pod: PodInfo, routers: Sequence[RouterInfo], state: _Round
+        self,
+        pod: PodInfo,
+        routers: Sequence[RouterInfo],
+        state: _Round,
+        *,
+        contract_matches: bool,
     ) -> list[RouterInfo]:
         """Current semantic scope plus checkpointed router IDs during rollback."""
 
@@ -681,7 +693,8 @@ class RouterActuator:
                 state.target.mode == "rollback" and router.router_id in state.initials
             )
             if not historical and (
-                router.namespace != self._dgd.dynamo_namespace
+                not contract_matches
+                or router.namespace != self._dgd.dynamo_namespace
                 or router.worker_type not in self._startup_maps
             ):
                 continue

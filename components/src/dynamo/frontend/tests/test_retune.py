@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -115,3 +116,63 @@ def test_unsupported_contract_version_does_not_fall_back(capability: dict) -> No
     capability["version"] = 2
     with pytest.raises(ValueError, match="unsupported.*Retune"):
         _startup(capability, [], {})
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("source", ["env", "cli"])
+def test_retune_preserves_local_notices_and_quiet_remote_inspection(
+    capability, local, source, monkeypatch, caplog, recwarn
+):
+    environ = {"DYN_FRONTEND_RETUNE_CAPABILITY": json.dumps(capability)}
+    argv = []
+    if source == "env":
+        environ.update(
+            DYN_ROUTER_TEMPERATURE="0.0",
+            DYN_ADMISSION_CONTROL="token-capacity",
+            DYN_ENFORCE_DISAGG="1",
+        )
+    else:
+        argv = [
+            "--router-temperature",
+            "0.0",
+            "--admission-control",
+            "token-capacity",
+            "--enforce-disagg",
+        ]
+    if local:
+        for name, value in environ.items():
+            monkeypatch.setenv(name, value)
+    before = dict(os.environ)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup(env=None if local else ArgEnv(environ)).add_arguments(parser)
+    parsed = parser.parse_args(argv)
+    assert parsed.router_temperature == 0.0
+    temperature = (
+        "DYN_ROUTER_TEMPERATURE" if source == "env" else "--router-temperature"
+    )
+    admission = "DYN_ADMISSION_CONTROL" if source == "env" else "--admission-control"
+    enforce = "DYN_ENFORCE_DISAGG" if source == "env" else "--enforce-disagg"
+    assert (
+        any(
+            str(item.message).startswith(f"{temperature} is deprecated")
+            for item in recwarn
+        )
+        is local
+    )
+    assert (
+        f"{admission} is no longer supported and is ignored" in caplog.text
+    ) is local
+    assert (f"{enforce} is deprecated and ignored" in caplog.text) is local
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize(
+    "config_json",
+    [
+        '{"router_temperature":0,"router_temperature":1}',
+        '{"use_kv_events":false,"router_approximate_cache_policy":"ttl","router_approximate_cache_policy":"lru"}',
+    ],
+)
+def test_duplicate_router_config_fields_are_rejected(config_json):
+    with pytest.raises(ValueError, match="duplicate field"):
+        KvRouterConfig.from_json(config_json)

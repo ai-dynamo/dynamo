@@ -328,6 +328,27 @@ async def test_runtime_contract_gates_observation_and_apply_but_not_owned_rollba
     assert report.routers_present and report.converged
 
 
+@pytest.mark.parametrize("config_hash", [None, "different-target"])
+async def test_wrong_hash_rollback_restores_only_checkpointed_routers(config_hash):
+    actuator, _, client, _ = make_actuator([pod("fe-0")])
+    frontend = client.frontend("fe-0")
+    frontend.config_hash = config_hash
+    owned = frontend.add(FakeRouter("owned", STARTUP, revision=1, current=dict(CHOSEN)))
+    unowned = frontend.add(
+        FakeRouter("unowned", STARTUP, revision=1, current=dict(CHOSEN))
+    )
+
+    report = await actuator.reconcile(
+        ROLLBACK, initials={"owned": STARTUP}, expected_frontends=1
+    )
+
+    assert report.converged
+    assert owned.current == STARTUP
+    assert unowned.current == CHOSEN
+    assert report.new_initials == {}
+    assert client.writes() == [("reset", "fe-0", "owned", 1)]
+
+
 async def test_missing_admin_binding_does_not_prove_router_reset() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
     client.frontend("fe-0").get_failures = [0] * 5

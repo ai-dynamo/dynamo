@@ -182,8 +182,7 @@ class RouterArgGroup(ArgGroup):
             consumes. ``--router-min-initial-workers`` gates frontend startup
             and is not carried on the model card, so a worker registering it
             would ship a flag that does nothing.
-        env: Another process's env (see ``ArgEnv``); the removed and
-            deprecated flags then parse without their notices.
+        env: Explicit env and warning policy (see ``ArgEnv``).
     """
 
     def __init__(
@@ -198,10 +197,12 @@ class RouterArgGroup(ArgGroup):
         self.env = env
 
     def add_arguments(self, parser) -> None:
-        if self.env is None:
-            if "DYN_ADMISSION_CONTROL" in os.environ:
+        emit_warnings = self.env is None or self.env.emit_warnings
+        if emit_warnings:
+            environ = os.environ if self.env is None else self.env.environ
+            if "DYN_ADMISSION_CONTROL" in environ:
                 logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
-            if "DYN_ENFORCE_DISAGG" in os.environ:
+            if "DYN_ENFORCE_DISAGG" in environ:
                 logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
 
         g = parser.add_argument_group("Router Options")
@@ -218,9 +219,7 @@ class RouterArgGroup(ArgGroup):
                 "--admission-control",
                 choices=("token-capacity", "none"),
                 action=(
-                    _IgnoredAdmissionControlAction
-                    if self.env is None
-                    else _IgnoredAction
+                    _IgnoredAdmissionControlAction if emit_warnings else _IgnoredAction
                 ),
                 default=argparse.SUPPRESS,
                 help=argparse.SUPPRESS,
@@ -238,7 +237,7 @@ class RouterArgGroup(ArgGroup):
                 arg_type=None,
                 action=(
                     _DeprecatedEnforceDisaggAction
-                    if self.env is None
+                    if emit_warnings
                     else argparse.BooleanOptionalAction
                 ),
                 env=self.env,

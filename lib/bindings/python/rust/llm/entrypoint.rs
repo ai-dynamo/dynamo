@@ -92,6 +92,18 @@ impl KvRouterConfig {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct KvRouterConfigInput {
+    #[serde(default)]
+    router_approximate_cache_policy: RsApproximateCachePolicyKind,
+    #[serde(default)]
+    router_prefill_policy: Option<String>,
+    #[serde(default)]
+    router_decode_policy: Option<String>,
+    #[serde(flatten)]
+    config: RsKvRouterConfig,
+}
+
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct AisPerfConfig {
@@ -336,54 +348,13 @@ impl KvRouterConfig {
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        let mut value: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        let input: KvRouterConfigInput = serde_json::from_str(config_json).map_err(|e| {
             PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
-        let fields = value
-            .as_object_mut()
-            .ok_or_else(|| PyValueError::new_err("KvRouterConfig JSON must be an object"))?;
-        let approximate = fields.remove("router_approximate_cache_policy");
-        let prefill = fields.remove("router_prefill_policy");
-        let decode = fields.remove("router_decode_policy");
-        let mut inner: RsKvRouterConfig = serde_json::from_value(value).map_err(|e| {
-            PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
-        })?;
-        if let Some(value) = approximate {
-            inner.router_approximate_cache_policy = value
-                .as_str()
-                .ok_or_else(|| {
-                    PyValueError::new_err("router_approximate_cache_policy must be a string")
-                })?
-                .parse()
-                .map_err(PyValueError::new_err)?;
-        }
-        for (name, supplied, target) in [
-            (
-                "router_prefill_policy",
-                prefill,
-                &mut inner.router_prefill_policy,
-            ),
-            (
-                "router_decode_policy",
-                decode,
-                &mut inner.router_decode_policy,
-            ),
-        ] {
-            if let Some(value) = supplied {
-                *target = if value.is_null() {
-                    None
-                } else {
-                    Some(
-                        value
-                            .as_str()
-                            .ok_or_else(|| {
-                                PyValueError::new_err(format!("{name} must be a string or null"))
-                            })?
-                            .to_owned(),
-                    )
-                };
-            }
-        }
+        let mut inner = input.config;
+        inner.router_approximate_cache_policy = input.router_approximate_cache_policy;
+        inner.router_prefill_policy = input.router_prefill_policy;
+        inner.router_decode_policy = input.router_decode_policy;
         inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })

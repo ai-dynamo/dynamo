@@ -113,7 +113,7 @@ async fn list(
             )
         }))
         .await;
-    let routers = results
+    let routers: Vec<_> = results
         .into_iter()
         .filter_map(|(target, result)| {
             let configuration = match result {
@@ -128,7 +128,11 @@ async fn list(
             })
         })
         .collect();
-    let retune = manager.retune_acknowledgment(query.model.as_deref());
+    let returned_router_ids = routers
+        .iter()
+        .map(|router| router.target.router_id)
+        .collect();
+    let retune = manager.retune_acknowledgment(query.model.as_deref(), &returned_router_ids);
     Json(PolicyListResponse { routers, retune }).into_response()
 }
 
@@ -241,17 +245,33 @@ mod tests {
         (router_policy_router(manager).1, core, ids[0], ids[1])
     }
 
-    #[tokio::test]
-    async fn retune_acknowledges_effective_router_configuration_not_just_launch_binding() {
-        let contract = || {
-            crate::retune::RetuneContract::from_json(&serde_json::json!({
+    fn retune_contract() -> crate::retune::RetuneContract {
+        crate::retune::RetuneContract::from_json(&serde_json::json!({
             "version": 1, "configHash": "a".repeat(64), "frontendComponentName": "gateway", "adminPort": 8002,
             "traceStorage": {"claimName": "traces", "mountPath": "/trace", "segmentsDir": "segments", "windowsDir": "windows"},
             "router": {"profile": "kv-v1", "overlapScoreCredit": 1.0, "prefillLoadScale": 1.0, "temperature": 0.0},
         }).to_string()).unwrap()
-        };
+    }
+
+    fn commit_retune_group(manager: &ModelManager, model: &str) {
+        let card = crate::model_card::ModelDeploymentCard::with_name_only(model);
+        manager
+            .commit_discovery_group(
+                model,
+                model,
+                crate::discovery::WorkerSet::new("test".into(), model.into(), card.clone()),
+                vec![(model.into(), card)],
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn retune_acknowledges_effective_router_configuration_not_just_launch_binding() {
         let manager = Arc::new(ModelManager::new());
-        manager.configure_retune(contract()).unwrap();
+        manager.configure_retune(retune_contract()).unwrap();
+        commit_retune_group(&manager, "first");
+        commit_retune_group(&manager, "second");
         let (app, _core, _, _) = fixture(manager).await;
         let (_, response) = call(&app, Method::GET, "/router_policy", Value::Null).await;
         assert!(
@@ -260,9 +280,18 @@ mod tests {
         );
 
         let manager = Arc::new(ModelManager::new());
-        manager.configure_retune(contract()).unwrap();
+        manager.configure_retune(retune_contract()).unwrap();
         let config = crate::retune::profile_config("kv-v1", 1.0, 1.0, 0.0).unwrap();
-        let (app, _core, router_id, _) = fixture_with_config(manager, config).await;
+        let (app, _core, router_id, _) = fixture_with_config(manager.clone(), config).await;
+        for path in ["/router_policy", "/router_policy?model=first"] {
+            let (_, response) = call(&app, Method::GET, path, Value::Null).await;
+            assert!(response.get("retune").is_none());
+        }
+        commit_retune_group(&manager, "second");
+        let (_, response) =
+            call(&app, Method::GET, "/router_policy?model=first", Value::Null).await;
+        assert!(response.get("retune").is_none());
+        commit_retune_group(&manager, "first");
         let (_, response) = call(&app, Method::GET, "/router_policy", Value::Null).await;
         assert_eq!(response["retune"]["configHash"], "a".repeat(64));
         let (status, _) = call(&app, Method::PATCH, "/router_policy", serde_json::json!({
@@ -275,6 +304,38 @@ mod tests {
             "a".repeat(64),
             "policy tuning does not change the immutable startup binding"
         );
+    }
+
+    #[tokio::test]
+    async fn retune_acknowledgment_requires_the_returned_router_set() {
+        let manager = Arc::new(ModelManager::new());
+        manager.configure_retune(retune_contract()).unwrap();
+        let config = crate::retune::profile_config("kv-v1", 1.0, 1.0, 0.0).unwrap();
+        let (app, _core, router_id, _) = fixture_with_config(manager.clone(), config.clone()).await;
+        commit_retune_group(&manager, "first");
+        commit_retune_group(&manager, "second");
+
+        let request = call(&app, Method::GET, "/router_policy", Value::Null);
+        tokio::pin!(request);
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let (target, control) = manager.router_policies.get(router_id).unwrap();
+        manager.router_policies.register(
+            target.model,
+            EndpointId {
+                namespace: target.namespace,
+                component: target.component,
+                name: target.endpoint,
+            },
+            target.worker_type,
+            &control,
+            Some(config),
+        );
+
+        let (_, response) = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .unwrap();
+        assert_eq!(response["routers"].as_array().unwrap().len(), 2);
+        assert!(response.get("retune").is_none());
     }
 
     async fn call(app: &Router, method: Method, uri: &str, body: Value) -> (StatusCode, Value) {

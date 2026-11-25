@@ -1098,6 +1098,10 @@ When frontend TLS is configured, the admin listener uses the same certificate an
 settings, so call it with `https://`. The inference port's `/openapi.json` does not list these
 routes; `generate-frontend-openapi` does.
 
+Live Retune requires a reachable HTTP admin listener without TLS. Enabling Retune on a
+TLS-enabled frontend is rejected at startup; the HTTPS guidance above applies to frontends
+without Retune.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`, `PATCH` | `/router_policy` | Get or update worker-selection parameters of a router instance |
@@ -1138,6 +1142,8 @@ With a supported Retune contract, `GET /router_policy` adds a top-level
 `retune: {"configHash": "<binding>"}` acknowledgment only after validating compatible effective
 router configuration. Missing acknowledgment, including responses from older runtimes, is not
 permission to tune. The existing `routers` list and policy-update protocol remain unchanged.
+Acknowledgment requires committed discovery state and a consistent router snapshot; a changing
+router set is not acknowledged.
 The Planner separately checks its immutable launch binding against the operator's target hash;
 runtime acknowledgment does not assert that a target rollout has completed.
 

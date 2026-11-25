@@ -132,7 +132,10 @@ impl RetuneContract {
         tls: bool,
     ) -> anyhow::Result<()> {
         ensure!(
-            enabled && address.port() == self.admin_port && !address.ip().is_loopback() && !tls,
+            enabled
+                && address.port() == self.admin_port
+                && !address.ip().to_canonical().is_loopback()
+                && !tls,
             "Retune requires its admin listener on a reachable Pod address, the contracted port and without TLS"
         );
         Ok(())
@@ -331,6 +334,19 @@ mod tests {
                 .validate_admin(true, "127.0.0.1:8002".parse().unwrap(), false)
                 .is_err()
         );
+        assert!(
+            contract
+                .validate_admin(true, "[::1]:8002".parse().unwrap(), false)
+                .is_err()
+        );
+        assert!(
+            contract
+                .validate_admin(true, "[::ffff:127.0.0.1]:8002".parse().unwrap(), false)
+                .is_err()
+        );
+        contract
+            .validate_admin(true, "[::]:8002".parse().unwrap(), false)
+            .unwrap();
         assert!(
             contract
                 .validate_admin(true, "0.0.0.0:8003".parse().unwrap(), false)

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
 use dynamo_runtime::protocols::EndpointId;
@@ -69,13 +69,17 @@ impl RouterPolicyRegistry {
         &self,
         contract: &crate::retune::RetuneContract,
         model: Option<&str>,
+        returned_router_ids: &HashSet<Uuid>,
     ) -> bool {
         let entries = self.entries.lock();
-        let mut matched = false;
+        let mut matched = 0;
         for entry in entries.values().filter(|entry| {
             entry.control.strong_count() != 0
                 && model.is_none_or(|model| entry.target.model == model)
         }) {
+            if !returned_router_ids.contains(&entry.target.router_id) {
+                return false;
+            }
             let Some(config) = &entry.config else {
                 return false;
             };
@@ -86,9 +90,9 @@ impl RouterPolicyRegistry {
             {
                 return false;
             }
-            matched = true;
+            matched += 1;
         }
-        matched
+        matched != 0 && matched == returned_router_ids.len()
     }
 
     pub(crate) fn get(&self, id: Uuid) -> Option<(RouterPolicyTarget, Arc<RuntimePolicyControl>)> {

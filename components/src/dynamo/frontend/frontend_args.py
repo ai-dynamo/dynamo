@@ -449,7 +449,7 @@ class FrontendArgGroup(ArgGroup):
         self._is_local = env is None
         self.env = env
         if env is None and os.environ.get("DYN_FRONTEND_RETUNE_CAPABILITY"):
-            self.env = ArgEnv(environ=dict(os.environ))
+            self.env = ArgEnv(environ=dict(os.environ), emit_warnings=True)
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(

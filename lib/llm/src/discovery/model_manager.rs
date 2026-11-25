@@ -20,6 +20,7 @@ use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
@@ -230,15 +231,18 @@ impl ModelManager {
     pub(crate) fn retune_acknowledgment(
         &self,
         model: Option<&str>,
+        returned_router_ids: &HashSet<Uuid>,
     ) -> Option<crate::retune::RetuneAcknowledgment<'_>> {
         let contract = self.retune.get()?;
 
         // Check selected committed advertisements, not rejected discovery cohorts or argv.
+        let mut committed = false;
         for group in self
             .discovery_groups
             .iter()
             .filter(|group| model.is_none_or(|model| group.primary == model))
         {
+            committed = true;
             if group
                 .worker_set
                 .load_thresholds
@@ -256,8 +260,11 @@ impl ModelManager {
                 return None;
             }
         }
+        if !committed {
+            return None;
+        }
         self.router_policies
-            .matches_retune(contract, model)
+            .matches_retune(contract, model, returned_router_ids)
             .then_some(crate::retune::RetuneAcknowledgment {
                 config_hash: &contract.config_hash,
             })
