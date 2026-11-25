@@ -710,6 +710,7 @@ requirements.txt                                                                
 /components/src/dynamo/vllm/cache_info.py                                                               @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /container/deps/requirements.frontend.txt                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /deploy/operator/internal/controller/lpx/                                                               @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
+/deploy/operator/output-copier/Dockerfile                                                               @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/kv-events/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /lib/sidecar/testkit/tests/support/lpx.rs                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
