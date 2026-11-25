@@ -3673,6 +3673,51 @@ impl OpenAIPreprocessor {
         Ok((prompt_ids, label_ids, encoding_bytes))
     }
 
+    fn single_systemone_token_id(
+        &self,
+        token: &str,
+        err_msg: &'static str,
+    ) -> anyhow::Result<TokenIdType> {
+        let encoding = self.tokenize(token)?;
+        match encoding.token_ids() {
+            [id] => Ok(*id),
+            _ => Err(SystemOneModelIncompatible(err_msg).into()),
+        }
+    }
+
+    fn render_systemone_pooling_chat(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_content: &str,
+        add_generation_prompt: bool,
+        chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> anyhow::Result<RenderedPrompt> {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                "stream": false,
+                "max_tokens": 0,
+                "add_generation_prompt": add_generation_prompt,
+                "thinking": false,
+                "chat_template_kwargs": chat_template_kwargs.cloned().unwrap_or_default()
+            }))?;
+        request.normalize_reasoning_template_args()?;
+        self.apply_template(&request)?
+            .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))
+    }
+
+    fn check_systemone_encoding_bytes(bytes: usize, limit: usize) -> anyhow::Result<()> {
+        if bytes > limit {
+            return Err(SystemOneEncodingTooLarge { bytes, limit }.into());
+        }
+        Ok(())
+    }
+
     /// Render a joint pooling-classifier decision sequence through the model's
     /// chat template, tokenize it without truncation, and locate the exact
     /// inline readout marker positions.
@@ -3687,40 +3732,19 @@ impl OpenAIPreprocessor {
         expected_markers: usize,
         max_encoding_bytes: usize,
     ) -> anyhow::Result<(Vec<TokenIdType>, Vec<usize>, usize)> {
-        let marker_encoding = self.tokenize(marker)?;
-        let marker_ids = marker_encoding.token_ids();
-        if marker_ids.len() != 1 {
-            return Err(SystemOneModelIncompatible(
-                "pooling decision readout marker must encode to a single token",
-            )
-            .into());
-        }
-        let marker_id = marker_ids[0];
-
-        let mut request: NvCreateChatCompletionRequest =
-            serde_json::from_value(serde_json::json!({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                "stream": false,
-                "max_tokens": 0,
-                "thinking": false,
-                "chat_template_kwargs": chat_template_kwargs.cloned().unwrap_or_default()
-            }))?;
-        request.normalize_reasoning_template_args()?;
-        let prompt = self
-            .apply_template(&request)?
-            .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
+        let marker_id = self.single_systemone_token_id(
+            marker,
+            "pooling decision readout marker must encode to a single token",
+        )?;
+        let prompt = self.render_systemone_pooling_chat(
+            model,
+            system_prompt,
+            user_content,
+            true,
+            chat_template_kwargs,
+        )?;
         let encoding_bytes = prompt.as_str().len();
-        if encoding_bytes > max_encoding_bytes {
-            return Err(SystemOneEncodingTooLarge {
-                bytes: encoding_bytes,
-                limit: max_encoding_bytes,
-            }
-            .into());
-        }
+        Self::check_systemone_encoding_bytes(encoding_bytes, max_encoding_bytes)?;
         let prompt_ids = self.tokenize_rendered_prompt(&prompt)?.token_ids().to_vec();
         let markers: Vec<usize> = prompt_ids
             .iter()
@@ -3736,10 +3760,7 @@ impl OpenAIPreprocessor {
         Ok((prompt_ids, markers, encoding_bytes))
     }
 
-    /// Render the shared context chunk for `joint-chunked-readout-v1` (protocol v4):
-    /// applies the chat template with `add_generation_prompt=false` and `thinking=false`,
-    /// slices at the trailing `CONTEXT_END` sentinel so the user turn stays open and
-    /// trailing state whitespace is preserved, tokenizes, and appends `separator`.
+    /// Render the shared context chunk for `joint-chunked-readout-v1` (protocol v4).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_systemone_chunked_pooling_context(
         &self,
@@ -3751,34 +3772,17 @@ impl OpenAIPreprocessor {
         separator: &str,
         max_encoding_bytes: usize,
     ) -> anyhow::Result<(Vec<TokenIdType>, usize)> {
-        let sep_encoding = self.tokenize(separator)?;
-        let sep_ids = sep_encoding.token_ids();
-        if sep_ids.len() != 1 {
-            return Err(SystemOneModelIncompatible(
-                "pooling decision separator must encode to a single token",
-            )
-            .into());
-        }
-        let separator_id = sep_ids[0];
-
-        let user_content = format!("{state_text}{sentinel}");
-        let mut request: NvCreateChatCompletionRequest =
-            serde_json::from_value(serde_json::json!({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                "stream": false,
-                "max_tokens": 0,
-                "add_generation_prompt": false,
-                "thinking": false,
-                "chat_template_kwargs": chat_template_kwargs.cloned().unwrap_or_default()
-            }))?;
-        request.normalize_reasoning_template_args()?;
-        let prompt = self
-            .apply_template(&request)?
-            .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
+        let separator_id = self.single_systemone_token_id(
+            separator,
+            "pooling decision separator must encode to a single token",
+        )?;
+        let prompt = self.render_systemone_pooling_chat(
+            model,
+            system_prompt,
+            &format!("{state_text}{sentinel}"),
+            false,
+            chat_template_kwargs,
+        )?;
         let rendered = prompt.as_str();
         let cut = rendered.rfind(sentinel).ok_or_else(|| {
             anyhow::anyhow!("chat template dropped the chunked context boundary sentinel")
@@ -3790,43 +3794,25 @@ impl OpenAIPreprocessor {
             ));
         }
         let encoding_bytes = context_text.len();
-        if encoding_bytes > max_encoding_bytes {
-            return Err(SystemOneEncodingTooLarge {
-                bytes: encoding_bytes,
-                limit: max_encoding_bytes,
-            }
-            .into());
-        }
+        Self::check_systemone_encoding_bytes(encoding_bytes, max_encoding_bytes)?;
         let mut context_ids = self.tokenize(context_text)?.token_ids().to_vec();
         context_ids.push(separator_id);
         Ok((context_ids, encoding_bytes))
     }
 
-    /// Encode one `joint-chunked-readout-v1` question chunk (`Question:\n...`)
-    /// without special tokens and append its single readout marker token.
+    /// Encode one `joint-chunked-readout-v1` question chunk and append its marker token.
     pub(crate) fn encode_systemone_chunked_pooling_question(
         &self,
         question_text: &str,
         marker: &str,
         max_encoding_bytes: usize,
     ) -> anyhow::Result<(Vec<TokenIdType>, TokenIdType, usize)> {
-        let marker_encoding = self.tokenize(marker)?;
-        let marker_ids = marker_encoding.token_ids();
-        if marker_ids.len() != 1 {
-            return Err(SystemOneModelIncompatible(
-                "pooling decision readout marker must encode to a single token",
-            )
-            .into());
-        }
-        let marker_id = marker_ids[0];
+        let marker_id = self.single_systemone_token_id(
+            marker,
+            "pooling decision readout marker must encode to a single token",
+        )?;
         let encoding_bytes = question_text.len();
-        if encoding_bytes > max_encoding_bytes {
-            return Err(SystemOneEncodingTooLarge {
-                bytes: encoding_bytes,
-                limit: max_encoding_bytes,
-            }
-            .into());
-        }
+        Self::check_systemone_encoding_bytes(encoding_bytes, max_encoding_bytes)?;
         let mut ids = self.tokenize(question_text)?.token_ids().to_vec();
         ids.push(marker_id);
         Ok((ids, marker_id, encoding_bytes))

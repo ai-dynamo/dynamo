@@ -39,10 +39,9 @@ use crate::{
         systemone::{
             CHUNKED_CONTEXT_END_SENTINEL, CHUNKED_POOLING_SYSTEM_PROMPT, POOLING_SYSTEM_PROMPT,
             PoolingDecisionConfig, ScoringBackend, VllmScoreCollector, build_native_score_request,
-            build_pooling_decision_request, build_pooling_last_classify_request,
-            causal_scoring_request, extract_marker_logits, format_chunked_question_text,
-            format_chunked_state_text, format_joint_user_prompt, parse_candidate_scores,
-            reduce_head_logits,
+            build_pooling_request, causal_scoring_request, extract_marker_logits,
+            format_chunked_question_text, format_joint_user_prompt, format_pooling_state_text,
+            parse_candidate_scores, reduce_head_logits,
         },
     },
 };
@@ -654,12 +653,27 @@ async fn dispatch(
             .map(|(total, next)| total + next as u64);
         outcomes.push(result.answer);
     }
-    let mut response =
-        match project_response(&request, &selection.canonical_model, &outcomes, &usage) {
-            Ok(body) => Json(body).into_response(),
-            Err(cause) => decision_error(cause),
-        };
-    attach_request_ids(&mut response, &request_id);
+    finish_decision_response(
+        &request,
+        &selection.canonical_model,
+        &outcomes,
+        &usage,
+        &request_id,
+    )
+}
+
+fn finish_decision_response(
+    request: &CanonicalRequest,
+    model: &str,
+    outcomes: &[QuestionOutcome],
+    usage: &Usage,
+    request_id: &str,
+) -> Response {
+    let mut response = match project_response(request, model, outcomes, usage) {
+        Ok(body) => Json(body).into_response(),
+        Err(cause) => decision_error(cause),
+    };
+    attach_request_ids(&mut response, request_id);
     response.headers_mut().insert(
         HeaderName::from_static("x-dynamo-systemone-version"),
         HeaderValue::from_static("1"),
@@ -1102,6 +1116,20 @@ fn map_pooling_render_error(cause: anyhow::Error) -> (StatusCode, String) {
     )
 }
 
+fn pooling_overlength_error(
+    question: &dynamo_decisions::CanonicalQuestion,
+    tokens: usize,
+    max_seq_len: usize,
+) -> (StatusCode, String) {
+    let qid = question.id.as_deref().unwrap_or("unnamed");
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        format!(
+            "question {qid:?} needs {tokens} tokens with the state, exceeding the {max_seq_len}-token limit; inputs are never truncated"
+        ),
+    )
+}
+
 fn prepare_chunked_pooling_batches(
     request: &CanonicalRequest,
     selection: &SystemOneExecutionSelection,
@@ -1118,7 +1146,7 @@ fn prepare_chunked_pooling_batches(
         )
     })?;
     let state_text =
-        format_chunked_state_text(&request.input, config, selection.card.special_tokens());
+        format_pooling_state_text(&request.input, config, selection.card.special_tokens());
     let (context_ids, ctx_bytes) = selection
         .preprocessor
         .render_systemone_chunked_pooling_context(
@@ -1166,13 +1194,10 @@ fn prepare_chunked_pooling_batches(
             ));
         }
         if token_ids.len() > max_seq_len {
-            let qid = question.id.as_deref().unwrap_or("unnamed");
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "question {qid:?} needs {} tokens with the state, exceeding the {max_seq_len}-token limit; inputs are never truncated",
-                    token_ids.len()
-                ),
+            return Err(pooling_overlength_error(
+                question,
+                token_ids.len(),
+                max_seq_len,
             ));
         }
         let marker_pos = token_ids.len() - 1;
@@ -1240,28 +1265,7 @@ fn bisect_pooling_questions(
             questions.len(),
             *remaining_encoding_bytes,
         )
-        .map_err(|cause| {
-            if let Some(oversized) =
-                cause.downcast_ref::<crate::preprocessor::SystemOneEncodingTooLarge>()
-            {
-                return (StatusCode::UNPROCESSABLE_ENTITY, oversized.to_string());
-            }
-            if let Some(incompatible) =
-                cause.downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
-            {
-                return (StatusCode::UNPROCESSABLE_ENTITY, incompatible.0.to_string());
-            }
-            if dynamo_error::http::find_canonical_error_in_chain(cause.as_ref())
-                .is_some_and(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
-            {
-                return (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string());
-            }
-            tracing::error!(error = %cause, "pooling decision prompt rendering failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal server error".to_string(),
-            )
-        })?;
+        .map_err(map_pooling_render_error)?;
     *remaining_encoding_bytes = remaining_encoding_bytes.saturating_sub(encoding_bytes);
 
     if token_ids.len() <= max_seq_len {
@@ -1273,13 +1277,10 @@ fn bisect_pooling_questions(
         return Ok(());
     }
     if questions.len() == 1 {
-        let qid = questions[0].id.as_deref().unwrap_or("unnamed");
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "question {qid:?} needs {} tokens with the state, exceeding the {max_seq_len}-token limit; inputs are never truncated",
-                token_ids.len()
-            ),
+        return Err(pooling_overlength_error(
+            questions[0],
+            token_ids.len(),
+            max_seq_len,
         ));
     }
     let mid = questions.len() / 2;
@@ -1379,17 +1380,13 @@ async fn dispatch_pooling(
         cached_tokens: Some(0),
         reasoning_tokens: 0,
     };
-    let mut response =
-        match project_response(&request, &selection.canonical_model, &outcomes, &usage) {
-            Ok(body) => Json(body).into_response(),
-            Err(cause) => decision_error(cause),
-        };
-    attach_request_ids(&mut response, &request_id);
-    response.headers_mut().insert(
-        HeaderName::from_static("x-dynamo-systemone-version"),
-        HeaderValue::from_static("1"),
-    );
-    response
+    finish_decision_response(
+        &request,
+        &selection.canonical_model,
+        &outcomes,
+        &usage,
+        &request_id,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1406,20 +1403,18 @@ async fn run_pooling_batch(
     selection.validate_dispatch(None).map_err(|_| {
         DispatchError::unavailable("selected worker revision is no longer available")
     })?;
-    let pooling_engine = match &selection.engine {
-        SystemOneEngine::Pooling(engine) => engine,
-        SystemOneEngine::Generate(_) => {
-            return Err(DispatchError::malformed(
-                "generate engine cannot execute pooling decision batch",
-            ));
-        }
+    let SystemOneEngine::Pooling(pooling_engine) = &selection.engine else {
+        return Err(DispatchError::malformed(
+            "generate engine cannot execute pooling decision batch",
+        ));
     };
     let seq_len = batch.token_ids.len();
-    let pooling_req = if config.uses_last_classify() {
-        build_pooling_last_classify_request(&selection.canonical_model, batch.token_ids)
+    let task = if config.uses_last_classify() {
+        "classify"
     } else {
-        build_pooling_decision_request(&selection.canonical_model, batch.token_ids)
+        "token_classify"
     };
+    let pooling_req = build_pooling_request(&selection.canonical_model, batch.token_ids, task);
     let branch_id = format!("{request_id}-p{batch_idx}");
     let context = Context::with_id_and_metadata(pooling_req, branch_id, Default::default());
     let branch_context = context.context();

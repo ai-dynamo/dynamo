@@ -123,72 +123,60 @@ def publish_vllm_decision_capability(
     return True
 
 
+_POOLING_METADATA_FILES = ("decision_config.json", "joint_config.json")
+
+
 def _resolve_pooling_metadata_files(
     config: "Config",
     vllm_config: "VllmConfig",
 ) -> tuple[Path, Path] | None:
-    """Locate ``decision_config.json`` and ``joint_config.json`` for a model.
-
-    Checks resolved local directories first (``vllm_config.model_config.model``,
-    ``config.engine_args.model``, ``config.model``), then falls back to the
-    HuggingFace cache for repo IDs using ``vllm_config.model_config.revision``.
-    """
+    """Locate pooling decision metadata locally or in the HuggingFace cache."""
     model_cfg = getattr(vllm_config, "model_config", None)
-    engine_args = getattr(config, "engine_args", None)
     candidates = (
         getattr(model_cfg, "model", None),
-        getattr(engine_args, "model", None),
+        getattr(getattr(config, "engine_args", None), "model", None),
         getattr(config, "model", None),
     )
     for candidate in candidates:
         if isinstance(candidate, (str, Path)) and str(candidate):
             model_dir = Path(candidate)
             if model_dir.is_dir():
-                decision_path = model_dir / "decision_config.json"
-                joint_path = model_dir / "joint_config.json"
-                if decision_path.is_file() and joint_path.is_file():
-                    return decision_path, joint_path
-                return None
+                paths = tuple(model_dir / name for name in _POOLING_METADATA_FILES)
+                return paths if all(p.is_file() for p in paths) else None
 
-    repo_id = next(
-        (str(c) for c in candidates if isinstance(c, str) and c),
-        None,
-    )
+    repo_id = next((c for c in candidates if isinstance(c, str) and c), None)
     if not repo_id:
         return None
     try:
         from huggingface_hub import try_to_load_from_cache
         from huggingface_hub.errors import HFValidationError
-    except ImportError:
-        return None
-    revision = getattr(model_cfg, "revision", None)
-    try:
-        decision_cached = try_to_load_from_cache(
-            repo_id=repo_id, filename="decision_config.json", revision=revision
-        )
-        joint_cached = try_to_load_from_cache(
-            repo_id=repo_id, filename="joint_config.json", revision=revision
-        )
-    except (HFValidationError, OSError) as exc:
+
+        revision = getattr(model_cfg, "revision", None)
+        cached = [
+            try_to_load_from_cache(repo_id=repo_id, filename=name, revision=revision)
+            for name in _POOLING_METADATA_FILES
+        ]
+    except (ImportError, HFValidationError, OSError) as exc:
         logger.debug(
-            "HF cache lookup for pooling decision metadata (%s) failed: %s",
-            repo_id,
-            exc,
+            "HF cache lookup for pooling metadata (%s) failed: %s", repo_id, exc
         )
         return None
-    if isinstance(decision_cached, str) and isinstance(joint_cached, str):
-        decision_path = Path(decision_cached)
-        joint_path = Path(joint_cached)
-        if decision_path.is_file() and joint_path.is_file():
-            return decision_path, joint_path
+    if all(isinstance(p, str) for p in cached):
+        paths = (Path(cached[0]), Path(cached[1]))
+        if all(p.is_file() for p in paths):
+            return paths
     return None
 
 
-def _load_pooling_decision_descriptor(decision_path: Path, joint_path: Path) -> dict:
-    """Load and validate a generic joint-inline-readout pooling descriptor.
+def _optional_positive_int(obj: dict, key: str) -> int | None:
+    val = obj.get(key)
+    if val is not None and (type(val) is not int or val < 1):
+        raise ValueError(f"joint_config.{key} must be a positive integer or null")
+    return val
 
-    Raises ``ValueError`` when the metadata files are invalid or unsupported.
-    """
+
+def _load_pooling_decision_descriptor(decision_path: Path, joint_path: Path) -> dict:
+    """Load and validate a pooling-classifier readout descriptor."""
     decision = json.loads(decision_path.read_text(encoding="utf-8"))
     joint = json.loads(joint_path.read_text(encoding="utf-8"))
     if not isinstance(decision, dict) or not isinstance(joint, dict):
@@ -203,11 +191,11 @@ def _load_pooling_decision_descriptor(decision_path: Path, joint_path: Path) -> 
         raise ValueError(
             f"unsupported decision attention_mode: {decision.get('attention_mode')!r}"
         )
-    joint_version = joint.get("version")
-    template = joint.get("template")
-    if joint_version == 3 and template == _POOLING_INLINE_TEMPLATE:
+
+    joint_version, template = joint.get("version"), joint.get("template")
+    if (joint_version, template) == (3, _POOLING_INLINE_TEMPLATE):
         separator = None
-    elif joint_version == 4 and template == _POOLING_CHUNKED_TEMPLATE:
+    elif (joint_version, template) == (4, _POOLING_CHUNKED_TEMPLATE):
         separator = joint.get("separator")
         if not isinstance(separator, str) or not separator:
             raise ValueError(
@@ -229,7 +217,7 @@ def _load_pooling_decision_descriptor(decision_path: Path, joint_path: Path) -> 
     if (
         not isinstance(codes, list)
         or not (2 <= len(codes) <= _MAX_POOLING_CLASSES)
-        or any(not isinstance(code, str) or not code for code in codes)
+        or any(not isinstance(c, str) or not c for c in codes)
         or len(set(codes)) != len(codes)
     ):
         raise ValueError(
@@ -244,25 +232,14 @@ def _load_pooling_decision_descriptor(decision_path: Path, joint_path: Path) -> 
     ):
         raise ValueError("decision_config.temperature must be a finite positive number")
 
-    max_questions = joint.get("max_questions")
-    if max_questions is not None and (
-        type(max_questions) is not int or max_questions < 1
-    ):
-        raise ValueError(
-            "joint_config.max_questions must be a positive integer or null"
-        )
-    max_length = joint.get("max_length")
-    if max_length is not None and (type(max_length) is not int or max_length < 1):
-        raise ValueError("joint_config.max_length must be a positive integer or null")
-
     descriptor = {
         "template": template,
         "marker": marker,
         "readout_offset": readout_offset,
         "codes": list(codes),
         "temperature": float(temperature),
-        "max_questions": max_questions,
-        "max_length": max_length,
+        "max_questions": _optional_positive_int(joint, "max_questions"),
+        "max_length": _optional_positive_int(joint, "max_length"),
     }
     if separator is not None:
         descriptor["separator"] = separator
@@ -278,9 +255,7 @@ def publish_vllm_pooling_decision_capability(
     *,
     needs: list[list[WorkerType]] | None = None,
 ) -> bool:
-    """Publish a pooling-classifier decision contract when a classify worker serves
-    a checkpoint with valid ``decision_config.json`` + ``joint_config.json`` metadata.
-    """
+    """Publish `vllm_pooling_decision_v1` for qualified classify/pooling decision workers."""
     if (
         not getattr(config, "classify_worker", False)
         or not model_type.supports_pooling()
@@ -291,20 +266,17 @@ def publish_vllm_pooling_decision_capability(
     if metadata_files is None:
         return False
     decision_path, joint_path = metadata_files
+    model_label = getattr(config, "model", decision_path.parent)
     try:
         descriptor = _load_pooling_decision_descriptor(decision_path, joint_path)
     except (OSError, ValueError) as exc:
         logger.warning(
-            "Skipping pooling decision capability for %s: %s",
-            getattr(config, "model", decision_path.parent),
-            exc,
+            "Skipping pooling decision capability for %s: %s", model_label, exc
         )
         return False
 
     model_cfg = vllm_config.model_config
     pooler_cfg = getattr(model_cfg, "pooler_config", None)
-    use_activation = getattr(pooler_cfg, "use_activation", None)
-    pooling_type = getattr(pooler_cfg, "pooling_type", None)
     dp_size = getattr(
         getattr(vllm_config, "parallel_config", None), "data_parallel_size", None
     )
@@ -312,7 +284,6 @@ def publish_vllm_pooling_decision_capability(
         descriptor["template"] == _POOLING_CHUNKED_TEMPLATE
         and descriptor["readout_offset"] == 0
     )
-    pooling_type_ok = not uses_last_classify or pooling_type in (None, "LAST", "last")
     checks = (
         (
             "requires runner_type=pooling",
@@ -322,8 +293,15 @@ def publish_vllm_pooling_decision_capability(
             "requires convert_type=classify",
             getattr(model_cfg, "convert_type", None) == "classify",
         ),
-        ("requires pooler_config.use_activation=False", use_activation is False),
-        ("requires pooler_config.pooling_type=LAST", pooling_type_ok),
+        (
+            "requires pooler_config.use_activation=False",
+            getattr(pooler_cfg, "use_activation", None) is False,
+        ),
+        (
+            "requires pooler_config.pooling_type=LAST",
+            not uses_last_classify
+            or getattr(pooler_cfg, "pooling_type", None) in (None, "LAST", "last"),
+        ),
         ("requires aggregated worker", worker_type == WorkerType.Aggregated),
         ("requires no downstream workers", not any(needs or ())),
         ("requires data_parallel_size=1", dp_size == 1),
@@ -332,12 +310,9 @@ def publish_vllm_pooling_decision_capability(
             getattr(vllm_config, "lora_config", None) is None,
         ),
     )
-    failed = next((reason for reason, ok in checks if not ok), None)
-    if failed is not None:
+    if failed := next((reason for reason, ok in checks if not ok), None):
         logger.warning(
-            "Skipping pooling decision capability for %s: %s",
-            getattr(config, "model", decision_path.parent),
-            failed,
+            "Skipping pooling decision capability for %s: %s", model_label, failed
         )
         return False
 
