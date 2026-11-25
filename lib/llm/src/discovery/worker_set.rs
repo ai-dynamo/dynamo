@@ -41,14 +41,9 @@ use crate::{
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
 
-pub(super) fn modalities_exclude_images(modalities: &[String]) -> bool {
-    !modalities.is_empty()
-        && modalities
-            .iter()
-            .all(|modality| matches!(modality.as_str(), "text" | "video" | "audio"))
-}
-
-fn card_excludes_image_input(card: &ModelDeploymentCard) -> bool {
+/// Whether a card advertises a complete input-modality list without images.
+/// A missing or malformed list is unknown and keeps images.
+pub(super) fn card_excludes_images(card: &ModelDeploymentCard) -> bool {
     card.runtime_config
         .runtime_data
         .get(crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES)
@@ -72,7 +67,7 @@ fn target_allows_image_omission(state: RouterTargetState<'_>) -> bool {
     match state {
         RouterTargetState::Absent => true,
         RouterTargetState::Active(Some(WorkerSetTarget::Committed(target))) => {
-            card_excludes_image_input(&target.card)
+            target.excludes_images
         }
         RouterTargetState::Pending | RouterTargetState::Active(_) => false,
     }
@@ -87,6 +82,8 @@ pub(crate) struct CommittedWorkerSetTarget {
     pub(crate) generation: u64,
     pub(crate) card: Arc<ModelDeploymentCard>,
     pub(crate) admitted_ids: watch::Receiver<Vec<u64>>,
+    /// Every admitted worker advertised a text-only input contract.
+    pub(crate) excludes_images: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,7 +251,7 @@ pub struct WorkerSet {
     card: ModelDeploymentCard,
 
     /// Image support belongs to the serving pool, including for adapter views.
-    excludes_image_input: bool,
+    excludes_images: bool,
 
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
@@ -306,14 +303,14 @@ pub struct WorkerSet {
 impl WorkerSet {
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
-        let excludes_image_input = card_excludes_image_input(&card);
+        let excludes_images = card_excludes_images(&card);
         Self {
             namespace,
             endpoint_id: None,
             topology_target: None,
             mdcsum,
             card,
-            excludes_image_input,
+            excludes_images,
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
@@ -374,7 +371,7 @@ impl WorkerSet {
     }
 
     pub(super) fn allows_image_omission(&self) -> bool {
-        self.excludes_image_input
+        self.excludes_images
             && self
                 .prefill_router
                 .as_ref()
@@ -503,6 +500,11 @@ impl WorkerSet {
     /// are not gated through PrefillRouter.
     pub fn is_prefill_set(&self) -> bool {
         !self.is_encode_set() && !self.has_any_serving_engine()
+    }
+
+    /// The cohort's policy replaces the representative card's own list.
+    pub(crate) fn set_excludes_images(&mut self, excludes: bool) {
+        self.excludes_images = excludes;
     }
 
     pub(crate) fn set_input_policy(&mut self, policy: ChatInputPolicy) {
@@ -661,7 +663,7 @@ impl WorkerSet {
             topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
-            excludes_image_input: self.excludes_image_input,
+            excludes_images: self.excludes_images,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),

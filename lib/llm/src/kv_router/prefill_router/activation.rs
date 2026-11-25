@@ -917,6 +917,7 @@ mod tests {
                 generation,
                 card: Arc::new(selected),
                 admitted_ids,
+                excludes_images: false,
             })
         };
         let router = PrefillRouter::new_with_selection_policy(
@@ -1262,6 +1263,7 @@ mod tests {
             generation: 1,
             card: Arc::new(silent),
             admitted_ids,
+            excludes_images: false,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
             while router.lifecycle_state() != PrefillLifecycleState::Active {
@@ -1590,6 +1592,7 @@ mod tests {
             generation: 1,
             card: Arc::new(advertised),
             admitted_ids,
+            excludes_images: false,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
             while router.lifecycle_state() != PrefillLifecycleState::Active {
@@ -1766,6 +1769,7 @@ mod tests {
                 generation,
                 card: Arc::new(selected),
                 admitted_ids,
+                excludes_images: false,
             });
             let target_id = target.id();
             let router = PrefillRouter::new_with_selection_policy(

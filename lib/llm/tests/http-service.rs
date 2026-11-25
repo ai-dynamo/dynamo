@@ -4525,59 +4525,101 @@ async fn test_reject_media_disabled_preserves_backend_422_through_http_middlewar
     svc.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_image_omission_uses_model_modalities_without_global_rejection() {
-    use dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
-    let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder()
-        .port(port)
-        .host("127.0.0.1")
-        .enable_chat_endpoints(true)
-        .enable_responses_endpoints(true)
-        .enable_anthropic_endpoints(true)
-        .build()
-        .unwrap();
-    let state = service.state_clone();
-    let engine = Arc::new(NvExtCaptureEngine::default());
-    for (name, modalities) in [
-        ("text-only", Some(vec!["text"])),
-        ("vision", Some(vec!["text", "image"])),
-        ("unknown", None),
-    ] {
-        let mut card = ModelDeploymentCard::with_name_only(name);
-        if let Some(modalities) = modalities {
-            card.runtime_config
-                .set_engine_specific(SUPPORTED_INPUT_MODALITIES, modalities)
+/// HTTP service with text-only, image-capable, and unknown-modality deployments
+/// sharing one capture engine.
+struct ImageOmissionService {
+    port: u16,
+    engine: Arc<NvExtCaptureEngine>,
+    client: reqwest::Client,
+    cancel: CancellationToken,
+    join: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl ImageOmissionService {
+    async fn start() -> Self {
+        use dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .host("127.0.0.1")
+            .enable_chat_endpoints(true)
+            .enable_responses_endpoints(true)
+            .enable_anthropic_endpoints(true)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let engine = Arc::new(NvExtCaptureEngine::default());
+        for (name, modalities) in [
+            ("text-only", Some(vec!["text"])),
+            ("vision", Some(vec!["text", "image"])),
+            ("unknown", None),
+        ] {
+            let mut card = ModelDeploymentCard::with_name_only(name);
+            if let Some(modalities) = modalities {
+                card.runtime_config
+                    .set_engine_specific(SUPPORTED_INPUT_MODALITIES, modalities)
+                    .unwrap();
+            }
+            let checksum = card.mdcsum().to_string();
+            state
+                .manager()
+                .add_chat_completions_model_with_card(name, &checksum, card, engine.clone())
                 .unwrap();
         }
-        let checksum = card.mdcsum().to_string();
-        state
-            .manager()
-            .add_chat_completions_model_with_card(name, &checksum, card, engine.clone())
+        let cancel = CancellationToken::new();
+        let join = service.spawn_with_listener(cancel.clone(), listener).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
             .unwrap();
+        Self {
+            port,
+            engine,
+            client,
+            cancel,
+            join,
+        }
     }
+}
+
+#[test]
+fn test_chat_engine_tuple_apis_stay_public() {
+    let manager = dynamo_llm::discovery::ModelManager::new();
+    let card = ModelDeploymentCard::with_name_only("model");
+    let checksum = card.mdcsum().to_string();
+    manager
+        .add_chat_completions_model_with_card(
+            "model",
+            &checksum,
+            card,
+            Arc::new(NvExtCaptureEngine::default()),
+        )
+        .unwrap();
     let (_, _): (
         OpenAIChatCompletionsStreamingEngine,
         dynamo_llm::protocols::openai::ParsingOptions,
-    ) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing("text-only")
+    ) = manager
+        .get_chat_completions_engine_with_parsing("model")
         .unwrap();
     let unsupported: Option<(
         OpenAIChatCompletionsStreamingEngine,
         dynamo_llm::protocols::openai::ParsingOptions,
-    )> = state
-        .manager()
-        .get_chat_completions_engine_with_parsing_for_capability("text-only", "unsupported")
+    )> = manager
+        .get_chat_completions_engine_with_parsing_for_capability("model", "unsupported")
         .unwrap();
     assert!(unsupported.is_none());
-    let cancel = CancellationToken::new();
-    let join = service.spawn_with_listener(cancel.clone(), listener).await;
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_replaces_images_only_for_text_only_models() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
     for name in ["text-only", "vision", "unknown"] {
         for (path, mut body) in [
             (
@@ -4648,6 +4690,19 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
             }
         }
     }
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_replaces_file_id_and_url_sources() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
     let response = client
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
         .json(&serde_json::json!({"model":"text-only", "input":[
@@ -4679,7 +4734,19 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
     let captured = engine.messages.lock().unwrap().take().unwrap().to_string();
     assert!(captured.contains("[image omitted]"));
     assert!(!captured.contains("invalid.invalid"));
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
 
+#[tokio::test]
+async fn test_image_omission_keeps_anthropic_request_validation() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
     let duplicate_model = r#"{"model":"text-only","model":"text-only","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"}}]}]}"#;
     let response = client
         .post(format!("http://127.0.0.1:{port}/v1/messages"))
@@ -4753,6 +4820,21 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
             );
             assert!(engine.messages.lock().unwrap().is_none());
         }
+    }
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_keeps_responses_source_validation() {
+    let ImageOmissionService {
+        port,
+        engine,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
+    for model in ["text-only", "vision", "unknown"] {
         for image in [
             serde_json::json!({"type":"input_image"}),
             serde_json::json!({"type":"input_image","file_id":""}),
@@ -4781,6 +4863,22 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
             }
         }
     }
+    cancel.cancel();
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_image_omission_leaves_count_tokens_unchanged() {
+    let ImageOmissionService {
+        port,
+        engine: _,
+        client,
+        cancel,
+        join,
+    } = ImageOmissionService::start().await;
+    let url_image = serde_json::json!({
+        "type":"image", "source":{"type":"url","url":"https://invalid.invalid/image"}
+    });
     for model in ["text-only", "vision", "unknown"] {
         let response = client.post(format!("http://127.0.0.1:{port}/v1/messages/count_tokens"))
             .json(&serde_json::json!({"model":model,"messages":[{"role":"user","content":[url_image]}]}))

@@ -944,7 +944,8 @@ impl Model {
             },
         )
         .map(Some)
-        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+        // A capable WorkerSet existed when the filter passed.
+        .ok_or_else(|| self.engine_error(capability.is_some() || self.has_chat_engine()))
     }
 
     /// Select a chat engine from a WorkerSet that advertises `capability`.
@@ -954,20 +955,9 @@ impl Model {
         capability: &str,
     ) -> Result<Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
     {
-        if !self.has_chat_engine_for_capability(capability) {
-            return if self.has_chat_engine() {
-                Ok(None)
-            } else {
-                Err(self.engine_error(false))
-            };
-        }
-        self.select_worker_set_with(|ws| {
-            ws.supports_runtime_capability(capability)
-                .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-                .flatten()
-        })
-        .map(Some)
-        .ok_or_else(|| self.engine_error(true))
+        Ok(self
+            .get_chat_engine_with_image_policy_for_capability(Some(capability))?
+            .map(|selection| (selection.engine, selection.parsing_options)))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -1877,6 +1867,7 @@ mod tests {
                 generation: 1,
                 card: selected_card,
                 admitted_ids: admitted_rx,
+                excludes_images: false,
             },
         );
         model.add_worker_set("ns-a".to_string(), unadmitted);
@@ -2993,6 +2984,7 @@ mod tests {
                 generation: 1,
                 card: Arc::new(peer.card().clone()),
                 admitted_ids,
+                excludes_images: omit_images,
             });
             model.add_worker_set("text:peer".into(), Arc::new(peer));
             assert!(

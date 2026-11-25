@@ -4574,6 +4574,7 @@ mod tests {
             generation: 1,
             card: Arc::new(card),
             admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
+            excludes_images: false,
         });
         if role != WorkerType::Decode {
             return (worker_set, None, None);

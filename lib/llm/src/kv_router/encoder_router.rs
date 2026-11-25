@@ -676,6 +676,7 @@ mod tests {
                 generation,
                 card: card.clone(),
                 admitted_ids,
+                excludes_images: false,
             })
         };
         let router = EncoderRouter::new("model".into(), namespace);

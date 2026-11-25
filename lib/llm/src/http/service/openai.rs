@@ -4330,13 +4330,18 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
+
+    tracing::trace!("Getting chat completions engine for model: {}", model);
+
     // Selected once: the Beam request normalization below reads this engine's parsing
     // options and dispatch uses this same engine, so the two cannot disagree on the
     // worker set when one served name fronts Beam and non-Beam pools.
     // The lookup sits inside validation, so this range nests in
     // frontend.http.chat.validate, whose duration includes it.
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
-    // Custom content requires explicit support on the same deployment used for omission.
+    // Text-input WorkerSets never run the preprocessor gate, so admit custom
+    // content only where a WorkerSet advertises it. Image omission follows the
+    // same selection.
     let (model, engine_selection) = if crate::preprocessor::has_custom_content(request.content()) {
         state
             .manager()
@@ -4368,8 +4373,6 @@ async fn chat_completions(
         let replaced_images = super::image_omission::omit_chat_images(&mut request.inner.messages);
         super::image_omission::log_image_omission(&model, replaced_images);
     }
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let crate::discovery::ChatEngineSelection {
         engine,

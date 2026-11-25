@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::protocols::anthropic::types::{
-    AnthropicContentBlock, AnthropicMessage, AnthropicMessageContent, ToolResultContent,
-    ToolResultContentBlock,
+    AnthropicContentBlock, AnthropicMessage, AnthropicMessageContent, AnthropicRole,
+    ToolResultContent, ToolResultContentBlock,
 };
 use dynamo_protocols::types::responses::{
-    EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, InputTextContent,
-    Item, MessageItem,
+    EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, InputRole,
+    InputTextContent, Item, MessageItem, Role,
 };
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartText,
@@ -79,6 +79,8 @@ pub(super) fn omit_chat_images(messages: &mut [ChatCompletionRequestMessage]) ->
     replaced_images
 }
 
+/// Rewrites only parts the converter keeps as images: user messages and
+/// function-call outputs. Other roles are reduced to text for every deployment.
 pub(super) fn omit_response_images(input: &mut InputParam) -> usize {
     let InputParam::Items(items) = input else {
         return 0;
@@ -86,11 +88,17 @@ pub(super) fn omit_response_images(input: &mut InputParam) -> usize {
     let mut replaced_images = 0;
     for item in items {
         let parts = match item {
-            InputItem::EasyMessage(message) => match &mut message.content {
-                EasyInputContent::ContentList(parts) => parts,
-                EasyInputContent::Text(_) => continue,
-            },
-            InputItem::Item(Item::Message(MessageItem::Input(message))) => &mut message.content,
+            InputItem::EasyMessage(message) if matches!(message.role, Role::User) => {
+                match &mut message.content {
+                    EasyInputContent::ContentList(parts) => parts,
+                    EasyInputContent::Text(_) => continue,
+                }
+            }
+            InputItem::Item(Item::Message(MessageItem::Input(message)))
+                if matches!(message.role, InputRole::User) =>
+            {
+                &mut message.content
+            }
             InputItem::Item(Item::FunctionCallOutput(output)) => match &mut output.output {
                 FunctionCallOutput::Content(parts) => parts,
                 FunctionCallOutput::Text(_) => continue,
@@ -120,9 +128,13 @@ pub(super) fn omit_response_images(input: &mut InputParam) -> usize {
     replaced_images
 }
 
+/// Only user turns keep images through conversion.
 pub(super) fn omit_anthropic_images(messages: &mut [AnthropicMessage]) -> usize {
     let mut replaced_images = 0;
     for message in messages {
+        if !matches!(message.role, AnthropicRole::User) {
+            continue;
+        }
         let AnthropicMessageContent::Blocks { content } = &mut message.content else {
             continue;
         };
@@ -173,5 +185,42 @@ mod tests {
         let original = serde_json::to_value(&messages).unwrap();
         assert_eq!(omit_chat_images(&mut messages), 0);
         assert_eq!(serde_json::to_value(&messages).unwrap(), original);
+    }
+
+    #[test]
+    fn only_roles_that_keep_images_are_rewritten() {
+        let image = json!({"type":"input_image","image_url":"https://example.com/a.png"});
+        let mut input: InputParam = serde_json::from_value(json!([
+            {"role":"system","content":[image]},
+            {"role":"developer","content":[image]},
+            {"role":"assistant","content":[image]},
+            {"type":"message","role":"system","content":[image]},
+            {"role":"user","content":[image]},
+            {"type":"message","role":"user","content":[image]},
+            {"type":"function_call_output","call_id":"call_1","output":[image]}
+        ]))
+        .unwrap();
+        assert_eq!(omit_response_images(&mut input), 3);
+        let InputParam::Items(items) = &input else {
+            unreachable!()
+        };
+        for (index, item) in items.iter().enumerate() {
+            let rewritten = serde_json::to_string(item).unwrap().contains(OMITTED_IMAGE);
+            assert_eq!(rewritten, index >= 4, "item {index}");
+        }
+
+        let image =
+            json!({"type":"image","source":{"type":"url","url":"https://example.com/a.png"}});
+        let mut messages: Vec<AnthropicMessage> = serde_json::from_value(json!([
+            {"role":"assistant","content":[image]},
+            {"role":"user","content":[image]}
+        ]))
+        .unwrap();
+        assert_eq!(omit_anthropic_images(&mut messages), 1);
+        assert!(matches!(
+            &messages[0].content,
+            AnthropicMessageContent::Blocks { content }
+                if matches!(content[0], AnthropicContentBlock::Image { .. })
+        ));
     }
 }
