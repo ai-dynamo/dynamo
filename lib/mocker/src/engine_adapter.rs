@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use aisim_core::engine::{
-    EngineConfig, EngineFactory, FittedIterationTiming, TimingModel, TimingModelConfig,
+    EngineConfig, EngineFactory, FittedIterationTiming, TimingModel, TimingModelConfig, WorkerType,
 };
 use aisim_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
-use aisim_core::{EstimationMode, ForwardPassPerfModel};
-use anyhow::{Context, Result};
+use aisim_core::{EstimationMode, ForwardPassPerfModel, ForwardPassWorkerType};
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
 use crate::common::perf_model::PerfModel;
@@ -76,21 +76,57 @@ fn offline_replay_components(args: &MockerConfig) -> Result<EngineComponents> {
     if let PerfModel::Ais { callback } = components.args.perf_model.as_ref()
         && let Some(model) = callback
             .forward_pass_model()
-            .filter(|model| selects_fitted(model))
+            .filter(|model| has_fitted_estimator(model))
     {
-        let timing =
-            FittedIterationTiming::from_model(model).context("invalid fitted AIS timing")?;
-        timing.require_replay_role(
-            components.args.dp_size,
-            components.args.decode_speedup_ratio,
-        )?;
+        // `from_model` takes the role from the model's identity; AISimulate
+        // leaves checking it against the engine's role to the embedder.
+        let role = replay_role(components.args.worker_type);
+        let model_role = model
+            .provenance()
+            .map(|provenance| provenance.config.worker_type);
+        ensure!(
+            model_role == Some(role),
+            "the fitted AIS model is for the {} role, but this engine is {}",
+            model_role.map_or("unknown", role_name),
+            role_name(role),
+        );
+        let timing = FittedIterationTiming::from_model(model).with_context(|| {
+            format!("invalid fitted AIS timing for the {} role", role_name(role))
+        })?;
+        timing
+            .require_replay_role(
+                components.args.dp_size,
+                components.args.decode_speedup_ratio,
+            )
+            .with_context(|| {
+                format!(
+                    "fitted AIS timing cannot serve the {} role",
+                    role_name(role)
+                )
+            })?;
         components.timing = Some(Arc::new(timing));
     }
     Ok(components)
 }
 
-/// Whether `model` selected a fitted estimator.
-fn selects_fitted(model: &ForwardPassPerfModel) -> bool {
+/// The forward-pass role of an engine with this worker type.
+fn replay_role(worker_type: WorkerType) -> ForwardPassWorkerType {
+    match worker_type {
+        WorkerType::Aggregated => ForwardPassWorkerType::Aggregated,
+        WorkerType::Prefill => ForwardPassWorkerType::Prefill,
+        WorkerType::Decode => ForwardPassWorkerType::Decode,
+    }
+}
+
+fn role_name(role: ForwardPassWorkerType) -> &'static str {
+    match role {
+        ForwardPassWorkerType::Aggregated => "aggregated",
+        ForwardPassWorkerType::Prefill => "prefill",
+        ForwardPassWorkerType::Decode => "decode",
+    }
+}
+
+fn has_fitted_estimator(model: &ForwardPassPerfModel) -> bool {
     model.provenance().is_some_and(|provenance| {
         matches!(
             provenance.selected_estimation_mode,
@@ -438,12 +474,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn offline_replay_prices_a_fitted_ais_mixed_pass_as_one_query() {
-        // An aggregated vLLM learned model: pure prefill 10 ms, pure decode
-        // 5 ms, and a pass that computes both 7 ms.
-        let dir = tempfile::tempdir().unwrap();
-        let artifact = dir.path().join("learned.json");
+    /// Mocker arguments whose AIS callback carries an aggregated vLLM learned
+    /// model: pure prefill 10 ms, pure decode 5 ms, and a pass that computes
+    /// both 7 ms. The artifact lives in `dir`.
+    fn fitted_ais_args(dir: &std::path::Path) -> MockerConfig {
+        let artifact = dir.join("learned.json");
         let store = |ms: f64| serde_json::json!({"baseline": ms, "trees": []});
         std::fs::write(
             &artifact,
@@ -479,6 +514,13 @@ mod tests {
         args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(FittedEcho(
             Arc::new(model),
         ))));
+        args
+    }
+
+    #[test]
+    fn offline_replay_prices_a_fitted_ais_mixed_pass_as_one_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = fitted_ais_args(dir.path());
 
         let (config, factory) = aggregated_replay_setup(&args).unwrap();
         let mut engine = factory
@@ -532,5 +574,50 @@ mod tests {
             now_ms = started.end_ms;
         }
         assert_eq!(mixed_passes, 1);
+    }
+
+    #[test]
+    fn offline_replay_refuses_a_fitted_ais_model_with_a_decode_speedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = fitted_ais_args(dir.path());
+        args.decode_speedup_ratio = 2.0;
+
+        let error = format!("{:#}", aggregated_replay_setup(&args).err().unwrap());
+        assert!(
+            error.contains("fitted AIS timing cannot serve the aggregated role"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn offline_replay_refuses_a_fitted_ais_model_built_for_another_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefill_args = MockerConfig::from_value(serde_json::json!({
+            "engine": {"worker_type": "prefill"}
+        }))
+        .unwrap();
+        // The configured identity says decode, so the launch check passes,
+        // but the callback's model was built for an aggregated engine.
+        let mut decode_args = fitted_ais_args(dir.path());
+        decode_args.worker_type = WorkerType::Decode;
+        let TimingModelConfig::External { config, .. } =
+            &mut decode_args.engine.engine.timing_model
+        else {
+            panic!("the fixture configures an external AIS timing model");
+        };
+        config["worker_type"] = serde_json::json!("decode");
+
+        let error = format!(
+            "{:#}",
+            disaggregated_replay_setup(&prefill_args, &decode_args)
+                .err()
+                .unwrap()
+        );
+        assert!(
+            error.contains(
+                "the fitted AIS model is for the aggregated role, but this engine is decode"
+            ),
+            "{error}"
+        );
     }
 }
