@@ -274,7 +274,6 @@ struct SyncReplayIndexer {
     /// Ranks whose KVCR-owned residency has been seen. Each has one cache owner
     /// ([`replay_cache_owner`]) that lasts until the worker's removal is finalized.
     cache_owned_ranks: BTreeSet<WorkerWithDpRank>,
-    /// The routing snapshot of the current cache owners, once there is one.
     routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 
