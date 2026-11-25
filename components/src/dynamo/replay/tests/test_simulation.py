@@ -899,10 +899,14 @@ def test_agentic_speculation_capability_does_not_bypass_g2_scope(nested, alias):
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
     # A depth written as aic_nextn or nextn is refused with host offload by a
     # general check, before the agentic G2 check that refuses the other form.
+    # Each pattern is the start of the AISim message from its own check, so a
+    # refusal from the other check fails the test.
     refusal = (
-        "requires speculative decoding disabled"
+        "^agentic host offload requires canonical mtp speculation"
+        " or speculative decoding disabled"
         if alias == "speculation"
-        else "requires canonical mtp speculation"
+        else "^native_host_offload with speculative decoding"
+        " requires canonical mtp speculation"
     )
     with pytest.raises(ValueError, match=refusal):
         capabilities.require_compatible(spec)

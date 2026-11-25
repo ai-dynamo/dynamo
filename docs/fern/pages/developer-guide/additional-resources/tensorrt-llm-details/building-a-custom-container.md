@@ -14,8 +14,10 @@ The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream NVIDIA Tensor
 trtllm:
   cuda13.4:
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
-    runtime_image_tag: 1.4.0rc3
+    runtime_image_tag: <version>
 ```
+
+The [compatibility matrix](../../../reference/general/compatibility.mdx) lists the current TensorRT-LLM version.
 
 For `--target=runtime` (the focus of this guide), `container/render.py` emits a stage that:
 

@@ -32,6 +32,8 @@ The pre-v1.0.0 bodies predate the current release-note template and state no PR 
 
 | Release | PRs | Contributors | First-time contributors | Breaking changes | Known issues |
 | --- | --- | --- | --- | --- | --- |
+| v1.6.2 | - | - | - | 0 | 0 |
+| v1.6.1 | - | - | - | 1 | 0 |
 | v1.6.0 | 654 | 148 | 45 | 41 | 15 |
 | v1.5.1 | - | - | - | 2 | 2 |
 | v1.5.0 | 658 | 123 | 23 | 44 | 12 |

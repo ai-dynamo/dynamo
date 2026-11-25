@@ -165,7 +165,7 @@ impl HttpService {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct HttpAsyncEngine(pub PythonAsyncEngine);
 
@@ -190,7 +190,7 @@ impl HttpAsyncEngine {
     /// could accept a different type of request or return a different type of response
     /// and we would not know until runtime.
     #[new]
-    pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
+    pub fn new(generator: Py<PyAny>, event_loop: Py<PyAny>) -> PyResult<Self> {
         Ok(PythonAsyncEngine::new(generator, event_loop)?.into())
     }
 }
@@ -215,7 +215,7 @@ where
             // and return the rust version of HttpError
             Err(e) => {
                 if let Some(py_err) = e.downcast_ref::<PyErr>() {
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         // With the Stable ABI, we can't subclass Python's built-in exceptions in PyO3, so instead we
                         // implement the exception in Python and assume that it's an HttpError if the code and message
                         // are present.
