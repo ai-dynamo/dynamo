@@ -593,19 +593,6 @@ struct AdmissionContext {
     lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
 }
 
-#[cfg(test)]
-impl AdmissionContext {
-    /// A request of `class_index` with no attempt sender or lifecycle transfer.
-    fn untracked(class_index: usize, due_at: Option<Instant>) -> Self {
-        Self {
-            class_index,
-            due_at,
-            attempt_tx: None,
-            lifecycle_transfer: None,
-        }
-    }
-}
-
 /// The host's reject thresholds as its provider reports them now, when any is configured.
 fn reject_limits(provider: Option<&RejectThresholdsProvider>) -> Option<BusyThresholds> {
     provider
@@ -1748,59 +1735,6 @@ impl<
                 worker_inputs,
             )
         })
-    }
-
-    /// Enqueue a request in the lane keyed by its session id, as a classifier such as
-    /// ThunderAgent keys it, for lane tests.
-    #[cfg(test)]
-    pub(crate) async fn enqueue_keyed_by_session_for_test(&self, request: SchedulingRequest) {
-        let mut queue_metadata = self
-            .default_queue_metadata(&request, Instant::now())
-            .expect("test request names a configured policy class");
-        queue_metadata.lane_key = tests::keyed_by_session(&request);
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let command = AdmissionCommand::Enqueue {
-            request,
-            attempt_tx: None,
-            block_hashes: None,
-            prepared: None,
-            queue_metadata,
-            lease: None,
-            ack_tx,
-        };
-        self.admission_tx
-            .send(command)
-            .await
-            .expect("scheduler queue actor gone");
-        let _ = ack_rx.await;
-    }
-
-    /// Enqueue a request with `due_at` for actor-expiry tests.
-    #[cfg(test)]
-    pub(crate) async fn enqueue_with_due_at_for_test(
-        &self,
-        request: SchedulingRequest,
-        due_at: Instant,
-    ) {
-        let mut queue_metadata = self
-            .default_queue_metadata(&request, Instant::now())
-            .expect("test request names a configured policy class");
-        queue_metadata.due_at = Some(due_at);
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let command = AdmissionCommand::Enqueue {
-            request,
-            attempt_tx: None,
-            block_hashes: None,
-            prepared: None,
-            queue_metadata,
-            lease: None,
-            ack_tx,
-        };
-        self.admission_tx
-            .send(command)
-            .await
-            .expect("scheduler queue actor gone");
-        let _ = ack_rx.await;
     }
 
     fn with_queue_eligibility<R>(
@@ -5322,11 +5256,75 @@ mod tests {
     }
 
     /// The lane key a classifier that keys by session, such as ThunderAgent, would set.
-    pub(super) fn keyed_by_session(request: &SchedulingRequest) -> Option<LaneKey> {
+    fn keyed_by_session(request: &SchedulingRequest) -> Option<LaneKey> {
         request
             .session_context
             .as_ref()
             .map(|session| LaneKey::new(session.session_id()))
+    }
+
+    impl AdmissionContext {
+        /// A request of `class_index` with no attempt sender or lifecycle transfer.
+        fn untracked(class_index: usize, due_at: Option<Instant>) -> Self {
+            Self {
+                class_index,
+                due_at,
+                attempt_tx: None,
+                lifecycle_transfer: None,
+            }
+        }
+    }
+
+    impl<
+        P: SequencePublisher + 'static,
+        C: WorkerConfigLike + Send + Sync + 'static,
+        Sel: WorkerSelector<C> + Send + 'static,
+        RF: OverlapScoresRefresh + Send + Sync + 'static,
+    > SchedulerQueue<P, C, Sel, RF>
+    {
+        /// Send the actor an `Enqueue` for `request` with `prepared` rows and its default queue
+        /// metadata changed by `adjust`. Returns whether the actor acknowledged it.
+        async fn enqueue_with(
+            &self,
+            request: SchedulingRequest,
+            prepared: Option<Box<PreparedAdmission>>,
+            adjust: impl FnOnce(&mut QueueMetadata, &SchedulingRequest),
+        ) -> bool {
+            let mut queue_metadata = self
+                .default_queue_metadata(&request, Instant::now())
+                .expect("test request names a configured policy class");
+            adjust(&mut queue_metadata, &request);
+            let (ack_tx, ack_rx) = oneshot::channel();
+            let command = AdmissionCommand::Enqueue {
+                request,
+                attempt_tx: None,
+                block_hashes: None,
+                prepared,
+                queue_metadata,
+                lease: None,
+                ack_tx,
+            };
+            self.admission_tx
+                .send(command)
+                .await
+                .expect("scheduler queue actor gone");
+            ack_rx.await.is_ok()
+        }
+
+        /// Enqueue a request in the lane keyed by its session id, as a classifier such as
+        /// ThunderAgent keys it.
+        async fn enqueue_keyed_by_session_for_test(&self, request: SchedulingRequest) {
+            let keyed = |metadata: &mut QueueMetadata, request: &SchedulingRequest| {
+                metadata.lane_key = keyed_by_session(request)
+            };
+            self.enqueue_with(request, None, keyed).await;
+        }
+
+        /// Enqueue a request that expires at `due_at`.
+        async fn enqueue_with_due_at_for_test(&self, request: SchedulingRequest, due_at: Instant) {
+            self.enqueue_with(request, None, |metadata, _| metadata.due_at = Some(due_at))
+                .await;
+        }
     }
 
     fn in_session(request: &mut SchedulingRequest, session_id: &str) {
@@ -5511,24 +5509,7 @@ mod tests {
         request: SchedulingRequest,
         prepared: Option<Box<PreparedAdmission>>,
     ) {
-        let queue_metadata = queue
-            .default_queue_metadata(&request, Instant::now())
-            .unwrap();
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue
-            .admission_tx
-            .send(AdmissionCommand::Enqueue {
-                request,
-                attempt_tx: None,
-                block_hashes: None,
-                prepared,
-                queue_metadata,
-                lease: None,
-                ack_tx,
-            })
-            .await
-            .unwrap();
-        ack_rx.await.unwrap();
+        assert!(queue.enqueue_with(request, prepared, |_, _| {}).await);
     }
 
     #[test]
