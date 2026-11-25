@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Expected rejection: A100 does not support the model's required FP8 tensor-core compute mode.
-# Evidence: none
+# Evidence: https://resources.nvidia.com/en-us-gpu/nvidia-a100-datashee-1
 command:
 - '{python}'
 - -m

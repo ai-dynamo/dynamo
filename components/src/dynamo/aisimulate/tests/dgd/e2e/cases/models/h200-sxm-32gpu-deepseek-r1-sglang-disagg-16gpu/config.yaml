@@ -35,7 +35,7 @@ engine:
           attention_data: 16
           moe_tensor: 1
           moe_expert: 16
-  backend_version: previous
+  backend_version: 0.5.20
 optimization:
   target: goodput_per_gpu
   constraints:

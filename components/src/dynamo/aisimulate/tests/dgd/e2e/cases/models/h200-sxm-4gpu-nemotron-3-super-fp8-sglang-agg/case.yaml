@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Expected rejection: The pinned AISim H200/SGLang support matrix marks every Nemotron FP8 topology unsupported because no silicon rows match its FP8 MoE key.
-# Evidence: https://github.com/ai-dynamo/aisim/blob/f85518b36f5488a4c8f6c9553a85d523f173bbb6/python/aisim/src/aisim_core/systems/fpe_support_matrix/h200_sxm.csv
 command:
 - '{python}'
 - -m
@@ -18,7 +16,8 @@ command:
 - json
 - --output
 - dgd
-exit_code: nonzero
-diagnostic: (?s)MoE data missing for MoeKey.*no feasible candidate found
+goldens:
+- index.json
+- deployment.yaml
 mirrors:
   model/config.json: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8/resolve/744b1880a37996c5d56bf454ae164dfd74d77c4e/config.json

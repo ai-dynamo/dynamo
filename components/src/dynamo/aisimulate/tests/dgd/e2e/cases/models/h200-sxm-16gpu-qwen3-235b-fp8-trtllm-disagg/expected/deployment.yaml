@@ -53,7 +53,7 @@ spec:
           - --trtllm.moe_tensor_parallel_size
           - '1'
           - --trtllm.moe_config.backend
-          - CUTLASS
+          - AUTO
           - --trtllm.kv_cache_config.dtype
           - auto
           - --trtllm.kv_cache_config.enable_block_reuse
@@ -112,7 +112,7 @@ spec:
           - --trtllm.moe_tensor_parallel_size
           - '1'
           - --trtllm.moe_config.backend
-          - CUTLASS
+          - AUTO
           - --trtllm.kv_cache_config.dtype
           - auto
           - --trtllm.kv_cache_config.enable_block_reuse

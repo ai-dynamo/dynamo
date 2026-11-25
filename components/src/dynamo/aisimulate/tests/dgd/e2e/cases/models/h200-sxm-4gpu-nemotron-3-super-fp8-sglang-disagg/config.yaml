@@ -16,6 +16,7 @@ engine:
   model: model
   hardware: h200_sxm
   backend: sglang
+  context_length: 2048
   workers:
     prefill:
       parallelism:

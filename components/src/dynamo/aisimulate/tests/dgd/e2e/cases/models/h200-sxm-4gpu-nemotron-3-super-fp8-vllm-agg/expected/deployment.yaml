@@ -38,11 +38,11 @@ spec:
           - dynamo.vllm
           args:
           - --tensor-parallel-size
-          - '1'
+          - '4'
           - --pipeline-parallel-size
           - '1'
           - --data-parallel-size
-          - '2'
+          - '1'
           - --enable-expert-parallel
           - --gpu-memory-utilization
           - '0.9'
@@ -572,10 +572,10 @@ spec:
           - '262144'
           resources:
             limits:
-              nvidia.com/gpu: '2'
+              nvidia.com/gpu: '4'
             requests:
               ephemeral-storage: 2Gi
-              nvidia.com/gpu: '2'
+              nvidia.com/gpu: '4'
           envFrom:
           - secretRef:
               name: hf-token-secret

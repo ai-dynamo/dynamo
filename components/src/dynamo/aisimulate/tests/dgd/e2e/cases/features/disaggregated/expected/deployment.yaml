@@ -20,6 +20,10 @@ spec:
           args:
           - -m
           - dynamo.frontend
+          - --model-name
+          - ../../../fixtures/tiny-model
+          - --model-path
+          - ../../../fixtures/tiny-model
           envFrom:
           - secretRef:
               name: hf-token-secret

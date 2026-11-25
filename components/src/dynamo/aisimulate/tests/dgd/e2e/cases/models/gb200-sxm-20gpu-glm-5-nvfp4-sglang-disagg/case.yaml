@@ -21,3 +21,4 @@ goldens:
 - deployment.yaml
 mirrors:
   model/config.json: https://huggingface.co/nvidia/GLM-5-NVFP4/resolve/dc54ff55a7e9e71b85db953d8bc22eca894b44c6/config.json
+  model/hf_quant_config.json: https://huggingface.co/nvidia/GLM-5-NVFP4/resolve/dc54ff55a7e9e71b85db953d8bc22eca894b44c6/hf_quant_config.json

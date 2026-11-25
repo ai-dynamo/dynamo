@@ -22,3 +22,7 @@ goldens:
 - candidate-000/deploy.yaml
 - candidate-001/kustomization.yaml
 - candidate-001/deploy.yaml
+- candidate-002/kustomization.yaml
+- candidate-002/deploy.yaml
+- candidate-003/kustomization.yaml
+- candidate-003/deploy.yaml
