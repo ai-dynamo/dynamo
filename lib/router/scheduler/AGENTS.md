@@ -17,9 +17,10 @@ work and capacity checks; an ineligible target permits fallback within the origi
 constraints. Exact pins remain exact. Prepared rows keep main's configuration,
 availability and overload freshness checks. Callers may project loads, count the
 ranks past configured reject thresholds in the same pass, and fill rows; the actor
-repairs and judges again the ranks it wrote since, or projects again. Record every
-actor-side write to a rank's load in `ActorWriteLog` after the write, or a prepared
-projection misses it. A write from another task after the caller's pass (a release,
+repairs and judges again the ranks it wrote since, or projects again. When the actor
+books or releases, call the method on `ActorSlots`, which records the rank in
+`ActorWriteLog` after the write; add a new kind of actor-side write there, or a
+prepared projection misses it. A write from another task after the caller's pass (a release,
 a prefill mark, a replica's booking) is not re-read: that selection keeps the
 caller's load and fullness for the rank. When adding an await between receiving a
 request and admitting it, drop its judged prepared load after the await, as the

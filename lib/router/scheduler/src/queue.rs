@@ -47,11 +47,14 @@ use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::PrefillLoadHint;
+use dynamo_slot_tracker::host::DecodeProgress;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
 };
 use dynamo_slot_tracker::{BusyThresholds, FullRankCounts};
+use dynamo_slot_tracker::{LifecycleMutationOutcome, RequestId};
+use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::WorkerInputs;
 use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
@@ -290,6 +293,136 @@ impl ActorWriteLog {
             (0..written)
                 .map(move |write| self.ranks[(since as usize + write) % ACTOR_WRITE_LOG].get())
         })
+    }
+}
+
+/// The actor's handle on the slot tracker. Its bookings and releases go through here and
+/// are counted in the write log, so a load a caller projected can be brought up to date
+/// with them; the reads forward unchanged. A release a caller applies on its own task
+/// (`DirectBookingRelease`) is not counted: the actor does not re-read that rank.
+struct ActorSlots<P: SequencePublisher> {
+    tracker: Arc<ActiveSequencesMultiWorker<P>>,
+    write_log: ActorWriteLog,
+}
+
+impl<P: SequencePublisher + 'static> ActorSlots<P> {
+    fn new(tracker: Arc<ActiveSequencesMultiWorker<P>>, actor_writes: Arc<AtomicU64>) -> Self {
+        Self {
+            tracker,
+            write_log: ActorWriteLog::new(actor_writes),
+        }
+    }
+
+    /// Book `request` on its rank.
+    fn add_request_admitted(
+        &self,
+        request: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<AttemptId, SequenceError> {
+        let worker = request.worker;
+        let attempt_id = self.tracker.add_request_admitted(request, decay_now)?;
+        self.write_log.record(worker);
+        Ok(attempt_id)
+    }
+
+    /// Free the booking the attempt holds, if it still does.
+    fn free_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        decay_now: Instant,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        let outcome = self
+            .tracker
+            .free_if_booking(request_id, worker, attempt_id, decay_now)?;
+        if outcome.is_applied() {
+            self.write_log.record(worker);
+        }
+        Ok(outcome)
+    }
+
+    /// Expire the booking the attempt holds, if it still does.
+    fn expire_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        decay_now: Instant,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        let outcome = self
+            .tracker
+            .expire_if_booking(request_id, worker, attempt_id, decay_now)?;
+        if outcome.is_applied() {
+            self.write_log.record(worker);
+        }
+        Ok(outcome)
+    }
+
+    /// The rank of each write after the first `since`; see [`ActorWriteLog::written_since`].
+    fn written_since(
+        &self,
+        since: u64,
+    ) -> Option<impl ExactSizeIterator<Item = WorkerWithDpRank> + '_> {
+        self.write_log.written_since(since)
+    }
+
+    #[inline(always)]
+    fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        full_ranks: Option<&mut FullRankCounts>,
+    ) -> u64 {
+        self.tracker
+            .project_worker_loads_into(token_sequence, decay_now, projections, full_ranks)
+    }
+
+    #[inline(always)]
+    fn reproject_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        workers: &[WorkerWithDpRank],
+        version: u64,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        full_ranks: Option<&mut FullRankCounts>,
+    ) -> bool {
+        self.tracker.reproject_worker_loads(
+            token_sequence,
+            decay_now,
+            workers,
+            version,
+            projections,
+            full_ranks,
+        )
+    }
+
+    #[inline(always)]
+    fn record_full_worker_ranks_at(&self, decay_now: Instant, full_ranks: &mut FullRankCounts) {
+        self.tracker
+            .record_full_worker_ranks_at(decay_now, full_ranks);
+    }
+
+    #[inline(always)]
+    fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
+        self.tracker.worker_load_reader(decay_now)
+    }
+
+    #[inline(always)]
+    fn decode_progress_for(&self, worker: WorkerWithDpRank) -> Option<DecodeProgress> {
+        self.tracker.decode_progress_for(worker)
+    }
+
+    #[inline(always)]
+    fn additional_active_blocks(
+        &self,
+        token_sequence: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        self.tracker
+            .additional_active_blocks(token_sequence, worker)
     }
 }
 
@@ -1063,7 +1196,7 @@ struct SchedulerQueueActor<
     pending_count: Arc<AtomicUsize>,
     pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
-    slots: Arc<ActiveSequencesMultiWorker<P>>,
+    slots: ActorSlots<P>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Advanced when the actor observes a configuration change; see `PreparedAdmission`.
     workers_generation: Arc<AtomicU64>,
@@ -1083,7 +1216,6 @@ struct SchedulerQueueActor<
     /// in a class gets the same answer, so a capacity change walks the ranks once per class
     /// rather than once per blocked lane.
     class_room: Vec<Option<bool>>,
-    write_log: ActorWriteLog,
     /// Scratch for the ranks re-read in a prepared load.
     reread_ranks: Vec<WorkerWithDpRank>,
     block_size: u32,
@@ -1358,8 +1490,12 @@ impl<
     }
 }
 
-impl<P: SequencePublisher, C: WorkerConfigLike, Sel: WorkerSelector<C>, RF: OverlapScoresRefresh>
-    SchedulerQueue<P, C, Sel, RF>
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike,
+    Sel: WorkerSelector<C>,
+    RF: OverlapScoresRefresh,
+> SchedulerQueue<P, C, Sel, RF>
 {
     /// An actor over this queue's shared state: the one the queue spawns, and the ones tests
     /// drive by hand. Built in one place so both hold the same fields.
@@ -1386,7 +1522,7 @@ impl<P: SequencePublisher, C: WorkerConfigLike, Sel: WorkerSelector<C>, RF: Over
             pending_count: Arc::clone(&self.pending_count),
             pending_isl_tokens: Arc::clone(&self.pending_isl_tokens),
             class_counters: Arc::clone(&self.class_counters),
-            slots,
+            slots: ActorSlots::new(slots, Arc::clone(&self.actor_writes)),
             workers_with_configs: self.workers_with_configs.clone(),
             workers_generation: Arc::clone(&self.workers_generation),
             candidate_preparer: Arc::clone(&self.candidate_preparer),
@@ -1396,7 +1532,6 @@ impl<P: SequencePublisher, C: WorkerConfigLike, Sel: WorkerSelector<C>, RF: Over
             full_ranks: FullRankCounts::default(),
             gate_full_ranks: FullRankCounts::default(),
             class_room: Vec::new(),
-            write_log: ActorWriteLog::new(Arc::clone(&self.actor_writes)),
             reread_ranks: Vec::new(),
             block_size: self.block_size,
             selector,
@@ -2444,7 +2579,6 @@ impl<
                             .map(|outcome| {
                                 if outcome.is_applied() {
                                     made_ready = true;
-                                    self.write_log.record(booking.worker);
                                 }
                             }),
                         None => Ok(()),
@@ -2465,7 +2599,6 @@ impl<
                         .map(|outcome| {
                             if outcome.is_applied() {
                                 made_ready = true;
-                                self.write_log.record(booking.worker);
                             }
                         });
                     if let Err(error) = result {
@@ -2490,7 +2623,6 @@ impl<
                         .map(|outcome| {
                             if outcome.is_applied() {
                                 made_ready = true;
-                                self.write_log.record(booking.worker);
                             }
                         });
                     if let Err(error) = result {
@@ -3078,7 +3210,7 @@ impl<
         if load.limits != limits || load.overlap != overlap {
             return None;
         }
-        let ranks = self.write_log.written_since(load.actor_writes)?;
+        let ranks = self.slots.written_since(load.actor_writes)?;
         if ranks.len().saturating_mul(PREPARED_LOAD_MAX_STALE) > load.loads.len() {
             return None;
         }
@@ -3432,7 +3564,6 @@ impl<
                 return Admission::Refused;
             }
         };
-        self.write_log.record(worker);
         if let Some(transfer) = lifecycle_transfer {
             transfer.arm_booking(SchedulerBookingDescriptor {
                 request_id: request_id.clone(),
@@ -3451,15 +3582,11 @@ impl<
         }
 
         tracing::debug!(%request_id, "Rolling back undelivered scheduler booking");
-        match self
-            .slots
-            .free_if_booking(&request_id, worker, attempt_id, Instant::now())
+        if let Err(error) =
+            self.slots
+                .free_if_booking(&request_id, worker, attempt_id, Instant::now())
         {
-            Ok(outcome) if outcome.is_applied() => self.write_log.record(worker),
-            Ok(_) => {}
-            Err(error) => {
-                tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
-            }
+            tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
         Admission::Refused
     }
@@ -5662,6 +5789,61 @@ mod tests {
                 "{workers} workers, counts only: {counts_only}"
             );
             assert_eq!(prepared_queue.prepared_selections(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_see_releases_the_actor_applied_after_preparation() {
+        for expired in [false, true] {
+            // 32 workers, so the actor re-reads only the rank it wrote since the caller's pass.
+            let prepared_queue = make_prepared_queue_with(32, 1, false, Box::new(LeastLoaded));
+            let mut actor = actor_with_selector_for_test(
+                &prepared_queue.queue,
+                &prepared_queue.slots,
+                counting_policy(
+                    &prepared_queue.prepared_selections,
+                    false,
+                    Box::new(LeastLoaded),
+                ),
+            );
+            // The caller reads worker 0 while it holds a booking.
+            let held = book_directly(&prepared_queue.slots, "held");
+            let (request, mut rx) = make_request("request", 64);
+            let prepared = prepared_queue.queue.prepare_candidates(&request);
+            assert!(prepared.is_some());
+
+            let target = if expired {
+                SchedulerCleanupTarget::ExpiredBooking(held)
+            } else {
+                SchedulerCleanupTarget::Booking(held)
+            };
+            actor.cleanup.enqueue(AdmissionCleanupEntry { target });
+            actor.drain_cleanup();
+
+            // The release makes worker 0 the least loaded again, though its load was read
+            // before it.
+            actor.refresh_workers_generation();
+            assert_eq!(
+                actor.with_projected_loads(
+                    request,
+                    Instant::now(),
+                    prepared,
+                    |actor, request, prepared| {
+                        actor.admit_one_projected(
+                            AdmissionContext::untracked(0, None),
+                            request,
+                            prepared,
+                        )
+                    }
+                ),
+                Admission::Booked
+            );
+            assert_eq!(
+                rx.try_recv().unwrap().unwrap().best_worker,
+                WorkerWithDpRank::new(0, 0),
+                "expired: {expired}"
+            );
+            assert_eq!(prepared_queue.prepared_selections(), 1);
         }
     }
 
