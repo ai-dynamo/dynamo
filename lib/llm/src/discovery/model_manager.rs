@@ -1608,29 +1608,78 @@ impl ModelManager {
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
-    pub(crate) fn get_chat_completions_engine_with_parsing(
+    pub fn get_chat_completions_engine_with_parsing(
         &self,
         model: &str,
-    ) -> Result<ChatEngineSelection, ModelManagerError> {
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_image_policy()
+            .get_chat_engine_with_parsing()
     }
 
-    pub(crate) fn get_chat_completions_engine_with_parsing_for_capability(
+    pub fn get_chat_completions_engine_with_parsing_for_capability(
         &self,
         model: &str,
         capability: &str,
-    ) -> Result<Option<ChatEngineSelection>, ModelManagerError> {
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        )>,
+        ModelManagerError,
+    > {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_image_policy_for_capability(Some(capability))
+            .get_chat_engine_with_parsing_for_capability(capability)
+    }
+
+    pub(crate) fn get_chat_completions_selection(
+        &self,
+        model: &str,
+    ) -> Result<(String, ChatEngineSelection), ModelManagerError> {
+        let catalog = self.catalog.load();
+        let canonical = catalog
+            .aliases
+            .get(model)
+            .map(String::as_str)
+            .unwrap_or(model);
+        let selection = catalog
+            .models
+            .get(canonical)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_image_policy()?;
+        Ok((canonical.to_owned(), selection))
+    }
+
+    pub(crate) fn get_chat_completions_selection_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<Option<(String, ChatEngineSelection)>, ModelManagerError> {
+        let catalog = self.catalog.load();
+        let canonical = catalog
+            .aliases
+            .get(model)
+            .map(String::as_str)
+            .unwrap_or(model);
+        let selection = catalog
+            .models
+            .get(canonical)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_image_policy_for_capability(Some(capability))?;
+        Ok(selection.map(|selection| (canonical.to_owned(), selection)))
     }
 
     pub fn get_completions_engine_with_parsing(

@@ -3006,6 +3006,14 @@ mod tests {
                 WorkerType::Encode => encoder.set_target(Some(target)),
                 _ => unreachable!(),
             }
+            // The current-thread runtime has not run asynchronous activation yet.
+            assert!(
+                !model
+                    .get_chat_engine_with_image_policy()
+                    .unwrap()
+                    .omit_images,
+                "a pending {role:?} target must preserve images"
+            );
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
                     let available = match role {

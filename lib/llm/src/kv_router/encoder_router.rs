@@ -22,7 +22,7 @@ use dynamo_runtime::{
     protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
 
-use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
+use crate::discovery::{RouterTargetState, WorkerSetTarget, WorkerSetTargetId};
 use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::{MultimodalData, TraceLink},
@@ -77,18 +77,19 @@ impl Drop for EncoderRouter {
 }
 
 impl EncoderRouter {
-    pub(crate) fn target_allows_image_omission(&self) -> bool {
+    pub(crate) fn inspect_target(&self, inspect: &dyn Fn(RouterTargetState<'_>) -> bool) -> bool {
         let current_target = self.target.lock();
         if current_target.is_none() {
-            return true;
+            return inspect(RouterTargetState::Absent);
         }
-        self.lifecycle_state() == EncoderLifecycleState::Active
-            && self.target_tx.as_ref().is_some_and(|target| {
-                target
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(WorkerSetTarget::allows_image_omission)
-            })
+        // Activation and target changes publish under the same lock.
+        if self.lifecycle_state() != EncoderLifecycleState::Active {
+            return inspect(RouterTargetState::Pending);
+        }
+        match &self.target_tx {
+            Some(target_tx) => inspect(RouterTargetState::Active(target_tx.borrow().as_ref())),
+            None => inspect(RouterTargetState::Active(None)),
+        }
     }
 
     /// Returns `None` when this router does not target the group, and an empty

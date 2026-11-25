@@ -4559,6 +4559,21 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
             .add_chat_completions_model_with_card(name, &checksum, card, engine.clone())
             .unwrap();
     }
+    let (_, _): (
+        OpenAIChatCompletionsStreamingEngine,
+        dynamo_llm::protocols::openai::ParsingOptions,
+    ) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing("text-only")
+        .unwrap();
+    let unsupported: Option<(
+        OpenAIChatCompletionsStreamingEngine,
+        dynamo_llm::protocols::openai::ParsingOptions,
+    )> = state
+        .manager()
+        .get_chat_completions_engine_with_parsing_for_capability("text-only", "unsupported")
+        .unwrap();
+    assert!(unsupported.is_none());
     let cancel = CancellationToken::new();
     let join = service.spawn_with_listener(cancel.clone(), listener).await;
     let client = reqwest::Client::builder()
@@ -4745,6 +4760,9 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
             serde_json::json!({"type":"input_image"}),
             serde_json::json!({"type":"input_image","file_id":""}),
             serde_json::json!({"type":"input_image","file_id":"  "}),
+            serde_json::json!({"type":"input_image","image_url":""}),
+            serde_json::json!({"type":"input_image","image_url":"relative.png"}),
+            serde_json::json!({"type":"input_image","image_url":"relative.png","file_id":"file-image"}),
         ] {
             for input in [
                 serde_json::json!([{"role":"user","content":[image]}]),

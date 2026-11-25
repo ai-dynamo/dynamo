@@ -24,7 +24,7 @@ use dynamo_worker_selection::host::ConditionalDisaggPolicy;
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
+    discovery::{ModelManager, RouterTargetState, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
@@ -323,8 +323,8 @@ struct PrefillBuildContext {
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
-    fn target_allows_image_omission(&self) -> bool {
-        false
+    fn inspect_target(&self, inspect: &dyn Fn(RouterTargetState<'_>) -> bool) -> bool {
+        inspect(RouterTargetState::Pending)
     }
 
     /// Returns `None` when this router does not target the group, and an empty
@@ -341,19 +341,19 @@ impl PrefillRouterLifecycle for PrefillRouter {
         self.set_target(target);
     }
 
-    fn target_allows_image_omission(&self) -> bool {
+    fn inspect_target(&self, inspect: &dyn Fn(RouterTargetState<'_>) -> bool) -> bool {
         let current_target = self.target.lock();
         if current_target.is_none() {
-            return true;
+            return inspect(RouterTargetState::Absent);
         }
         // Activation and target changes publish under the same lock.
-        self.lifecycle_state() == PrefillLifecycleState::Active
-            && self.target_tx.as_ref().is_some_and(|target| {
-                target
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(WorkerSetTarget::allows_image_omission)
-            })
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            return inspect(RouterTargetState::Pending);
+        }
+        match &self.target_tx {
+            Some(target_tx) => inspect(RouterTargetState::Active(target_tx.borrow().as_ref())),
+            None => inspect(RouterTargetState::Active(None)),
+        }
     }
 
     fn available_worker_ids_for(

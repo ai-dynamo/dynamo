@@ -41,6 +41,13 @@ use crate::{
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
 
+pub(super) fn modalities_exclude_images(modalities: &[String]) -> bool {
+    !modalities.is_empty()
+        && modalities
+            .iter()
+            .all(|modality| matches!(modality.as_str(), "text" | "video" | "audio"))
+}
+
 fn card_excludes_image_input(card: &ModelDeploymentCard) -> bool {
     card.runtime_config
         .runtime_data
@@ -52,6 +59,23 @@ fn card_excludes_image_input(card: &ModelDeploymentCard) -> bool {
                     .iter()
                     .all(|modality| matches!(modality.as_str(), Some("text" | "video" | "audio")))
         })
+}
+
+/// Snapshot inspected while the router holds its target publication lock.
+pub(crate) enum RouterTargetState<'a> {
+    Absent,
+    Pending,
+    Active(Option<&'a WorkerSetTarget>),
+}
+
+fn target_allows_image_omission(state: RouterTargetState<'_>) -> bool {
+    match state {
+        RouterTargetState::Absent => true,
+        RouterTargetState::Active(Some(WorkerSetTarget::Committed(target))) => {
+            card_excludes_image_input(&target.card)
+        }
+        RouterTargetState::Pending | RouterTargetState::Active(_) => false,
+    }
 }
 
 /// A topology hop must retain the provider's admission and configuration, even
@@ -88,13 +112,6 @@ pub(crate) enum WorkerSetTarget {
 }
 
 impl WorkerSetTarget {
-    pub(crate) fn allows_image_omission(&self) -> bool {
-        match self {
-            Self::Committed(target) => card_excludes_image_input(&target.card),
-            Self::Legacy(_) => false,
-        }
-    }
-
     pub(crate) fn id(&self) -> WorkerSetTargetId {
         match self {
             Self::Committed(target) => WorkerSetTargetId::Committed {
@@ -361,11 +378,11 @@ impl WorkerSet {
             && self
                 .prefill_router
                 .as_ref()
-                .is_none_or(|router| router.target_allows_image_omission())
+                .is_none_or(|router| router.inspect_target(&target_allows_image_omission))
             && self
                 .encoder_router
                 .as_ref()
-                .is_none_or(|router| router.target_allows_image_omission())
+                .is_none_or(|router| router.inspect_target(&target_allows_image_omission))
     }
 
     pub fn mdcsum(&self) -> &str {

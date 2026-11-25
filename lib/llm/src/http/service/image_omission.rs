@@ -98,10 +98,17 @@ pub(super) fn omit_response_images(input: &mut InputParam) -> usize {
             _ => continue,
         };
         for part in parts {
-            if matches!(part, InputContent::InputImage(image)
-                if image.image_url.is_some()
-                    || image.file_id.as_deref().is_some_and(|id| !id.trim().is_empty()))
-            {
+            let InputContent::InputImage(image) = part else {
+                continue;
+            };
+            let valid_source = match image.image_url.as_deref() {
+                Some(url) => url::Url::parse(url).is_ok(),
+                None => image
+                    .file_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()),
+            };
+            if valid_source {
                 replaced_images += 1;
                 *part = InputContent::InputText(InputTextContent {
                     text: OMITTED_IMAGE.into(),

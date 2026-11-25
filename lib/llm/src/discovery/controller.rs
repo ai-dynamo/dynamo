@@ -73,20 +73,15 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
 }
 
 fn cohort_input_modalities(members: &[DesiredInstance]) -> Option<Vec<String>> {
-    let mut members = members.iter();
-    let agreed = members.next()?.input_modalities.clone()?;
-    members
-        .all(|member| member.input_modalities.as_ref() == Some(&agreed))
-        .then_some(agreed)
-}
-
-fn input_modalities_digest(modalities: &[String]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    for modality in modalities {
-        hasher.update(&(modality.len() as u64).to_be_bytes());
-        hasher.update(modality.as_bytes());
-    }
-    hasher.finalize().to_hex().to_string()
+    // This is an image policy summary, not agreement on unrelated modalities.
+    (!members.is_empty()
+        && members.iter().all(|member| {
+            member
+                .input_modalities
+                .as_deref()
+                .is_some_and(super::worker_set::modalities_exclude_images)
+        }))
+    .then(|| vec!["text".to_string()])
 }
 
 /// Active cohort contracts change materialization, not worker compatibility.
@@ -100,9 +95,8 @@ fn cohort_fingerprint(
         fingerprint.push_str("\0video_contract\0");
         fingerprint.push_str(contract);
     }
-    if let Some(modalities) = input_modalities {
-        fingerprint.push_str("\0input_modalities\0");
-        fingerprint.push_str(&input_modalities_digest(modalities));
+    if input_modalities.is_some_and(super::worker_set::modalities_exclude_images) {
+        fingerprint.push_str("\0input_modalities\0excludes_images");
     }
     fingerprint
 }
@@ -1339,12 +1333,12 @@ fn surviving_commit(
     {
         return None;
     }
-    if let Some(contract) = input_modalities {
+    if input_modalities.is_some() {
         surviving.retain(|member| {
             member
                 .input_modalities
                 .as_deref()
-                .is_some_and(|modalities| input_modalities_digest(modalities) == contract)
+                .is_some_and(super::worker_set::modalities_exclude_images)
         });
     }
     if surviving.is_empty() {
@@ -1800,25 +1794,33 @@ mod tests {
 
     #[test]
     fn modality_fingerprint_is_independent_of_checksum_and_video() {
-        let modalities = vec!["image".to_string(), "text".to_string()];
+        let modalities = vec!["text".to_string()];
         for video in [None, Some("video-digest")] {
             for input in [None, Some(modalities.as_slice())] {
                 let fingerprint = cohort_fingerprint("checksum", video, input);
                 let (checksum, actual_video, actual_modalities) = fingerprint_parts(&fingerprint);
                 assert_eq!(checksum, "checksum");
                 assert_eq!(actual_video, video);
-                assert_eq!(
-                    actual_modalities.map(str::to_owned),
-                    input.map(input_modalities_digest)
-                );
+                assert_eq!(actual_modalities, input.map(|_| "excludes_images"));
                 if video.is_none() && input.is_none() {
                     assert_eq!(fingerprint, "checksum");
                 }
             }
         }
+        assert_eq!(
+            cohort_fingerprint("checksum", None, Some(&["text".into(), "audio".into()])),
+            cohort_fingerprint("checksum", None, Some(&modalities)),
+        );
+        assert_eq!(
+            cohort_fingerprint("checksum", None, Some(&["image".into(), "audio".into()])),
+            cohort_fingerprint("checksum", None, None),
+        );
         let normalized =
             instance_with_modalities(1, 16, Some(serde_json::json!(["text", "image", "text"])));
-        assert_eq!(normalized.input_modalities, Some(modalities));
+        assert_eq!(
+            normalized.input_modalities,
+            Some(vec!["image".into(), "text".into()])
+        );
         let malformed = instance_with_modalities(2, 16, Some(serde_json::json!(["text", 1])));
         assert!(malformed.input_modalities.is_none());
     }
@@ -1862,6 +1864,15 @@ mod tests {
             host.release.add_permits(1);
             finish_build(&mut controller).await;
             assert_eq!(host.members(&group_key()).len(), 2);
+            let preserving_admissions = host.admissions.lock().unwrap().last().unwrap().clone();
+            controller.apply_added(instance_with_modalities(
+                3,
+                16,
+                Some(serde_json::json!(["text", "image", "audio"])),
+            ));
+            assert_eq!(*preserving_admissions.borrow(), vec![1, 3]);
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
             controller.apply_removed(&vision.key);
             controller.start_queued_builds();
             assert_eq!(
@@ -1870,6 +1881,24 @@ mod tests {
             );
             host.release.add_permits(1);
             finish_build(&mut controller).await;
+
+            // Extra non-image modalities agree with the committed image policy.
+            let text_audio =
+                instance_with_modalities(4, 16, Some(serde_json::json!(["text", "audio"])));
+            controller.apply_added(text_audio.clone());
+            assert_eq!(host.members(&group_key()).len(), 2);
+            assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+            controller.apply_added(instance_with_modalities(
+                1,
+                16,
+                Some(serde_json::json!(["text", "video"])),
+            ));
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+            assert_eq!(host.members(&group_key()).len(), 2);
+            controller.apply_removed(&text_audio.key);
 
             // Same-ID publication must not keep using a pipeline that omitted images.
             controller.apply_added(instance_with_modalities(1, 16, None));
@@ -1913,6 +1942,14 @@ mod tests {
                 host.release.add_permits(1);
                 finish_build(&mut controller).await;
                 let admissions = host.admissions.lock().unwrap()[0].clone();
+                controller.apply_added(instance_with_modalities(
+                    1,
+                    16,
+                    Some(serde_json::json!(["text", "audio"])),
+                ));
+                assert_eq!(*admissions.borrow(), vec![1, 2]);
+                controller.start_queued_builds();
+                assert!(starts.try_recv().is_err());
                 if start_rebuild {
                     host.failures
                         .store(usize::from(fail_rebuild), Ordering::SeqCst);
