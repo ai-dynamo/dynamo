@@ -234,7 +234,9 @@ async fn establish(
             }
             if let Err(cause) = contact(service, peer, id, address, deadline, HELLO_CAP).await {
                 let cached = match cause.error_type() {
-                    ErrorType::ConnectionTimeout => full_budget,
+                    // A timeout before the caller's own deadline came from the
+                    // contact cap, so it is the worker's whatever the budget.
+                    ErrorType::ConnectionTimeout => full_budget || Instant::now() < deadline,
                     ErrorType::CannotConnect | ErrorType::WorkerUnavailable => true,
                     _ => false,
                 };
@@ -696,6 +698,114 @@ mod tests {
             Duration::from_secs(2),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_renewal_at_the_handshake_cap_shares_the_worker_timeout() {
+        use crate::{
+            pipeline::network::{
+                egress::unified_client::RequestPlaneClient,
+                velo_request::{client::VeloRequestClient, encode_address},
+            },
+            protocols::EndpointId,
+        };
+
+        let frontend = request_peer().await;
+        let worker = request_peer().await;
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, |_| Ok(Some(Bytes::new()))).build(),
+            )
+            .unwrap();
+        let info = worker.velo.peer_info();
+        let target = encode_address(
+            &info,
+            &EndpointId {
+                namespace: "ns".into(),
+                component: "worker".into(),
+                name: "generate".into(),
+            },
+            1,
+        )
+        .unwrap();
+        let budget = Duration::from_secs(60);
+        let client = VeloRequestClient::new(frontend.clone(), budget);
+        let eager = || client.send_request(target.clone(), Bytes::new(), Default::default());
+        eager().await.unwrap();
+        let (peer, _) = frontend.confirmed_peer(info.instance_id()).unwrap();
+        let full = peer.staged.try_acquire_many(STAGED_WINDOW as u32).unwrap();
+        let (contacts, release) = stall_handler(&worker, PEER_HANDLER);
+        let wait_for_contact = |n| {
+            let contacts = contacts.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while contacts.load(Ordering::Relaxed) < n {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .expect("worker did not receive the pin request");
+            }
+        };
+        let advance_past_cap = || tokio::time::advance(HELLO_CAP + Duration::from_millis(1));
+
+        // The confirmed route comes due while a large request waits in the full window.
+        tokio::time::pause();
+        let until_refresh = peer.confirmed_until.load(Ordering::Acquire) - frontend.peer_clock();
+        tokio::time::advance(Duration::from_secs(until_refresh - 1)).await;
+        let queued_deadline = Instant::now() + budget;
+        let mut queued = client.send_request(
+            target.clone(),
+            Bytes::from(vec![1; 300 * 1024]),
+            Default::default(),
+        );
+        assert!(futures::poll!(&mut queued).is_pending());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        drop(full);
+        assert!(futures::poll!(&mut queued).is_pending());
+        tokio::time::resume();
+        wait_for_contact(1).await;
+        tokio::time::pause();
+        advance_past_cap().await;
+        let error = queued.await.unwrap_err().downcast::<DynamoError>().unwrap();
+        assert_eq!(error.error_type(), ErrorType::ResourceExhausted);
+        let left = queued_deadline.saturating_duration_since(Instant::now());
+        assert!(left > HELLO_CAP, "the caller deadline ended the handshake");
+
+        let start = Instant::now();
+        let mut fresh = eager();
+        let result = match futures::poll!(&mut fresh) {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => {
+                tokio::time::resume();
+                wait_for_contact(2).await;
+                tokio::time::pause();
+                advance_past_cap().await;
+                fresh.await
+            }
+        };
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast::<DynamoError>()
+                .unwrap()
+                .error_type(),
+            ErrorType::ConnectionTimeout
+        );
+        let extra_wait = start.elapsed();
+        let mut next = eager();
+        assert!(
+            matches!(futures::poll!(&mut next), std::task::Poll::Ready(Err(_))),
+            "ordinary first contact must cache its genuine timeout"
+        );
+        let count = contacts.load(Ordering::Relaxed);
+        release.notify_waiters();
+        tokio::time::resume();
+        assert!(
+            count == 1 && extra_wait < FAILURE_TTL,
+            "worker pin reached its 25 s cap with {left:?} of the queued caller's budget left; the fresh caller waited {extra_wait:?}, worker saw {count} pin requests"
+        );
     }
 
     #[tokio::test]
