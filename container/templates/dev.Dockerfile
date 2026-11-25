@@ -171,17 +171,6 @@ USER root
 # Redeclare build args for use in this stage
 ARG PYTHON_VERSION
 
-# Copy NIXL SDK material for dev stage compilation.
-# cargo build needs NIXL headers plus linkable -lnixl, -lnixl_build, and -lnixl_common.
-# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
-# - vLLM CUDA: Reuse upstream vLLM's Python-wheel NIXL libs and copy only headers beside them.
-# - trtllm/none: NIXL/UCX are already present in runtime (no-op).
-ARG TARGETARCH
-{% if framework == "vllm" and device == "cuda" %}
-ARG CUDA_MAJOR
-{% endif %}
-COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-
 # Copy shell profile script for framework-specific environment variables
 # This script conditionally adds PATH/LD_LIBRARY_PATH entries based on what exists
 COPY --chmod=755 container/dev/50-framework-paths.sh /etc/profile.d/50-framework-paths.sh
@@ -194,8 +183,7 @@ COPY --chmod=755 container/dev/50-framework-paths.sh /etc/profile.d/50-framework
 #   framework=none runtime stage now installs /usr/bin/python3.
 # - Set umask for group-writable files in dev stage (runs as root).
 # - Stash the pre-tools python3 (see the dynamo_tools copy below).
-RUN --mount=from=wheel_builder,target=/wheel_builder \
-    set -eux; \
+RUN set -eux; \
     if [ ! -e /usr/bin/python3 ]; then \
         if [ -x /opt/dynamo/venv/bin/python3 ]; then \
             ln -s /opt/dynamo/venv/bin/python3 /usr/bin/python3; \
@@ -209,25 +197,6 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
             echo "ERROR: Could not find Python to symlink to /usr/bin/python3" >&2; \
             exit 1; \
         fi; \
-    fi; \
-    if [ "${FRAMEWORK}" = "sglang" ]; then \
-        test -d /wheel_builder/usr/local/ucx; \
-        test -d /wheel_builder/opt/nvidia/nvda_nixl; \
-        mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
-        cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
-        cp -r /wheel_builder/usr/local/ucx /usr/local/; \
-        cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
-        cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
-        cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
-        echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
-{% if framework == "vllm" and device == "cuda" %}
-    elif [ "${FRAMEWORK}" = "vllm" ]; then \
-        install_nixl_from_wheel \
-            --cuda-major "${CUDA_MAJOR}" \
-            --python-version "${PYTHON_VERSION}" \
-            --prefix /opt/dynamo/nixl \
-            --headers-src /wheel_builder/opt/nvidia/nvda_nixl/include; \
-{% endif %}
     fi; \
     mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh; \
     if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
@@ -246,20 +215,16 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 # Runtime registers both architecture-specific native paths with ldconfig.
 # Keep those inherited paths rather than selecting another Python wheel copy.
-{% elif framework == "vllm" and device == "cuda" %}
-# vLLM's NIXL wheel provides the stable prefix used for source builds.
-# For vLLM CUDA, /opt/dynamo/nixl is a symlink to the wheel's
-# .nixl_cu${CUDA_MAJOR}.mesonpy.libs directory, with headers added by the dev stage.
+{% elif framework == "vllm" %}
+# /opt/dynamo/nixl links to the upstream nixl-cu wheel's libraries (see the
+# runtime stage). The wheel ships no headers, so nixl-sys builds in stub mode
+# and loads libnixl_capi.so at runtime.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 {% else %}
-# NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
-# For dynamo: this resets the same values already set in runtime.
-# For sglang: this sets them after copying NIXL from wheel_builder above.
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+# Dynamo and SGLang CUDA get NIXL from its PyPI wheel, registered with the
+# loader in the runtime stage; nixl-sys builds in stub mode against it.
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
@@ -280,7 +245,7 @@ ENV CUDA_HOME=/usr/local/cuda \
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
 ARG PYTHON_VERSION
 ENV LD_LIBRARY_PATH=\
-{% if framework != "trtllm" %}
+{% if device in ("xpu", "cpu") or framework == "vllm" %}
 ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
 {% endif %}

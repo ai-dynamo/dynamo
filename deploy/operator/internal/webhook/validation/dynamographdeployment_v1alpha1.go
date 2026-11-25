@@ -19,31 +19,44 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil.
+// oldDGD is nil on create, otherwise it is the previous source-version object.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) field.ErrorList {
 	if !hasV1Alpha1CompatibilityFields(dgd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		return nil
+	}
+	var oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec
+	if oldDGD != nil {
+		oldSpec = &oldDGD.Spec
 	}
 	return v.validateDynamoGraphDeploymentSpecV1alpha1(
 		&dgd.Spec,
 		field.NewPath("spec"),
 		dgd.Name,
 		dgd.Namespace,
+		oldSpec,
+		compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations),
 	)
 }
 
 // validateDynamoGraphDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.
+// oldSpec is nil on create, otherwise it contains the previous source-version lists.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alpha1(
 	spec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 	fldPath *field.Path,
 	dgdName string,
 	dgdNamespace string,
+	oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
+	orderedEnvironment bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	pvcsPath := fldPath.Child("pvcs")
@@ -56,13 +69,24 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 		service := spec.Services[serviceName]
 		servicePath := servicesPath.Key(serviceName)
 		dynamoNamespace := nvidiacomv1alpha1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, dgdNamespace, dgdName)
+		var oldEnv []corev1.EnvVar
+		if oldSpec != nil && oldSpec.Services[serviceName] != nil {
+			oldEnv = oldSpec.Services[serviceName].Envs
+		}
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecV1alpha1(
 			service,
 			servicePath,
 			dynamoNamespace,
+			oldEnv,
+			orderedEnvironment,
 		)...)
 	}
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		var oldEnv []corev1.EnvVar
+		if oldSpec != nil {
+			oldEnv = oldSpec.Envs
+		}
+		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"), orderedEnvironment)...)
 		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntimeV1Alpha1(spec, fldPath)...)
 	}
 	return allErrs

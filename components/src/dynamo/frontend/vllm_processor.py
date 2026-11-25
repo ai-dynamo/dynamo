@@ -1051,6 +1051,7 @@ class VllmProcessor:
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
                 structural_tag_excludes_reasoning=self.structural_tag_excludes_reasoning,
+                request_id=context.id() if context is not None else request_id,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -1756,6 +1757,10 @@ class EngineFactory:
             "tokenizer_mode": tokenizer_mode,
             "config_format": config_format,
             "trust_remote_code": trust_remote_code,
+            # No cap here (vLLM's -1). The Rust frontend has already checked
+            # the count against the serving model's limit, which follows
+            # worker membership; a cap fixed at build time would go stale.
+            "max_logprobs": -1,
         }
         context_length = _runtime_config_context_length(mdc)
         if context_length:

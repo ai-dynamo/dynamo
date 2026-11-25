@@ -99,19 +99,14 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
+use crate::otlp::{
+    OtlpProtocol, get_service_name, otlp_protocol_from_env, parse_key_value_list,
+    resolve_otlp_endpoint, resolve_signal_otlp_protocol,
+};
 use crate::telemetry::{LIFECYCLE_TARGET, lifecycle_tracing_enabled};
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
-
-/// Default OTLP endpoint
-const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
-
-/// Default OTLP HTTP endpoint
-const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318";
-
-/// Default service name
-const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
@@ -242,97 +237,6 @@ fn log_signals_disabled_over_legacy_switch() {
     }
 }
 
-/// Get the service name from environment or use default
-pub(crate) fn get_service_name() -> String {
-    std::env::var(env_logging::otlp::OTEL_SERVICE_NAME)
-        .unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OtlpProtocol {
-    Grpc,
-    HttpProtobuf,
-}
-
-impl OtlpProtocol {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Grpc => "grpc",
-            Self::HttpProtobuf => "http/protobuf",
-        }
-    }
-}
-
-fn parse_otlp_protocol_for_env(value: Option<&str>, env_name: &str) -> OtlpProtocol {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => OtlpProtocol::Grpc,
-        Some(value) if value.eq_ignore_ascii_case("grpc") => OtlpProtocol::Grpc,
-        Some(value) if value.eq_ignore_ascii_case("http/protobuf") => OtlpProtocol::HttpProtobuf,
-        Some(value) => {
-            eprintln!(
-                "WARNING: unsupported {} '{}'; falling back to grpc",
-                env_name, value
-            );
-            OtlpProtocol::Grpc
-        }
-    }
-}
-
-fn parse_otlp_protocol(value: Option<&str>) -> OtlpProtocol {
-    parse_otlp_protocol_for_env(value, env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
-}
-
-pub(crate) fn otlp_protocol_from_env() -> OtlpProtocol {
-    parse_otlp_protocol(
-        std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
-            .ok()
-            .as_deref(),
-    )
-}
-
-pub(crate) fn resolve_signal_otlp_protocol(
-    generic_protocol: OtlpProtocol,
-    signal_protocol: Option<&str>,
-    signal_protocol_env: &str,
-) -> OtlpProtocol {
-    match signal_protocol
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => parse_otlp_protocol_for_env(Some(value), signal_protocol_env),
-        None => generic_protocol,
-    }
-}
-
-fn append_otlp_http_path(endpoint: &str, path: &str) -> String {
-    let endpoint = endpoint.trim_end_matches('/');
-    format!("{endpoint}{path}")
-}
-
-pub(crate) fn resolve_otlp_endpoint(
-    protocol: OtlpProtocol,
-    signal_endpoint: Option<String>,
-    generic_endpoint: Option<String>,
-    http_path: &str,
-) -> String {
-    if let Some(endpoint) = signal_endpoint.filter(|value| !value.trim().is_empty()) {
-        return endpoint;
-    }
-
-    match protocol {
-        OtlpProtocol::Grpc => generic_endpoint
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_OTLP_ENDPOINT.to_string()),
-        OtlpProtocol::HttpProtobuf => append_otlp_http_path(
-            generic_endpoint
-                .filter(|value| !value.trim().is_empty())
-                .as_deref()
-                .unwrap_or(DEFAULT_OTLP_HTTP_ENDPOINT),
-            http_path,
-        ),
-    }
-}
-
 fn parse_trace_sample_ratio(value: Option<&str>) -> Option<f64> {
     let raw = value?;
     match raw.parse::<f64>() {
@@ -386,7 +290,7 @@ fn otlp_metadata_for(signal_env: &str) -> tonic::metadata::MetadataMap {
         .or_else(|_| std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_HEADERS))
         .unwrap_or_default();
 
-    for (key, value) in crate::metrics::otlp_export::parse_key_value_list(&raw) {
+    for (key, value) in parse_key_value_list(&raw) {
         match (
             tonic::metadata::MetadataKey::from_bytes(key.as_bytes()),
             tonic::metadata::MetadataValue::try_from(&value),
@@ -2170,6 +2074,7 @@ impl tracing::field::Visit for JsonVisitor {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::otlp::DEFAULT_OTLP_ENDPOINT;
     use anyhow::{Result, anyhow};
     use chrono::{DateTime, Utc};
     use jsonschema::{Draft, JSONSchema};
@@ -2309,124 +2214,6 @@ pub mod tests {
             targets_filter(&config, None),
             Err(TargetsFilterFallback::Dynamic)
         ));
-    }
-
-    #[test]
-    fn otlp_protocol_defaults_to_grpc() {
-        assert_eq!(parse_otlp_protocol(None), OtlpProtocol::Grpc);
-        assert_eq!(parse_otlp_protocol(Some("")), OtlpProtocol::Grpc);
-        assert_eq!(parse_otlp_protocol(Some("grpc")), OtlpProtocol::Grpc);
-        assert_eq!(
-            parse_otlp_protocol(Some("http/protobuf")),
-            OtlpProtocol::HttpProtobuf
-        );
-        assert_eq!(
-            parse_otlp_protocol(Some("HTTP/PROTOBUF")),
-            OtlpProtocol::HttpProtobuf
-        );
-        assert_eq!(parse_otlp_protocol(Some("bad")), OtlpProtocol::Grpc);
-    }
-
-    #[test]
-    fn otlp_signal_protocol_overrides_generic_protocol() {
-        let generic_protocol = OtlpProtocol::Grpc;
-        assert_eq!(
-            resolve_signal_otlp_protocol(
-                generic_protocol,
-                Some("http/protobuf"),
-                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
-            ),
-            OtlpProtocol::HttpProtobuf
-        );
-        assert_eq!(
-            resolve_signal_otlp_protocol(
-                generic_protocol,
-                Some(""),
-                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
-            ),
-            OtlpProtocol::Grpc
-        );
-        assert_eq!(
-            resolve_signal_otlp_protocol(
-                generic_protocol,
-                None,
-                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
-            ),
-            OtlpProtocol::Grpc
-        );
-    }
-
-    #[test]
-    fn otlp_http_endpoint_appends_signal_paths_from_generic_endpoint() {
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                None,
-                Some("https://llm-observe.weizhipin.com".to_string()),
-                "/v1/traces",
-            ),
-            "https://llm-observe.weizhipin.com/v1/traces"
-        );
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                None,
-                Some("https://llm-observe.weizhipin.com/".to_string()),
-                "/v1/logs",
-            ),
-            "https://llm-observe.weizhipin.com/v1/logs"
-        );
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                None,
-                Some("https://llm-observe.weizhipin.com/v1/traces".to_string()),
-                "/v1/traces",
-            ),
-            "https://llm-observe.weizhipin.com/v1/traces/v1/traces"
-        );
-    }
-
-    #[test]
-    fn otlp_signal_endpoint_is_used_verbatim() {
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::HttpProtobuf,
-                Some("https://collector.example/custom/traces".to_string()),
-                Some("https://collector.example".to_string()),
-                "/v1/traces",
-            ),
-            "https://collector.example/custom/traces"
-        );
-    }
-
-    #[test]
-    fn otlp_grpc_endpoint_keeps_generic_endpoint_verbatim() {
-        assert_eq!(
-            resolve_otlp_endpoint(
-                OtlpProtocol::Grpc,
-                None,
-                Some("http://otel-collector:4317".to_string()),
-                "/v1/traces",
-            ),
-            "http://otel-collector:4317"
-        );
-    }
-
-    /// A non-blank per-signal exporter overrides `OTEL_EXPORT_ENABLED`; unset or blank
-    /// defers to it.
-    #[test]
-    fn signal_exporter_overrides_legacy_switch() {
-        // Unset or blank defers to OTEL_EXPORT_ENABLED.
-        assert!(!resolve_telemetry_signal_export(None, false));
-        assert!(resolve_telemetry_signal_export(None, true));
-        assert!(resolve_telemetry_signal_export(Some(""), true));
-        assert!(resolve_telemetry_signal_export(Some("  "), true));
-        // A non-blank value wins in both directions.
-        assert!(resolve_telemetry_signal_export(Some("otlp"), false));
-        assert!(resolve_telemetry_signal_export(Some(" OTLP "), false));
-        assert!(!resolve_telemetry_signal_export(Some("none"), true));
-        assert!(!resolve_telemetry_signal_export(Some("console"), true));
     }
 
     #[test]

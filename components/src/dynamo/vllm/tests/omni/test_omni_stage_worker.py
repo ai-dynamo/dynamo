@@ -189,7 +189,7 @@ async def test_stage_connector_refs_builds_engine_core_request():
 
     # The engine should receive an OmniEngineCoreRequest (not the raw dict)
     assert hasattr(engine.received_prompt, "prompt_token_ids")
-    assert engine.received_prompt.prompt_token_ids == [100, 200, 300]
+    assert list(engine.received_prompt.prompt_token_ids) == [100, 200, 300]
     # Output processor should have been registered
     engine.engine.output_processors[0].add_request.assert_called_once()
 

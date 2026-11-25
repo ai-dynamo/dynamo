@@ -4,6 +4,7 @@
 //! The error a filter, scorer, or picker reports; the kernel wraps it in its own.
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum WorkerSelectionPolicyError {
     #[error("worker selection policy failed: {0}")]
     Failed(String),

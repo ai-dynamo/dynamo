@@ -1800,15 +1800,15 @@ pub mod services {
             note = "moved to dynamo_scheduler::WorkerRequest; removed in 1.10.0"
         )]
         pub type WorkerRequest = dynamo_scheduler::WorkerRequest;
-        pub use crate::plugins::WorkerSelectionPolicyParameters;
-        pub use crate::plugins::WorkerSelectionPolicyProvider;
+        pub use crate::plugins::worker_selection::WorkerSelectionPolicyParameters;
+        pub use crate::plugins::worker_selection::WorkerSelectionPolicyProvider;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError; removed in 1.10.0"
+            note = "moved to dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyProviderError; removed in 1.10.0"
         )]
         pub type WorkerSelectionPolicyProviderError =
-            crate::plugins::WorkerSelectionPolicyProviderError;
-        pub use crate::plugins::WorkerSelectionPolicyRegistryError;
+            crate::plugins::worker_selection::WorkerSelectionPolicyProviderError;
+        pub use crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError;
     }
 
     /// Pre-split `dynamo_kv_router::services::overlap`; its items live in `dynamo_scheduler` now.

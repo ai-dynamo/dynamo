@@ -487,7 +487,9 @@ class TestImageDiffusionWorkerHandler:
         """Test that nvext parameters are passed to the generator."""
         test_image = Image.new("RGB", (256, 256), color="yellow")
 
-        handler._generate_images = AsyncMock(return_value=[test_image.tobytes()])
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
 
         request = {
             "prompt": "A yellow square",
@@ -503,25 +505,22 @@ class TestImageDiffusionWorkerHandler:
             },
         }
 
-        # Execute generation
-        results = []
         mock_context.trace_headers = MagicMock(
             return_value={"traceparent": "00-1234567890-1234567890-01"}
         )
-        async for result in handler.generate(request, mock_context):
-            results.append(result)
+        async for _ in handler.generate(request, mock_context):
+            pass
 
-        # Verify results
-        handler._generate_images.assert_called_once_with(
-            prompt="A yellow square",
-            width=256,
-            height=256,
-            num_inference_steps=10,
-            guidance_scale=7.5,
-            seed=42,
-            negative_prompt="negative",
-            input_reference=None,
-        )
+        assert handler.generator.generate.call_args[1]["sampling_params_kwargs"] == {
+            "prompt": "A yellow square",
+            "negative_prompt": "negative",
+            "height": 256,
+            "width": 256,
+            "num_inference_steps": 10,
+            "save_output": False,
+            "guidance_scale": 7.5,
+            "seed": 42,
+        }
 
     @pytest.mark.asyncio
     async def test_generate_i2i_passes_image_path(

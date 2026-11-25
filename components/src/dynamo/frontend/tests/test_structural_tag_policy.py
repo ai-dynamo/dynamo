@@ -1,14 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import importlib.util
+import json
+from pathlib import Path
+
 import pytest
 
 from dynamo.frontend.structural_tag_policy import (
     effective_tool_strict,
+    guidance_tool_schema,
     runtime_backend_defers_grammar,
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
     should_attempt_structural_tag,
+    unsupported_regex_construct,
+    unsupported_schema_construct,
 )
 
 pytestmark = [
@@ -16,6 +24,11 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+requires_xgrammar = pytest.mark.skipif(
+    importlib.util.find_spec("xgrammar") is None,
+    reason="the regex check asks XGrammar, which vLLM and SGLang install",
+)
 
 
 @pytest.mark.parametrize(
@@ -86,6 +99,102 @@ def test_structural_tag_activation_policy(
 )
 def test_effective_tool_strict(request_strict, schema_mode, expected):
     assert effective_tool_strict(request_strict, schema_mode) is expected
+
+
+# The verdicts are shared with the Rust preprocessor test, which checks its
+# hand-written list against them. This test checks them against XGrammar itself,
+# so that list cannot drift from the compiler unnoticed.
+# components/src/dynamo/frontend/tests -> the repository root.
+_REGEX_CONSTRUCT_CASES = [
+    tuple(case)
+    for case in json.loads(
+        (
+            Path(__file__).resolve().parents[5]
+            / "lib/llm/tests/data/structural_tag/unsupported_regex_constructs.json"
+        ).read_text(encoding="utf-8")
+    )["cases"]
+]
+
+
+@requires_xgrammar
+@pytest.mark.parametrize(("pattern", "expected"), _REGEX_CONSTRUCT_CASES)
+def test_unsupported_regex_constructs_match_the_grammar_compiler(pattern, expected):
+    assert (unsupported_regex_construct(pattern) is None) == (expected is None)
+
+
+_LOOKAHEAD = r"^(?!\s*$).+"
+
+
+@requires_xgrammar
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        ({"properties": {"a": {"items": {"pattern": _LOOKAHEAD}}}}, "lookahead"),
+        ({"anyOf": [{"type": "integer"}, {"pattern": _LOOKAHEAD}]}, "lookahead"),
+        ({"patternProperties": {_LOOKAHEAD: {"type": "string"}}}, "lookahead"),
+        ({"$defs": {"name": {"pattern": _LOOKAHEAD}}}, "lookahead"),
+        ({"properties": {"default": {"pattern": _LOOKAHEAD}}}, "lookahead"),
+        ({"dependencies": {"enum": {"pattern": _LOOKAHEAD}}}, "lookahead"),
+        ({"properties": {"a": {"type": "string", "pattern": "^[a-z]+$"}}}, None),
+        ({"properties": {"pattern": {"type": "string"}}}, None),
+        ({"const": {"pattern": _LOOKAHEAD}}, None),
+        ({"default": {"pattern": _LOOKAHEAD}}, None),
+        ({"enum": [{"pattern": _LOOKAHEAD}]}, None),
+        ({"examples": [{"pattern": _LOOKAHEAD}]}, None),
+        (None, None),
+    ],
+)
+def test_unsupported_schema_constructs_are_found_in_subschemas_only(schema, expected):
+    assert (unsupported_schema_construct(schema) is None) == (expected is None)
+
+
+def _value_schema(pattern):
+    return {
+        "type": "object",
+        "properties": {"value": {"type": "string", "pattern": pattern}},
+        "required": ["value"],
+    }
+
+
+_UNSUPPORTED = _value_schema(_LOOKAHEAD)
+_SUPPORTED = _value_schema("^[a-z]+$")
+_STRIPPED = {
+    "type": "object",
+    "properties": {"value": {"type": "string"}},
+    "required": ["value"],
+}
+_UNSUPPORTED_NAMES = {
+    "type": "object",
+    "patternProperties": {_LOOKAHEAD: {"type": "string"}},
+    "additionalProperties": False,
+}
+
+
+@requires_xgrammar
+@pytest.mark.parametrize(
+    ("request_strict", "schema_mode", "parameters", "expected"),
+    [
+        (None, "auto", _UNSUPPORTED, (_STRIPPED, True)),
+        (True, "auto", _UNSUPPORTED, (_UNSUPPORTED, True)),
+        (False, "auto", _UNSUPPORTED, (_UNSUPPORTED, False)),
+        (None, "strict", _UNSUPPORTED, (_UNSUPPORTED, True)),
+        (False, "strict", _UNSUPPORTED, (_UNSUPPORTED, True)),
+        (None, "auto", _SUPPORTED, (_SUPPORTED, True)),
+        (None, "auto", _UNSUPPORTED_NAMES, (_UNSUPPORTED_NAMES, False)),
+        (None, "auto", None, (None, True)),
+    ],
+)
+def test_guidance_tool_schema_adapts_only_automatic_enforcement(
+    request_strict, schema_mode, parameters, expected
+):
+    client_schema = copy.deepcopy(parameters)
+    assert (
+        guidance_tool_schema(
+            request_strict, schema_mode, parameters, tool_name="record_value"
+        )
+        == expected
+    )
+    assert parameters == client_schema
 
 
 def test_runtime_structural_tag_options_are_conservative_when_absent():
