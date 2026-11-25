@@ -24,7 +24,7 @@ use crate::{
 use super::{
     REQUEST_HANDLER, decode_address,
     discovery::DiscoveryReady,
-    peers::{PeerState, by_deadline, error, establish_route, transport_error},
+    peers::{PeerState, by_deadline, error, establish_route, renew_route, transport_error},
     server::ENDPOINT_PATH_HEADER,
 };
 
@@ -162,7 +162,7 @@ impl RequestPlaneClient for VeloRequestClient {
                     )
                     .into());
                 }
-                let (current, current_epoch) = establish_route(
+                let (current, current_epoch) = renew_route(
                     &self.service,
                     target.instance_id,
                     target.worker_address,
@@ -180,6 +180,10 @@ impl RequestPlaneClient for VeloRequestClient {
         } else {
             None
         };
+        // Every wait above is a chance for the owning runtime to shut down.
+        if self.owner_released() {
+            return Err(runtime_shut_down().into());
+        }
         let _slot = self.service.ack_slots.try_acquire().map_err(|_| {
             error(
                 ErrorType::ResourceExhausted,

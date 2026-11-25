@@ -1975,6 +1975,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_route_renewal_stops_when_its_owner_releases_the_listener() {
+        use crate::{
+            Runtime,
+            pipeline::network::{
+                egress::unified_client::RequestPlaneClient,
+                velo_request::{client::VeloRequestClient, encode_address},
+            },
+            protocols::EndpointId,
+        };
+        let owner = Runtime::from_current().unwrap().velo_response_service();
+        let other = Runtime::from_current().unwrap().velo_response_service();
+        let options = VeloServiceOptions {
+            request_plane_enabled: true,
+            ..Default::default()
+        };
+        owner.set_options(options).unwrap();
+        other.set_options(options).unwrap();
+        let service = owner.service().await.unwrap();
+        assert!(Arc::ptr_eq(&service, &other.service().await.unwrap()));
+        let (_, worker) = request_pair().await;
+        let entered = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let late = Arc::new(AtomicUsize::new(0));
+        worker
+            .velo
+            .register_handler(
+                velo::Handler::unary_handler_async(REQUEST_HANDLER, {
+                    let (entered, release, late) = (entered.clone(), release.clone(), late.clone());
+                    move |ctx| {
+                        let (entered, release, late) =
+                            (entered.clone(), release.clone(), late.clone());
+                        async move {
+                            if ctx.payload[0] == 1 {
+                                entered.add_permits(1);
+                                release.acquire().await.unwrap().forget();
+                            } else {
+                                late.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(Some(Bytes::from_static(b"ack")))
+                        }
+                    }
+                })
+                .build(),
+            )
+            .unwrap();
+
+        let info = worker.velo.peer_info();
+        let target = encode_address(
+            &info,
+            &EndpointId {
+                namespace: "ns".into(),
+                component: "worker".into(),
+                name: "generate".into(),
+            },
+            1,
+        )
+        .unwrap();
+        let (peer, _) = establish_route(&service, &info, deadline()).await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(PEER_IDLE_TTL / 2 - Duration::from_secs(5)).await;
+        tokio::time::resume();
+        let client = Arc::new(
+            VeloRequestClient::new(service.clone(), Duration::from_secs(30))
+                .with_owner(owner.clone()),
+        );
+        let window = peer.staged.available_permits();
+        let mut occupying = tokio::task::JoinSet::new();
+        for _ in 0..window {
+            let (client, target) = (client.clone(), target.clone());
+            occupying.spawn(async move {
+                client
+                    .send_request(target, Bytes::from(vec![1; 300 * 1024]), Default::default())
+                    .await
+            });
+        }
+        by_deadline(deadline(), entered.acquire_many(window as u32))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert!(service.confirmed_peer(info.instance_id()).is_some());
+        let mut queued =
+            client.send_request(target, Bytes::from(vec![2; 300 * 1024]), Default::default());
+        assert!(futures::poll!(&mut queued).is_pending());
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::time::resume();
+        release.add_permits(window);
+        for result in occupying.join_all().await {
+            assert_eq!(result.unwrap(), "ack");
+        }
+
+        // The queue has drained. The due renewal now takes the request across another await.
+        assert!(futures::poll!(&mut queued).is_pending());
+        assert!(peer.route.confirmed_epoch().is_none());
+        assert_eq!(late.load(Ordering::Relaxed), 0);
+        owner.shutdown().await;
+        assert!(!client.is_healthy());
+        let result = by_deadline(deadline(), queued).await.unwrap();
+        let delivered = late.load(Ordering::Relaxed);
+        other.shutdown().await;
+        assert_eq!(
+            delivered, 0,
+            "worker received the queued request after owner shutdown: {result:?}"
+        );
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast::<DynamoError>()
+                .unwrap()
+                .error_type(),
+            ErrorType::Unavailable
+        );
+    }
+
+    #[tokio::test]
     async fn queued_staged_request_stops_at_owner_release() {
         use crate::{
             DistributedRuntime, Runtime,

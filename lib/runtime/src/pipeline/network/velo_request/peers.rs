@@ -188,6 +188,28 @@ pub(in crate::pipeline::network) async fn establish_route(
     address: &str,
     deadline: Instant,
 ) -> Result<(Arc<PeerState>, u64), DynamoError> {
+    establish(service, id, address, deadline, true).await
+}
+
+/// Looks the route up again for a caller that already spent part of its
+/// deadline waiting locally. If its contact times out, that says nothing about
+/// the worker, so the timeout is not cached for other callers.
+pub(in crate::pipeline::network) async fn renew_route(
+    service: &VeloResponseService,
+    id: InstanceId,
+    address: &str,
+    deadline: Instant,
+) -> Result<(Arc<PeerState>, u64), DynamoError> {
+    establish(service, id, address, deadline, false).await
+}
+
+async fn establish(
+    service: &VeloResponseService,
+    id: InstanceId,
+    address: &str,
+    deadline: Instant,
+    full_budget: bool,
+) -> Result<(Arc<PeerState>, u64), DynamoError> {
     if let Some(route) = service.confirmed_peer(id) {
         return Ok(route);
     }
@@ -211,12 +233,12 @@ pub(in crate::pipeline::network) async fn establish_route(
                 return Err(cause.clone());
             }
             if let Err(cause) = contact(service, peer, id, address, deadline, HELLO_CAP).await {
-                if matches!(
-                    cause.error_type(),
-                    ErrorType::ConnectionTimeout
-                        | ErrorType::CannotConnect
-                        | ErrorType::WorkerUnavailable
-                ) {
+                let cached = match cause.error_type() {
+                    ErrorType::ConnectionTimeout => full_budget,
+                    ErrorType::CannotConnect | ErrorType::WorkerUnavailable => true,
+                    _ => false,
+                };
+                if cached {
                     *recent = Some((Instant::now(), cause.clone()));
                 }
                 return Err(cause);
@@ -519,6 +541,135 @@ mod tests {
                 .error_type(),
             ErrorType::ResourceExhausted,
             "the staged window consumed the send budget while the healthy route was renewing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_queued_renewal_does_not_inhibit_a_worker_for_a_fresh_request() {
+        use crate::{
+            DistributedRuntime, Runtime,
+            component::TransportType,
+            discovery::DiscoverySpec,
+            distributed::{DistributedConfig, RequestPlaneMode},
+            pipeline::{
+                SingleIn,
+                network::{
+                    ResponsePlaneMode,
+                    egress::{
+                        push_router::{PushRouter, RouterMode},
+                        unified_client::RequestPlaneClient,
+                    },
+                    velo_request::{client::VeloRequestClient, encode_address},
+                },
+            },
+            protocols::annotated::Annotated,
+        };
+        let owner = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(
+            owner.clone(),
+            DistributedConfig {
+                request_plane: RequestPlaneMode::Velo,
+                response_plane: Some(ResponsePlaneMode::Velo),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
+        let frontend = drt.velo_response_service().await.unwrap();
+        let worker = request_peer().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        worker
+            .velo
+            .register_handler(
+                Handler::unary_handler(REQUEST_HANDLER, {
+                    let calls = calls.clone();
+                    move |ctx| {
+                        let ack = if ctx.payload.is_empty() {
+                            Bytes::new()
+                        } else {
+                            calls.fetch_add(1, Ordering::Relaxed);
+                            Bytes::from_static(b"Server overloaded: test worker")
+                        };
+                        Ok(Some(ack))
+                    }
+                })
+                .build(),
+            )
+            .unwrap();
+        let endpoint = drt
+            .namespace("queued_renewal")
+            .unwrap()
+            .component("worker")
+            .unwrap()
+            .endpoint("generate");
+        let endpoint_id = endpoint.id();
+        let discovery_id = drt.discovery().instance_id();
+        let info = worker.velo.peer_info();
+        let target = encode_address(&info, &endpoint_id, discovery_id).unwrap();
+        drt.discovery()
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+                transport: TransportType::Velo(target.clone()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let client = endpoint
+            .client_with_inhibited_duration(Duration::from_secs(10))
+            .await
+            .unwrap();
+        client.wait_for_instances().await.unwrap();
+        let router = PushRouter::<String, Annotated<String>>::from_client(
+            client.clone(),
+            RouterMode::Direct,
+        )
+        .await
+        .unwrap();
+        let budget = Duration::from_secs(2);
+        let transport = VeloRequestClient::new(frontend.clone(), budget);
+        let eager = || transport.send_request(target.clone(), Bytes::new(), Default::default());
+        eager().await.unwrap();
+        let (peer, _) = frontend.confirmed_peer(info.instance_id()).unwrap();
+        let reserved = peer.staged.try_acquire_many(STAGED_WINDOW as u32).unwrap();
+        let (handshakes, gate) = stall_handler(&worker, PEER_HANDLER);
+
+        tokio::time::pause();
+        let until_refresh = peer.confirmed_until.load(Ordering::Acquire) - frontend.peer_clock();
+        tokio::time::advance(Duration::from_secs(until_refresh - 1)).await;
+        let mut queued = transport.send_request(
+            target.clone(),
+            Bytes::from(vec![1; 300 * 1024]),
+            Default::default(),
+        );
+        assert!(futures::poll!(&mut queued).is_pending());
+        tokio::time::advance(budget - Duration::from_millis(100)).await;
+        drop(reserved);
+        assert!(futures::poll!(&mut queued).is_pending());
+        tokio::time::resume();
+        let local_error = queued.await.unwrap_err().downcast::<DynamoError>().unwrap();
+        assert_eq!(local_error.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(handshakes.load(Ordering::Relaxed), 1);
+        gate.notify_waiters();
+        register_peer_handler(&worker).unwrap();
+
+        let error = router
+            .direct(SingleIn::new("fresh".to_string()), discovery_id)
+            .await
+            .expect_err("the worker returns its overload ACK for nonempty payloads");
+        let eligible = client.instance_ids_avail().contains(&discovery_id);
+        let received = calls.load(Ordering::Relaxed);
+        tokio::time::pause();
+        tokio::time::advance(FAILURE_TTL + Duration::from_millis(1)).await;
+        tokio::time::resume();
+        eager().await.unwrap();
+        owner.shutdown();
+        assert!(
+            eligible && received == 1,
+            "fresh request after a queued renewal timed out: worker eligible {eligible}, requests received {received}, error {:?}",
+            error.downcast_ref::<DynamoError>().unwrap().error_type()
         );
     }
 
