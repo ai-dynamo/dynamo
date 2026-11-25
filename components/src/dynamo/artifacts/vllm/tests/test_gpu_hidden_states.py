@@ -187,3 +187,45 @@ def test_worker_start_warms_nixl_off_the_engine_thread(monkeypatch):
     connector._is_tp_rank_zero = False
     connector.register_kv_caches({})
     assert connector.scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_all_engines_rpc_sees_handles_on_every_data_parallel_engine():
+    calls = []
+
+    class Client:
+        async def call_utility_all_async(self, name, method, timeout, args, kwargs):
+            calls.append((name, method, args))
+            # Engine 0 doesn't know the handle; engine 1 has two TP ranks.
+            return [[None], [None, {"state": "ready"}]]
+
+    class Engine:
+        engine_core = Client()
+
+        async def collective_rpc(self, method, timeout=None, args=(), kwargs=None):
+            return [None]  # what vLLM returns under DP: engine 0 only
+
+    rpc = gpu.all_engines_rpc(Engine())
+    assert await rpc("dynamo_claim_hidden_states", args=("h", 60)) == [
+        None,
+        None,
+        {"state": "ready"},
+    ]
+    assert calls == [("collective_rpc", "dynamo_claim_hidden_states", ("h", 60))]
+    claim = await gpu.claim_hidden_states(rpc, "h", 60)
+    assert claim == {"state": "ready"}
+
+
+def test_all_engines_rpc_falls_back_without_data_parallel_client():
+    class Engine:
+        engine_core = object()
+
+        async def collective_rpc(self, method, timeout=None, args=(), kwargs=None):
+            return []
+
+    engine = Engine()
+    assert gpu.all_engines_rpc(engine) == engine.collective_rpc
+
+
+def test_engines_that_do_not_own_a_handle_stay_silent_on_bad_leases():
+    assert _connector().claim("missing", 0) is None

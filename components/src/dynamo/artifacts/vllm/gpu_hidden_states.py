@@ -184,6 +184,11 @@ class DynamoGpuHiddenStatesConnector(ExampleHiddenStatesConnector):
 
     def claim(self, req_id: str, lease_seconds: int) -> dict[str, Any] | None:
         """Return NIXL read metadata once the gather is done. Never blocks long."""
+        with self._lock:
+            gathered = self._held.get(req_id)
+            if gathered is None:
+                # Not ours: under data parallelism another engine owns it.
+                return None
         if (
             type(lease_seconds) is not int
             or not 1 <= lease_seconds <= self._max_lease_s
@@ -331,13 +336,34 @@ class DynamoHiddenStateWorkerExtension:
         return None if connector is None else connector.claim(handle, lease_seconds)
 
 
+def all_engines_rpc(async_llm):
+    """A `collective_rpc` that returns every engine's worker results.
+
+    With data parallelism, vLLM's `AsyncLLM.collective_rpc` runs on every engine
+    but returns only the first engine's results, so a handle owned by another
+    engine would be claimed there and the answer discarded. The engine client's
+    `call_utility_all_async` returns all of them; without data parallelism this
+    falls back to `collective_rpc`.
+    """
+    call_all = getattr(async_llm.engine_core, "call_utility_all_async", None)
+    if call_all is None:
+        return async_llm.collective_rpc
+
+    async def rpc(method, timeout=None, args=(), kwargs=None):
+        per_engine = await call_all("collective_rpc", method, timeout, args, kwargs)
+        return [result for engine_results in per_engine for result in engine_results]
+
+    return rpc
+
+
 async def claim_hidden_states(
     rpc, handle: str, lease_seconds: int, *, timeout_seconds: float = 30.0
 ) -> dict[str, Any]:
     """Poll the workers until the handle is ready; `rpc` is `collective_rpc`.
 
-    Pass `AsyncLLM.collective_rpc` from a Dynamo handler. Returns the single
-    worker result that knows the handle.
+    From a Dynamo handler, pass `all_engines_rpc(engine_client)`: plain
+    `AsyncLLM.collective_rpc` misses handles owned by any engine but the first
+    under data parallelism. Returns the single worker result that knows the handle.
     """
     deadline = time.monotonic() + timeout_seconds
     delay = 0.002
