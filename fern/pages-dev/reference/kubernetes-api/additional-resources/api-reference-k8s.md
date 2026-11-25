@@ -3692,6 +3692,23 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers<br />to AISimulate's num_gpus_per_node input.<br />An explicit value is authoritative. In a nonempty hardware object, admission discovers<br />an omitted value from the selected cluster node shape. The Run controller never discovers<br />this value. An exactly empty hardware object opts out of all operator hardware discovery<br />and typed hardware defaults, leaving AISimulate input and defaults authoritative. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `interconnect` _[InterconnectSpec](#interconnectspec)_ | Interconnect describes the links between candidate workers. Like gpu, it makes the<br />hardware object nonempty, so admission still discovers omitted GPU fields. |  | Optional: \{\} <br /> |
+
+
+#### InterconnectSpec
+
+
+
+InterconnectSpec describes the links that move data between candidate workers.
+
+
+
+_Appears in:_
+- [HardwareSpec](#v1beta2-hardwarespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kvTransferBandwidthGBps` _float_ | KVTransferBandwidthGBps is the sustained bandwidth, in decimal gigabytes per second, that<br />one GPU has for moving KV cache from a prefill worker to a decode worker. It is a per-GPU<br />value, not the aggregate of a node or of a parallel group. It lowers to AISimulate's<br />engine.kv_transfer.bandwidth_gb_per_second; AISimulate's KV-transfer documentation<br />(https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-transfer.md)<br />describes how candidates use it, including link sharing. When omitted, no bandwidth is<br />lowered and AISimulate's default applies, which models the transfer as instantaneous. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### KVCapacityFractionRange
