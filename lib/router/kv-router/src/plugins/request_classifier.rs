@@ -22,6 +22,10 @@ pub use dynamo_admission::{
     RequestClassifierContext, RequestProgress,
 };
 
+// The router-wide busy thresholds a classifier reads from `ClassifyRequest::reject_thresholds`;
+// `has_room` on them is the fullness check the router runs on a rank's load and capacity.
+// Only a classifier is handed thresholds, so the other kind's module does not export them.
+pub use dynamo_slot_tracker::BusyThresholds;
 // Registration: the factory a provider returns, the parameters it is built from, and its
 // errors.
 pub use registry::{

@@ -79,10 +79,6 @@ mod shared {
         WorkerCopyInput, WorkerInfo, WorkerInputs, WorkerLoadInput,
     };
 
-    // The router-wide busy thresholds; `has_room` on them is the fullness check the router
-    // runs on a rank's load and capacity.
-    pub use dynamo_slot_tracker::BusyThresholds;
-
     // The session a request belongs to.
     pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 
