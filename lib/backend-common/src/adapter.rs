@@ -15,9 +15,9 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_llm::first_token::FirstTokenSource;
-use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
@@ -322,10 +322,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Capture this worker's trace identity once, for stamping on the
         // first non-empty chunk. Yields None when `DistributedTraceIdLayer`
         // is not installed.
-        let worker_trace_link: Option<dynamo_llm::protocols::common::preprocessor::TraceLink> = {
+        let worker_trace_link: Option<dynamo_frontend_protocols::common::preprocessor::TraceLink> = {
             let link = span.in_scope(|| {
                 dynamo_runtime::logging::get_distributed_tracing_context().map(|tc| {
-                    dynamo_llm::protocols::common::preprocessor::TraceLink {
+                    dynamo_frontend_protocols::common::preprocessor::TraceLink {
                         trace_id: tc.trace_id,
                         span_id: tc.span_id,
                     }
@@ -733,7 +733,7 @@ mod tests {
     use super::*;
     use crate::engine::{EngineConfig, FinishReason, LLMEngineOutputExt, chunk, usage};
     use crate::error::{BackendError, DynamoError, ErrorType};
-    use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::pipeline::Context;
     use futures::StreamExt;
     use futures::stream::BoxStream;
@@ -1830,7 +1830,7 @@ mod tests {
     /// the regression.
     #[tokio::test]
     async fn auto_span_handles_malformed_hex_gracefully() {
-        use dynamo_llm::protocols::common::preprocessor::TraceLink;
+        use dynamo_frontend_protocols::common::preprocessor::TraceLink;
 
         let (captured, _guard) = install_capture();
         let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);
@@ -1864,7 +1864,7 @@ mod tests {
     /// trace the request's migration path.
     #[tokio::test]
     async fn auto_span_records_migration_link() {
-        use dynamo_llm::protocols::common::preprocessor::TraceLink;
+        use dynamo_frontend_protocols::common::preprocessor::TraceLink;
 
         let (captured, _guard) = install_capture();
         let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);

@@ -16,7 +16,7 @@ pub struct Inspected {
     pub terminal: bool,
     pub has_output: bool,
 }
-use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
 
 fn backend(kind: BackendError, message: String) -> DynamoError {
     DynamoError::builder()
@@ -133,7 +133,7 @@ pub fn inspect(response: Value, is_prefill: bool) -> Result<Inspected, DynamoErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_llm::protocols::common::FinishReason;
+    use dynamo_frontend_protocols::common::FinishReason;
     use serde_json::json;
 
     #[test]

@@ -3,7 +3,7 @@
 
 //! Model input adaptation, separate from output parsing and API conversion.
 
-use crate::protocols::anthropic::types::{
+use dynamo_frontend_protocols::anthropic::types::{
     AnthropicCreateMessageRequest, AnthropicRole, SystemContent, system_message_content,
 };
 use dynamo_model_card::model_card::{ModelDeploymentCard, TokenizerKind};
@@ -97,7 +97,7 @@ fn merge_inline_system_messages(req: &mut AnthropicCreateMessageRequest) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_protocols::types::ChatCompletionRequestMessage;
 
     #[test]

@@ -397,7 +397,7 @@ async fn tool_call_script(name: &str) -> scripted_chat_engine::Script {
 #[tokio::test]
 #[serial]
 async fn colliding_namespace_tools_round_trip_through_http() {
-    use dynamo_llm::protocols::openai::{
+    use dynamo_frontend_protocols::openai::{
         chat_completions::NvCreateChatCompletionRequest, responses::NvCreateResponse,
     };
 

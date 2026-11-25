@@ -192,7 +192,7 @@ def reject_unsupported_controls(
 def extract_text_input(input_field: Any, task_label: str) -> list[str]:
     """Convert the request's ``input`` field to a list of text prompts.
 
-    Both ``ClassificationInput`` (lib/llm/src/protocols/openai/classify.rs)
+    Both ``ClassificationInput`` (lib/frontend-protocols/src/openai/classify.rs)
     and ``EmbeddingInput`` (dynamo_protocols::types) are untagged enums
     over single-str / list-of-str / single-token-list / list-of-token-lists.
     The handler accepts text variants only; token-ID variants need per-model

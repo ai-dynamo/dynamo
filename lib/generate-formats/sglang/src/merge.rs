@@ -44,13 +44,13 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::response_merge::{Assembler, RuleSet};
+use dynamo_frontend_protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
+use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use dynamo_frontend_protocols::response_merge::prefill_annotations;
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
 };
-use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use dynamo_llm::protocols::common::preprocessor::RoutingHints;
-use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use dynamo_llm::protocols::response_merge::prefill_annotations;
 
 /// Shared with the SGLang contract test.
 pub(super) const RULES_JSON: &str = include_str!("merge_rules.json");

@@ -113,7 +113,7 @@ fn codec_extends_native_field_rules_and_joins_structured_sequences() {
             .request
             .annotations
             .iter()
-            .any(|a| a == dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION)
+            .any(|a| a == dynamo_frontend_protocols::response_merge::PREFILL_OUTPUT_ANNOTATION)
     );
     for (response, prefill) in [
         (

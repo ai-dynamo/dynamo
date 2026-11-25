@@ -364,8 +364,8 @@ fn routing_reference(request: &PreprocessedRequest) -> RoutingReference {
 }
 
 async fn image_routing_requests(model: &str, block_size: u32) -> Vec<PreprocessedRequest> {
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_model_card::model_card::ModelDeploymentCard;
 
     let path = std::env::var("TRTLLM_E2E_MODEL_PATH").expect("set TRTLLM_E2E_MODEL_PATH");

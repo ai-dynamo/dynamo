@@ -162,10 +162,10 @@ mod tests {
         discovery::ModelManager,
         kv_router::prefill_router::PrefillBinding,
         kv_router::{KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext},
-        protocols::common::{
-            FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
-        },
         worker_type::WorkerType,
+    };
+    use dynamo_frontend_protocols::common::{
+        FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
     };
 
     type LlmResponse = dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>;
@@ -631,7 +631,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_class_decode_refusal_stops_pending_prefill() {
         use super::super::handoff::PrefillTask;
-        use crate::protocols::response_merge::PrefillNeed;
+        use dynamo_frontend_protocols::response_merge::PrefillNeed;
         use dynamo_runtime::engine::AsyncEngineContextProvider;
         use dynamo_runtime::error::{DynamoError, ErrorType};
         use dynamo_runtime::pipeline::context::Controller;

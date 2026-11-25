@@ -13,7 +13,8 @@ use super::{
     config::read_model_config,
     image::{ImagePromptKind, ImageRoutingBackend, ImageRoutingRuntime},
 };
-use crate::{protocols::TokenIdType, tokenizers::traits::Tokenizer};
+use crate::tokenizers::traits::Tokenizer;
+use dynamo_frontend_protocols::TokenIdType;
 
 pub(in crate::preprocessor) const MODEL_TYPE: &str = "NemotronH_Nano_Omni_Reasoning_V3";
 pub(in crate::preprocessor) const IMAGE_START: &str = "<img>";

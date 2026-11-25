@@ -305,7 +305,7 @@ tokenization.
 
 `DecodeWorkerHandler` supports logprob passthrough, matching the vLLM and TRT-LLM backends.
 Controlled by `output_options` in the preprocessed request (from Rust `OutputOptions` struct
-in `lib/llm/src/protocols/common.rs`).
+in `lib/frontend-protocols/src/common.rs`).
 
 **Mapping from OutputOptions to SGLang kwargs** (`_build_logprob_kwargs`):
 

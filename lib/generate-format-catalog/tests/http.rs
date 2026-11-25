@@ -6,12 +6,12 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::Response,
 };
-use dynamo_llm::generate_format::{ClientRequest, SharedFormat};
-use dynamo_llm::http::service::{format_generate, service_v2};
-use dynamo_llm::protocols::{
+use dynamo_frontend_protocols::{
     Annotated,
     common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
+use dynamo_llm::generate_format::{ClientRequest, SharedFormat};
+use dynamo_llm::http::service::{format_generate, service_v2};
 use dynamo_runtime::engine::{AsyncEngine, ResponseStream};
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Error, ManyOut, SingleIn};
@@ -53,7 +53,7 @@ fn sglang() -> SharedFormat {
 async fn respond(
     state: Arc<service_v2::State>,
     format: SharedFormat,
-    engine: dynamo_llm::types::openai::generate::GenerateStreamingEngine,
+    engine: dynamo_frontend_protocols::types::openai::generate::GenerateStreamingEngine,
     body: Value,
     mut headers: HeaderMap,
 ) -> Response {
@@ -196,7 +196,7 @@ async fn native_responses_record_cached_token_metrics() {
 
 #[tokio::test]
 async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
-    use dynamo_llm::protocols::common::FinishReason;
+    use dynamo_frontend_protocols::common::FinishReason;
     for (finish, missing_logprobs, status) in [
         (FinishReason::Length, false, StatusCode::OK),
         (FinishReason::Cancelled, false, CANCELLED),
@@ -438,7 +438,7 @@ async fn format_request_id_is_correlation_only() {
             assert_eq!(envelope_id, Some("client-id"));
             let output = LLMEngineOutput {
                 token_ids: vec![7],
-                finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+                finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Length),
                 engine_data: Some(Box::new(serde_json::json!({"sglang_response": {
                     "output_ids": [7], "meta_info": {"id": "engine-private"}
                 }}))),
@@ -495,7 +495,7 @@ impl AsyncEngine<Input, Output, Error> for ConcurrentEchoEngine {
         let token_ids = request.content().token_ids.to_vec();
         let output = LLMEngineOutput {
             token_ids: token_ids.clone(),
-            finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+            finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
             engine_data: Some(Box::new(
                 serde_json::json!({"sglang_response": {"output_ids": token_ids}}),
             )),

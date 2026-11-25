@@ -22,19 +22,18 @@ use crate::{
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     preprocessor::OpenAIPreprocessor,
-    types::{
-        RealtimeBidirectionalEngine,
-        generic::tensor::TensorStreamingEngine,
-        openai::{
-            audios::OpenAIAudiosStreamingEngine,
-            chat_completions::OpenAIChatCompletionsStreamingEngine,
-            classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            rerank::OpenAIRerankStreamingEngine,
-            transcriptions::OpenAITranscriptionsStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
-        },
+};
+use dynamo_frontend_protocols::types::{
+    RealtimeBidirectionalEngine,
+    generic::tensor::TensorStreamingEngine,
+    openai::{
+        audios::OpenAIAudiosStreamingEngine,
+        chat_completions::OpenAIChatCompletionsStreamingEngine,
+        classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
+        embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
+        images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
+        rerank::OpenAIRerankStreamingEngine, transcriptions::OpenAITranscriptionsStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
 use dynamo_model_card::model_card::ModelDeploymentCard;
@@ -169,16 +168,24 @@ struct LoraGenerateEngine {
 #[async_trait]
 impl
     AsyncEngine<
-        SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
-        ManyOut<crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        SingleIn<dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest>,
+        ManyOut<
+            dynamo_frontend_protocols::types::Annotated<
+                dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput,
+            >,
+        >,
         Error,
     > for LoraGenerateEngine
 {
     async fn generate(
         &self,
-        mut request: SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+        mut request: SingleIn<dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest>,
     ) -> Result<
-        ManyOut<crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        ManyOut<
+            dynamo_frontend_protocols::types::Annotated<
+                dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput,
+            >,
+        >,
         Error,
     > {
         request.routing.get_or_insert_default().lora_name = Some(self.lora_name.clone());
@@ -460,8 +467,8 @@ impl WorkerSet {
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
-    pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
-        crate::protocols::openai::ParsingOptions {
+    pub fn parsing_options(&self) -> dynamo_frontend_protocols::openai::ParsingOptions {
+        dynamo_frontend_protocols::openai::ParsingOptions {
             default_thinking_mode: self
                 .card
                 .runtime_config
@@ -474,7 +481,7 @@ impl WorkerSet {
                 .card
                 .runtime_config
                 .exclude_tools_when_tool_choice_none,
-            ..crate::protocols::openai::ParsingOptions::new(
+            ..dynamo_frontend_protocols::openai::ParsingOptions::new(
                 self.card.runtime_config.tool_call_parser.clone(),
                 self.card.runtime_config.reasoning_parser.clone(),
             )
@@ -656,27 +663,43 @@ impl Drop for WorkerSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::llm_backend::LLMEngineOutput;
-    use crate::protocols::common::preprocessor::PreprocessedRequest;
-    use crate::types::Annotated;
-    use crate::types::generic::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
-    use crate::types::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
-    use crate::types::openai::chat_completions::{
+    use async_trait::async_trait;
+    use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
+    use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+    use dynamo_frontend_protocols::types::Annotated;
+    use dynamo_frontend_protocols::types::generic::tensor::{
+        NvCreateTensorRequest, NvCreateTensorResponse,
+    };
+    use dynamo_frontend_protocols::types::openai::audios::{
+        NvAudioSpeechResponse, NvCreateAudioSpeechRequest,
+    };
+    use dynamo_frontend_protocols::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     };
-    use crate::types::openai::classify::{NvCreateClassifyRequest, NvCreateClassifyResponse};
-    use crate::types::openai::completions::{
+    use dynamo_frontend_protocols::types::openai::classify::{
+        NvCreateClassifyRequest, NvCreateClassifyResponse,
+    };
+    use dynamo_frontend_protocols::types::openai::completions::{
         NvCreateCompletionRequest, NvCreateCompletionResponse,
     };
-    use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
-    use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
-    use crate::types::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
-    use crate::types::openai::rerank::{NvCreateRerankRequest, NvCreateRerankResponse};
-    use crate::types::openai::transcriptions::{
+    use dynamo_frontend_protocols::types::openai::embeddings::{
+        NvCreateEmbeddingRequest, NvCreateEmbeddingResponse,
+    };
+    use dynamo_frontend_protocols::types::openai::images::{
+        NvCreateImageRequest, NvImagesResponse,
+    };
+    use dynamo_frontend_protocols::types::openai::pooling::{
+        NvCreatePoolingRequest, NvCreatePoolingResponse,
+    };
+    use dynamo_frontend_protocols::types::openai::rerank::{
+        NvCreateRerankRequest, NvCreateRerankResponse,
+    };
+    use dynamo_frontend_protocols::types::openai::transcriptions::{
         NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest,
     };
-    use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
-    use async_trait::async_trait;
+    use dynamo_frontend_protocols::types::openai::videos::{
+        NvCreateVideoRequest, NvVideosResponse,
+    };
     use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};

@@ -61,7 +61,7 @@ async fn sse_parser_requires_anthropic_termination() {
 }
 
 fn user_text(
-    request: &dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
+    request: &dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest,
 ) -> &str {
     match &request.inner.messages[..] {
         [ChatCompletionRequestMessage::User(user)] => match &user.content {
@@ -474,7 +474,7 @@ async fn completed_tool_block_precedes_gated_tail(#[case] per_tool_completion: b
         let mut script = load_agent_fixture(fixture).await.unwrap();
         let split_at = if per_tool_completion {
             script[1].data.as_mut().unwrap().tool_call_completion.push(
-                dynamo_llm::protocols::openai::chat_completions::ToolCallCompletion {
+                dynamo_frontend_protocols::openai::chat_completions::ToolCallCompletion {
                     choice_index: 0,
                     tool_index: 0,
                     complete: true,

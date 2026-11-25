@@ -25,7 +25,7 @@ pub mod kserve_test {
     pub mod inference {
         tonic::include_proto!("inference");
     }
-    use dynamo_llm::protocols::tensor;
+    use dynamo_frontend_protocols::tensor;
     use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_model_card::model_type::{ModelInput, ModelType};
     use dynamo_model_card::tensor_model;
@@ -37,9 +37,7 @@ pub mod kserve_test {
 
     use anyhow::Error;
     use async_stream::stream;
-    use dynamo_llm::grpc::service::kserve::KserveService;
-    use dynamo_llm::grpc::service::kserve::inference as kserve_inference;
-    use dynamo_llm::protocols::{
+    use dynamo_frontend_protocols::{
         Annotated,
         openai::{
             chat_completions::{
@@ -49,6 +47,8 @@ pub mod kserve_test {
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     };
+    use dynamo_llm::grpc::service::kserve::KserveService;
+    use dynamo_llm::grpc::service::kserve::inference as kserve_inference;
     use dynamo_runtime::{
         CancellationToken,
         pipeline::{

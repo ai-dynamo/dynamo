@@ -68,6 +68,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # must not enable `extension-module`.
 aisim-core = { version = "=0.15.0-dev.202611230000000114", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
+dynamo-frontend-protocols = { path = "../../frontend-protocols" }
 dynamo-model-card = { path = "../../model-card" }
 dynamo-error = { path = "../../error", features = ["http"] }
 dynamo-mocker = { path = "../../mocker" }

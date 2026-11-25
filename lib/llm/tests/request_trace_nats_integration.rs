@@ -23,8 +23,8 @@
 
 #[cfg(test)]
 mod tests {
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionResponse;
     use dynamo_llm::request_trace::init_from_env_with_shutdown;
     use dynamo_llm::request_trace::payload;
     use dynamo_runtime::transports::nats;

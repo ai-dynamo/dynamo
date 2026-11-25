@@ -4,7 +4,7 @@
 //! Tests request with the token_data in nvext used for the EPP-aware Gateway integration. When the backend_instance_id is in the request along with the token_data the tokenization will be skipped in the preprocesor.rs
 
 use anyhow::Result;
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 #[test]
 fn test_request_json_structure() -> Result<()> {

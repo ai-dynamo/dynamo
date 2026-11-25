@@ -33,7 +33,7 @@ use super::{
     },
     service_v2,
 };
-use crate::protocols::openai::transcriptions::{
+use dynamo_frontend_protocols::openai::transcriptions::{
     NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest,
 };
 use dynamo_http_server::{

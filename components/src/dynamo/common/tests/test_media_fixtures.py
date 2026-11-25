@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The JSON fixtures in lib/llm/src/protocols/openai/media_fixtures/, shared
-with the Rust tests in lib/llm/src/protocols/openai/media_fixtures.rs, which
+"""The JSON fixtures in lib/frontend-protocols/src/openai/media_fixtures/, shared
+with the Rust tests in lib/frontend-protocols/src/openai/media_fixtures.rs, which
 hold the Rust types to the same files.
 
 - `<module>_request.json` and `<module>_response.json`: one full message each.
@@ -45,7 +45,8 @@ pytestmark = [
 
 # components/src/dynamo/common/tests -> the repository root.
 FIXTURES = (
-    Path(__file__).resolve().parents[5] / "lib/llm/src/protocols/openai/media_fixtures"
+    Path(__file__).resolve().parents[5]
+    / "lib/frontend-protocols/src/openai/media_fixtures"
 )
 
 CASES = [

@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
+use dynamo_frontend_protocols::common::StopConditions;
+use dynamo_frontend_protocols::types::TokenIdType;
 use dynamo_llm::backend::Decoder;
-use dynamo_llm::protocols::common::StopConditions;
 use dynamo_llm::tokenizers::DecodeStream;
 use dynamo_llm::tokenizers::FastTokenizer;
 use dynamo_llm::tokenizers::hf::HuggingFaceTokenizer;
 use dynamo_llm::tokenizers::tiktoken::TikTokenTokenizer;
 use dynamo_llm::tokenizers::traits::{Encoder, Tokenizer};
-use dynamo_llm::types::TokenIdType;
 use std::path::Path;
 
 const TEST_TOKENIZER: &str = concat!(

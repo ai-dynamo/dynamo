@@ -353,11 +353,13 @@ fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
     let mut req = request();
     add_images(&mut req, ["https://example.com/first.png"]);
     req.extra_args = Some(json!({"mm_hashes": ["0123456789abcdef"]}));
-    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
-        routing_token_ids: vec![11, 22, 33],
-        expanded_prompt_len: 3,
-        ..Default::default()
-    });
+    req.mm_routing_info = Some(
+        dynamo_frontend_protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11, 22, 33],
+            expanded_prompt_len: 3,
+            ..Default::default()
+        },
+    );
     let mut enabled = image_limits(4096).unwrap();
     enabled.supports_image_routing = true;
     let proto = build_generate_request(req.clone(), "req", "model", Some(enabled), AGG).unwrap();
@@ -419,11 +421,13 @@ fn image_routing_uses_only_the_image_hashes_from_grouped_metadata() {
         "mm_hashes": ["1111111111111111"],
         "mm_hashes_by_modality": {"image": ["0123456789abcdef"], "video": ["fedcba9876543210"]}
     }));
-    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
-        routing_token_ids: vec![11],
-        expanded_prompt_len: 1,
-        ..Default::default()
-    });
+    req.mm_routing_info = Some(
+        dynamo_frontend_protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11],
+            expanded_prompt_len: 1,
+            ..Default::default()
+        },
+    );
     let mut limits = image_limits(4096).unwrap();
     limits.supports_image_routing = true;
     let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
@@ -470,11 +474,13 @@ fn mixed_media_image_hints_follow_modality_indices_and_preserve_video_uuids() {
         "mm_hashes": ["fedcba9876543210", "2222222222222222", "1111111111111111"],
         "mm_hashes_by_modality": {"image": ["1111111111111111", "2222222222222222"]}
     }));
-    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
-        routing_token_ids: vec![11, 22, 33],
-        expanded_prompt_len: 3,
-        ..Default::default()
-    });
+    req.mm_routing_info = Some(
+        dynamo_frontend_protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11, 22, 33],
+            expanded_prompt_len: 3,
+            ..Default::default()
+        },
+    );
     let mut limits = image_video_limits(4096).unwrap();
     limits.supports_image_routing = true;
     let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
@@ -544,11 +550,13 @@ fn malformed_image_routing_hashes_are_rejected_before_dispatch() {
         let mut req = request();
         add_images(&mut req, ["https://example.com/first.png"]);
         req.extra_args = Some(json!({"mm_hashes": hashes}));
-        req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
-            routing_token_ids: vec![11],
-            expanded_prompt_len: 1,
-            ..Default::default()
-        });
+        req.mm_routing_info = Some(
+            dynamo_frontend_protocols::common::preprocessor::MmRoutingInfo {
+                routing_token_ids: vec![11],
+                expanded_prompt_len: 1,
+                ..Default::default()
+            },
+        );
         let mut limits = image_limits(4096).unwrap();
         limits.supports_image_routing = true;
         assert!(build_generate_request(req, "req", "model", Some(limits), AGG).is_err());

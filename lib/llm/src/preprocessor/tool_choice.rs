@@ -11,17 +11,17 @@ use crate::preprocessor::structural_tag::{
     SelectedStructuralTagBuilder, requires_native_tool_call_format,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PromptReasoningPrefill};
-use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-use crate::protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_frontend_protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
 #[cfg(test)]
-use crate::protocols::openai::chat_completions::unified_parser;
-use crate::protocols::openai::common_ext::CommonExtProvider;
-use crate::protocols::openai::tools::{
+use dynamo_frontend_protocols::openai::chat_completions::unified_parser;
+use dynamo_frontend_protocols::openai::common_ext::CommonExtProvider;
+use dynamo_frontend_protocols::openai::tools::{
     ToolChoiceGuidance, convert_tools, get_tool_choice_guidance_from_tools,
     validate_openai_tool_choice,
 };
-use crate::protocols::openai::{GuidedToolConstraint, validate};
+use dynamo_frontend_protocols::openai::{GuidedToolConstraint, validate};
 
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_protocols::types::{
@@ -969,7 +969,7 @@ mod tests {
     use std::{path::PathBuf, sync::Arc};
 
     use super::*;
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_model_card::local_model::runtime_config::{
         LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, StructuralTagMode,
     };
@@ -1659,7 +1659,7 @@ mod tests {
 
     #[test]
     fn muse_spark_named_responses_prompt_keeps_qualified_name_and_full_schema() {
-        let response: crate::protocols::openai::responses::NvCreateResponse = serde_json::from_value(json!({
+        let response: dynamo_frontend_protocols::openai::responses::NvCreateResponse = serde_json::from_value(json!({
             "model": "test-model", "input": "Get the weather",
             "tools": [{"type": "namespace", "name": "weather", "defer_loading": true, "tools": [
                 {"type": "function", "name": "get_weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}},
@@ -2906,8 +2906,10 @@ mod tests {
     }
 
     /// `guided_json` as preprocessing sets it from the request's reply schema.
-    fn guided_json(schema: &Value) -> Option<crate::protocols::common::GuidedDecodingOptions> {
-        crate::protocols::common::GuidedDecodingOptions::from_optional(
+    fn guided_json(
+        schema: &Value,
+    ) -> Option<dynamo_frontend_protocols::common::GuidedDecodingOptions> {
+        dynamo_frontend_protocols::common::GuidedDecodingOptions::from_optional(
             Some(schema.clone()),
             None,
             None,
@@ -3084,7 +3086,7 @@ mod tests {
 
     #[test]
     fn test_tool_choice_conversion_preserves_request_level_parser_policy() {
-        use crate::protocols::anthropic::types::AnthropicCreateMessageRequest;
+        use dynamo_frontend_protocols::anthropic::types::AnthropicCreateMessageRequest;
 
         for (label, tool_choice, parsing_enabled) in [
             ("auto", serde_json::json!({"type": "auto"}), true),

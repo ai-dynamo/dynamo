@@ -6,7 +6,7 @@ gaps:
   - endpoint: /v1/chat/completions
     field: chat_template_kwargs
     location: '#/components/schemas/NvCreateChatCompletionRequest'
-    source: lib/llm/src/protocols/openai/chat_completions.rs
+    source: lib/frontend-protocols/src/openai/chat_completions.rs
     reason: Serde accepts this alias for chat_template_args. New exports describe it with x-dynamo-input-aliases, consumed by alias-aware comparison; ordinary JSON Schema validation does not enforce this extension's value or duplicate-name rules. Older captures omit the metadata. Consult alias-matches.json before interpreting missing-name deltas.
   - endpoint: /v1/chat/completions
     field: messages[].function_call.arguments and messages[].tool_calls[].function.arguments
@@ -35,10 +35,10 @@ gaps:
   - endpoint: /v1/chat/completions
     field: '*'
     location: '#/components/schemas/NvCreateChatCompletionRequest'
-    source: lib/llm/src/protocols/openai/validate.rs
+    source: lib/frontend-protocols/src/openai/validate.rs
     reason: Catch-all admission, numeric Rust bounds, aliases and cross-field/custom validation are not comprehensively encoded by the exporter. Absence of a declared field or constraint cannot prove acceptance or rejection.
   - endpoint: /v1/completions
     field: '*'
     location: '#/components/schemas/NvCreateCompletionRequest'
-    source: lib/llm/src/protocols/openai/validate.rs
+    source: lib/frontend-protocols/src/openai/validate.rs
     reason: Catch-all admission, numeric Rust bounds and custom/cross-field validation are not comprehensively encoded by the exporter. Completion rejects chat-only common controls even though a generic catch-all may appear permissive.

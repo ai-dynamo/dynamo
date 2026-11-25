@@ -32,11 +32,11 @@ use super::{HostedOccupancy, RoutingHost, RoutingPolicy};
 use crate::{
     kv_router::{KvRouter, RoutingLoadContext, metrics::RouterRequestMetrics},
     lora::{LoadEstimator, LoraFilter},
-    protocols::common::llm_backend::LLMEngineOutput,
-    protocols::common::preprocessor::PreprocessedRequest,
     routing_policy::HostedCandidatePolicy,
     session_affinity::AffinityCoordinator,
 };
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
 
 /// The transport a [`RoutingHost`] sends through.
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;

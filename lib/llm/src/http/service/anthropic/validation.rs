@@ -156,7 +156,7 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
         #[derive(Deserialize)]
         struct Message<'a> {
             #[serde(rename = "role")]
-            _role: crate::protocols::anthropic::types::AnthropicRole,
+            _role: dynamo_frontend_protocols::anthropic::types::AnthropicRole,
             #[serde(borrow)]
             content: &'a RawValue,
         }

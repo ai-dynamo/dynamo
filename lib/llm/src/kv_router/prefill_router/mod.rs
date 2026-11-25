@@ -26,16 +26,16 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
-    protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-        llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-        timing::RequestPhase,
-    },
-    protocols::response_merge::{
-        PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
-    },
     session_affinity::{AffinityTarget, SessionAffinityMode},
+};
+use dynamo_frontend_protocols::common::{
+    extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    llm_backend::{LLMEngineOutput, PreprocessedRequest},
+    preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
+    timing::RequestPhase,
+};
+use dynamo_frontend_protocols::response_merge::{
+    PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
 };
 use dynamo_model_card::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1;
 
@@ -930,7 +930,7 @@ mod tests {
     };
     use tokio::sync::oneshot;
 
-    use crate::protocols::common::{
+    use dynamo_frontend_protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
         timing::{RequestTracker, RoutingData},

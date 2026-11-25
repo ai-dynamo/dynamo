@@ -16,12 +16,12 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_set::WorkerSet;
 use crate::preprocessor::OpenAIPreprocessor;
-use crate::protocols::openai::ParsingOptions;
+use dynamo_frontend_protocols::openai::ParsingOptions;
 use dynamo_model_card::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_model_card::router_config::LoadThresholdConfig;
 
-use crate::types::{
+use dynamo_frontend_protocols::types::{
     RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
     openai::{
@@ -1094,9 +1094,9 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::preprocessor::PreprocessedRequest;
-    use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
     use async_trait::async_trait;
+    use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+    use dynamo_frontend_protocols::{Annotated, common::llm_backend::LLMEngineOutput};
     use dynamo_model_card::local_model::runtime_config::{
         VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     };
@@ -1112,16 +1112,18 @@ mod tests {
     #[async_trait]
     impl
         AsyncEngine<
-            SingleIn<crate::protocols::openai::images::NvCreateImageRequest>,
-            ManyOut<Annotated<crate::protocols::openai::images::NvImagesResponse>>,
+            SingleIn<dynamo_frontend_protocols::openai::images::NvCreateImageRequest>,
+            ManyOut<Annotated<dynamo_frontend_protocols::openai::images::NvImagesResponse>>,
             Error,
         > for StubImageEngine
     {
         async fn generate(
             &self,
-            _: SingleIn<crate::protocols::openai::images::NvCreateImageRequest>,
-        ) -> Result<ManyOut<Annotated<crate::protocols::openai::images::NvImagesResponse>>, Error>
-        {
+            _: SingleIn<dynamo_frontend_protocols::openai::images::NvCreateImageRequest>,
+        ) -> Result<
+            ManyOut<Annotated<dynamo_frontend_protocols::openai::images::NvImagesResponse>>,
+            Error,
+        > {
             unreachable!("selection must not generate images")
         }
     }
@@ -1396,10 +1398,10 @@ mod tests {
     struct StubChatEngine;
 
     #[async_trait]
-    impl AsyncEngine<SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> for StubChatEngine {
-        async fn generate(&self, _: SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>)
-            -> Result<ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> {
+    impl AsyncEngine<SingleIn<dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> for StubChatEngine {
+        async fn generate(&self, _: SingleIn<dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest>)
+            -> Result<ManyOut<Annotated<dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> {
             unreachable!("selection must not generate")
         }
     }
@@ -2634,7 +2636,7 @@ mod tests {
 
     /// Build a chat completions engine backed by the in-tree echo engine.
     fn make_test_chat_engine()
-    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+    -> dynamo_frontend_protocols::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine{
         Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
         ))

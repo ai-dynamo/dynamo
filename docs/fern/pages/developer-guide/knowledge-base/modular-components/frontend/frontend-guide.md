@@ -131,7 +131,7 @@ When registering the backend, the backend must provide the model's metadata as t
 
 #### Inference
 
-When receiving inference request, the backend will receive [NvCreateTensorRequest](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs) and be expected to return [NvCreateTensorResponse](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs), which are the mapping of ModelInferRequest / ModelInferResponse protobuf message in Dynamo.
+When receiving inference request, the backend will receive [NvCreateTensorRequest](https://github.com/ai-dynamo/dynamo/tree/main/lib/frontend-protocols/src/tensor.rs) and be expected to return [NvCreateTensorResponse](https://github.com/ai-dynamo/dynamo/tree/main/lib/frontend-protocols/src/tensor.rs), which are the mapping of ModelInferRequest / ModelInferResponse protobuf message in Dynamo.
 
 ## See Also
 

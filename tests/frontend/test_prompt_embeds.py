@@ -12,7 +12,7 @@ These tests validate behavior that cannot be covered by Rust unit tests:
 - Concurrent request handling
 
 Validation tests (base64, size limits, empty prompt) are covered by Rust unit tests
-in lib/llm/src/protocols/openai/completions.rs
+in lib/frontend-protocols/src/openai/completions.rs
 
 Run with: pytest tests/frontend/test_prompt_embeds.py -v
 """

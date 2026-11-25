@@ -76,8 +76,8 @@ const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 use super::{RouteDoc, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::migration::realtime::{RealtimeRecovery, UnexpectedEnd};
-use crate::types::RealtimeBidirectionalEngine;
 use dynamo_error::http::SanitizedError;
+use dynamo_frontend_protocols::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
     DynamoRealtimeClientEvent, EventType, RealtimeAPIError, RealtimeClientEvent,
     RealtimeClientEventSessionUpdate, RealtimeServerEvent, RealtimeServerEventError,

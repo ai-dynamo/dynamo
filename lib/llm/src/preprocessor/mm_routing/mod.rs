@@ -19,7 +19,8 @@ use std::{path::Path, sync::Arc};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::{protocols::TokenIdType, tokenizers::traits::Tokenizer};
+use crate::tokenizers::traits::Tokenizer;
+use dynamo_frontend_protocols::TokenIdType;
 
 /// Which token sequence the running vLLM Qwen3 processor replaces for video.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

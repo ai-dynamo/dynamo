@@ -48,12 +48,10 @@ pub use frontend_extension::{
     validate_extension_route_method, validate_extension_route_path,
 };
 
-use crate::{
-    preprocessor::OpenAIPreprocessor,
-    protocols::openai::{
-        ParsingOptions,
-        chat_completions::{NvCreateChatCompletionRequest, is_thinking_control_key},
-    },
+use crate::preprocessor::OpenAIPreprocessor;
+use dynamo_frontend_protocols::openai::{
+    ParsingOptions,
+    chat_completions::{NvCreateChatCompletionRequest, is_thinking_control_key},
 };
 use dynamo_model_card::frontend_config::ChatTemplateDefaults;
 
@@ -66,7 +64,7 @@ fn apply_request_tool_call_parsing_options(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<ParsingOptions, DynamoError> {
     let unified_family =
-        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+        dynamo_frontend_protocols::openai::chat_completions::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
         );
@@ -88,7 +86,8 @@ fn apply_request_tool_call_parsing_options(
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
     let effective_tools = crate::preprocessor::tool_choice::effective_tools(&request.inner)?;
-    let converted_tools = crate::protocols::openai::tools::convert_tools(effective_tools.as_ref());
+    let converted_tools =
+        dynamo_frontend_protocols::openai::tools::convert_tools(effective_tools.as_ref());
     let structural_tag_config = parsing_options.structural_tag.as_ref();
     let has_structured_output = request
         .inner
@@ -163,7 +162,7 @@ pub(crate) fn apply_chat_template_defaults(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::openai::GuidedToolConstraint;
+    use dynamo_frontend_protocols::openai::GuidedToolConstraint;
     use serde_json::{Value, json};
 
     #[test]
@@ -323,7 +322,7 @@ mod tests {
     // the aggregated native output, not hand it to the guided-JSON reader.
     #[tokio::test]
     async fn unified_mistral_forced_choices_batch_native_calls() {
-        use crate::protocols::openai::chat_completions::aggregator::DeltaAggregator;
+        use dynamo_frontend_protocols::openai::chat_completions::aggregator::DeltaAggregator;
         use dynamo_runtime::protocols::annotated::Annotated;
         if crate::test_utils::run_isolated(
             concat!(

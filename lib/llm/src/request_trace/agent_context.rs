@@ -13,16 +13,16 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 use parking_lot::Mutex;
 
-use crate::protocols::common::FinishReason as BackendFinishReason;
-use crate::protocols::common::extensions::AgentContext;
-use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
-};
 use crate::request_trace::{
     DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, RequestReplayMetrics, RequestTraceMetrics,
     RequestTraceWorkerInfo, ToolCallMetadata, tool_relay::ToolEventRelay,
+};
+use dynamo_frontend_protocols::common::FinishReason as BackendFinishReason;
+use dynamo_frontend_protocols::common::extensions::AgentContext;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::timing::RequestTracker;
+use dynamo_frontend_protocols::openai::{
+    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
 use dynamo_model_card::local_model::LocalModel;
 
@@ -575,11 +575,11 @@ fn tool_events_namespace(local_model: &LocalModel) -> String {
 mod tests {
     use std::{thread, time::Duration};
 
-    use crate::protocols::common::{
+    use dynamo_frontend_protocols::common::{
         self,
         timing::{RequestTracker, WORKER_TYPE_DECODE},
     };
-    use crate::protocols::openai::{
+    use dynamo_frontend_protocols::openai::{
         chat_completions::NvCreateChatCompletionStreamResponse,
         completions::NvCreateCompletionResponse,
     };
@@ -595,7 +595,7 @@ mod tests {
         record_chat_finish_reason_metadata, record_completion_finish_reason_metadata,
         request_metrics, request_metrics_from_agent_state,
     };
-    use crate::protocols::common::extensions::AgentContext;
+    use dynamo_frontend_protocols::common::extensions::AgentContext;
 
     #[test]
     fn request_end_records_client_tool_call_ids() {
@@ -655,7 +655,7 @@ mod tests {
                 {"type":"function", "name":"shell"}
             ]))
             .unwrap();
-        let names = crate::protocols::openai::responses::ToolNameMap::new(&tools, None);
+        let names = dynamo_frontend_protocols::openai::responses::ToolNameMap::new(&tools, None);
         let finish_reason_metadata = SharedFinishReasonMetadata::default();
         {
             let mut metadata = finish_reason_metadata.lock();

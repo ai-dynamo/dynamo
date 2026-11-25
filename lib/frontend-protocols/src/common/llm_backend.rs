@@ -1,0 +1,672 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use serde::{Deserialize, Serialize};
+use std::ops::Deref;
+
+pub use super::FinishReason;
+pub use super::preprocessor::PreprocessedRequest;
+use crate::TokenIdType;
+use dynamo_protocols::types::CompletionUsage;
+use dynamo_protocols::types::StopReason;
+use dynamo_runtime::error::DynamoError;
+use dynamo_runtime::protocols::maybe_error::MaybeError;
+
+pub type TokenType = Option<String>;
+pub type LogProbs = Vec<f64>;
+
+/// In-process decoder state captured on a streamed output for a possible migration retry.
+///
+/// The checkpoint deliberately retains the historical wire representation of
+/// `jailed_text`: serializers see only the withheld string, while pending token IDs are
+/// skipped and therefore survive only when the value moves through the frontend in memory.
+/// Deserializing a legacy string restores the text and starts with no pending token IDs.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(transparent)]
+pub struct DecoderCheckpoint {
+    jailed_text: String,
+    #[serde(skip)]
+    pending_token_ids: Vec<TokenIdType>,
+}
+
+impl DecoderCheckpoint {
+    /// Captures withheld stop-filter text and token IDs buffered by incremental decoding.
+    pub fn new(jailed_text: String, pending_token_ids: Vec<TokenIdType>) -> Self {
+        Self {
+            jailed_text,
+            pending_token_ids,
+        }
+    }
+
+    /// Splits the checkpoint into its stop-filter text and incremental-decoder state.
+    pub fn into_parts(self) -> (String, Vec<TokenIdType>) {
+        (self.jailed_text, self.pending_token_ids)
+    }
+}
+
+impl Deref for DecoderCheckpoint {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.jailed_text
+    }
+}
+
+impl From<String> for DecoderCheckpoint {
+    fn from(jailed_text: String) -> Self {
+        Self::new(jailed_text, Vec::new())
+    }
+}
+
+/// Per-position prompt logprob entry reported by an engine adapter.
+#[derive(Serialize, Deserialize, utoipa::ToSchema, Debug, Clone, PartialEq)]
+pub struct PromptLogprobEntry {
+    pub logprob: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoded_token: Option<String>,
+}
+
+/// Per-token map of `token_id -> PromptLogprobEntry`. The first position
+/// is `None` (no logprob exists for BOS / the very first prompt token).
+pub type PromptLogprobs = Vec<Option<std::collections::HashMap<TokenIdType, PromptLogprobEntry>>>;
+
+/// Output type discriminator for different modalities
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputType {
+    #[default]
+    Text,
+    Image,
+    Video,
+    Audio,
+}
+
+impl OutputType {
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Text)
+    }
+}
+
+/// Image URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ImageUrlData {
+    pub url: String,
+}
+
+/// Video URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VideoUrlData {
+    pub url: String,
+}
+
+/// Audio URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AudioUrlData {
+    pub url: String,
+}
+
+/// Content part for multimodal outputs (internal representation)
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlData },
+    VideoUrl { video_url: VideoUrlData },
+    AudioUrl { audio_url: AudioUrlData },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TopLogprob {
+    pub rank: u32,
+    pub token_id: TokenIdType,
+    pub token: TokenType,
+    pub logprob: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
+}
+pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
+
+/// Backend's output, one stream item per token or chunk. As in [`LLMEngineOutput`], the large
+/// fields that are `None` on the default path are boxed.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BackendOutput {
+    /// New token_ids generated from the LLM Engine
+    pub token_ids: Vec<TokenIdType>,
+
+    /// Unlike [`LLMEngineOutput::tokens`], this is a vector of tokens, not an optional.
+    /// The size of this vector should be the same as the size of `token_ids`.
+    pub tokens: Vec<TokenType>,
+
+    /// Decoded text from the list tokens.
+    pub text: Option<String>,
+
+    /// Optional cumulative log probabilities
+    pub cum_log_probs: Option<f64>,
+
+    /// Optional log probabilities
+    pub log_probs: Option<LogProbs>,
+
+    pub top_logprobs: Option<TopLogprobs>,
+
+    // TODO: Enrich this with more information as can apply our first-level postprocessing
+    // logic and return more detailed information
+    pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+
+    // Model Deployment Card checksum
+    //pub mdcsum: String,
+
+    // Index field for batch requests to match OpenAI format
+    pub index: Option<u32>,
+
+    // Token usage information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_usage: Option<CompletionUsage>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation).
+    /// Engine-owned payload — backends pack their own KV-transfer format
+    /// here (vLLM `kv_transfer_params`, SGLang bootstrap triple, TRT-LLM
+    /// encoded `LlmDisaggregatedParams`). Dynamo does NOT inject framework
+    /// metadata into this field — use `worker_trace_link` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<Box<serde_json::Value>>,
+
+    /// Multimodal encoder handoff payload (object-only by contract).
+    /// Set by Encode workers on their terminal chunk; consumed by the
+    /// frontend and threaded onto the downstream PreprocessedRequest.
+    /// Engine-opaque; framework does not inspect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<Box<serde_json::Value>>,
+
+    /// Framework-owned link to the prefill worker's span. Propagated
+    /// alongside the engine's `disaggregated_params` so the decode worker
+    /// can record an OTel `Link` on its `engine.generate` span. Engines
+    /// should NOT read or write this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_trace_link: Option<Box<crate::common::preprocessor::TraceLink>>,
+
+    /// Opaque engine data passed through from the backend worker to the response.
+    /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<Box<serde_json::Value>>,
+
+    /// Router-computed data handed back to the frontend (e.g. per-request timing from
+    /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
+    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`](crate::common::timing::RoutingData).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<Box<crate::common::timing::RoutingData>>,
+
+    /// Frontend-only decoder checkpoint for a possible migration retry. Its serialized
+    /// representation remains the historical optional `jailed_text` string; pending token
+    /// IDs are in-memory-only and let the retry reconstruct incremental decoding state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jailed_text: Option<DecoderCheckpoint>,
+}
+
+/// The LLM engine and backnd with manage it's own state, specifically translating how a
+/// given request/slot is managed on that particular backend.
+///
+/// For nvLLM's purpose, it has a single tracable request_id as part of it's context that
+/// has propaged through the service pipeline to the backend.
+///
+/// This is the minimal raw output from the LLM engine. The Backend may then apply multiple
+/// levels of post-processing before the BackendOutput is returns
+///
+/// It is a stream item, moved several times per token, so the large fields that are `None` on
+/// the default path are boxed: `None` costs a pointer, not the field. A `Box` serializes as the
+/// value it holds, so the wire is unchanged.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct LLMEngineOutput {
+    // new token_ids
+    pub token_ids: Vec<TokenIdType>,
+
+    /// If the LLM Engine performs the detokenization, then this will have a Some of the detokenized
+    /// text/tokens. If this value is None, then the Backend is responsible for detokenization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Vec<TokenType>>,
+
+    // decoded text -
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+
+    /// Output type discriminator (text, image, video, audio)
+    #[serde(default, skip_serializing_if = "OutputType::is_text")]
+    pub output_type: OutputType,
+
+    /// Multimodal content parts (for non-text outputs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<ContentPart>>,
+
+    /// cumulative log probabilities
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cum_log_probs: Option<f64>,
+
+    /// Optional log probabilities
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_probs: Option<LogProbs>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<TopLogprobs>,
+
+    // TODO: Enrich this with more information as can apply our first-level postprocessing
+    // logic and return more detailed information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+
+    // Index field for batch requests to match OpenAI format
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<Box<serde_json::Value>>,
+
+    /// Multimodal encoder handoff payload (object-only by contract).
+    /// Set by Encode workers on their terminal chunk via
+    /// `LLMEngineOutput::encode_terminal`; the post-processor copies it
+    /// through to `BackendOutput.encoder_result`. Engine-opaque payload;
+    /// framework does not inspect or mutate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<Box<serde_json::Value>>,
+
+    /// Framework-owned link to the prefill worker's span (cross-process
+    /// trace linking on disagg requests). Set by the framework on the
+    /// prefill terminal chunk; consumed by the decode adapter. Engines
+    /// should NOT read or write this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_trace_link: Option<Box<crate::common::preprocessor::TraceLink>>,
+
+    /// Additional arguments for extensibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<Box<serde_json::Value>>,
+
+    // Token usage information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_usage: Option<CompletionUsage>,
+
+    /// Opaque engine data passed through from the backend worker to the response.
+    /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<Box<serde_json::Value>>,
+
+    /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
+    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`](crate::common::timing::RoutingData).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<Box<crate::common::timing::RoutingData>>,
+
+    /// Frontend-only decoder checkpoint for a possible migration retry. Engines never set
+    /// it; `Backend` populates it after worker deserialization. The legacy optional-string
+    /// wire shape is retained, while pending token IDs are kept in memory only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jailed_text: Option<DecoderCheckpoint>,
+}
+
+impl LLMEngineOutput {
+    pub fn cancelled() -> Self {
+        LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(FinishReason::Cancelled),
+            stop_reason: None,
+            index: None,
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            extra_args: None,
+            completion_usage: None,
+            engine_data: None,
+            routing_data: None,
+            jailed_text: None,
+        }
+    }
+
+    pub fn stop() -> Self {
+        LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
+            cum_log_probs: None,
+            log_probs: None,
+            finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
+            top_logprobs: None,
+            index: None,
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            extra_args: None,
+            completion_usage: None,
+            engine_data: None,
+            routing_data: None,
+            jailed_text: None,
+        }
+    }
+
+    pub fn length() -> Self {
+        LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(FinishReason::Length),
+            stop_reason: None,
+            index: None,
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            extra_args: None,
+            completion_usage: None,
+            engine_data: None,
+            routing_data: None,
+            jailed_text: None,
+        }
+    }
+
+    pub fn error(err_msg: String) -> Self {
+        LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(FinishReason::Error(err_msg)),
+            stop_reason: None,
+            index: None,
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            extra_args: None,
+            completion_usage: None,
+            engine_data: None,
+            routing_data: None,
+            jailed_text: None,
+        }
+    }
+
+    /// Terminal chunk for an Encode-mode stream. The `encoder_result`
+    /// payload is the engine-opaque handoff dict the downstream
+    /// Prefill/Aggregated worker will receive on its
+    /// `PreprocessedRequest.encoder_result`.
+    ///
+    /// Signature takes `serde_json::Map<String, serde_json::Value>` (not
+    /// bare `Value`) so the object-only Wire Shape invariant is
+    /// type-enforced and the constructor stays infallible -- there is no
+    /// way to pass an array or scalar through this API. The constructor
+    /// wraps the `Map` in `Value::Object(...)` internally.
+    ///
+    /// `index: Some(0)` matches the Python helper `encoder_terminal_chunk`
+    /// so Rust and Python producers emit byte-identical terminals for the
+    /// same `encoder_result`.
+    pub fn encode_terminal(encoder_result: serde_json::Map<String, serde_json::Value>) -> Self {
+        LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            disaggregated_params: None,
+            encoder_result: Some(Box::new(serde_json::Value::Object(encoder_result))),
+            worker_trace_link: None,
+            extra_args: None,
+            completion_usage: None,
+            engine_data: None,
+            routing_data: None,
+            jailed_text: None,
+        }
+    }
+}
+
+pub(crate) fn prompt_logprobs_from_engine_data(
+    engine_data: Option<&serde_json::Value>,
+) -> anyhow::Result<Option<PromptLogprobs>> {
+    let Some(value) = engine_data.and_then(|data| data.get("prompt_logprobs")) else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("invalid prompt_logprobs payload: {error}"))
+}
+
+impl MaybeError for LLMEngineOutput {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        LLMEngineOutput::error(err.to_string())
+    }
+
+    fn err(&self) -> Option<DynamoError> {
+        if let Some(FinishReason::Error(err_msg)) = &self.finish_reason {
+            Some(DynamoError::msg(err_msg.clone()))
+        } else {
+            None
+        }
+    }
+}
+
+/// Raw output from embedding engines containing base64-encoded float32 vectors.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EmbeddingsEngineOutput {
+    /// One standard-base64 string per input embedding.
+    pub embeddings: Vec<String>,
+
+    /// Token usage information
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkpoint_output(checkpoint: Option<DecoderCheckpoint>) -> BackendOutput {
+        BackendOutput {
+            token_ids: vec![],
+            tokens: vec![],
+            text: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: None,
+            stop_reason: None,
+            index: None,
+            completion_usage: None,
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            engine_data: None,
+            routing_data: None,
+            jailed_text: checkpoint,
+        }
+    }
+
+    /// An engine output with every optional field set, as the worker sends it.
+    const ENGINE_OUTPUT_WITH_EVERY_FIELD: &str = r#"{
+        "token_ids": [1, 2],
+        "tokens": ["a", null],
+        "text": "ab",
+        "cum_log_probs": -1.5,
+        "log_probs": [-0.5, -1.0],
+        "top_logprobs": [[{"rank": 1, "token_id": 1, "token": "a", "logprob": -0.5}]],
+        "finish_reason": "stop",
+        "stop_reason": "</s>",
+        "index": 0,
+        "disaggregated_params": {"kv_transfer_params": {"remote_engine_id": "e1"}},
+        "encoder_result": {"embeddings": [0.5]},
+        "worker_trace_link": {"trace_id": "0af7651916cd43dd8448eb211c80319c", "span_id": "b7ad6b7169203331"},
+        "extra_args": {"custom": true},
+        "completion_usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        "engine_data": {"raw": [1, 2, 3]},
+        "routing_data": {"token_ids": [7, 8]}
+    }"#;
+
+    /// Every field of the engine's and the backend's output keeps its JSON shape, whatever
+    /// its type in Rust (a field held in a `Box` serializes as the value itself). These are
+    /// the worker/frontend wire.
+    #[test]
+    fn engine_and_backend_outputs_round_trip_every_field() {
+        let wire: serde_json::Value = serde_json::from_str(ENGINE_OUTPUT_WITH_EVERY_FIELD).unwrap();
+
+        let engine: LLMEngineOutput = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&engine).unwrap(), wire);
+
+        // The backend's output has the same fields, but for `extra_args`.
+        let mut backend_wire = wire.clone();
+        backend_wire.as_object_mut().unwrap().remove("extra_args");
+        let backend: BackendOutput = serde_json::from_value(backend_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&backend).unwrap(), backend_wire);
+
+        // An absent field stays absent, and an explicit null reads as absent.
+        let mut nulls = serde_json::json!({"token_ids": []});
+        for field in [
+            "disaggregated_params",
+            "encoder_result",
+            "worker_trace_link",
+            "extra_args",
+            "engine_data",
+            "routing_data",
+        ] {
+            nulls
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), serde_json::Value::Null);
+        }
+        let engine: LLMEngineOutput = serde_json::from_value(nulls).unwrap();
+        assert_eq!(
+            serde_json::to_value(&engine).unwrap(),
+            serde_json::json!({"token_ids": []})
+        );
+    }
+
+    /// The outputs are stream items, moved several times per token: their size is a cost
+    /// per item. `disaggregated_params`, `encoder_result`, `worker_trace_link`, `extra_args`,
+    /// `engine_data` and `routing_data` are held in a `Box`. Raise these limits only with a
+    /// measured reason.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn engine_and_backend_outputs_stay_small() {
+        assert!(std::mem::size_of::<LLMEngineOutput>() <= 456);
+        assert!(std::mem::size_of::<BackendOutput>() <= 416);
+    }
+
+    /// Decoder checkpoints retain the legacy optional-string wire shape while keeping
+    /// pending token IDs strictly in process.
+    #[test]
+    fn decoder_checkpoint_preserves_legacy_wire_shape() {
+        let absent = serde_json::to_value(checkpoint_output(None)).unwrap();
+        assert!(absent.get("jailed_text").is_none());
+
+        let mut null = absent.clone();
+        null.as_object_mut()
+            .unwrap()
+            .insert("jailed_text".to_string(), serde_json::Value::Null);
+        let decoded_null: BackendOutput = serde_json::from_value(null).unwrap();
+        assert_eq!(decoded_null.jailed_text, None);
+
+        let mut legacy = absent;
+        legacy.as_object_mut().unwrap().insert(
+            "jailed_text".to_string(),
+            serde_json::Value::String("ST".to_string()),
+        );
+        let decoded_legacy: BackendOutput = serde_json::from_value(legacy).unwrap();
+        let checkpoint = decoded_legacy.jailed_text.unwrap();
+        assert_eq!(&*checkpoint, "ST");
+        assert!(checkpoint.into_parts().1.is_empty());
+
+        let populated = serde_json::to_value(checkpoint_output(Some(DecoderCheckpoint::new(
+            "ST".to_string(),
+            vec![195],
+        ))))
+        .unwrap();
+        assert_eq!(populated.get("jailed_text").unwrap(), "ST");
+        assert!(
+            !populated.to_string().contains("195"),
+            "pending decoder IDs must not leak onto the wire"
+        );
+    }
+
+    #[test]
+    fn test_maybe_error() {
+        let output = LLMEngineOutput::stop();
+        assert!(output.err().is_none());
+        assert!(output.is_ok());
+        assert!(!output.is_err());
+
+        let output = LLMEngineOutput::error("Test error".to_string());
+        assert!(format!("{}", output.err().unwrap()).contains("Test error"));
+        assert!(!output.is_ok());
+        assert!(output.is_err());
+    }
+
+    /// `encode_terminal` produces an Encode-mode terminal chunk with the
+    /// exact field shape required by the Wire Shape contract:
+    /// empty token_ids, FinishReason::Stop, index = Some(0), and the
+    /// encoder_result wrapped as `Value::Object(_)` (object-only by type).
+    #[test]
+    fn encode_terminal_pins_terminal_chunk_shape() {
+        let payload = serde_json::json!({
+            "embedding_handle": {"uri": "nixl://encoder/0", "shape": [1, 1024]},
+        });
+        let map = payload.as_object().unwrap().clone();
+        let chunk = LLMEngineOutput::encode_terminal(map);
+
+        assert!(chunk.token_ids.is_empty(), "encode terminal has no tokens");
+        assert_eq!(chunk.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(chunk.index, Some(0));
+        let result = chunk
+            .encoder_result
+            .as_ref()
+            .expect("encoder_result must be set");
+        assert!(result.is_object(), "encoder_result must be a JSON object");
+        assert_eq!(**result, payload);
+        // Sibling Option fields stay None on the producer terminal.
+        assert!(chunk.disaggregated_params.is_none());
+        assert!(chunk.worker_trace_link.is_none());
+        assert!(chunk.completion_usage.is_none());
+    }
+
+    /// A token-only chunk goes on the wire as just its token IDs.
+    #[test]
+    fn token_chunk_omits_defaults_on_the_wire() {
+        let chunk = LLMEngineOutput {
+            token_ids: vec![42],
+            ..Default::default()
+        };
+        let bytes = rmp_serde::to_vec_named(&chunk).unwrap();
+        let wire: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(wire, serde_json::json!({"token_ids": [42]}));
+        assert_eq!(
+            rmp_serde::from_slice::<LLMEngineOutput>(&bytes).unwrap(),
+            chunk
+        );
+    }
+}

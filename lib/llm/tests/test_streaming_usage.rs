@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
-use dynamo_llm::protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE;
-use dynamo_llm::protocols::openai::ParsingOptions;
-use dynamo_llm::protocols::openai::chat_completions::{
+use dynamo_frontend_protocols::common::llm_backend::{BackendOutput, FinishReason};
+use dynamo_frontend_protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE;
+use dynamo_frontend_protocols::openai::ParsingOptions;
+use dynamo_frontend_protocols::openai::chat_completions::{
     DeltaGenerator, NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
 };
-use dynamo_llm::protocols::openai::completions::NvCreateCompletionRequest;
+use dynamo_frontend_protocols::openai::completions::NvCreateCompletionRequest;
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
@@ -856,7 +856,7 @@ async fn test_nonstreaming_has_usage_field() {
 
     // Aggregate the streaming chunks into a single non-streaming response
     // This simulates what the HTTP service does for non-streaming requests
-    let result = dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionResponse::from_annotated_stream(
+    let result = dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionResponse::from_annotated_stream(
         transformed_stream,
         ParsingOptions::default(),
     )
@@ -1081,7 +1081,7 @@ async fn test_cmpl_nonstreaming_has_usage_and_cached_tokens() {
     // Aggregate into a single non-streaming response
     let parsing = ParsingOptions::default();
     let result =
-        dynamo_llm::protocols::openai::completions::NvCreateCompletionResponse::from_annotated_stream(
+        dynamo_frontend_protocols::openai::completions::NvCreateCompletionResponse::from_annotated_stream(
             transformed_stream,
             parsing,
         )

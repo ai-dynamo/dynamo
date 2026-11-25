@@ -13,8 +13,8 @@ use dynamo_runtime::error::ErrorClass;
 use serde_json::{Map, Value};
 
 use super::openai::{ErrorMessage, ErrorResponse, parse_json_request, read_json_request_body};
-use crate::protocols::openai::images::NvCreateImageRequest;
 use dynamo_error::http::HttpError;
+use dynamo_frontend_protocols::openai::images::NvCreateImageRequest;
 
 #[derive(Clone, Debug)]
 pub(super) struct Limits {

@@ -13,7 +13,7 @@ use dynamo_runtime::{
 };
 
 use super::{PrefillCompletion, PrefillError, PrefillRouter, handoff::PrefillTask};
-use crate::protocols::common::{
+use dynamo_frontend_protocols::common::{
     llm_backend::{FinishReason, LLMEngineOutput},
     timing::RequestTracker,
 };
@@ -152,7 +152,7 @@ impl PrefillRouter {
         }
 
         Ok(PrefillCompletion::Handoff {
-            result: crate::protocols::common::preprocessor::PrefillResult {
+            result: dynamo_frontend_protocols::common::preprocessor::PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
             },
@@ -193,7 +193,7 @@ impl PrefillRouter {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocols::response_merge::PrefillNeed;
+    use dynamo_frontend_protocols::response_merge::PrefillNeed;
     use futures::stream;
     use serde_json::json;
 
@@ -296,7 +296,7 @@ mod tests {
                                 let tracker = Arc::new(RequestTracker::new());
                                 let permit = tracker
                                     .set_phase(
-                                        crate::protocols::common::timing::RequestPhase::Prefill,
+                                        dynamo_frontend_protocols::common::timing::RequestPhase::Prefill,
                                     )
                                     .await;
                                 router.spawn_prefill_task(response, Some(tracker), permit)

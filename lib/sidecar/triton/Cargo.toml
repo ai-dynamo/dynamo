@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-frontend-protocols = { workspace = true }
 dynamo-model-card = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }

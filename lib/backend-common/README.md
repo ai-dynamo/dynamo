@@ -174,7 +174,7 @@ Roles and `Worker` behavior:
 | `Decode`     | Resume from a prefill peer's KV | Honors `enable_local_indexer` for declared KV event sources |
 
 The crate re-exports `PrefillResult` and `BootstrapInfo` from
-[`dynamo-llm`'s protocol types](../llm/src/protocols/common/preprocessor.rs);
+[`dynamo-frontend-protocols`](../frontend-protocols/src/common/preprocessor.rs);
 these decorate `PreprocessedRequest` on decode-bound requests. Prefill
 terminals carry their handoff payload via the engine's terminal chunk
 (e.g. `disaggregated_params`).

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_backend_common::DynamoError;
+use dynamo_frontend_protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse, Tensor};
 use dynamo_llm::grpc::service::kserve::inference;
 use dynamo_llm::grpc::service::tensor::dynamo_param_to_kserve;
-use dynamo_llm::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse, Tensor};
 use validator::Validate;
 
 use dynamo_sidecar_common::{invalid_argument, protocol_error};
@@ -131,8 +131,8 @@ pub(crate) fn from_triton_response(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_frontend_protocols::tensor::{FlattenTensor, NvCreateTensorRequest, Tensor};
     use dynamo_llm::grpc::service::kserve::inference;
-    use dynamo_llm::protocols::tensor::{FlattenTensor, NvCreateTensorRequest, Tensor};
     use dynamo_model_card::tensor_model::{DataType, TensorMetadata};
 
     use super::{from_triton_response, to_triton_request};

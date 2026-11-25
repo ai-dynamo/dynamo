@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dynamo_backend_common::DynamoError;
-use dynamo_llm::protocols::openai::classify::{
+use dynamo_frontend_protocols::openai::classify::{
     ClassificationData, ClassificationInput, ClassificationUsage, NvCreateClassifyRequest,
     NvCreateClassifyResponse,
 };

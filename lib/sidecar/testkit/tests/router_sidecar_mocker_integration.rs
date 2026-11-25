@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, FinishReason, LLMEngine};
+use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
 use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager};
 use dynamo_llm::kv_router::PrefillRouter;
-use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_llm::session_affinity::SessionAffinityMode;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_model_card::model_card::TokenizerKind;

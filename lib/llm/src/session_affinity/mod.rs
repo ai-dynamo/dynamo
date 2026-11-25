@@ -19,8 +19,9 @@ pub(crate) use coordinator::{affinity_id, from_table, invalid_argument};
 pub(crate) use dynamo_session_affinity::host::{Hold, subagent_group_affinity_id};
 pub use dynamo_session_affinity::host::{MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode};
 
-pub type LlmResponse =
-    crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>;
+pub type LlmResponse = dynamo_frontend_protocols::types::Annotated<
+    dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput,
+>;
 
 /// The config every frontend affinity table is built from, with its entry
 /// limit read from `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`.

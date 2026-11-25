@@ -34,13 +34,14 @@ areas:
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
   - lib/llm/src/preprocessor/tools/
-  - lib/llm/src/protocols.rs
-  - lib/llm/src/protocols/
-  - lib/llm/src/protocols/anthropic/
-  - lib/llm/src/protocols/common.rs
-  - lib/llm/src/protocols/common/
-  - lib/llm/src/protocols/openai.rs
-  - lib/llm/src/protocols/openai/
+  - lib/frontend-protocols/
+  - lib/frontend-protocols/src/lib.rs
+  - lib/frontend-protocols/src/
+  - lib/frontend-protocols/src/anthropic/
+  - lib/frontend-protocols/src/common.rs
+  - lib/frontend-protocols/src/common/
+  - lib/frontend-protocols/src/openai.rs
+  - lib/frontend-protocols/src/openai/
   - lib/model-card/src/parser_family.rs
   - lib/model-card/src/tensor_model.rs
   - lib/llm/tests/test_reasoning_parser.rs
@@ -241,6 +242,7 @@ areas:
   - lib/lora/src/huggingface.rs
   - lib/lora/src/routing/
   - lib/lora/tests/
+  - lib/frontend-protocols/src/types.rs
   - lib/model-card/
   - lib/llm/src/perf/
   - lib/llm/src/utils/
@@ -607,7 +609,7 @@ shared:
   owners:
   - ops
   - docs
-- glob: lib/llm/src/protocols/agents.rs
+- glob: lib/frontend-protocols/src/agents.rs
   owners:
   - frontend
   - agents
@@ -809,15 +811,15 @@ shared:
   owners:
   - runtime
   - performance
-- glob: lib/llm/src/protocols/openai/audios/
+- glob: lib/frontend-protocols/src/openai/audios/
   owners:
   - frontend
   - multimodal
-- glob: lib/llm/src/protocols/openai/images/
+- glob: lib/frontend-protocols/src/openai/images/
   owners:
   - frontend
   - diffusion
-- glob: lib/llm/src/protocols/openai/videos/
+- glob: lib/frontend-protocols/src/openai/videos/
   owners:
   - frontend
   - diffusion
@@ -1128,11 +1130,11 @@ shared:
   owners:
   - multimodal
   - router
-- glob: lib/llm/src/protocols/openai/images.rs
+- glob: lib/frontend-protocols/src/openai/images.rs
   owners:
   - frontend
   - diffusion
-- glob: lib/llm/src/protocols/openai/videos.rs
+- glob: lib/frontend-protocols/src/openai/videos.rs
   owners:
   - frontend
   - diffusion

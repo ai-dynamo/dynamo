@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Generated from lib/llm/src/protocols/openai/media_schemas/audio.json by
+# Generated from lib/frontend-protocols/src/openai/media_schemas/audio.json by
 # scripts/generate_media_protocols.py. Do not edit.
 
 from __future__ import annotations

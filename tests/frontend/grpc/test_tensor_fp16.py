@@ -16,7 +16,7 @@ starts failing on purpose and forces the discussion.
 
 BF16 is intentionally not covered here because numpy has no native bfloat16
 dtype and ml_dtypes is not a repo dep. The Rust unit tests in
-lib/llm/src/grpc/service/tensor.rs and lib/llm/src/protocols/tensor.rs cover
+lib/llm/src/grpc/service/tensor.rs and lib/frontend-protocols/src/tensor.rs cover
 BF16 encode/decode/serde end-to-end.
 """
 

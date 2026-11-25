@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::llm_backend::{
+use dynamo_frontend_protocols::common::llm_backend::{
     BackendOutput, FinishReason as BackendFinishReason,
 };
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::request_trace::SharedFinishReasonMetadata;
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,

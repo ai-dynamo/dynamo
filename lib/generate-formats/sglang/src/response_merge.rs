@@ -13,7 +13,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use dynamo_llm::protocols::response_merge::PrefillNeed;
+use dynamo_frontend_protocols::response_merge::PrefillNeed;
 
 use crate::{ClientCodec, Native};
 

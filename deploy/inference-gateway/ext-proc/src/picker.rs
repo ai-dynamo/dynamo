@@ -12,7 +12,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use dynamo_llm::http::service::metadata::MetadataHeaderError;
 
-use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, last_non_empty_trimmed_value};
+use dynamo_frontend_protocols::common::extensions::{
+    HEADER_TENANT_ID, last_non_empty_trimmed_value,
+};
 
 /// A model server pod endpoint available for serving requests.
 #[derive(Debug, Clone)]

@@ -69,10 +69,18 @@
 # === frontend  (@ai-dynamo/dynamo-frontend-codeowners) ===
 /lib/lora/                                                                                              @ai-dynamo/dynamo-frontend-codeowners
 /lib/http-server/                                                                                       @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/                                                                                @ai-dynamo/dynamo-frontend-codeowners
 /examples/chat_templates/                                                                               @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/                                                                            @ai-dynamo/dynamo-frontend-codeowners
 /lib/generate-format-catalog/                                                                           @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/lib.rs                                                                      @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/common/                                                                     @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/openai/                                                                     @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/common.rs                                                                   @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/openai.rs                                                                   @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/anthropic/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
 # === agents  (@ai-dynamo/dynamo-agents-codeowners) ===
 /examples/agents/                                                                                       @ai-dynamo/dynamo-agents-codeowners
@@ -473,14 +481,12 @@ requirements.txt                                                                
 /lib/lora/src/routing/                                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /tests/router/configs/                                                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/kv_router/                                                                                 @ai-dynamo/dynamo-router-codeowners
-/lib/llm/src/protocols/                                                                                 @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/telemetry/                                                                                 @ai-dynamo/dynamo-observability-codeowners
 /tests/fault_tolerance/                                                                                 @ai-dynamo/dynamo-fault-tolerance-codeowners
 /lib/llm/src/entrypoint/                                                                                @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/pool_relay/                                                                                @ai-dynamo/dynamo-global-router-codeowners
 /lib/llm/src/grpc/protos/                                                                               @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/kv_router.rs                                                                               @ai-dynamo/dynamo-router-codeowners
-/lib/llm/src/protocols.rs                                                                               @ai-dynamo/dynamo-frontend-codeowners
 /lib/runtime/src/metrics/                                                                               @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/entrypoint.rs                                                                              @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/grpc/service/                                                                              @ai-dynamo/dynamo-frontend-codeowners
@@ -506,8 +512,6 @@ requirements.txt                                                                
 /.github/workflows/xpu-ci.yaml                                                                          @ai-dynamo/dynamo-xpu-codeowners
 /deploy/operator/internal/gms/                                                                          @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/entrypoint/input/                                                                          @ai-dynamo/dynamo-frontend-codeowners
-/lib/llm/src/protocols/common/                                                                          @ai-dynamo/dynamo-frontend-codeowners
-/lib/llm/src/protocols/openai/                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/routing_policy.rs                                                                          @ai-dynamo/dynamo-router-codeowners
 /tests/fault_tolerance/deploy/                                                                          @ai-dynamo/dynamo-fault-tolerance-codeowners
 /lib/llm/src/generate_format.rs                                                                         @ai-dynamo/dynamo-frontend-codeowners
@@ -516,13 +520,10 @@ requirements.txt                                                                
 /lib/llm/src/entrypoint/input.rs                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/preprocessor/media/                                                                        @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/preprocessor/tools/                                                                        @ai-dynamo/dynamo-frontend-codeowners
-/lib/llm/src/protocols/common.rs                                                                        @ai-dynamo/dynamo-frontend-codeowners
-/lib/llm/src/protocols/openai.rs                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/hardware/                                                                        @ai-dynamo/dynamo-fault-tolerance-codeowners
 /components/src/dynamo/common/rl/                                                                       @ai-dynamo/dynamo-rl-codeowners
 /components/src/dynamo/vllm/omni/                                                                       @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/kv_router/publisher/                                                                       @ai-dynamo/dynamo-router-codeowners
-/lib/llm/src/protocols/anthropic/                                                                       @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/migration/                                                                       @ai-dynamo/dynamo-fault-tolerance-codeowners
 /tests/gpu_memory_service/common/                                                                       @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/preprocessor/media.rs                                                                      @ai-dynamo/dynamo-multimodal-codeowners
@@ -531,6 +532,7 @@ requirements.txt                                                                
 /lib/model-card/src/tensor_model.rs                                                                     @ai-dynamo/dynamo-frontend-codeowners
 /lib/backend-common/examples/mocker/                                                                    @ai-dynamo/dynamo-performance-codeowners
 /lib/bindings/python/rust/parsers.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners
+/lib/frontend-protocols/src/types.rs                                                                    @ai-dynamo/dynamo-runtime-codeowners
 /lib/model-card/src/parser_family.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/cancellation/                                                                    @ai-dynamo/dynamo-fault-tolerance-codeowners
 /tests/router/test_pool_relay_e2e.py                                                                    @ai-dynamo/dynamo-global-router-codeowners
@@ -644,7 +646,6 @@ requirements.txt                                                                
 /.github/workflows/fern-docs.yml                                                                        @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /examples/deployments/**/vllm/**                                                                        @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/llm/src/kv_router/README.md                                                                        @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
-/lib/llm/src/protocols/agents.rs                                                                        @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                                                        @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.github/review-prompts/README.md                                                                       @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/vllm/omni/                                                                       @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
@@ -672,10 +673,8 @@ requirements.txt                                                                
 /container/deps/requirements.vllm.txt                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/operator/internal/checkpoint/                                                                   @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/dynamo/lpx/                                                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
+/lib/frontend-protocols/src/agents.rs                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/llm/src/preprocessor/mm_routing/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
-/lib/llm/src/protocols/openai/audios/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/lib/llm/src/protocols/openai/images/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
-/lib/llm/src/protocols/openai/videos/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/router/scheduler/src/selection/*                                                                   @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /tests/frontend/agent_smoke_inputs.py                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /tests/serve/test_sample_diffusion.py                                                                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
@@ -691,8 +690,6 @@ requirements.txt                                                                
 /container/deps/requirements.trtllm.txt                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /container/templates/planner.Dockerfile                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/llm/src/preprocessor/media/rdma.rs                                                                 @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
-/lib/llm/src/protocols/openai/images.rs                                                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
-/lib/llm/src/protocols/openai/videos.rs                                                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/router/session-affinity/src/lib.rs                                                                 @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /tests/fault_tolerance/etcd_ha/utils.py                                                                 @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/protocols/                                                                @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
@@ -723,6 +720,9 @@ requirements.txt                                                                
 /components/src/dynamo/trtllm/publisher.py                                                              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /container/deps/requirements.benchmark.txt                                                              @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners
 /lib/bench/kv_router/dc_ckf_relay_bench.rs                                                              @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-global-router-codeowners
+/lib/frontend-protocols/src/openai/audios/                                                              @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/lib/frontend-protocols/src/openai/images/                                                              @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/frontend-protocols/src/openai/videos/                                                              @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/sidecar/testkit/tests/support/vllm.rs                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /components/src/dynamo/thunderagent_router/                                                             @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-agents-codeowners
 /components/src/dynamo/vllm/health_check.py                                                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
@@ -731,6 +731,8 @@ requirements.txt                                                                
 /lib/llm/src/http/service/busy_threshold.rs                                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-epp-codeowners
 /components/src/dynamo/aisimulate/tests/dgd/                                                            @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /container/templates/vllm_runtime.Dockerfile                                                            @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/frontend-protocols/src/openai/images.rs                                                            @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/frontend-protocols/src/openai/videos.rs                                                            @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/sidecar/testkit/tests/support/sglang.rs                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/fault_tolerance/cancellation/utils.py                                                            @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/multimodal_profiles/vllm_xpu.py                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners

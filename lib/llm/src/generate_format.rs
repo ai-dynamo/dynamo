@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use dynamo_frontend_protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 
 mod error;
 pub use error::{ErrorPhase, WorkerError};
@@ -272,8 +272,8 @@ pub fn named(name: &str) -> anyhow::Result<SharedFormat> {
 #[cfg(test)]
 pub(crate) mod test_formats {
     use super::*;
-    use crate::protocols::common::preprocessor::RoutingHints;
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_model_card::local_model::runtime_config::{
         SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     };

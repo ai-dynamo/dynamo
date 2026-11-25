@@ -14,6 +14,7 @@ use pyo3::{
 };
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_frontend_protocols::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_kv_indexer::host::ApproximateCachePolicyKind as RsApproximateCachePolicyKind;
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, apply_deprecated_overlap_score_weight_override,
@@ -24,7 +25,6 @@ use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
-use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_model_card::frontend_config::{
     ChatTemplateDefaults, FrontendApiConfig, MediaRejectionConfig, MetricsConfig,
 };

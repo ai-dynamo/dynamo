@@ -34,19 +34,19 @@ use crate::{
         KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
         to_worker_selection_session_context,
     },
-    protocols::common::preprocessor::PreprocessedRequest,
-    protocols::common::{
-        FinishReason,
-        extensions::SessionAffinityId,
-        llm_backend::LLMEngineOutput,
-        preprocessor::owned_abort_error,
-        timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
-    },
     routing_policy::{HostedCandidatePolicy, check_candidate_policy},
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
         explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
+};
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::{
+    FinishReason,
+    extensions::SessionAffinityId,
+    llm_backend::LLMEngineOutput,
+    preprocessor::owned_abort_error,
+    timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
 };
 
 mod builder;

@@ -14,13 +14,11 @@
 //! Run: `cargo test -p dynamo-llm --no-default-features --test protocols openapi_response_schema::`.
 
 use axum::http::Method;
-use dynamo_llm::{
-    http::service::{OpenApiRouteKind, RouteDoc, openapi_docs},
-    protocols::openai::{
-        chat_completions::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse},
-        completions::NvCreateCompletionResponse,
-    },
+use dynamo_frontend_protocols::openai::{
+    chat_completions::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse},
+    completions::NvCreateCompletionResponse,
 };
+use dynamo_llm::http::service::{OpenApiRouteKind, RouteDoc, openapi_docs};
 use dynamo_model_card::reasoning_field::{ReasoningField, RoutedReasoning};
 use serde_json::{Value, json};
 

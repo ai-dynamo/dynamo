@@ -14,12 +14,12 @@ use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
 use crate::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptions};
+use dynamo_frontend_protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use dynamo_frontend_protocols::common::preprocessed_mm_identifier;
+use dynamo_frontend_protocols::common::preprocessor::MmRoutingInfo;
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
-use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use dynamo_llm::protocols::common::preprocessed_mm_identifier;
-use dynamo_llm::protocols::common::preprocessor::MmRoutingInfo;
 use dynamo_model_card::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 mod errors;
@@ -414,7 +414,7 @@ fn preprocessed_from_generate(
         .output_options(output_options)
         .mm_routing_info(mm_routing_info)
         .routing(Some(
-            dynamo_llm::protocols::common::preprocessor::RoutingHints {
+            dynamo_frontend_protocols::common::preprocessor::RoutingHints {
                 dp_rank: data_parallel_rank,
                 expected_output_tokens: max_tokens,
                 lora_name: worker.lora_name.map(str::to_owned),

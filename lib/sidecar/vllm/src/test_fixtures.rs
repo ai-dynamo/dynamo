@@ -7,7 +7,7 @@ use dynamo_backend_common::{
     MultimodalData, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions,
     StopConditions,
 };
-use dynamo_llm::protocols::common::preprocessed_mm_routing_hash;
+use dynamo_frontend_protocols::common::preprocessed_mm_routing_hash;
 use prost_types_v14 as prost_types;
 use serde_json::json;
 

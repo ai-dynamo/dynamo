@@ -30,12 +30,12 @@ use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContext
 use dynamo_runtime::pipeline::{Context as PipelineContext, Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
-use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use crate::protocols::openai::chat_completions::{
+use crate::tokenizers::traits::Tokenizer;
+use dynamo_frontend_protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use dynamo_frontend_protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
-use crate::tokenizers::traits::Tokenizer;
 use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 
 /// Maximum asynchronous warmup lifetime after the client turn completes.
@@ -463,8 +463,8 @@ mod tests {
     use tokio::time::Instant;
 
     use crate::preprocessor::prompt::prompt_formatter_from_mdc;
-    use crate::protocols::common::extensions::{AgentHints, NvExt};
-    use crate::protocols::openai::responses::NvCreateResponse;
+    use dynamo_frontend_protocols::common::extensions::{AgentHints, NvExt};
+    use dynamo_frontend_protocols::openai::responses::NvCreateResponse;
     use dynamo_model_card::model_card::ModelDeploymentCard;
 
     use super::*;

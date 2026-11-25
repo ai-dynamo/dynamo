@@ -168,8 +168,8 @@ use futures::Stream;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
-use crate::protocols::common::llm_backend::LLMEngineOutput;
-use crate::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 
 mod metrics;
@@ -5952,8 +5952,8 @@ mod tests {
     /// what they say, independently; early usage completes nothing.
     #[test]
     fn engine_outputs_classify_their_tokens_and_completion_independently() {
-        use crate::protocols::TokenIdType;
-        use crate::protocols::common::FinishReason;
+        use dynamo_frontend_protocols::TokenIdType;
+        use dynamo_frontend_protocols::common::FinishReason;
         use dynamo_protocols::types::CompletionUsage;
 
         let output =

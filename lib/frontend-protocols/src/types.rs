@@ -1,0 +1,222 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+pub use crate::{Annotated, TokenIdType};
+
+pub mod openai {
+    use super::*;
+    use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
+
+    pub mod completions {
+        use super::*;
+
+        pub use crate::openai::completions::{
+            NvCreateCompletionRequest, NvCreateCompletionResponse,
+        };
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Completions API
+        pub type OpenAICompletionsUnaryEngine =
+            UnaryEngine<NvCreateCompletionRequest, NvCreateCompletionResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Completions API
+        pub type OpenAICompletionsStreamingEngine =
+            ServerStreamingEngine<NvCreateCompletionRequest, Annotated<NvCreateCompletionResponse>>;
+    }
+
+    pub mod chat_completions {
+        use super::*;
+
+        pub use crate::openai::chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+            NvCreateChatCompletionStreamResponse,
+        };
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Chat Completions API
+        pub type OpenAIChatCompletionsUnaryEngine =
+            UnaryEngine<NvCreateChatCompletionRequest, NvCreateChatCompletionResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Chat Completions API
+        pub type OpenAIChatCompletionsStreamingEngine = ServerStreamingEngine<
+            NvCreateChatCompletionRequest,
+            Annotated<NvCreateChatCompletionStreamResponse>,
+        >;
+    }
+
+    pub mod generate {
+        use super::*;
+        use crate::common::llm_backend::LLMEngineOutput;
+        use crate::common::preprocessor::PreprocessedRequest;
+
+        /// A [`ServerStreamingEngine`] implementation for the token-in/token-out
+        /// `Generate` API.
+        ///
+        /// The registered engine is **raw**: it consumes a preprocessed
+        /// [`PreprocessedRequest`] and streams [`LLMEngineOutput`] directly, with
+        /// no Backend/decoder in between. The handler is responsible for
+        /// projecting engine output into the selected client format.
+        pub type GenerateStreamingEngine =
+            ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+    }
+
+    pub mod embeddings {
+        use super::*;
+
+        pub use crate::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Embeddings API
+        pub type OpenAIEmbeddingsUnaryEngine =
+            UnaryEngine<NvCreateEmbeddingRequest, NvCreateEmbeddingResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Embeddings API
+        pub type OpenAIEmbeddingsStreamingEngine =
+            ServerStreamingEngine<NvCreateEmbeddingRequest, Annotated<NvCreateEmbeddingResponse>>;
+    }
+
+    pub mod classify {
+        use super::*;
+
+        pub use crate::openai::classify::{NvCreateClassifyRequest, NvCreateClassifyResponse};
+
+        /// A [`UnaryEngine`] implementation for the `/classify` API
+        pub type OpenAIClassifyUnaryEngine =
+            UnaryEngine<NvCreateClassifyRequest, NvCreateClassifyResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the `/classify` API
+        pub type OpenAIClassifyStreamingEngine =
+            ServerStreamingEngine<NvCreateClassifyRequest, Annotated<NvCreateClassifyResponse>>;
+    }
+
+    pub mod pooling {
+        use super::*;
+
+        pub use crate::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
+
+        /// A [`UnaryEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingUnaryEngine =
+            UnaryEngine<NvCreatePoolingRequest, NvCreatePoolingResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingStreamingEngine =
+            ServerStreamingEngine<NvCreatePoolingRequest, Annotated<NvCreatePoolingResponse>>;
+    }
+
+    pub mod rerank {
+        use super::*;
+
+        pub use crate::openai::rerank::{NvCreateRerankRequest, NvCreateRerankResponse};
+
+        pub type OpenAIRerankUnaryEngine =
+            UnaryEngine<NvCreateRerankRequest, NvCreateRerankResponse>;
+
+        pub type OpenAIRerankStreamingEngine =
+            ServerStreamingEngine<NvCreateRerankRequest, Annotated<NvCreateRerankResponse>>;
+    }
+
+    pub mod images {
+        use super::*;
+
+        pub use crate::openai::images::{NvCreateImageRequest, NvImagesResponse};
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Images API
+        pub type OpenAIImagesUnaryEngine = UnaryEngine<NvCreateImageRequest, NvImagesResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Images API.
+        ///
+        /// **Note**: This "streaming" refers to the internal routing/distribution architecture,
+        /// NOT client-facing Server-Sent Events (SSE) streaming. Image generation does not
+        /// support progressive streaming to clients - images are generated completely and
+        /// returned as finished artifacts (URLs or base64).
+        ///
+        /// The HTTP endpoint folds this stream into a single response before returning to clients,
+        /// similar to how embeddings work. The streaming infrastructure is used for:
+        /// - Consistent routing architecture across all model types
+        /// - Request distribution via PushRouter
+        /// - Worker fault detection and load balancing
+        pub type OpenAIImagesStreamingEngine =
+            ServerStreamingEngine<NvCreateImageRequest, Annotated<NvImagesResponse>>;
+    }
+
+    pub mod videos {
+        use super::*;
+
+        pub use crate::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Videos API
+        pub type OpenAIVideosUnaryEngine = UnaryEngine<NvCreateVideoRequest, NvVideosResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Videos API
+        pub type OpenAIVideosStreamingEngine =
+            ServerStreamingEngine<NvCreateVideoRequest, Annotated<NvVideosResponse>>;
+    }
+
+    pub mod audios {
+        use super::*;
+
+        pub use crate::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
+
+        /// A [`UnaryEngine`] implementation for the Audio Speech API
+        pub type OpenAIAudiosUnaryEngine =
+            UnaryEngine<NvCreateAudioSpeechRequest, NvAudioSpeechResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the Audio Speech API
+        pub type OpenAIAudiosStreamingEngine =
+            ServerStreamingEngine<NvCreateAudioSpeechRequest, Annotated<NvAudioSpeechResponse>>;
+    }
+
+    pub mod transcriptions {
+        use super::*;
+
+        pub use crate::openai::transcriptions::{
+            NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest,
+        };
+
+        pub type OpenAITranscriptionsUnaryEngine =
+            UnaryEngine<NvCreateAudioTranscriptionRequest, NvAudioTranscriptionResponse>;
+
+        pub type OpenAITranscriptionsStreamingEngine = ServerStreamingEngine<
+            NvCreateAudioTranscriptionRequest,
+            Annotated<NvAudioTranscriptionResponse>,
+        >;
+    }
+}
+
+pub mod generic {
+    use super::*;
+    use dynamo_runtime::pipeline::{
+        BidirectionalStreamingEngine, ServerStreamingEngine, UnaryEngine,
+    };
+
+    pub mod tensor {
+        use super::*;
+
+        pub use crate::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
+
+        /// A [`UnaryEngine`] implementation for the generic Tensor API
+        pub type TensorUnaryEngine = UnaryEngine<NvCreateTensorRequest, NvCreateTensorResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the generic Tensor API
+        pub type TensorStreamingEngine =
+            ServerStreamingEngine<NvCreateTensorRequest, Annotated<NvCreateTensorResponse>>;
+    }
+
+    pub mod realtime {
+        use super::*;
+
+        pub use dynamo_protocols::types::realtime::{
+            DynamoRealtimeClientEvent, RealtimeServerEvent,
+        };
+
+        /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI
+        /// Realtime API.
+        ///
+        /// Many-in / many-out: the client streams a sequence of [`DynamoRealtimeClientEvent`]
+        /// frames over the lifetime of one session and receives a stream of
+        /// [`RealtimeServerEvent`] frames back. Used by the experimental
+        /// `/v1/realtime` WebSocket endpoint. The canonical concrete implementor of
+        /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
+        pub type RealtimeBidirectionalEngine =
+            BidirectionalStreamingEngine<DynamoRealtimeClientEvent, Annotated<RealtimeServerEvent>>;
+    }
+}
+
+pub use generic::realtime::RealtimeBidirectionalEngine;

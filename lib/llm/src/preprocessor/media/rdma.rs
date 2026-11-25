@@ -19,8 +19,8 @@ use std::sync::{Arc, LazyLock};
 use super::decoders::DecodedMediaMetadata;
 use super::decoders::image::ImageLayout;
 #[cfg(feature = "media-ffmpeg")]
-use crate::protocols::common::decoded_media::DecodedVideoMetadata;
-use crate::protocols::common::decoded_media::{
+use dynamo_frontend_protocols::common::decoded_media::DecodedVideoMetadata;
+use dynamo_frontend_protocols::common::decoded_media::{
     DecodedImageLayout, DecodedImageMetadata, DecodedMediaDataType, DecodedMediaDescriptor,
     DecodedMediaMetadata as WireMediaMetadata, DecodedMediaTensorInfo, NixlMemType,
     NixlRegionDescriptor,
@@ -488,7 +488,7 @@ mod tests {
         use super::super::decoders::image::ImageLayout;
         use super::super::decoders::{DecodedMediaMetadata, ImageMetadata};
         use super::{MediaTensorInfo, RdmaMediaDataDescriptor};
-        use crate::protocols::common::decoded_media::DecodedMediaDescriptor;
+        use dynamo_frontend_protocols::common::decoded_media::DecodedMediaDescriptor;
         use dynamo_memory::nixl::{MemType, NixlDescriptor};
         use image::{ColorType, ImageFormat};
 

@@ -4,9 +4,9 @@
 use anyhow::{Ok, Result};
 use dynamo_runtime::config::environment_names::model::huggingface as env_hf;
 
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_renderer::PromptContextMixin;
 use dynamo_renderer::PromptFormatter;
@@ -680,8 +680,8 @@ mod cached_multimodal_uuid {
     use std::sync::Arc;
 
     use super::Request;
+    use dynamo_frontend_protocols::common::preprocessor::MultimodalData;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
-    use dynamo_llm::protocols::common::preprocessor::MultimodalData;
     use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_runtime::error::{DynamoError, ErrorType};
 
@@ -764,7 +764,7 @@ mod cached_multimodal_uuid {
         #[cfg(feature = "mm-routing")]
         {
             let mut builder =
-                dynamo_llm::protocols::common::preprocessor::PreprocessedRequest::builder();
+                dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest::builder();
             let mm_image_entries = preprocessor
                 .gather_multi_modal_data(&request, &mut builder, None, &[])
                 .await
@@ -978,8 +978,8 @@ mod media_io_kwargs_forwarding {
 }
 
 mod context_length_validation {
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_model_card::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
     use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_runtime::error::{DynamoError, ErrorType};
@@ -1321,11 +1321,11 @@ mod context_length_validation {
 }
 
 mod embedding_without_chat_template {
+    use dynamo_frontend_protocols::common::preprocessor::PreprocessedEmbeddingRequest;
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_frontend_protocols::openai::embeddings::NvCreateEmbeddingRequest;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
-    use dynamo_llm::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-    use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
     use dynamo_model_card::local_model::runtime_config::TokenizerBackend;
     use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_model_card::model_type::ModelType;

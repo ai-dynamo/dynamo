@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
-use dynamo_llm::{
-    discovery::UNKNOWN_METRIC_MODEL,
-    protocols::{Annotated, openai::chat_completions::NvCreateChatCompletionStreamResponse},
+use dynamo_frontend_protocols::{
+    Annotated, openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
+use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
+use dynamo_llm::discovery::UNKNOWN_METRIC_MODEL;
 use dynamo_runtime::{
     config::environment_names::llm::{
         DYN_DISABLE_FRONTEND_NVEXT, DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,

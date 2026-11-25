@@ -9,13 +9,13 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
-use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
-};
 use crate::request_trace::{
     AgentContextTraceState, RequestReplayMetrics, SharedFinishReasonMetadata,
+};
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::timing::RequestTracker;
+use dynamo_frontend_protocols::openai::{
+    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
 
 struct RequestTraceRequestEndState {
@@ -47,7 +47,7 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
 }
 
 fn shared_replay_metrics(
-    token_ids: &[crate::protocols::TokenIdType],
+    token_ids: &[dynamo_frontend_protocols::TokenIdType],
     trace_block_size: usize,
 ) -> Option<Arc<RequestReplayMetrics>> {
     if trace_block_size == 0 {
@@ -234,10 +234,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::protocols::common::extensions::{AgentContext, InputTrigger};
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
+    use dynamo_frontend_protocols::common::extensions::{AgentContext, InputTrigger};
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
     struct TrackerDropStream {
         tracker: Arc<RequestTracker>,

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::common::extensions::AgentContext;
-use crate::protocols::openai::chat_completions::{
+use dynamo_frontend_protocols::common::extensions::AgentContext;
+use dynamo_frontend_protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 

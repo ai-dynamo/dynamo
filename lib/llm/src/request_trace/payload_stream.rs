@@ -6,8 +6,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 
-use crate::protocols::openai::ParsingOptions;
-use crate::protocols::openai::chat_completions::{
+use dynamo_frontend_protocols::openai::ParsingOptions;
+use dynamo_frontend_protocols::openai::chat_completions::{
     DeltaAggregator, NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -865,7 +865,7 @@ mod tests {
         for error in [false, true] {
             let mut chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
             chunks[0].data.as_mut().unwrap().tool_call_completion.push(
-                crate::protocols::openai::chat_completions::ToolCallCompletion {
+                dynamo_frontend_protocols::openai::chat_completions::ToolCallCompletion {
                     choice_index: 0,
                     tool_index: 0,
                     complete: false,

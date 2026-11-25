@@ -122,7 +122,7 @@ fn test_mistral_native_checkpoint_serves_on_the_rust_frontend() {
     let dynamo_renderer::PromptFormatter::OAI(formatter) =
         dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc(&mdc).unwrap();
     assert!(formatter.renders_continuation_natively());
-    let mut request: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
+    let mut request: dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest =
         serde_json::from_value(serde_json::json!({
             "model": "mistral",
             "messages": [{"role": "user", "content": "hi"}],
@@ -161,7 +161,7 @@ fn native_selection_preserves_dual_format_metadata() {
             let dynamo_renderer::PromptFormatter::OAI(formatter) =
                 dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc(&card).unwrap();
             let request = serde_json::from_value::<
-                dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
+                dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest,
             >(
                 serde_json::json!({"model":"test", "messages":[{"role":"user","content":"hi"}]}),
             )

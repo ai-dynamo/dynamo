@@ -17,17 +17,19 @@ use crate::{
     migration::Migration,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
-    types::{
-        Annotated,
-        openai::{
-            chat_completions::{
-                NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-                OpenAIChatCompletionsStreamingEngine,
-            },
-            completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+};
+use dynamo_frontend_protocols::common::llm_backend::{
+    BackendOutput, LLMEngineOutput, PreprocessedRequest,
+};
+use dynamo_frontend_protocols::types::{
+    Annotated,
+    openai::{
+        chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+            OpenAIChatCompletionsStreamingEngine,
         },
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_http_server::metrics::Metrics;
@@ -387,7 +389,7 @@ where
 {
     // In-process cards have no model type, so the preprocessor skips this check, yet
     // `mistral` still selects `mistral_4`, which would drop every pre-v11 tool call.
-    crate::protocols::openai::chat_completions::unified_parser::check_family_tokens(
+    dynamo_frontend_protocols::openai::chat_completions::unified_parser::check_family_tokens(
         card.runtime_config.tool_call_parser.as_deref(),
         card.runtime_config.reasoning_parser.as_deref(),
         tokenizer.as_ref(),

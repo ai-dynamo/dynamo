@@ -1,0 +1,1518 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use derive_builder::Builder;
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+pub use dynamo_kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
+};
+use dynamo_lora::runtime::RuntimeLoraSourceUri;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
+use dynamo_scheduler::host::{RequestLifecycle, RouterConfigOverride, RoutingConstraints};
+use serde::{Deserialize, Serialize};
+
+use uuid::Uuid;
+
+use super::decoded_media::DecodedMediaDescriptor;
+use super::extensions::{AgentContext, RouterParams};
+use super::llm_backend::DecoderCheckpoint;
+use super::timing::{RequestPhase, RequestTracker};
+use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::TokenIdType;
+
+/// Routing hints for directing requests to specific workers.
+/// These fields are extracted from nvext and used by the router to determine
+/// which worker(s) should handle the request.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(default)]
+pub struct RoutingHints {
+    /// General backend instance ID for direct routing (aggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_instance_id: Option<u64>,
+
+    /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// Targeted decode worker ID for disaggregated serving (GAIE Stage 2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+
+    /// Data parallel rank for the decode worker
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<u32>,
+
+    /// Data parallel rank for the prefill worker in disaggregated serving
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+
+    /// Expected number of output tokens for this request.
+    /// Used as a hint for routing decisions to estimate resource requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_output_tokens: Option<u32>,
+
+    /// LORA adapter name for this request.
+    /// Used for LORA-aware routing and tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
+
+    /// Canonical base model for a request-time LoRA adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model_name: Option<String>,
+
+    /// Opaque source URI sent only to the selected worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_source_uri: Option<RuntimeLoraSourceUri>,
+
+    /// Request-time LoRA resolver protocol version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_resolution_version: Option<u16>,
+
+    /// Cache namespace for request-scoped KV cache isolation.
+    #[serde(
+        default,
+        rename = "cache_salt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_namespace: Option<String>,
+
+    /// Priority jump in seconds for queue ordering.
+    /// A positive value decreases the effective arrival time, moving the request
+    /// ahead in the scheduler queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_jump: Option<f64>,
+
+    /// Strict router pending-queue priority tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
+
+    /// Backend engine scheduling priority forwarded to the generate call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+
+    /// Worker IDs provided externally and not discovered by the router.
+    /// When set, only workers in this set are considered during scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+
+    /// Request routing constraints used for worker compatibility and soft preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_constraints: Option<RoutingConstraints>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct BootstrapInfo {
+    /// The host address for bootstrap connection
+    pub bootstrap_host: String,
+
+    /// The port for bootstrap connection
+    pub bootstrap_port: u16,
+
+    /// Unique room ID for this request's KV transfer session
+    pub bootstrap_room: u64,
+
+    /// Stable mocker lifecycle identity. Role, backend, and wire version are
+    /// validated by the bootstrap registration and framing protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_id: Option<Uuid>,
+}
+
+/// Directional pointer to a predecessor worker's `engine.generate` span.
+/// Used for prefill→decode handoff, migration retries, and multi-modal
+/// pipelines — wherever a downstream worker should render an OTel `Link`
+/// back to a previous worker that handled (or attempted) the same
+/// request. Framework-owned; engines do not read or write this.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TraceLink {
+    /// W3C trace_id of the predecessor span (32 hex chars).
+    pub trace_id: String,
+    /// W3C span_id of the predecessor span (16 hex chars).
+    pub span_id: String,
+}
+
+/// One attempt's remote prefill booking, releasable before the attempt that
+/// made it completes. The router that made the booking implements this;
+/// [`MigrationState`] only parks the handle for a committed retry to run.
+pub trait PrefillBookingRelease: std::fmt::Debug + Send + Sync {
+    /// Release the booking. The booking is gone when the future resolves.
+    fn release(&self) -> futures::future::BoxFuture<'_, ()>;
+}
+
+/// Frontend-local state shared by every attempt from one migration manager.
+/// The selected router records a failed worker before the error is exposed;
+/// later attempts use the accumulated set as an attempt-local exclusion.
+#[derive(Debug, Clone, Default)]
+pub struct MigrationState {
+    inner: Arc<OnceLock<Mutex<MigrationStateInner>>>,
+}
+
+#[derive(Debug, Default)]
+struct MigrationStateInner {
+    excluded_worker_ids: Vec<WorkerId>,
+    last_error: Option<DynamoError>,
+    request_lifecycle: Option<Box<RequestLifecycle>>,
+    prefill_release: Option<Box<dyn PrefillBookingRelease>>,
+}
+
+impl MigrationState {
+    pub fn record_failure(&self, worker_id: WorkerId, error: Option<DynamoError>) {
+        let mut inner = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inner.excluded_worker_ids.contains(&worker_id) {
+            inner.excluded_worker_ids.push(worker_id);
+        }
+        if error.is_some() {
+            inner.last_error = error;
+        }
+    }
+
+    pub fn excluded_worker_ids(&self) -> Vec<WorkerId> {
+        let Some(inner) = self.inner.get() else {
+            return Vec::new();
+        };
+        inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .excluded_worker_ids
+            .clone()
+    }
+
+    pub fn exhausted_error(&self) -> Option<DynamoError> {
+        let inner = self.inner.get()?;
+        let last_error = inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_error
+            .clone()?;
+        let (error_type, message) = if match_error_chain(
+            &last_error,
+            &[ErrorType::WorkerOverloaded],
+            &[ErrorType::ResourceExhausted],
+        ) {
+            (
+                ErrorType::ResourceExhausted,
+                "all eligible workers rejected the request as overloaded",
+            )
+        } else {
+            (
+                ErrorType::Unavailable,
+                "no untried eligible worker remains after migration",
+            )
+        };
+        Some(
+            DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build(),
+        )
+    }
+
+    pub fn take_request_lifecycle(&self) -> Option<Box<RequestLifecycle>> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .take()
+    }
+
+    pub fn store_request_lifecycle(&self, lifecycle: Box<RequestLifecycle>) {
+        let replaced = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .replace(lifecycle);
+        if let Some(replaced) = replaced {
+            tracing::warn!(
+                replaced = ?replaced,
+                "Replacing an unclaimed request-classifier migration lifecycle"
+            );
+        }
+    }
+
+    pub fn abort_request_lifecycle(&self, error: Option<&AbortCause>) {
+        let Some(mut lifecycle) = self.take_request_lifecycle() else {
+            return;
+        };
+        lifecycle.abort(error.map(owned_abort_error));
+    }
+
+    /// Park the latest attempt's remote prefill booking. Its prefill can
+    /// outlive a failed decode to serve an in-flight KV transfer, so only a
+    /// committed retry, which re-books the same request ID, releases it early.
+    pub fn store_prefill_release(&self, release: Box<dyn PrefillBookingRelease>) {
+        self.inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release = Some(release);
+    }
+
+    pub fn take_prefill_release(&self) -> Option<Box<dyn PrefillBookingRelease>> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release
+            .take()
+    }
+}
+
+/// Owned abort payload for classifier lifecycle events: the typed
+/// [`DynamoError`] from the chain when one exists, else the whole chain
+/// converted so the root cause survives.
+pub fn owned_abort_error(error: &AbortCause) -> Arc<AbortCause> {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = cause {
+        if let Some(dynamo_error) = current.downcast_ref::<DynamoError>() {
+            return Arc::new(dynamo_error.clone());
+        }
+        cause = current.source();
+    }
+    Arc::new(DynamoError::from(
+        error as &(dyn std::error::Error + 'static),
+    ))
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrefillResult {
+    /// Disaggregated execution parameters. Engine-owned; the framework
+    /// reads this through to the underlying inference engine without
+    /// interpretation.
+    pub disaggregated_params: serde_json::Value,
+    /// Prompt token details produced during prefill
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<dynamo_protocols::types::PromptTokensDetails>,
+}
+
+/// Optional multimodal routing-only data.
+/// This is used by the router to compute overlaps on an alternate token sequence
+/// (for example, MM-expanded tokens) without changing execution token_ids.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(default)]
+pub struct MmRoutingInfo {
+    /// Token IDs to use for routing overlap computation.
+    pub routing_token_ids: Vec<TokenIdType>,
+
+    /// Block-level multimodal metadata aligned with routing_token_ids blocks.
+    /// Use `None` entries for blocks without multimodal objects.
+    pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+
+    /// Unpadded expanded prompt length. Use instead of `routing_token_ids.len()`
+    /// (which includes block-padding) when a real token count is needed.
+    #[serde(default)]
+    pub expanded_prompt_len: usize,
+}
+
+/// Media carried between the frontend and backend.
+///
+/// A `Url` wire value can deserialize as either `Url` or `RawUrl` when parsing
+/// is unnecessary. Consumers must handle both representations of URL input.
+#[derive(Serialize, Debug, Clone)]
+pub enum MultimodalData {
+    Url(url::Url),
+    /// URL text without a parsed URL object; not all values have been validated.
+    #[serde(rename(serialize = "Url"))]
+    RawUrl(String),
+    Decoded(DecodedMediaDescriptor),
+    /// Payload-free media slot resolved by a backend processor cache.
+    UuidOnly(String),
+    /// Opaque JSON for a backend-registered modality processor.
+    Json(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for MultimodalData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        use std::borrow::Cow;
+
+        // Keep the existing names and variant order for old and new senders.
+        #[derive(Deserialize)]
+        enum WireData<'a> {
+            Url(#[serde(borrow)] Cow<'a, str>),
+            RawUrl(String),
+            Decoded(DecodedMediaDescriptor),
+            UuidOnly(String),
+            Json(serde_json::Value),
+        }
+
+        match WireData::deserialize(deserializer)? {
+            WireData::Url(value) if is_plain_base64_data_uri(&value) => {
+                Ok(Self::RawUrl(value.into_owned()))
+            }
+            WireData::Url(value) => {
+                url::Url::deserialize(value.as_ref().into_deserializer()).map(Self::Url)
+            }
+            WireData::RawUrl(value) => Ok(Self::RawUrl(value)),
+            WireData::Decoded(value) => Ok(Self::Decoded(value)),
+            WireData::UuidOnly(value) => Ok(Self::UuidOnly(value)),
+            WireData::Json(value) => Ok(Self::Json(value)),
+        }
+    }
+}
+
+/// Check complete blocks without a per-byte early exit so LLVM can vectorize.
+fn is_base64_payload(payload: &[u8]) -> bool {
+    fn allowed(b: u8) -> bool {
+        (b.wrapping_sub(b'A') <= 25)
+            | (b.wrapping_sub(b'a') <= 25)
+            | (b.wrapping_sub(b'0') <= 9)
+            | (b == b'+')
+            | (b == b'/')
+            | (b == b'=')
+    }
+    let (blocks, tail) = payload.as_chunks::<32>();
+    for block in blocks {
+        let mut valid = true;
+        for &byte in block {
+            valid &= allowed(byte);
+        }
+        if !valid {
+            return false;
+        }
+    }
+    tail.iter().copied().all(allowed)
+}
+
+/// Recognize data URIs whose bytes, and therefore cache keys, need no normalization.
+fn is_plain_base64_data_uri(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("data:") else {
+        return false;
+    };
+    let Some((header, payload)) = rest.split_once(',') else {
+        return false;
+    };
+    value.len() <= u32::MAX as usize
+        && !header.starts_with('/')
+        && header.ends_with(";base64")
+        && header
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'?' && b != b'#')
+        && is_base64_payload(payload.as_bytes())
+}
+
+// multimodal map containing {mm_part_type: [data...]}
+pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
+
+/// Backend cache UUIDs aligned positionally with multimodal data slots.
+pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
+
+/// A reference into [`MultimodalDataMap`] preserving the media traversal order.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MultimodalItemRef {
+    pub modality: String,
+    pub index: usize,
+}
+
+/// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
+/// crate is responsible for converting request from the public APIs to this internal representation.
+#[derive(Serialize, Deserialize, Clone, Builder)]
+pub struct PreprocessedRequest {
+    /// ID of the model to use.
+    ///
+    /// `serde(default)` so canary payloads from the runtime's
+    /// `HealthCheckManager` deserialize without carrying a model name —
+    /// real traffic always has this set by the preprocessor; only the
+    /// in-process canary path is allowed to omit it.
+    #[serde(default)]
+    pub model: String,
+
+    /// Attempt-local migration state. Frontend-only: it is neither serialized
+    /// to workers nor exposed as a caller-controlled routing hint.
+    #[builder(default)]
+    #[serde(skip)]
+    pub migration_state: Option<MigrationState>,
+
+    /// Set when remote prefill has staged KV blocks that only this request's
+    /// decode worker can release, so the decode leg must reach that worker even
+    /// after the client disconnects.
+    ///
+    /// Narrower than `RequestPhase::Decode`: the conditional-disaggregation
+    /// bypass reaches decode without running remote prefill and leaves this
+    /// unset. Frontend-only, like `migration_state` — the routing decision it
+    /// feeds is made in-process before the request is serialized to a worker.
+    #[builder(default)]
+    #[serde(skip)]
+    pub staged_kv_cleanup: bool,
+
+    /// Prompt tokens shared by prefill and decode request clones.
+    ///
+    /// Disaggregated serving runs those requests concurrently. Keeping the
+    /// immutable prompt behind `Arc` makes cloning the token storage constant-time;
+    /// paths that append generated tokens use `Arc::make_mut`.
+    #[builder(setter(into))]
+    #[serde(
+        serialize_with = "serialize_token_ids",
+        deserialize_with = "deserialize_token_ids"
+    )]
+    pub token_ids: Arc<Vec<TokenIdType>>,
+
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings
+    /// If provided, this takes precedence over token_ids for inference
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
+
+    // Multimodal data
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// User-provided backend cache identities aligned with `multi_modal_data`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_uuids: Option<MultimodalUuidMap>,
+
+    /// Media references in gather order: content parts, after the formatter's
+    /// message ordering. A chat template that regroups media by modality
+    /// renders a different placeholder order.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_order: Option<Vec<MultimodalItemRef>>,
+
+    /// Optional multimodal routing-only fields (separate from execution payload).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_routing_info: Option<MmRoutingInfo>,
+
+    /// StopConditions are conditions that the inference engine will use to stop generation.
+    #[serde(default)]
+    pub stop_conditions: StopConditions,
+
+    /// SamplingOptions directs the inference engine to use sampling instead of greedy decoding.
+    /// More documentation on how and on the order in which sampling options are applied
+    /// are needed.
+    #[serde(default)]
+    pub sampling_options: SamplingOptions,
+
+    /// OutputOptions are options that control the output of the inference engine such as whether
+    /// to return log probabilities, or whether to skip special tokens in output.
+    #[serde(default)]
+    pub output_options: OutputOptions,
+
+    /// The EOS token ID(s) for the Model
+    /// Not every backend needs this, but those that do can find it here.
+    /// TODO - refactor this to a better location
+    #[builder(default)]
+    #[serde(default)]
+    pub eos_token_ids: Vec<TokenIdType>,
+
+    /// The computed checksum of the Model Deployment Card (MDC).
+    #[builder(default)]
+    pub mdc_sum: Option<String>,
+
+    /// User requested annotations for the request
+    #[builder(default)]
+    #[serde(default)]
+    pub annotations: Vec<String>,
+
+    /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingHints>,
+
+    /// Router configuration overrides for this specific request
+    #[builder(default)]
+    pub router_config_override: Option<RouterConfigOverride>,
+
+    /// Structured prefill result
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_result: Option<PrefillResult>,
+
+    /// Multimodal encoder handoff payload, set by the frontend when
+    /// forwarding a request from an Encode worker to a downstream
+    /// Prefill/Aggregated peer. Engine-opaque JSON object;
+    /// the framework neither inspects nor mutates the contents. Object-
+    /// only by contract (see Python `require_encoder_result` and the
+    /// Rust `LLMEngineOutput::encode_terminal` constructor).
+    #[builder(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_object"
+    )]
+    pub encoder_result: Option<serde_json::Value>,
+
+    /// Directional link to a predecessor worker's `engine.generate` span.
+    /// Set by `PrefillRouter` on the decode side (prefill→decode handoff)
+    /// and by the migration `RetryManager` on retry attempts. Framework-
+    /// owned — engines must not read or write. Consumed by `EngineAdapter`
+    /// at request start to record an OTel `Link` on its `engine.generate`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_link: Option<TraceLink>,
+
+    /// Decoder state from the previous attempt, carried into a migration retry so the
+    /// fresh decoder can restore withheld stop-filter text and replay any token IDs still
+    /// buffered by incremental detokenization. `RetryManager` sets it and `Backend`
+    /// consumes it in the same frontend process; `#[serde(skip)]` prevents it from reaching
+    /// a remote worker.
+    #[builder(default)]
+    #[serde(skip)]
+    pub jail_seed: Option<DecoderCheckpoint>,
+
+    /// Bootstrap info for disaggregated serving
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_info: Option<BootstrapInfo>,
+
+    /// Additional arguments for extensibility
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<serde_json::Value>,
+
+    /// Versioned KV hint message from Dynamo's routing layer for the selected backend request.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hint: Option<KvHint>,
+
+    /// Whether the backend should allow a reasoning phase before enforcing
+    /// guided output. SGLang consumes this as its per-request
+    /// `require_reasoning` engine argument.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_reasoning: bool,
+
+    /// Router-specific parameters forwarded from `nvext.router`.
+    /// Consumed by router implementations (e.g. the global router) and ignored
+    /// by engines/backends.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterParams>,
+
+    /// Optional agent identity metadata forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<AgentContext>,
+
+    /// Opaque frontend-derived scope for partitioning backend `ImageLoader`
+    /// URL caches and Dynamo-owned image embedding caches. This does not
+    /// namespace engine KV caches.
+    ///
+    /// This is carried separately from `agent_context` because backends need
+    /// only the opaque cache scope, not agent lifecycle metadata.
+    /// The optional field is safe across rolling upgrades: older readers
+    /// ignore it and newer readers default it when an older frontend omits it.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_cache_scope: Option<String>,
+
+    /// Multimodal processor kwargs forwarded to the backend engine
+    /// (e.g. `{"use_audio_in_video": true}` for omni models).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_processor_kwargs: Option<serde_json::Value>,
+
+    /// Per-request media I/O options, forwarded untouched from the incoming request
+    /// when the worker owns media decoding. Absent when the frontend decoded the
+    /// media itself and already consumed them.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<serde_json::Value>,
+
+    /// Optional request timestamp in milliseconds forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
+
+    /// Milliseconds between the frontend receiving this request and the router dispatching this
+    /// attempt to its worker, so it includes routing, router queueing and, for a decode leg, the
+    /// prefill leg. Router-owned, unlike the client's `request_timestamp_ms`: a backend can order
+    /// admission by the original arrival with it (TensorRT-LLM's
+    /// `DisaggregatedParams.orig_elapsed_s`). Absent when no frontend router dispatched the
+    /// request.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_since_arrival_ms: Option<f64>,
+
+    /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
+    #[builder(default)]
+    #[serde(skip)]
+    pub tracker: Option<Arc<RequestTracker>>,
+
+    /// Set by the runtime's `HealthCheckManager` when this request originated
+    /// from a canary probe. Engines may use it in `generate()` to bypass
+    /// cross-worker coordination (KV transfer, bootstrap handshake,
+    /// `require_prefill_result`) and run local-only. The wire-format key
+    /// is `_HEALTH_CHECK` so the canary payload built by
+    /// `dynamo.common.backend.health_check.build_health_check_payload`
+    /// (and the legacy `HealthCheckPayload` base class) round-trips through
+    /// this field. Skipped from serialization when false so normal traffic
+    /// doesn't carry the marker.
+    #[builder(default)]
+    #[serde(
+        default,
+        rename = "_HEALTH_CHECK",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_probe: bool,
+}
+
+/// `DYN_TOKEN_IDS_AS_BYTES=1`: put `token_ids` on the request plane as one packed
+/// little-endian int32 blob instead of a sequence. On a binary codec (msgpack) the
+/// Python worker then receives `bytes` and never allocates one Python int per
+/// token; the TRT-LLM handler turns it into an int32 array. Human-readable codecs
+/// (JSON) keep the sequence form. Deserialization accepts both forms.
+/// Enable only when every msgpack worker runs a release with this reader: an older
+/// worker decodes the blob through rmp-serde's `deserialize_seq`, one token per
+/// byte, with no error.
+static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::request_plane::DYN_TOKEN_IDS_AS_BYTES,
+    )
+});
+
+/// Readers decode the packed form as signed int32 (the engines' token type), so
+/// ids above `i32::MAX` keep the sequence form.
+fn token_ids_fit_i32(ids: &[TokenIdType]) -> bool {
+    ids.iter().all(|&id| id <= i32::MAX as TokenIdType)
+}
+
+/// Upper bound on the capacity reserved from a sequence size hint; a MessagePack
+/// array header can claim any length before supplying the elements.
+const TOKEN_IDS_PREALLOC_CAP: usize = 1 << 20;
+
+fn serialize_token_ids<S>(ids: &Arc<Vec<TokenIdType>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serialize_token_ids_with(ids, serializer, *TOKEN_IDS_AS_BYTES)
+}
+
+fn serialize_token_ids_with<S>(
+    ids: &[TokenIdType],
+    serializer: S,
+    packed: bool,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if packed && !serializer.is_human_readable() && token_ids_fit_i32(ids) {
+        let mut buf = Vec::with_capacity(ids.len() * 4);
+        for id in ids {
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+        return serializer.serialize_bytes(&buf);
+    }
+    ids.serialize(serializer)
+}
+
+fn deserialize_token_ids<'de, D>(deserializer: D) -> Result<Arc<Vec<TokenIdType>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TokenIdsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TokenIdsVisitor {
+        type Value = Vec<TokenIdType>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a sequence of token ids or packed little-endian int32 bytes")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out =
+                Vec::with_capacity(seq.size_hint().unwrap_or(0).min(TOKEN_IDS_PREALLOC_CAP));
+            while let Some(id) = seq.next_element::<TokenIdType>()? {
+                out.push(id);
+            }
+            Ok(out)
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if !v.len().is_multiple_of(4) {
+                return Err(E::custom(
+                    "packed token_ids byte length is not a multiple of 4",
+                ));
+            }
+            Ok(v.chunks_exact(4)
+                .map(|c| TokenIdType::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect())
+        }
+
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_bytes(&v)
+        }
+    }
+
+    deserializer.deserialize_any(TokenIdsVisitor).map(Arc::new)
+}
+
+/// Enforce the object-only `encoder_result` contract at the serde boundary.
+/// The handoff payload is engine-opaque but must be a JSON object at every hop;
+/// reject arrays/scalars here so a non-conforming (e.g. cross-language)
+/// producer fails fast instead of leaking a malformed shape downstream.
+fn deserialize_optional_object<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    if let Some(v) = &value
+        && !v.is_object()
+    {
+        return Err(serde::de::Error::custom(
+            "encoder_result must be a JSON object",
+        ));
+    }
+    Ok(value)
+}
+
+impl std::fmt::Debug for PreprocessedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreprocessedRequest")
+            .field("model", &self.model)
+            .field("token_count", &self.token_ids.len())
+            .field("output_options", &self.output_options)
+            .field("extra_args", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreprocessedRequest {
+    pub fn phase(&self) -> RequestPhase {
+        self.tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or_default()
+    }
+
+    pub fn has_annotation(&self, annotation: &str) -> bool {
+        self.annotations.contains(&annotation.to_string())
+    }
+
+    /// Get the value of an annotation in the format "key:value"
+    /// Returns None if the annotation is not found or has no value
+    pub fn get_annotation_value(&self, key: &str) -> Option<String> {
+        let prefix = format!("{}:", key);
+        self.annotations
+            .iter()
+            .find(|a| a.starts_with(&prefix))
+            .map(|a| a[prefix.len()..].to_string())
+    }
+
+    pub fn builder() -> PreprocessedRequestBuilder {
+        PreprocessedRequestBuilder::default()
+    }
+
+    /// Get mutable access to routing hints, creating default if None
+    pub fn routing_mut(&mut self) -> &mut RoutingHints {
+        self.routing.get_or_insert_with(RoutingHints::default)
+    }
+
+    /// The request's tracker, created if the request has none. The tracker is not serialized, so
+    /// a request another router dispatched arrives without one; the new tracker starts from the
+    /// age that router stamped, so a later stamp adds this process's time to it.
+    pub fn ensure_tracker(&mut self) -> &Arc<RequestTracker> {
+        let upstream_elapsed = self
+            .elapsed_since_arrival_ms
+            .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
+            .unwrap_or_default();
+        self.tracker.get_or_insert_with(|| {
+            Arc::new(RequestTracker::with_upstream_elapsed(upstream_elapsed))
+        })
+    }
+
+    /// Stamp [`Self::elapsed_since_arrival_ms`] from the request's tracker. The router calls
+    /// this as it dispatches each attempt, and every attempt is stamped from the same tracker, so
+    /// a retry does not count earlier time twice. A request without a tracker keeps the value it
+    /// arrived with.
+    pub fn stamp_elapsed_since_arrival(&mut self) {
+        if let Some(tracker) = &self.tracker {
+            self.elapsed_since_arrival_ms =
+                Some(tracker.elapsed_since_arrival().as_secs_f64() * 1000.0);
+        }
+    }
+
+    /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
+    /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
+    pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
+        let Some(mm) = self.mm_routing_info.as_ref() else {
+            return (&self.token_ids, None);
+        };
+        let tokens = mm.routing_token_ids.as_slice();
+        if tokens.is_empty() {
+            return (&self.token_ids, None);
+        }
+        (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
+
+    pub fn expanded_prompt_token_count(&self) -> usize {
+        self.mm_routing_info
+            .as_ref()
+            .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)
+            .map_or(self.token_ids.len(), |mm| mm.expanded_prompt_len)
+    }
+}
+
+/// [`PreprocessedEmbeddingRequest`] is the internal representation of an embedding request
+/// after preprocessing. Contains tokenized input ready for embedding engines.
+#[derive(Serialize, Deserialize, Debug, Clone, Builder)]
+pub struct PreprocessedEmbeddingRequest {
+    /// Tokenized input text as token IDs (one Vec per input text)
+    pub token_ids: Vec<Vec<TokenIdType>>,
+
+    /// Model to use for embedding
+    pub model: String,
+
+    /// Encoding format preference
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding_format: Option<String>,
+
+    /// Maximum prompt tokens requested by the client; -1 means the model limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub truncate_prompt_tokens: Option<i64>,
+
+    /// Number of dimensions for output embeddings (if supported)
+    pub dimensions: Option<u32>,
+
+    /// The computed checksum of the Model Deployment Card (MDC)
+    #[builder(default)]
+    pub mdc_sum: Option<String>,
+
+    /// User requested annotations for the request
+    #[builder(default)]
+    pub annotations: Vec<String>,
+}
+
+impl PreprocessedEmbeddingRequest {
+    pub fn has_annotation(&self, annotation: &str) -> bool {
+        self.annotations.contains(&annotation.to_string())
+    }
+}
+
+impl PreprocessedEmbeddingRequest {
+    pub fn builder() -> PreprocessedEmbeddingRequestBuilder {
+        PreprocessedEmbeddingRequestBuilder::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_blocks_match_scalar_for_all_bytes_and_tails() {
+        for length in [0, 1, 31, 32, 33, 63, 64, 65] {
+            let mut payload = vec![b'A'; length];
+            assert!(is_base64_payload(&payload));
+            for offset in 0..length {
+                for byte in 0..=255 {
+                    payload[offset] = byte;
+                    let expected = payload
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+                    assert_eq!(
+                        is_base64_payload(&payload),
+                        expected,
+                        "{length}/{offset}/{byte}"
+                    );
+                }
+                payload[offset] = b'A';
+            }
+        }
+    }
+
+    #[test]
+    fn multimodal_uri_wire_compatibility_and_order() {
+        #[derive(Serialize, Deserialize, Debug)]
+        enum OldData {
+            Url(url::Url),
+            #[serde(rename(serialize = "Url"))]
+            RawUrl(String),
+            Decoded(DecodedMediaDescriptor),
+            UuidOnly(String),
+        }
+        let values = [
+            ("data:image/jpeg;base64,/9j/AA==", true),
+            (" data:image/jpeg;base64,AA==\n", false),
+            ("DATA:image/jpeg;base64,AA==", false),
+            ("data:/image/../jpeg;base64,AA==", false),
+            ("data:image/jpeg;base64,A%41==", false),
+            ("data:image/jpeg;base64,AA==#fragment", false),
+            ("https://EXAMPLE.com/a/../image.jpg", false),
+        ];
+        for (value, fast) in values {
+            let wire = serde_json::json!({"Url": value});
+            let decoded: MultimodalData = serde_json::from_value(wire).unwrap();
+            let expected = url::Url::parse(value).unwrap();
+            assert_eq!(
+                matches!(decoded, MultimodalData::RawUrl(_)),
+                fast,
+                "{value}"
+            );
+            // A new public variant must update this compatibility test too.
+            let legacy = match decoded {
+                MultimodalData::Url(value) => OldData::Url(value),
+                MultimodalData::RawUrl(value) => OldData::RawUrl(value),
+                MultimodalData::Decoded(value) => OldData::Decoded(value),
+                MultimodalData::UuidOnly(value) => OldData::UuidOnly(value),
+                MultimodalData::Json(_) => panic!("URL fixture decoded as custom JSON"),
+            };
+            assert_eq!(
+                serde_json::to_value(legacy).unwrap(),
+                serde_json::json!({"Url": expected})
+            );
+        }
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "nixl_metadata": "test-metadata",
+            "nixl_descriptor": {"addr": 0, "size": 3, "mem_type": "Dram", "device_id": 0},
+            "shape": [1, 1, 3], "dtype": "UINT8", "metadata": null,
+            "content_hash": "0123456789abcdef"
+        }))
+        .unwrap();
+        let old = vec![
+            OldData::Url(url::Url::parse(values[0].0).unwrap()),
+            OldData::RawUrl(values[0].0.into()),
+            OldData::Url(url::Url::parse("https://example.com/image.jpg").unwrap()),
+            OldData::Decoded(descriptor),
+            OldData::UuidOnly("cache-id".into()),
+        ];
+        let json = serde_json::to_vec(&old).unwrap();
+        let new: Vec<MultimodalData> = serde_json::from_slice(&json).unwrap();
+        let back = serde_json::to_vec(&new).unwrap();
+        assert_eq!(back, json);
+        let _: Vec<OldData> = serde_json::from_slice(&back).unwrap();
+        for (packed, named) in [
+            (rmp_serde::to_vec(&old).unwrap(), false),
+            (rmp_serde::to_vec_named(&old).unwrap(), true),
+        ] {
+            let decoded: Vec<MultimodalData> = rmp_serde::from_slice(&packed).unwrap();
+            let back = if named {
+                rmp_serde::to_vec_named(&decoded)
+            } else {
+                rmp_serde::to_vec(&decoded)
+            }
+            .unwrap();
+            let legacy: Vec<OldData> = rmp_serde::from_slice(&back).unwrap();
+            assert_eq!(serde_json::to_vec(&legacy).unwrap(), json);
+        }
+        let invalid = serde_json::json!({"Url": "relative"});
+        assert_eq!(
+            serde_json::from_value::<MultimodalData>(invalid.clone())
+                .unwrap_err()
+                .to_string(),
+            serde_json::from_value::<OldData>(invalid)
+                .unwrap_err()
+                .to_string()
+        );
+        let malformed = serde_json::json!({"Url": "http://[invalid"});
+        assert!(
+            serde_json::from_slice::<MultimodalData>(&serde_json::to_vec(&malformed).unwrap())
+                .is_err()
+        );
+        assert!(
+            rmp_serde::from_slice::<MultimodalData>(&rmp_serde::to_vec_named(&malformed).unwrap())
+                .is_err()
+        );
+        assert!(matches!(
+            serde_json::from_value::<MultimodalData>(serde_json::json!({"RawUrl":"raw"})).unwrap(),
+            MultimodalData::RawUrl(_)
+        ));
+    }
+
+    #[test]
+    fn multimodal_uri_header_matches_url_parser() {
+        let cases = (0u8..=127)
+            .map(char::from)
+            .chain(['é', '💡'])
+            .map(|c| format!("data:image/{c};base64,AA=="))
+            .chain(["data://[invalid;base64,AA==".to_string()]);
+        for value in cases {
+            let expected = url::Url::parse(&value);
+            let actual =
+                serde_json::from_value::<MultimodalData>(serde_json::json!({"Url": value}));
+            assert_eq!(actual.is_ok(), expected.is_ok(), "{value:?}");
+            if let Ok(expected) = expected {
+                assert_eq!(
+                    serde_json::to_value(actual.unwrap()).unwrap(),
+                    serde_json::json!({"Url": expected}),
+                    "{value:?}"
+                );
+            }
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TokenIdsOnly {
+        #[serde(deserialize_with = "deserialize_token_ids")]
+        token_ids: Arc<Vec<TokenIdType>>,
+    }
+
+    struct Bytes<'a>(&'a [u8]);
+
+    impl serde::Serialize for Bytes<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    struct PackedTokenIds<'a>(&'a [u8]);
+
+    impl serde::Serialize for PackedTokenIds<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field("token_ids", &Bytes(self.0))?;
+            st.end()
+        }
+    }
+
+    fn le_bytes(ids: &[TokenIdType]) -> Vec<u8> {
+        ids.iter().flat_map(|id| id.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn worker_extension_numbers_remain_native_for_independent_receivers() {
+        use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
+        #[derive(Deserialize)]
+        struct BackendSettings {
+            temperature: f64,
+            ranks: Vec<u64>,
+        }
+        #[derive(Deserialize)]
+        struct BackendRequest {
+            extra_args: BackendSettings,
+        }
+        let request: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "m", "token_ids": [1, 2, 3], "stop_conditions": {},
+            "sampling_options": {}, "output_options": {},
+            "extra_args": {"temperature": 0.7, "ranks": [0, 5]}
+        }))
+        .unwrap();
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let received: BackendRequest = codec.decode(&codec.encode(&request).unwrap()).unwrap();
+            assert_eq!(received.extra_args.temperature, 0.7);
+            assert_eq!(received.extra_args.ranks, vec![0, 5]);
+        }
+    }
+
+    #[test]
+    fn packed_token_ids_deserialize_from_msgpack_bytes() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&le_bytes(&ids))).unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_token_ids_reject_odd_byte_length() {
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&[1, 0, 0])).unwrap();
+        assert!(rmp_serde::from_slice::<TokenIdsOnly>(&payload).is_err());
+    }
+
+    #[test]
+    fn sequence_token_ids_still_deserialize() {
+        #[derive(serde::Serialize)]
+        struct Seq {
+            token_ids: Vec<TokenIdType>,
+        }
+        let ids = vec![7u32, 8, 9];
+        let payload = rmp_serde::to_vec_named(&Seq {
+            token_ids: ids.clone(),
+        })
+        .unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    struct TokenIdsField<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for TokenIdsField<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serialize_token_ids_with(self.ids, serializer, self.packed)
+        }
+    }
+
+    struct Request<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for Request<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field(
+                "token_ids",
+                &TokenIdsField {
+                    ids: self.ids,
+                    packed: self.packed,
+                },
+            )?;
+            st.end()
+        }
+    }
+
+    fn encode(ids: &[TokenIdType], packed: bool) -> Vec<u8> {
+        rmp_serde::to_vec_named(&Request { ids, packed }).unwrap()
+    }
+
+    // fixmap(1) + fixstr header + the 9 key bytes precede the `token_ids` value.
+    const VALUE_OFFSET: usize = 1 + 1 + "token_ids".len();
+
+    #[test]
+    fn packed_serialization_emits_int32_bytes_that_round_trip() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0xc4, "msgpack bin8 marker");
+        assert_eq!(&payload[VALUE_OFFSET + 2..], le_bytes(&ids).as_slice());
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn ids_above_i32_max_keep_the_sequence_form() {
+        let ids = vec![7u32, i32::MAX as u32 + 1];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0x92, "msgpack fixarray(2), not bin");
+        assert_eq!(payload, encode(&ids, false));
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_flag_leaves_json_as_a_sequence() {
+        let ids = vec![1u32, 2];
+        let json = serde_json::to_string(&Request {
+            ids: &ids,
+            packed: true,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"token_ids":[1,2]}"#);
+    }
+
+    fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(token_ids)
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid request")
+    }
+
+    #[test]
+    fn clone_shares_token_storage_until_mutated() {
+        let request = request_with_tokens(vec![1, 2, 3]);
+        let mut cloned = request.clone();
+
+        assert!(Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        Arc::make_mut(&mut cloned.token_ids).push(4);
+
+        assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
+        assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn metadata_upload_capability_is_serialized_but_never_debug_logged() {
+        let mut request = request_with_tokens(vec![1, 2, 3]);
+        request.extra_args = Some(
+            serde_json::json!({"nvext": {"metadata_upload": {"destination": {"url": "https://storage.example?sig=secret", "required_headers": {"x-token": "private-token"}}}}}),
+        );
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("private-token"));
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains("sig=secret"));
+        assert!(serialized.contains("private-token"));
+    }
+
+    #[test]
+    fn shared_tokens_preserve_json_wire_format() {
+        let request = request_with_tokens(vec![11, 22, 33]);
+        let json = serde_json::to_string(&request).expect("serializes");
+        assert!(json.contains(r#""token_ids":[11,22,33]"#), "{json}");
+
+        let decoded: PreprocessedRequest = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(decoded.token_ids.as_slice(), &[11, 22, 33]);
+    }
+
+    #[test]
+    fn embedding_encoding_format_serde_omits_none() {
+        let mut request = PreprocessedEmbeddingRequest {
+            token_ids: vec![vec![1, 2, 3]],
+            model: "test-model".to_string(),
+            encoding_format: None,
+            truncate_prompt_tokens: None,
+            dimensions: None,
+            mdc_sum: None,
+            annotations: Vec::new(),
+        };
+
+        let omitted = serde_json::to_value(&request).unwrap();
+        assert!(omitted.get("encoding_format").is_none());
+        assert!(omitted.get("truncate_prompt_tokens").is_none());
+        let round_trip: PreprocessedEmbeddingRequest = serde_json::from_value(omitted).unwrap();
+        assert!(round_trip.encoding_format.is_none());
+        assert!(round_trip.truncate_prompt_tokens.is_none());
+
+        request.encoding_format = Some("float".to_string());
+        request.truncate_prompt_tokens = Some(-1);
+        let explicit = serde_json::to_value(&request).unwrap();
+        assert_eq!(explicit["encoding_format"], "float");
+        assert_eq!(explicit["truncate_prompt_tokens"], -1);
+    }
+
+    #[test]
+    fn bootstrap_info_carries_only_stable_handoff_identity() {
+        let handoff_id = Uuid::from_u128(42);
+        let info = BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 1234,
+            bootstrap_room: 7,
+            handoff_id: Some(handoff_id),
+        };
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["handoff_id"], handoff_id.to_string());
+        assert!(value.get("mocker_handoff_protocol_version").is_none());
+        assert!(value.get("mocker_handoff_role").is_none());
+        assert!(value.get("mocker_handoff_engine_type").is_none());
+        assert_eq!(
+            serde_json::from_value::<BootstrapInfo>(value)
+                .unwrap()
+                .handoff_id,
+            Some(handoff_id)
+        );
+    }
+
+    /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,
+    /// `default`, and `skip_serializing_if`. Each assertion targets a distinct
+    /// attribute; if any is removed the test fails.
+    #[test]
+    fn is_probe_serde_round_trip() {
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        // skip_serializing_if: default (false) is omitted.
+        assert!(!req.is_probe);
+        let normal = serde_json::to_string(&req).unwrap();
+        assert!(!normal.contains("_HEALTH_CHECK"), "got: {normal}");
+        // default: absent marker round-trips to false.
+        let back: PreprocessedRequest = serde_json::from_str(&normal).unwrap();
+        assert!(!back.is_probe);
+
+        // rename: true serializes as `_HEALTH_CHECK` and round-trips.
+        req.is_probe = true;
+        let probe = serde_json::to_string(&req).unwrap();
+        assert!(probe.contains("\"_HEALTH_CHECK\":true"), "got: {probe}");
+        let back: PreprocessedRequest = serde_json::from_str(&probe).unwrap();
+        assert!(back.is_probe);
+    }
+
+    /// Covers the wire contract for the backend reasoning gate: old payloads
+    /// default to false, false is omitted, and true survives serialization.
+    #[test]
+    fn require_reasoning_serde_round_trip() {
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        let normal = serde_json::to_value(&req).unwrap();
+        assert!(
+            !normal
+                .as_object()
+                .unwrap()
+                .contains_key("require_reasoning")
+        );
+        let back: PreprocessedRequest = serde_json::from_value(normal).unwrap();
+        assert!(!back.require_reasoning);
+
+        req.require_reasoning = true;
+        let guided = serde_json::to_value(&req).unwrap();
+        assert_eq!(guided["require_reasoning"], true);
+        let back: PreprocessedRequest = serde_json::from_value(guided).unwrap();
+        assert!(back.require_reasoning);
+    }
+
+    #[test]
+    fn disabled_reasoning_with_thinking_budget_serde_round_trip() {
+        let req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions {
+                max_thinking_tokens: Some(0),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .require_reasoning(false)
+            .build()
+            .unwrap();
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert!(value.get("require_reasoning").is_none());
+        assert_eq!(value["stop_conditions"]["max_thinking_tokens"], 0);
+        let back: PreprocessedRequest = serde_json::from_value(value).unwrap();
+        assert!(!back.require_reasoning);
+        assert_eq!(back.stop_conditions.max_thinking_tokens, Some(0));
+    }
+
+    /// Canary payloads carry only engine-relevant fields. All other required
+    /// fields (`model`, `stop_conditions`, `sampling_options`, etc.) must
+    /// pick up `serde(default)` so the runtime's `JsonProbeAdapter` can
+    /// deserialize without rewriting the JSON. Regression guard against the
+    /// "missing field" failures the smoke tests hit.
+    #[test]
+    fn minimal_canary_payload_deserializes() {
+        let req: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1],
+            "_HEALTH_CHECK": true,
+        }))
+        .unwrap();
+        assert_eq!(req.token_ids.as_slice(), &[1]);
+        assert!(req.is_probe);
+        assert_eq!(req.model, "");
+    }
+
+    /// `encoder_result` is the multimodal encoder handoff payload set by
+    /// the frontend when forwarding a request to a downstream
+    /// Prefill/Aggregated worker. The wire shape is engine-opaque -- the
+    /// framework must round-trip the value byte-identical without
+    /// inspecting or wrapping it.
+    #[test]
+    fn encoder_result_round_trips_through_serde() {
+        let payload = serde_json::json!({
+            "embedding_handle": {
+                "shape": [1, 1024],
+                "dtype": "fp16",
+                "uri": "nixl://encoder-0/embedding-42",
+            },
+            "processed_token_ids": [128_000_u32, 200_001_u32, 200_002_u32],
+        });
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .encoder_result(Some(payload.clone()))
+            .build()
+            .unwrap();
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["encoder_result"], payload);
+
+        let back: PreprocessedRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.encoder_result, Some(payload));
+    }
+
+    /// `encoder_result` defaults to `None` and is absent from the
+    /// serialized payload when unset (via `skip_serializing_if`), matching
+    /// the convention used by sibling optional fields like `prefill_result`.
+    #[test]
+    fn encoder_result_is_absent_when_none() {
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+        assert!(req.encoder_result.is_none());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("encoder_result"),
+            "encoder_result must be absent from wire when None; got {json}"
+        );
+    }
+
+    #[test]
+    fn routing_hints_cache_namespace_serializes_as_cache_salt() {
+        let hints = RoutingHints {
+            cache_namespace: Some("tenant-a".to_string()),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&hints).unwrap();
+
+        assert_eq!(value["cache_salt"], "tenant-a");
+        assert!(value.get("cache_namespace").is_none());
+
+        let decoded: RoutingHints = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.cache_namespace.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn a_new_tracker_starts_from_the_upstream_stamp() {
+        let request = |stamp: Option<f64>| {
+            let mut request = PreprocessedRequest::builder()
+                .model("test".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .build()
+                .unwrap();
+            request.elapsed_since_arrival_ms = stamp;
+            request
+        };
+        let restamped = |mut request: PreprocessedRequest| {
+            request.ensure_tracker();
+            request.stamp_elapsed_since_arrival();
+            request.elapsed_since_arrival_ms.unwrap()
+        };
+
+        assert!((1500.0..2500.0).contains(&restamped(request(Some(1500.0)))));
+        // A stamp that is not a duration is dropped, not carried forward.
+        for stamp in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            assert!(
+                (0.0..1000.0).contains(&restamped(request(stamp))),
+                "{stamp:?}"
+            );
+        }
+
+        // The longest stamp that is still a duration does not overflow when time is added.
+        assert!(restamped(request(Some(1.8e22))) >= 1.8e22);
+
+        // An existing tracker is kept: the frontend's own clock already covers the request.
+        let mut received = request(Some(1500.0));
+        let tracker = Arc::new(RequestTracker::new());
+        received.tracker = Some(Arc::clone(&tracker));
+        assert!(Arc::ptr_eq(received.ensure_tracker(), &tracker));
+        assert!((0.0..1000.0).contains(&restamped(received)));
+    }
+}

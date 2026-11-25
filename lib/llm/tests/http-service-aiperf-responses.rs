@@ -16,15 +16,13 @@
 
 use anyhow::Error;
 use async_stream::stream;
-use dynamo_llm::{
-    http::service::service_v2::HttpService,
-    protocols::{
-        Annotated,
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        },
+use dynamo_frontend_protocols::{
+    Annotated,
+    openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_runtime::{
     CancellationToken,

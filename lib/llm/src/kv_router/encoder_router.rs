@@ -23,7 +23,7 @@ use dynamo_runtime::{
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
-use crate::protocols::common::{
+use dynamo_frontend_protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::{MultimodalData, TraceLink},
 };
@@ -458,8 +458,8 @@ mod tests {
     };
 
     use crate::discovery::CommittedWorkerSetTarget;
-    use crate::protocols::common::preprocessor::MultimodalData;
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_frontend_protocols::common::preprocessor::MultimodalData;
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_model_card::model_card::ModelDeploymentCard;
 
     use super::*;

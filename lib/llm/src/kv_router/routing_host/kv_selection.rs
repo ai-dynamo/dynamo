@@ -18,12 +18,12 @@ use dynamo_session_affinity::host::WorkerAffinityTarget;
 
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
-    protocols::common::preprocessor::PreprocessedRequest,
-    protocols::{
-        TokenIdType,
-        common::{preprocessor::RoutingHints, timing::RequestPhase},
-    },
     session_affinity::AffinityTarget,
+};
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::{
+    TokenIdType,
+    common::{preprocessor::RoutingHints, timing::RequestPhase},
 };
 
 #[cfg(test)]
@@ -522,12 +522,10 @@ mod tests {
     use dynamo_scheduler::host::{RoutingConstraints, RoutingEligibility, WorkerEligibilityError};
 
     use super::*;
-    use crate::{
-        lora::{
-            filter::LoraFilter, routing::table::LoraRoutingTable, state_tracker::LoraStateTracker,
-        },
-        protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
+    use crate::lora::{
+        filter::LoraFilter, routing::table::LoraRoutingTable, state_tracker::LoraStateTracker,
     };
+    use dynamo_frontend_protocols::common::{preprocessor::RoutingHints, timing::RequestPhase};
     use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
     fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {

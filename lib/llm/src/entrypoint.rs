@@ -17,15 +17,19 @@ use dynamo_scheduler::host::PrefillLoadEstimator;
 
 use crate::{
     admission_gate::WorkerAdmissionGate, backend::ExecutionContext, engines::StreamingEngine,
-    types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
+use dynamo_frontend_protocols::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_model_card::{local_model::LocalModel, model_card::ModelDeploymentCard};
 
 /// Callback type for chat engine factory (async)
 pub type PrefillRoutedEngine = dynamo_runtime::pipeline::ServiceEngine<
-    dynamo_runtime::pipeline::SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+    dynamo_runtime::pipeline::SingleIn<
+        dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest,
+    >,
     dynamo_runtime::pipeline::ManyOut<
-        crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>,
+        dynamo_frontend_protocols::types::Annotated<
+            dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput,
+        >,
     >,
 >;
 

@@ -30,7 +30,7 @@ HOT_PATH_RULES = (
     ("lib/llm/src/preprocessor", 9, "llm request preprocessing"),
     ("lib/llm/src/http", 8, "http request path"),
     ("lib/llm/src/grpc", 8, "grpc request path"),
-    ("lib/llm/src/protocols", 7, "protocol conversion"),
+    ("lib/frontend-protocols/src", 7, "protocol conversion"),
     ("lib/llm/src/migration.rs", 7, "request retry/migration"),
     ("lib/llm/src/kv_router", 8, "llm kv routing"),
     ("lib/router/scheduler/src", 9, "router scheduling kernel"),

@@ -16,9 +16,9 @@ use crate::{
     },
     kv_router::plugins::RouterPluginBuilder,
     namespace::NamespaceFilter,
-    types::openai::chat_completions::{
-        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-    },
+};
+use dynamo_frontend_protocols::types::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
 use dynamo_model_card::{
     endpoint_type::EndpointType, local_model::runtime_config::TokenizerBackend,
@@ -482,7 +482,7 @@ fn update_model_metrics(
 mod tests {
     use super::*;
     use crate::engines::make_echo_engine;
-    use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+    use dynamo_frontend_protocols::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_model_card::model_card::{LoraInfo, ModelDeploymentCard};
 

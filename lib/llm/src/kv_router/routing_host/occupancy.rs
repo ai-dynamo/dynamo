@@ -9,10 +9,8 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_scheduler::host::KvSchedulerError;
 use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 
-use crate::{
-    protocols::common::llm_backend::LLMEngineOutput,
-    protocols::common::preprocessor::PreprocessedRequest,
-};
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
 
 pub(crate) struct HostedOccupancy {
     state: Arc<RoutingOccupancyState>,

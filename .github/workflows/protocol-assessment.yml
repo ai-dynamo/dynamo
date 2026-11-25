@@ -7,7 +7,7 @@ on:
     paths:
       - 'container/context.yaml'
       - 'Cargo.lock'
-      - 'lib/llm/src/protocols/**'
+      - 'lib/frontend-protocols/src/**'
       - 'lib/llm/src/http/service.rs'
       - 'lib/llm/src/http/service/service_v2.rs'
       - 'lib/llm/src/http/service/openai.rs'

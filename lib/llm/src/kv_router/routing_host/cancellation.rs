@@ -12,9 +12,8 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContext, Error},
 };
 
-use crate::{
-    protocols::common::preprocessor::PreprocessedRequest, protocols::common::timing::RequestPhase,
-};
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::timing::RequestPhase;
 
 /// How long a disconnected decode request may keep router state alive while it
 /// finishes reaching its worker. On expiry we abandon the operation and release
@@ -203,7 +202,7 @@ mod tests {
         CLEANUP_DISPATCH_TIMEOUT, CleanupBudget, StagedKv, await_with_cleanup_policy,
         cancel_on_stop,
     };
-    use crate::protocols::common::timing::RequestPhase;
+    use dynamo_frontend_protocols::common::timing::RequestPhase;
 
     struct PendingUntilDropped(Arc<AtomicBool>);
 

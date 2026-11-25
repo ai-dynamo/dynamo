@@ -11,10 +11,10 @@
 // `set_status` operations mirror the OTel `Span` API.
 
 use dynamo_backend_common::FirstTokenNotifier;
-use dynamo_llm::http::service::response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders};
-use dynamo_llm::protocols::common::extensions::{
+use dynamo_frontend_protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
 };
+use dynamo_llm::http::service::response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders};
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::Context as PipelineContext;

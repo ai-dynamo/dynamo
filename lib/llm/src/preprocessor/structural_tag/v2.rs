@@ -11,7 +11,7 @@ use dynamo_parsers_v2::structural_tag::{
 };
 
 #[cfg(test)]
-use crate::protocols::openai::chat_completions::tool_parser_v2;
+use dynamo_frontend_protocols::openai::chat_completions::tool_parser_v2;
 
 use super::StructuralTagBuildRequest;
 
