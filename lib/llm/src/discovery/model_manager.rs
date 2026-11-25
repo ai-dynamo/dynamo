@@ -2503,14 +2503,31 @@ impl ModelManager {
             &effective_kv_router_config,
             index_inputs,
         );
-        let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
-            Some(
-                self.get_or_create_kv_source_membership_watch(&endpoint)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        // A frontend that dials its engines itself reaches them through the
+        // runtime's direct dispatch; they publish KV events on their own sockets
+        // and have no event-plane KV sources to track. Direct mode requires
+        // process-local discovery, so it never sees sidecar workers and one
+        // answer per router is enough. A router that wants no events keeps the
+        // runtime ingress, which then subscribes to nothing.
+        let has_direct_kv_events = endpoint
+            .drt()
+            .direct_dispatch::<
+                crate::protocols::common::preprocessor::PreprocessedRequest,
+                crate::protocols::Annotated<
+                    crate::protocols::common::llm_backend::LLMEngineOutput,
+                >,
+            >()
+            .is_some()
+            && kv_event_source_requirement.should_subscribe();
+        let kv_source_membership =
+            if !has_direct_kv_events && kv_event_source_requirement.should_subscribe() {
+                Some(
+                    self.get_or_create_kv_source_membership_watch(&endpoint)
+                        .await?,
+                )
+            } else {
+                None
+            };
 
         let runtime_model_name = model_name.clone();
         let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
@@ -2531,6 +2548,7 @@ impl ModelManager {
                 .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
+            has_direct_kv_events,
         )
         .await?;
 

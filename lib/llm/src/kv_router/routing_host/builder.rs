@@ -13,7 +13,8 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, WorkerSelectionPolicyHostExt};
+use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicyContext};
 use dynamo_router_policies::router_modes;
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
@@ -272,11 +273,11 @@ pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPick
     };
     let factory = crate::kv_router::plugins::router_plugin_registry().resolve_type(policy_type)?;
     // Routing-mode policies read neither the role nor the partition.
-    let policy = factory(
+    let policy = factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::default(),
         WorkerType::Aggregated,
         RoutingPartitionRef::new("", ""),
-    );
+    ));
     policy
         .into_hosted_picker()
         .map_err(|_| anyhow::anyhow!("{policy_type} policy cannot run without KV routing"))

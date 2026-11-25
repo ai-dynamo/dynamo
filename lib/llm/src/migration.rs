@@ -1102,7 +1102,7 @@ mod tests {
     #[test]
     fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         for &(error_type, reason) in &[
             (ErrorType::Cancelled, "request.cancelled"),
@@ -1172,7 +1172,7 @@ mod tests {
     #[test]
     fn pre_stream_validation_refusal_is_not_a_transport_failure() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 
         for error_type in [
             ErrorType::InvalidArgument,

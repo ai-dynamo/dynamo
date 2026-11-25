@@ -15,8 +15,9 @@ use tower::ServiceExt;
 
 use super::server::create_router;
 use super::*;
-use crate::plugins::worker_selection::SelectionConfig;
-use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyProviderError};
+use crate::plugins::RouterPluginRegistry;
+use crate::plugins::host::RouterPluginRegistryHostExt;
+use crate::plugins::worker_selection::WorkerSelectionPolicyProviderError;
 use crate::tracking_hash::tracking_hash_context;
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
@@ -37,7 +38,8 @@ use dynamo_scheduler::{MmRoutingInfoRequest, NormalizedPrompt, TrackingHashInput
 use dynamo_scheduler::{TrackingHashContext, TrackingHashScope};
 use dynamo_worker_selection::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerSelectionPolicy, WorkerSelectionPolicyContext, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 use tempfile::NamedTempFile;
 
@@ -81,7 +83,7 @@ struct WorkerIdScorer;
 impl WorkerScorer for WorkerIdScorer {
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -97,7 +99,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
@@ -115,7 +117,7 @@ struct NonFiniteScorer;
 impl WorkerScorer for NonFiniteScorer {
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -131,7 +133,7 @@ struct InvalidRowPicker;
 impl WorkerPicker for InvalidRowPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(input.candidates().len())
@@ -143,7 +145,7 @@ struct RejectAllFilter;
 impl WorkerFilter for RejectAllFilter {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(false)
@@ -155,7 +157,7 @@ struct RejectWorker(WorkerId);
 impl WorkerFilter for RejectWorker {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(candidate.worker().worker_id != self.0)
@@ -300,11 +302,7 @@ impl FactoryRendezvous {
 
 async fn native_policy_app<F>(worker_type: dynamo_router_protocol::WorkerType, factory: F) -> Router
 where
-    F: for<'a> Fn(
-            &SelectionConfig,
-            dynamo_router_protocol::WorkerType,
-            RoutingPartitionRef<'a>,
-        ) -> WorkerSelectionPolicy
+    F: for<'a> Fn(WorkerSelectionPolicyContext<'a>) -> WorkerSelectionPolicy
         + Send
         + Sync
         + 'static,
@@ -373,14 +371,16 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
     let rendezvous = Arc::clone(&factory_rendezvous);
     let app = native_policy_app(
         dynamo_router_protocol::WorkerType::Prefill,
-        move |config, worker_type, partition| {
+        move |context| {
             calls.fetch_add(1, Ordering::Relaxed);
-            partitions.lock().unwrap().push(partition.into_owned());
-            worker_types.lock().unwrap().push(worker_type);
+            partitions
+                .lock()
+                .unwrap()
+                .push(context.partition().into_owned());
+            worker_types.lock().unwrap().push(context.worker_type());
             rendezvous.wait_for_peer();
             WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
-                worker_type.as_str(),
+                context.worker_type().as_str(),
                 vec![Box::new(RejectWorker(1))],
                 vec![Box::new(WorkerIdScorer)],
                 Box::new(LowestCostPicker),
@@ -449,17 +449,13 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
-    let app = native_policy_app(
-        dynamo_router_protocol::WorkerType::Aggregated,
-        |config, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                vec![Box::new(NonFiniteScorer)],
-                Box::new(LowestCostPicker),
-            )
-        },
-    )
+    let app = native_policy_app(dynamo_router_protocol::WorkerType::Aggregated, |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            vec![Box::new(NonFiniteScorer)],
+            Box::new(LowestCostPicker),
+        )
+    })
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -484,17 +480,13 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
-    let app = native_policy_app(
-        dynamo_router_protocol::WorkerType::Aggregated,
-        |config, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(InvalidRowPicker),
-            )
-        },
-    )
+    let app = native_policy_app(dynamo_router_protocol::WorkerType::Aggregated, |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(InvalidRowPicker),
+        )
+    })
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -519,18 +511,14 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
 
 #[tokio::test]
 async fn worker_selection_filter_returns_unavailable_without_booking() {
-    let app = native_policy_app(
-        dynamo_router_protocol::WorkerType::Aggregated,
-        |config, worker_type, _partition| {
-            WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
-                worker_type.as_str(),
-                vec![Box::new(RejectAllFilter)],
-                Vec::new(),
-                Box::new(LowestCostPicker),
-            )
-        },
-    )
+    let app = native_policy_app(dynamo_router_protocol::WorkerType::Aggregated, |context| {
+        WorkerSelectionPolicy::new_with_filters(
+            context.worker_type().as_str(),
+            vec![Box::new(RejectAllFilter)],
+            Vec::new(),
+            Box::new(LowestCostPicker),
+        )
+    })
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -1858,14 +1846,12 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         config_a
             .service_builder(
                 dynamo_router_protocol::WorkerType::Aggregated,
-                RouterPluginRegistry::default().with_default_factory(Arc::new(
-                    |config, role, _| {
-                        dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                            config.clone(),
-                            role.default_selector_label(),
-                        )
-                    },
-                )),
+                RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
+                    dynamo_worker_selection::WorkerSelectionPolicy::reference(
+                        context.selection_config().clone(),
+                        context.worker_type().default_selector_label(),
+                    )
+                })),
             )
             .build()
             .await
@@ -1875,10 +1861,10 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         SelectionServiceBuilder::new(
             test_config(),
             dynamo_router_protocol::WorkerType::Aggregated,
-            RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+            RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
                 dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                    config.clone(),
-                    role.default_selector_label(),
+                    context.selection_config().clone(),
+                    context.worker_type().default_selector_label(),
                 )
             })),
         )
@@ -1949,10 +1935,10 @@ async fn mesh_service(port: u16) -> SelectionService {
     SelectionServiceBuilder::new(
         test_config(),
         dynamo_router_protocol::WorkerType::Aggregated,
-        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
             dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                config.clone(),
-                role.default_selector_label(),
+                context.selection_config().clone(),
+                context.worker_type().default_selector_label(),
             )
         })),
     )
