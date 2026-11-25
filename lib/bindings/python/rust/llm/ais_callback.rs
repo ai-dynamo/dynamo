@@ -5,7 +5,7 @@
 #[cfg(feature = "ais-forward-pass")]
 use aisim_core::{
     ForwardPassMetrics, ForwardPassPerfModel, ForwardPassPerfModelConfig, ForwardPassPerfReadiness,
-    ScheduledRequestMetrics,
+    ForwardPassSpeculationConfig, ScheduledRequestMetrics,
 };
 use dynamo_mocker::common::perf_model::AisCallback;
 use dynamo_scheduler::host::PrefillLoadEstimator;
@@ -133,13 +133,14 @@ impl PrefillLoadEstimator for RustAisCallback {
 }
 
 #[cfg(feature = "ais-forward-pass")]
-fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
-    let config: ForwardPassPerfModelConfig =
-        serde_json::from_value(config.clone()).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
-        })?;
-    let nextn = match config.speculation.as_ref() {
-        None => config.nextn,
+fn speculation_depth(
+    speculation: Option<&ForwardPassSpeculationConfig>,
+    nextn: u32,
+) -> PyResult<u32> {
+    match speculation {
+        None => Ok(nextn),
+        // AISim rejects "none" combined with a nonzero nextn or any params.
+        Some(spec) if spec.kind == "none" => Ok(0),
         Some(spec) if spec.kind == "ngram" => spec
             .params
             .get("num_speculative_tokens")
@@ -149,13 +150,20 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
                 pyo3::exceptions::PyValueError::new_err(
                     "ngram num_speculative_tokens must be a nonnegative u32",
                 )
-            })?,
-        Some(_) => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Router/Mocker supports only ngram speculation or legacy nextn",
-            ));
-        }
-    };
+            }),
+        Some(_) => Err(pyo3::exceptions::PyValueError::new_err(
+            "Router/Mocker supports only none, ngram speculation or legacy nextn",
+        )),
+    }
+}
+
+#[cfg(feature = "ais-forward-pass")]
+fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
+    let config: ForwardPassPerfModelConfig =
+        serde_json::from_value(config.clone()).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
+        })?;
+    let nextn = speculation_depth(config.speculation.as_ref(), config.nextn)?;
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
@@ -208,7 +216,32 @@ pub(super) fn create_ais_prefill_load_estimator(
 
 #[cfg(all(test, feature = "ais-forward-pass"))]
 mod tests {
-    use super::{decode_metrics, prefill_metrics};
+    use super::{decode_metrics, prefill_metrics, speculation_depth};
+    use aisim_core::ForwardPassSpeculationConfig;
+
+    fn speculation(value: serde_json::Value) -> ForwardPassSpeculationConfig {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn speculation_depth_accepts_none_ngram_and_legacy_nextn() {
+        assert_eq!(speculation_depth(None, 3).unwrap(), 3);
+        let none = speculation(serde_json::json!({"kind": "none"}));
+        assert_eq!(speculation_depth(Some(&none), 0).unwrap(), 0);
+        let ngram = speculation(serde_json::json!({
+            "kind": "ngram",
+            "params": {"num_speculative_tokens": 4}
+        }));
+        assert_eq!(speculation_depth(Some(&ngram), 0).unwrap(), 4);
+    }
+
+    #[test]
+    fn speculation_depth_rejects_other_kinds_and_bad_ngram_depth() {
+        let eagle = speculation(serde_json::json!({"kind": "eagle"}));
+        assert!(speculation_depth(Some(&eagle), 0).is_err());
+        let ngram = speculation(serde_json::json!({"kind": "ngram"}));
+        assert!(speculation_depth(Some(&ngram), 0).is_err());
+    }
 
     #[test]
     fn scheduler_queries_preserve_prefix_and_local_attention_dp_batch() {
