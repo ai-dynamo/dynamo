@@ -43,6 +43,17 @@ fn worker_pool(initial_workers: usize, args: &MockerConfig) -> WorkerPoolSpec {
     }
 }
 
+/// AIS speculation is disabled when the field is absent, JSON null, or
+/// `{"kind":"none"}`. Any other object (ngram, mtp, legacy nextn, ...) is
+/// treated as speculative decoding.
+fn ais_speculation_disabled(speculation: Option<&serde_json::Value>) -> bool {
+    match speculation {
+        None => true,
+        Some(value) if value.is_null() => true,
+        Some(value) => value.get("kind").and_then(serde_json::Value::as_str) == Some("none"),
+    }
+}
+
 fn validate_agentic_host_offload(
     input: &ReplayRuntimeInput,
     roles: &[(usize, &MockerConfig)],
@@ -92,11 +103,9 @@ fn validate_agentic_host_offload(
         anyhow::ensure!(
             args.decode_speedup_ratio == 1.0
                 && args.aic_nextn.is_none()
-                && args.ais_perf_config().is_none_or(|config| {
-                    config
-                        .get("speculation")
-                        .is_none_or(serde_json::Value::is_null)
-                }),
+                && args
+                    .ais_perf_config()
+                    .is_none_or(|config| ais_speculation_disabled(config.get("speculation"))),
             "agentic host offload requires speculative decoding disabled"
         );
     }
@@ -976,6 +985,30 @@ mod agentic_host_offload_tests {
     }
 
     #[test]
+    fn accepts_explicit_ais_speculation_kind_none() {
+        let input = agentic_input();
+        let offloaded = args(Some("dp_rank_local"));
+        for speculation in [
+            serde_json::Value::Null,
+            serde_json::json!({"kind": "none"}),
+            serde_json::json!({"kind": "none", "params": {}}),
+        ] {
+            let mut accepted = offloaded.clone();
+            accepted.timing_model = aisim_core::engine::TimingModelConfig::External {
+                provider: "ais".to_string(),
+                config: serde_json::json!({"speculation": speculation}),
+            };
+            validate_agentic_host_offload(&input, &[(1, &accepted)], false).unwrap();
+        }
+        let mut accepted = offloaded;
+        accepted.timing_model = aisim_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({}),
+        };
+        validate_agentic_host_offload(&input, &[(1, &accepted)], false).unwrap();
+    }
+
+    #[test]
     fn accepts_single_worker_and_independent_pd_g2_scopes() {
         let input = agentic_input();
         let scopes = [None, Some("dp_rank_local"), Some("cluster_shared")];
@@ -1036,6 +1069,29 @@ mod agentic_host_offload_tests {
         invalid.timing_model = aisim_core::engine::TimingModelConfig::External {
             provider: "ais".to_string(),
             config: serde_json::json!({"speculation": {"nextn": 2}}),
+        };
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        let mut invalid = args(None);
+        invalid.timing_model = aisim_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({
+                "speculation": {
+                    "kind": "ngram",
+                    "params": {"num_speculative_tokens": 2},
+                }
+            }),
+        };
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        let mut invalid = args(None);
+        invalid.timing_model = aisim_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({"speculation": {"kind": "mtp"}}),
         };
         invalid_roles.push((
             invalid,
