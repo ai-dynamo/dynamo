@@ -38,26 +38,32 @@ To classify or reject requests before they enter the scheduling queue, or hold t
 
 | Stage | Input | Output | Use this stage for |
 |---|---|---|---|
-| `WorkerFilter` | Request context and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
-| `WorkerScorer` | Request context, all surviving workers, and an aligned output slice | One finite cost per worker | The rule ranks workers or adds a penalty |
+| `WorkerFilter` | The `WorkerSelectionRequest` and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
+| `WorkerScorer` | The `WorkerSelectionRequest`, all surviving workers, and an aligned output slice | One finite cost per worker | The rule ranks workers or adds a penalty |
 | `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
-| Policy factory | Router configuration, worker type, and routing partition | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
+| Policy factory | One `WorkerSelectionPolicyContext`: the selection settings, worker type, and routing partition the policy is built for | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
 
 An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
 
 ## Public Plugin API and Compatibility
 
-Use `dynamo_kv_router::plugins` for plugin registration and these modules for plugin contracts:
+A plugin crate depends on `dynamo-kv-router` alone and imports the module for the kind of plugin it is. The path says how stable a name is: the plugin API or `plugins::experimental`.
 
-| Module | Public API |
-|---|---|
-| `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, request context, worker signal accessors, configuration, and factories |
-| `plugins` | `RouterPluginRegistry` and the resolved `RouterPlugins` bundle |
-| `plugins::worker_selection::experimental` | Unstable extensions: the [resident block counts](#experimental-resident-block-counts), [KVCR occupancy](#kvcr-occupancy), and [decode progress](#experimental-decode-progress). No compatibility guarantee |
+| Module | Public API | Compatibility |
+|---|---|---|
+| `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, `WorkerSelectionRequest`, the picker's table, `WorkerSelectionPolicyContext`, `SelectionConfig`, factories, and everything in the root `plugins` module | The plugin API can change in a minor release. Each change is listed in that release's [deprecation notes](../../../../reference/general/releases/deprecations.mdx) |
+| `plugins::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in the root `plugins` module | Same |
+| `plugins` | Only what both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `RequestInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
+| `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints`. An API's names move into a kind's module when it is ready | None: an item can change or be removed in any release |
+| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from tests and benches | Same as the plugin API |
+
+A policy and a classifier read workers through the same rows, so a value added to an input group reaches both.
+
+`plugins::host` holds what a routing host names to resolve and run plugins, such as the resolved `RouterPlugins` bundle. Plugin crates do not import it. The two kind modules hold no host-only name: a host imports those from `plugins::host` or from the owning crate's `host` module.
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
-Version 1.7 removed the compatibility import paths for these contracts, such as `dynamo_kv_router::WorkerFilter` and `dynamo_kv_router::scheduling::RequestClassifier`, along with the `WorkerSelectionPolicyRegistry` alias, the worker-only `RouterPluginRegistry::register` method, and the frontend `worker_selection_policy_factory` setter. Import from `plugins::worker_selection` and `plugins::request_classifier`, use `RouterPluginRegistry`, and register worker policies with `register_worker_selection`. The types and traits are unchanged.
+Version 1.7 removed the compatibility import paths for these contracts, such as `dynamo_kv_router::WorkerFilter` and `dynamo_kv_router::scheduling::RequestClassifier`, along with the `WorkerSelectionPolicyRegistry` alias, the worker-only `RouterPluginRegistry::register` method, and the frontend `worker_selection_policy_factory` setter. Use `RouterPluginRegistry` and register worker policies with `register_worker_selection`.
 
 ## Build the Policy
 
@@ -111,8 +117,7 @@ This filter keeps workers with at least the configured number of device-resident
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
+    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
 struct MinimumDeviceOverlapFilter {
@@ -126,7 +131,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
 
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let cache = candidate
@@ -149,7 +154,8 @@ This scorer ranks workers by active requests above the batch minimum:
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 
 struct ActiveRequestsScorer;
@@ -161,7 +167,7 @@ impl WorkerScorer for ActiveRequestsScorer {
 
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -195,7 +201,7 @@ This picker selects the lowest-cost row:
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerInputView, WorkerPicker, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
 struct LowestCostPicker;
@@ -203,7 +209,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         input
@@ -230,7 +236,9 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
     WorkerSelectionPolicyProviderError,
 };
-use dynamo_kv_router::plugins::worker_selection::{WorkerFilter, WorkerScorer, WorkerSelectionPolicy};
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerFilter, WorkerScorer, WorkerSelectionPolicy,
+};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -251,14 +259,13 @@ fn provider(
     }
     let minimum_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |config, worker_type, _partition| {
+    Ok(Arc::new(move |context| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
         ];
         let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
         WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
-            worker_type.as_str(),
+            context.worker_type().as_str(),
             filters,
             scorers,
             Box::new(LowestCostPicker),
@@ -267,14 +274,24 @@ fn provider(
 }
 ```
 
-Dynamo calls the returned factory once per routing partition. Branch on the typed `WorkerType::Aggregated`, `WorkerType::Prefill`, `WorkerType::Decode`, or `WorkerType::Encode` role when worker pools need different components. Use the partition identity for distinct model or routing-group state.
+Dynamo calls the returned factory once per routing partition and passes it one `WorkerSelectionPolicyContext`:
+
+| Accessor | Value |
+|---|---|
+| `worker_type()` | The typed role of the worker pool: `WorkerType::Aggregated`, `WorkerType::Prefill`, `WorkerType::Decode`, or `WorkerType::Encode`. Branch on it when worker pools need different components |
+| `partition()` | The model and routing group the policy is built for. Use it for distinct model or routing-group state |
+| `selection_config()` | The scoring and sampling settings of the model that partition serves. They can differ per model, because a worker's model card can replace the frontend's settings. Read a setting with the accessor of its name, as in `context.selection_config().router_temperature()` |
+
+The context describes the partition, not a request. Filters, scorers, and pickers read each request through `WorkerSelectionRequest`.
 
 ### Register the Policy
 
 Expose a registration function from the policy crate:
 
 ```rust
-use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
+use dynamo_kv_router::plugins::worker_selection::{
+    RouterPluginRegistry, WorkerSelectionPolicyRegistryError,
+};
 
 pub fn register(
     registry: &mut RouterPluginRegistry,
@@ -333,15 +350,43 @@ For prefill and decode, the selection order is the role-specific CLI or environm
 cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
 ```
 
-Add one focused test for each policy decision and one registration test for every type name.
+Add one focused test for each policy decision and one registration test for every type name. `plugins::testing::SelectionCase` describes a request and its workers and runs the policy through the router's own selection path, so a test names no router type outside the plugin API. Put the test in a `#[cfg(test)]` module of the policy crate; the harness is for tests, and policy code does not import it:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
+    use dynamo_kv_router::plugins::worker_selection::WorkerWithDpRank;
+
+    use super::*;
+
+    #[test]
+    fn prefers_the_worker_with_fewer_requests() {
+        let policy = WorkerSelectionPolicy::new(
+            "test",
+            vec![Box::new(ActiveRequestsScorer)],
+            Box::new(LowestCostPicker),
+        );
+        let selected = SelectionCase::new(160, 16)
+            .worker(29, CaseWorker::new().active_requests(4))
+            .worker(41, CaseWorker::new().active_requests(1))
+            .select(&policy)
+            .unwrap();
+        assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
+    }
+}
+```
+
+`SelectionCase::new` takes the prompt length in tokens and the block size. `CaseWorker` sets the cache overlap, load, and capacity a worker reports; a value a test does not set reads as zero or unreported. For a registration test, `plugins::testing::registered_policy` builds the policy a registry holds under a type name from parameters written as a policy file writes them, in YAML, so a test can check that the provider accepts good parameters and rejects bad ones. For a request classifier, `plugins::testing::registered_classifier` does the same registration check, `SelectionCase::classify` runs it on the case, with the request and the worker rows both built from the case; for a classifier that reads no workers, `plugins::testing::classify_request` builds a request and `plugins::testing::classify` runs the classifier on it with no worker rows.
 
 ## Shared Plugin Construction
 
-The catalog registers plugin providers once. `RouterPluginRegistry::resolve_plugins` validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
+The catalog registers plugin providers once. A host then calls `resolve_plugins`, which validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Resolution is a host action: it is on the `plugins::host::RouterPluginRegistryHostExt` trait, not on the registry a plugin's `register` receives. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
 
 Rust embedders start with the host registry, which includes the default policy, then register their catalog:
 
 ```rust
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_llm::entrypoint::input::http::HttpFrontend;
 use dynamo_llm::kv_router::plugins::router_plugin_registry;
 
@@ -374,15 +419,24 @@ Worker identity and ordinary request metadata are always available. Dynamo calcu
 
 Routing cache resources start only if a component requests `CACHE` or a scorer requests `KV_COPY`. `serve_indexer`, `enable_session_prefix_index`, and the experimental `RESIDENT_BLOCKS` input require `CACHE`.
 
-### Request Context
+### Request
+
+Filters, scorers, and pickers receive each request as a `WorkerSelectionRequest`. Its `info()` returns a `RequestInfo`, the request facts every stage reads. A [request classifier](custom-admission-control.md#request-inputs) reads the same `RequestInfo` from its `ClassifyRequest`:
+
+| `RequestInfo` accessor | Meaning |
+|---|---|
+| `request_id()` | Optional request ID; `None` for a selection that tracks no request |
+| `isl_tokens()` | Input sequence length in tokens; zero when the request has no token IDs, such as embeddings-only input |
+| `session_context()` | Optional session metadata described below |
+| `pinned_worker()` | Exact worker and rank the request must run on, if any, such as an explicit request target, a hard session binding to one rank, or the worker Dynamo chose when it previewed the route. Read-only: Dynamo offers the policy only this worker. A session binding that Dynamo passes only as `affinity_target()` is not a pin |
+
+What exists only at worker selection is on the `WorkerSelectionRequest` itself:
 
 | Accessor | Meaning |
 |---|---|
-| `isl_tokens()` | Input sequence length in tokens, the same value a request classifier reads; zero when the request has no token IDs, such as embeddings-only input |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
-| `session_context()` | Optional session metadata described below |
 | `affinity_target()` | Optional advisory worker and data-parallel rank from soft session affinity |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
@@ -391,7 +445,7 @@ Routing cache resources start only if a component requests `CACHE` or a scorer r
 
 ### Session Context
 
-`session_context()` returns `None` when the request has no session metadata. This policy-facing view contains selected session metadata; it is not Dynamo's internal request envelope. When present, it provides:
+`info().session_context()` returns `None` when the request has no session metadata. This policy-facing view contains selected session metadata; it is not Dynamo's internal request envelope. When present, it provides:
 
 | Accessor | Meaning |
 |---|---|
@@ -401,7 +455,7 @@ Routing cache resources start only if a component requests `CACHE` or a scorer r
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
 | `agent_headers()` | Opaque coding-agent header names mapped to ordered lists of string values |
 
-`agent_headers()` exposes the request's ingress observations. Names are lowercase; values retain their original text, including unknown values and malformed embedded JSON. The map is shared across request and policy-context clones without copying header strings, needs no `WorkerInputs` group, and is not interpreted by the default policy. Missing keys mean no observation was captured. Plugins own any parsing, normalization, and decisions based on this untrusted data. For the captured families, size limits, and rolling-upgrade behavior, see [Connect an Agent Harness](../../../../use-cases/agents/session-ids.mdx#agent-headers) and [Trace an Agent Run](../../../../use-cases/agents/agent-tracing.md#dynamo-request_end-record).
+`agent_headers()` exposes the request's ingress observations. Names are lowercase; values retain their original text, including unknown values and malformed embedded JSON. The map is shared across clones of the request and of the policy's view of it without copying header strings, needs no `WorkerInputs` group, and is not interpreted by the default policy. Missing keys mean no observation was captured. Plugins own any parsing, normalization, and decisions based on this untrusted data. For the captured families, size limits, and rolling-upgrade behavior, see [Connect an Agent Harness](../../../../use-cases/agents/session-ids.mdx#agent-headers) and [Trace an Agent Run](../../../../use-cases/agents/agent-tracing.md#dynamo-request_end-record).
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
 
@@ -446,7 +500,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
 | `CACHE` | `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
-| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits`, `hits_beyond(prefix)` (every hit at or past `prefix`), and `loadable_beyond(prefix)` (the unbroken run starting at `prefix`, or zero when it is shorter than the engine loads) |
+| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits()`, `hits_beyond(prefix)` (every hit at or past `prefix`), and `loadable_beyond(prefix)` (the unbroken run starting at `prefix`, or zero when it is shorter than the engine loads) |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `active_decode_blocks()` | KV blocks the worker's active requests hold; excludes this request. Prompt blocks by default, plus the blocks generation adds only with `--router-track-output-blocks`; zero with `--no-router-track-active-blocks` |
@@ -458,8 +512,6 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `KV_COPY` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would copy from, and so held by the worker after the copy; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
-
-`BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
@@ -473,7 +525,8 @@ This scorer charges each worker for the prompt blocks it can neither reuse nor c
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 
 struct UncoveredPromptScorer;
@@ -485,7 +538,7 @@ impl WorkerScorer for UncoveredPromptScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -499,7 +552,7 @@ impl WorkerScorer for UncoveredPromptScorer {
                 .kv_copy()
                 .and_then(|copy| copy.source_prefix_blocks())
                 .map_or(0.0, f64::from);
-            *cost = (context.request_blocks() as f64 - cached.max(copyable)).max(0.0);
+            *cost = (request.request_blocks() as f64 - cached.max(copyable)).max(0.0);
         }
         Ok(())
     }
@@ -616,7 +669,7 @@ For example, a classifier can inspect the sequence before it queues the request:
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 
 struct InspectPrefixes;
@@ -625,7 +678,7 @@ impl RequestClassifier for InspectPrefixes {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
         Ok(request)
@@ -635,10 +688,10 @@ impl RequestClassifier for InspectPrefixes {
 
 ## Experimental Resident Block Counts
 
-A policy can read how many blocks the router's indexer holds for each worker rank, including cached blocks no running request uses, and charge a placement for the cache it would evict; use `LOAD` for work in flight. The API lives in `plugins::worker_selection::experimental`, whose items have no compatibility guarantee and may change or be removed in any release. Declare `resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, then import the `ResidentBlocks` trait to read `candidate.resident_blocks()` in a filter or scorer, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker:
+A policy can read how many blocks the router's indexer holds for each worker rank, including cached blocks no running request uses, and charge a placement for the cache it would evict; use `LOAD` for work in flight. The API lives in `plugins::experimental`, whose items have no compatibility guarantee and may change or be removed in any release. Declare `resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, then import the `ResidentBlocks` trait to read `candidate.resident_blocks()` in a filter or scorer, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker:
 
 ```rust
-use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::{
+use dynamo_kv_router::plugins::experimental::resident_blocks::{
     RESIDENT_BLOCKS, ResidentBlocks,
 };
 
@@ -652,7 +705,7 @@ impl WorkerScorer for EvictionPressure {
 
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -677,7 +730,7 @@ What the count contains, and whether router replicas agree on it, depends on the
 A KVCR instance is the host-memory KV cache attached to one worker rank. A policy that declares `RESIDENT_BLOCKS` can also read how many blocks the router has indexed for a worker's instance, and any policy can read the capacity the worker advertises for it; occupancy is the first divided by the second. The same traits carry the count: `candidate.cache_owner_blocks()` in a filter or scorer, and `input.cache_owner_blocks(row)` in a picker. `CacheOwnerCapacity` adds `cache_owner_capacity_blocks()` to `WorkerInfo`:
 
 ```rust
-use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::{
+use dynamo_kv_router::plugins::experimental::resident_blocks::{
     CacheOwnerCapacity, ResidentBlocks,
 };
 
@@ -697,7 +750,7 @@ A picker declares `DECODE_PROGRESS` in `required_worker_inputs()` and imports
 `DecodeProgressByRow` to read `input.decode_progress(row)`:
 
 ```rust
-use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+use dynamo_kv_router::plugins::experimental::decode_progress::{
     DECODE_PROGRESS, DecodeProgressByRow,
 };
 ```

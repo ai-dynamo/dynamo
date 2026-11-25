@@ -102,6 +102,7 @@ def make_image_payload_cached_tokens(
     min_routing_total_blocks: int = 0,
     min_avg_kv_hit_rate: float = 0.0,
     prompt_filler_repeats: int = 0,
+    timeout: int = 60,
     payload_cls: type[CachedTokensChatPayload] = CachedTokensChatPayload,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
@@ -145,6 +146,7 @@ def make_image_payload_cached_tokens(
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
         min_routing_total_blocks=min_routing_total_blocks,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
+        timeout=timeout,
     )
 
 

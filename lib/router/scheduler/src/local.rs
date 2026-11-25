@@ -11,7 +11,6 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::classifier_rows::ClassifierRows;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
@@ -477,7 +476,7 @@ where
         // one entry per worker; the actor projects load again before selection.
         request.worker_loads = FxHashMap::default();
         classifier
-            .classify_with(classification, &ClassifierRows(workers))
+            .classify_with(classification, &workers)
             .await
             .map(Some)
             .map_err(KvSchedulerError::from)
@@ -868,14 +867,16 @@ mod tests {
     use crate::PrefillLoadEstimator;
     use crate::overlap::OverlapSignals;
     use crate::selector::DefaultWorkerSelector;
-    use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig, local_test_scheduler_with};
     use crate::types::{ScheduleMode, TierOverlapBlocks};
     use dynamo_admission::{
-        ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, WorkerView,
+        ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
     };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
+    use dynamo_slot_tracker::host::BusyThresholdsHostExt;
     use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_worker_selection::WorkerCandidates;
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
@@ -1041,37 +1042,16 @@ mod tests {
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
     ) {
-        let dp_range = workers
-            .iter()
-            .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
-            .collect();
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            64,
-            dp_range,
-            replica_sync,
-            0,
-            "test",
-        ));
-        let (cfg_tx, cfg_rx) = watch::channel(workers);
         let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new(
-            Arc::clone(&slots),
-            cfg_rx,
+        let (scheduler, slots, cfg_tx) = local_test_scheduler_with(
+            workers,
             PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             64,
-            DefaultWorkerSelector::new(None, "test"),
-            prefill_load_estimator,
-            None::<Arc<NoopOverlapScoresRefresh>>,
-            None,
-            None,
-            None,
-            Duration::from_secs(60),
-            true,
             cancel_token.clone(),
-            "test",
+            replica_sync,
+            prefill_load_estimator,
             monitor_worker_configs,
-        ));
+        );
         (scheduler, slots, cfg_tx, cancel_token)
     }
 
@@ -1104,26 +1084,8 @@ mod tests {
 
     fn request(mode: ScheduleMode) -> ScheduleRequest {
         ScheduleRequest {
-            accounting_attribution: Default::default(),
-            mode,
             token_seq: Some(vec![1, 2, 3, 4]),
-            block_hashes: None,
-            isl_tokens: 64,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: crate::protocols::RoutingConstraints::default(),
-            router_config_override: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
+            ..crate::test_utils::test_schedule_request(mode, 64)
         }
     }
 
@@ -1317,6 +1279,7 @@ mod tests {
         fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
             self.checks.fetch_add(1, Ordering::Relaxed);
             let held = head
+                .info()
                 .session_context()
                 .is_some_and(|session| self.held.lock().contains(session.session_id()));
             if held {
@@ -1333,9 +1296,10 @@ mod tests {
         }
 
         fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
-            self.dispatched
-                .lock()
-                .push((head.request_id().unwrap_or_default().to_owned(), target));
+            self.dispatched.lock().push((
+                head.info().request_id().unwrap_or_default().to_owned(),
+                target,
+            ));
         }
 
         fn attach(&self, recheck: DispatchRecheck) {
@@ -1345,7 +1309,11 @@ mod tests {
 
     /// Keys each request's lane by its session id, as ThunderAgent does.
     fn key_by_session(mut request: ClassifyRequest) -> ClassifyRequest {
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        if let Some(session) = request
+            .info()
+            .session_context()
+            .map(|s| s.session_id().to_owned())
+        {
             request.set_lane_key(&session);
         }
         request
@@ -1358,7 +1326,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             Ok(key_by_session(request))
         }
@@ -1370,7 +1338,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             Ok(key_by_session(request))
         }
@@ -1640,7 +1608,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            workers: &dyn WorkerView,
+            workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             assert!(workers.is_empty());
@@ -1734,7 +1702,7 @@ mod tests {
             fn classify(
                 &mut self,
                 mut request: ClassifyRequest,
-                _workers: &dyn WorkerView,
+                _workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 assert_eq!(request.ingress_at(), self.0);
                 request.set_due_at(self.0 + Duration::from_secs(1));
@@ -1783,27 +1751,26 @@ mod tests {
             fn classify(
                 &mut self,
                 request: ClassifyRequest,
-                workers: &dyn WorkerView,
+                workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 // The queue's capacity check, run on the classifier's own rows.
-                let thresholds = BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.5),
-                    ..Default::default()
-                };
+                let thresholds =
+                    BusyThresholds::default().with_prefill_busy_threshold_frac(Some(0.5));
                 *self.0.lock() = Some(
-                    (0..workers.len())
-                        .map(|row| {
-                            let info = workers.info(row).expect("row in range");
-                            let load = workers.load(row).expect("LOAD was declared");
+                    workers
+                        .iter()
+                        .map(|worker| {
+                            let info = worker.info();
+                            let load = worker.load().expect("LOAD was declared");
                             (
                                 info.worker(),
-                                workers
-                                    .cache(row)
+                                worker
+                                    .cache()
                                     .expect("CACHE was declared")
-                                    .device_overlap_blocks,
-                                load.available,
-                                load.active_requests,
-                                thresholds.has_room(&load, info.capacity()),
+                                    .device_overlap_blocks(),
+                                load.is_available(),
+                                load.active_requests(),
+                                thresholds.has_room(load, info.capacity()),
                             )
                         })
                         .collect(),
@@ -2033,6 +2000,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: 1,
+                origin: Default::default(),
                 lora_name: None,
             })
             .unwrap();
@@ -2084,6 +2052,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 1,
+                origin: Default::default(),
                 lora_name: None,
             })
             .unwrap();
@@ -2134,6 +2103,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 1,
+                origin: Default::default(),
                 lora_name: None,
             })
             .unwrap();

@@ -24,8 +24,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::{
     decision_lifecycle::{self, run_until_killed, spawn_blocking_with_permit},
-    disconnect::create_connection_monitor,
-    metrics::{CancellationLabels, Endpoint, Metrics, SystemOnePhase},
     service_v2,
 };
 use crate::{
@@ -47,6 +45,10 @@ use crate::{
             reduce_head_logits,
         },
     },
+};
+use dynamo_http_server::{
+    disconnect::create_connection_monitor,
+    metrics::{CancellationLabels, Endpoint, Metrics, SystemOnePhase},
 };
 
 #[path = "systemone/abort.rs"]
@@ -216,7 +218,7 @@ fn acquire_admission(
             ),
             decision_lifecycle::AdmissionError::CapacityExhausted => response::capacity_error(
                 dialect,
-                super::error::overload_status_code(),
+                dynamo_error::http::overload_status_code(),
                 "System One request capacity is exhausted",
             ),
         };
@@ -327,7 +329,7 @@ async fn handle_request(
         Err(_) => {
             return response::capacity_error(
                 dialect,
-                super::error::overload_status_code(),
+                dynamo_error::http::overload_status_code(),
                 "System One preprocessing capacity is exhausted",
             );
         }
@@ -500,7 +502,7 @@ fn prepare_branches(
                     cause.downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
                 {
                     incompatible.0
-                } else if super::error::find_canonical_error_in_chain(cause.as_ref())
+                } else if dynamo_error::http::find_canonical_error_in_chain(cause.as_ref())
                     .is_some_and(|error| {
                         error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest
                     })
@@ -1088,7 +1090,7 @@ fn map_pooling_render_error(cause: anyhow::Error) -> (StatusCode, String) {
     {
         return (StatusCode::UNPROCESSABLE_ENTITY, incompatible.0.to_string());
     }
-    if super::error::find_canonical_error_in_chain(cause.as_ref())
+    if dynamo_error::http::find_canonical_error_in_chain(cause.as_ref())
         .is_some_and(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
     {
         return (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string());
@@ -1115,7 +1117,8 @@ fn prepare_chunked_pooling_batches(
             "chunked pooling decision config missing separator".to_string(),
         )
     })?;
-    let state_text = format_chunked_state_text(&request.input, config, selection.card.special_tokens());
+    let state_text =
+        format_chunked_state_text(&request.input, config, selection.card.special_tokens());
     let (context_ids, ctx_bytes) = selection
         .preprocessor
         .render_systemone_chunked_pooling_context(
@@ -1248,7 +1251,7 @@ fn bisect_pooling_questions(
             {
                 return (StatusCode::UNPROCESSABLE_ENTITY, incompatible.0.to_string());
             }
-            if super::error::find_canonical_error_in_chain(cause.as_ref())
+            if dynamo_error::http::find_canonical_error_in_chain(cause.as_ref())
                 .is_some_and(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
             {
                 return (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string());

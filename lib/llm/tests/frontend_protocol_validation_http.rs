@@ -6,16 +6,18 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
-    http::service::metrics::{Endpoint, ErrorType, RequestType, Status},
+    local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY,
+    model_card::ModelDeploymentCard,
     protocols::{Annotated, openai::chat_completions::NvCreateChatCompletionStreamResponse},
 };
 use dynamo_runtime::{
     config::environment_names::llm::{
         DYN_DISABLE_FRONTEND_NVEXT, DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-        DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+        DYN_ENABLE_ANTHROPIC_API, DYN_ENABLE_STREAMING_TOOL_DISPATCH,
+        DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
     },
     error::{DynamoError, ErrorType as DynamoErrorType},
 };
@@ -1425,6 +1427,100 @@ async fn completion_endpoints_reject_invalid_logit_bias_keys() {
     .await;
 }
 
+/// A model whose workers publish `max_logprobs` takes log-probability counts
+/// up to that limit instead of 20. Chat and completions refuse a larger count
+/// before the engine sees it; responses lowers it and reports the lowered value.
+#[tokio::test]
+#[serial]
+async fn published_max_logprobs_sets_the_models_logprobs_limit() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let chat = |top_logprobs: u8| {
+            json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "logprobs": true,
+                "top_logprobs": top_logprobs
+            })
+        };
+
+        // Nothing published: the limit stays at 20.
+        let svc = HarnessService::start(Vec::new()).await;
+        let response = post_json(&svc, "/v1/chat/completions", chat(32)).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "Top_logprobs must be between 0 and 20, got 32",
+        )
+        .await;
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let engine = Arc::new(ScriptedChatEngine::new(vec![script; 2].into_iter().map(Ok)));
+        let mut card = ModelDeploymentCard::with_name_only(MODEL);
+        card.runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), json!(32));
+        let svc = HarnessService::start_with_engine_and_card(engine, card).await;
+
+        // At the published limit: the count reaches the engine unchanged.
+        let response = post_json(&svc, "/v1/chat/completions", chat(32)).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        bounded(response.bytes()).await.unwrap();
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].inner.top_logprobs, Some(32));
+
+        // Above it: refused before the engine, and the message names the limit.
+        let response = post_json(&svc, "/v1/chat/completions", chat(33)).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "Top_logprobs must be between 0 and 32, got 33",
+        )
+        .await;
+        assert!(svc.engine.take_requests().await.is_empty());
+
+        // Completions checks `logprobs` against the same published limit.
+        let response = post_json(
+            &svc,
+            "/v1/completions",
+            json!({"model": MODEL, "prompt": "ping", "logprobs": 33}),
+        )
+        .await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "Logprobs must be between 0 and 32, got 33",
+        )
+        .await;
+
+        // Responses lowers an over-limit count to the published limit and echoes it.
+        let response = post_json(
+            &svc,
+            "/v1/responses",
+            json!({
+                "model": MODEL,
+                "input": "ping",
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": 40
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = bounded(response.json()).await.unwrap();
+        assert_eq!(body["top_logprobs"], json!(32));
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].inner.logprobs, Some(true));
+        assert_eq!(requests[0].inner.top_logprobs, Some(32));
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 // `reqwest::send` completes when response headers arrive. A 400 for `stream: true`
 // proves converted-request validation ran before the HTTP 200 SSE response was committed.
 #[tokio::test]
@@ -1540,6 +1636,192 @@ async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
         }
 
         assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+fn chat_allowed_tools_request(mode: &str, function: &str, stream: bool) -> Value {
+    json!({
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Look up the answer"}],
+        "tools": [
+            {"type": "function", "function": {"name": "lookup"}},
+            {"type": "function", "function": {"name": "delete"}}
+        ],
+        "tool_choice": {
+            "type": "allowed_tools",
+            "allowed_tools": {"mode": mode, "tools": [
+                {"type": "function", "function": {"name": function}}
+            ]}
+        },
+        "stream": stream
+    })
+}
+
+fn chat_allowed_tools_script(name: &str) -> Script {
+    [
+        (json!({"role": "assistant", "content": "Checking."}), None),
+        (
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": "{"}}]}),
+            None,
+        ),
+        (
+            json!({"tool_calls": [{"index": 0, "id": "call-1", "type": "function",
+                "function": {"name": name, "arguments": "}"}}]}),
+            Some("tool_calls"),
+        ),
+    ]
+    .into_iter()
+    .map(|(delta, finish_reason)| {
+        Annotated::from_data(
+            serde_json::from_value(json!({
+                "id": "chat-allowed", "object": "chat.completion.chunk", "created": 1,
+                "model": MODEL, "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+            }))
+            .unwrap(),
+        )
+    })
+    .collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_allowed_tools_preserves_catalog_and_limits_dispatched_tools() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let text = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([text, chat_allowed_tools_script("lookup")]).await;
+        for (mode, stream) in [("auto", false), ("required", true)] {
+            let response = post_json(
+                &svc,
+                "/v1/chat/completions",
+                chat_allowed_tools_request(mode, "lookup", stream),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            if stream {
+                let body = bounded(response.text()).await.unwrap();
+                let events = http_harness::parse_json_sse(&body).await.unwrap();
+                assert!(events.iter().all(|event| event.event != "error"), "{body}");
+                let calls: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| event.data["choices"][0]["delta"]["tool_calls"].as_array())
+                    .flatten()
+                    .collect();
+                assert_eq!(calls.len(), 1, "{body}");
+                assert_eq!(
+                    calls[0]["function"],
+                    json!({"name": "lookup", "arguments": "{}"})
+                );
+            } else {
+                let body: Value = bounded(response.json()).await.unwrap();
+                assert!(
+                    body["choices"][0]["message"]["content"].is_string(),
+                    "{body}"
+                );
+                assert!(
+                    body["choices"][0]["message"]["tool_calls"].is_null(),
+                    "{body}"
+                );
+            }
+            let dispatched = svc.engine.take_requests().await;
+            assert_eq!(dispatched.len(), 1);
+            let request = &dispatched[0];
+            let tool_names = |tools: &[dynamo_protocols::types::ChatCompletionTool]| {
+                tools
+                    .iter()
+                    .map(|tool| tool.function.name.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                tool_names(request.inner.tools.as_deref().unwrap()),
+                ["lookup"]
+            );
+            assert_eq!(
+                tool_names(request.chat_template_tools.as_deref().unwrap()),
+                ["lookup", "delete"]
+            );
+            let choice = serde_json::to_value(&request.inner.tool_choice).unwrap();
+            assert_eq!(choice, mode);
+        }
+
+        assert_openai_error(
+            post_json(
+                &svc,
+                "/v1/chat/completions",
+                chat_allowed_tools_request("required", "unknown", true),
+            )
+            .await,
+            ExpectedError::Validation,
+            "allowed_tools references unknown function",
+        )
+        .await;
+        let malformed_mode = chat_allowed_tools_request("bogus", "lookup", false);
+        let mut malformed_sampling = chat_allowed_tools_request("auto", "lookup", false);
+        malformed_sampling["top_p"] = json!("invalid_top_p");
+        let mut ordinary = chat_allowed_tools_request("auto", "lookup", false);
+        ordinary["tool_choice"] = json!("bogus");
+
+        for (request, message) in [
+            (malformed_mode, "unknown variant `bogus`"),
+            (malformed_sampling, "invalid type: string \"invalid_top_p\""),
+            (ordinary, "ChatCompletionToolChoiceOption"),
+        ] {
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", request).await,
+                ExpectedError::Validation,
+                message,
+            )
+            .await;
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_allowed_tools_blocks_disallowed_backend_calls() {
+    let env = [
+        BASE_ENV.as_slice(),
+        &[(DYN_ENABLE_STREAMING_TOOL_DISPATCH, Some("1"))],
+    ]
+    .concat();
+    temp_env::async_with_vars(env, async {
+        let script = chat_allowed_tools_script("delete");
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for stream in [false, true] {
+            let response = post_json(
+                &svc,
+                "/v1/chat/completions",
+                chat_allowed_tools_request("auto", "lookup", stream),
+            )
+            .await;
+            if stream {
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let body = bounded(response.text()).await.unwrap();
+                let events = http_harness::parse_json_sse(&body).await.unwrap();
+                assert!(
+                    events.iter().any(|event| event.data["error"].is_object()),
+                    "{body}"
+                );
+                assert!(
+                    events.iter().all(|event| {
+                        event.event != "tool_call_dispatch"
+                            && event.data["choices"][0]["delta"]["tool_calls"].is_null()
+                    }),
+                    "{body}"
+                );
+            } else {
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                );
+                let body: Value = bounded(response.json()).await.unwrap();
+                assert!(body.get("choices").is_none(), "{body}");
+            }
+        }
         svc.shutdown().await;
     })
     .await;

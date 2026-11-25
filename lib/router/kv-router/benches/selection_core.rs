@@ -19,13 +19,13 @@ use dynamo_kv_hashing::routing::{
 };
 use dynamo_kv_indexer::KvIndexerInterface;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::hint_policy::{
-    HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, HintPolicyFactory,
-    KvHintAction,
+use dynamo_kv_router::plugins::experimental::hints::{
+    Commitments, HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, KvHintAction,
 };
+use dynamo_kv_router::plugins::host::HintPolicyFactory;
 use dynamo_kv_router::plugins::worker_selection::{
-    Commitments, WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::local_selection_core_with_host;
@@ -38,6 +38,7 @@ use dynamo_scheduler::host::{
 };
 use dynamo_scheduler::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 use dynamo_slot_tracker::BusyThresholds;
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
 use tokio_util::sync::CancellationToken;
 
 const BLOCK_SIZE: u32 = 16;
@@ -49,10 +50,10 @@ fn prompt_tokens() -> Vec<u32> {
 /// `hints` makes worker 1 hold the whole prompt so every booking on another
 /// worker computes a fetch hint from it.
 fn reference_policy_factory() -> WorkerSelectionPolicyFactory {
-    Arc::new(|config, role, _| {
+    Arc::new(|context| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
+            context.selection_config().clone(),
+            context.worker_type().default_selector_label(),
         )
     })
 }
@@ -75,7 +76,7 @@ impl WorkerScorer for CopyCreditScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -91,9 +92,9 @@ impl WorkerScorer for CopyCreditScorer {
                 .kv_copy()
                 .and_then(|copy| copy.source_prefix_blocks())
                 .map_or(0.0, |blocks| (f64::from(blocks) - cached).max(0.0));
-            let uncached = (context.request_blocks() as f64 - cached).max(0.0);
+            let uncached = (request.request_blocks() as f64 - cached).max(0.0);
             *cost = uncached - self.copy_credit * copied
-                + load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.active_requests() as f64;
         }
         Ok(())
@@ -105,7 +106,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         input
@@ -164,10 +165,9 @@ fn core_with_copy_credit(
     workers: u64,
     copy_credit: f64,
 ) -> SelectionCore {
-    let policy: WorkerSelectionPolicyFactory = Arc::new(move |config, role, _| {
+    let policy: WorkerSelectionPolicyFactory = Arc::new(move |context| {
         WorkerSelectionPolicy::new(
-            config.clone(),
-            role.as_str(),
+            context.worker_type().as_str(),
             vec![Box::new(CopyCreditScorer { copy_credit })],
             Box::new(LowestCostPicker),
         )
@@ -260,10 +260,8 @@ fn core_with_reject_thresholds(
         ..Default::default()
     };
     let reject_thresholds = reject.then(|| {
-        Arc::new(|| BusyThresholds {
-            prefill_busy_threshold_frac: Some(1.0),
-            ..Default::default()
-        }) as RejectThresholdsProvider
+        Arc::new(|| BusyThresholds::default().with_prefill_busy_threshold_frac(Some(1.0)))
+            as RejectThresholdsProvider
     });
     let core = local_selection_core_with_host(
         config,

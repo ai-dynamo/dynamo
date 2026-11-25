@@ -187,6 +187,10 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
     `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
     use the upstream schema. Published worker capabilities must agree with the
     configured identity.
+    The pinned AISimulate release answers queries only for some backend versions on
+    each system. Any other `backend_version` fails with `UnlistedQueryVersionError`,
+    and the error lists the accepted versions. To use the version that the release
+    marks as current, omit `backend_version` or set it to `current`.
   </ParamField>
   <ParamField path="estimation_mode" type="string" default="auto">
     Key of a config. `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
@@ -245,15 +249,16 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 
 Download the AISimulate dataset snapshot into the container image during the image
 build, or mount a local copy before starting Planner. Use the
-generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
-AISimulate Python and Rust releases that support execution profiles through the
-common forward-pass query API. This integration pins Python
-`0.15.0.dev202611130000000104` and Rust `0.15.0-dev.202611130000000104`,
-which include that support. Use version-2 execution profiles; version 1 retains
-its legacy direct-phase queries and must be explicitly migrated and repinned.
-An execution profile is accepted only when its engine spec schema version matches the
-pinned AISimulate release. The move from 0.13 to 0.15 changes that version, so download
-or generate the dataset again.
+generic AISimulate wheel; measurements do not belong inside the wheel. Use the
+AISimulate Python and Rust releases that Dynamo pins (`aisim` in `pyproject.toml`
+and `aisim-core` in `Cargo.toml`), which support execution profiles through the
+common forward-pass query API. Use version-2 execution profiles; version 1 keeps
+its legacy direct-phase queries and must be migrated and repinned explicitly.
+An execution profile is accepted only when the pinned AISimulate release compiles the
+same engine as the one recorded in the profile. A new pin can change the compiled
+engine even when the engine spec schema version stays the same. The profile then
+fails with `compiled baseline differs from the profile basis`. When the AISimulate
+pin changes, download or generate the dataset again.
 
 The following configuration illustrates the paths to supply for a prefill role:
 

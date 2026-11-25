@@ -130,31 +130,11 @@ async fn mixed_profiles_route_the_whole_request_before_admission() {
         dynamo_decisions::Dialect::OpenAi,
     ] {
         for (vllm_live, sglang_live, candidates, expected) in [
-            (
-                true,
-                false,
-                26,
-                super::super::super::error::overload_status_code(),
-            ),
+            (true, false, 26, dynamo_error::http::overload_status_code()),
             (true, false, 27, StatusCode::SERVICE_UNAVAILABLE),
-            (
-                false,
-                true,
-                27,
-                super::super::super::error::overload_status_code(),
-            ),
-            (
-                false,
-                true,
-                255,
-                super::super::super::error::overload_status_code(),
-            ),
-            (
-                true,
-                true,
-                27,
-                super::super::super::error::overload_status_code(),
-            ),
+            (false, true, 27, dynamo_error::http::overload_status_code()),
+            (false, true, 255, dynamo_error::http::overload_status_code()),
+            (true, true, 27, dynamo_error::http::overload_status_code()),
             (false, false, 27, StatusCode::SERVICE_UNAVAILABLE),
         ] {
             vllm.send_replace(if vllm_live { vec![41, 42] } else { vec![] });
@@ -175,7 +155,7 @@ async fn mixed_profiles_route_the_whole_request_before_admission() {
             assert_eq!(request.questions[0].candidates.len(), 2);
             assert_eq!(request.questions[1].candidates.len(), candidates);
             request.dialect = dialect;
-            if expected == super::super::super::error::overload_status_code() {
+            if expected == dynamo_error::http::overload_status_code() {
                 let selected = state
                     .manager()
                     .get_systemone_execution_selection("public-model", candidates)
@@ -304,7 +284,7 @@ async fn run_causal(
             .acquire_many_owned(3)
             .await
             .unwrap(),
-        Arc::new(super::super::super::metrics::Metrics::new()),
+        Arc::new(dynamo_http_server::metrics::Metrics::new()),
         Arc::new(request),
     )
     .await;

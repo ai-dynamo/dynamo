@@ -1,20 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Advertise the qualified vLLM 0.33 causal decision execution profile."""
+"""Advertise the qualified vLLM causal decision execution profile."""
 
 import json
 import logging
 import math
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from packaging.version import InvalidVersion, Version
-
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
-
-from .decision_cache_provenance import verify_cache_sources
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -33,14 +28,6 @@ _ARCHITECTURES = frozenset(
         "Gemma4ForConditionalGeneration",
     }
 )
-
-
-def _released_runtime() -> bool:
-    try:
-        installed = version("vllm")
-        return isinstance(installed, str) and Version(installed).public == "0.33.0"
-    except (PackageNotFoundError, InvalidVersion):
-        return False
 
 
 def _unqualified_runtime_condition(runtime: "VllmConfig") -> str | None:
@@ -90,15 +77,9 @@ def _unqualified_runtime_condition(runtime: "VllmConfig") -> str | None:
 
 
 def qualify_vllm_decision_runtime(vllm_config: "VllmConfig", config: "Config") -> None:
-    """Reject an unqualified resolved configuration before the engine starts.
-
-    Cache fields alone do not establish measurement provenance, so their installed
-    source owners must match the qualified release before loading the model.
-    """
+    """Reject an unqualified resolved configuration before the engine starts."""
     if config.systemone_serial is not True:
         return
-    if not _released_runtime():
-        raise ValueError("--systemone-serial requires qualified vLLM 0.33.0")
     try:
         condition = _unqualified_runtime_condition(vllm_config)
     except AttributeError as exc:
@@ -109,8 +90,6 @@ def qualify_vllm_decision_runtime(vllm_config: "VllmConfig", config: "Config") -
         raise ValueError(
             f"--systemone-serial: runtime qualification failed: {condition}"
         )
-    if not verify_cache_sources():
-        raise ValueError("--systemone-serial requires qualified vLLM cache sources")
 
 
 def publish_vllm_decision_capability(

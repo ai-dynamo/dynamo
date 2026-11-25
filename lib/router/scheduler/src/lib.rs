@@ -8,7 +8,6 @@
 //! (`dynamo-kv-router`) sit above it; the five stages, protocol, kv-hashing, and kv-hints sit
 //! below.
 
-mod classifier_rows;
 mod config;
 mod filter;
 mod hint_policy;
