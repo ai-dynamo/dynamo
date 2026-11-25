@@ -15,8 +15,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_kv_router::plugins::request_classifier::RequestClassifierContext;
-use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerInfo};
+use dynamo_kv_router::plugins::{WorkerCapacity, WorkerInfo};
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::scheduling::config::RouterQueuePolicy;
 use dynamo_kv_router::scheduling::{

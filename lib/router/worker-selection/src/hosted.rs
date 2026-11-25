@@ -10,12 +10,13 @@ use dynamo_router_protocol::worker::WorkerId;
 
 use crate::{
     ScoredWorkerCandidate, SelectionFailure, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerSelectionPolicyError, WorkerSelectionRequest,
+    host::{WorkerSelectionRequestHostExt, request_info},
 };
 
 /// Request metadata a routing host without the KV path supplies for one selection.
 ///
-/// Only the prompt length and the preview flag are set; every other [`WorkerSelectionContext`] value reads as
+/// Only the prompt length and the preview flag are set; every other [`WorkerSelectionRequest`] value reads as
 /// the KV router's default for a request without it: no expected output length or
 /// temperature override, zero priorities, a block size of 0, and no session metadata.
 #[derive(Debug)]
@@ -36,21 +37,22 @@ impl HostedSelectionRequest {
     }
 
     /// Whether this selection only previews a worker, as a peek does; see
-    /// [`WorkerSelectionContext::is_preview`].
+    /// [`WorkerSelectionRequest::is_preview`].
     #[inline]
     pub fn with_preview(mut self, preview: bool) -> Self {
         self.preview = preview;
         self
     }
 
-    fn context(&self) -> WorkerSelectionContext<'_> {
+    fn selection_request(&self) -> WorkerSelectionRequest<'_> {
         // The host applies pins and session affinity before selecting.
-        WorkerSelectionContext::new(self.isl_tokens, 0).with_preview(self.preview)
+        WorkerSelectionRequest::new(request_info(None, self.isl_tokens, None, None), 0)
+            .with_preview(self.preview)
     }
 }
 
 /// A role's picker, taken out of its policy by
-/// [`WorkerSelectionPolicy::into_hosted_picker`](crate::WorkerSelectionPolicy::into_hosted_picker).
+/// [`WorkerSelectionPolicyHostExt::into_hosted_picker`](crate::host::WorkerSelectionPolicyHostExt::into_hosted_picker).
 ///
 /// One instance serves every request for its role, called concurrently from the
 /// routing host's tasks. Selection builds no candidate table and takes no lock.
@@ -109,7 +111,7 @@ impl HostedWorkerPicker {
             None
         };
         let row = self.picker.pick(
-            &request.context(),
+            &request.selection_request(),
             WorkerInputView::hosted(ids, rows, active_requests),
         )?;
         let Some(&worker_id) = ids.get(row) else {
@@ -137,9 +139,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::host::WorkerSelectionPolicyHostExt;
     use crate::{
-        RuntimePolicyError, SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter,
-        WorkerScorer, WorkerSelectionPolicy,
+        RuntimePolicyError, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerScorer,
+        WorkerSelectionPolicy,
     };
 
     const _: () = {
@@ -159,7 +162,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             Ok(self.row)
@@ -175,7 +178,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             (0..input.len())
@@ -189,7 +192,7 @@ mod tests {
     impl WorkerFilter for KeepAll {
         fn keep(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             Ok(true)
@@ -201,7 +204,7 @@ mod tests {
     impl WorkerScorer for ZeroScorer {
         fn score(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -215,13 +218,7 @@ mod tests {
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: impl WorkerPicker + 'static,
     ) -> WorkerSelectionPolicy {
-        WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
-            "test",
-            filters,
-            scorers,
-            Box::new(picker),
-        )
+        WorkerSelectionPolicy::new_with_filters("test", filters, scorers, Box::new(picker))
     }
 
     fn hosted(picker: impl WorkerPicker + 'static) -> HostedWorkerPicker {
@@ -342,7 +339,7 @@ mod tests {
         impl WorkerPicker for LastRowPicker {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert_eq!(input.len(), 3);
@@ -370,7 +367,7 @@ mod tests {
         impl WorkerPicker for CandidatesPicker {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 let candidates = input.candidates();
@@ -412,7 +409,7 @@ mod tests {
         impl WorkerPicker for UndeclaredPicker {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert_eq!(input.active_requests(0), None);
@@ -465,32 +462,33 @@ mod tests {
     }
 
     #[test]
-    fn hosted_select_context_exposes_request_metadata() {
-        struct ContextPicker;
+    fn hosted_selection_request_exposes_request_metadata() {
+        struct RequestPicker;
 
-        impl WorkerPicker for ContextPicker {
+        impl WorkerPicker for RequestPicker {
             fn pick(
                 &self,
-                context: &WorkerSelectionContext<'_>,
+                request: &WorkerSelectionRequest<'_>,
                 _input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                assert_eq!(context.isl_tokens(), 33);
-                assert_eq!(context.block_size(), 0);
-                assert_eq!(context.request_blocks(), 0);
-                assert_eq!(context.expected_output_tokens(), None);
-                assert_eq!(context.priority_jump(), 0.0);
-                assert_eq!(context.strict_priority(), 0);
-                assert_eq!(context.router_temperature_override(), None);
-                assert!(context.pinned_worker().is_none());
-                assert!(context.affinity_target().is_none());
-                assert!(!context.tracks_prefill_tokens());
-                assert!(context.session_context().is_none());
-                assert!(!context.is_preview());
+                let info = request.info();
+                assert_eq!(info.isl_tokens(), 33);
+                assert_eq!(request.block_size(), 0);
+                assert_eq!(request.request_blocks(), 0);
+                assert_eq!(request.expected_output_tokens(), None);
+                assert_eq!(request.priority_jump(), 0.0);
+                assert_eq!(request.strict_priority(), 0);
+                assert_eq!(request.router_temperature_override(), None);
+                assert!(info.pinned_worker().is_none());
+                assert!(request.affinity_target().is_none());
+                assert!(!request.tracks_prefill_tokens());
+                assert!(info.session_context().is_none());
+                assert!(!request.is_preview());
                 Ok(0)
             }
         }
 
-        hosted(ContextPicker)
+        hosted(RequestPicker)
             .select(&[1], None, &HostedSelectionRequest::new(33))
             .unwrap();
     }

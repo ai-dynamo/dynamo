@@ -6,6 +6,7 @@
 //! passes the result into admission's gate and its own reuse key; admission and worker
 //! selection depend on this crate for the rule.
 
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 
 use rustc_hash::FxHashMap;
@@ -35,18 +36,19 @@ impl RankLoad for WorkerLoadProjection {
 }
 
 /// Per-rank load limits. A rank is full once its booked load passes any configured limit.
+/// A plugin asks [`has_room`](Self::has_room); a host builds one and reads its limits
+/// through [`BusyThresholdsHostExt`](crate::host::BusyThresholdsHostExt).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BusyThresholds {
     /// Booked prefill tokens above which a rank is full.
-    // TODO(v1.7): Remove the absolute threshold; use `prefill_busy_threshold_frac`.
-    pub prefill_busy_threshold: Option<usize>,
+    prefill_busy_threshold: Option<usize>,
     /// Fraction of the rank's `max_num_batched_tokens` above which it is full. When the
     /// rank does not report it, the fraction is taken of
     /// [`DEFAULT_MAX_BATCHED_TOKENS`](dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS).
-    pub prefill_busy_threshold_frac: Option<f64>,
+    prefill_busy_threshold_frac: Option<f64>,
     /// Fraction of the rank's `total_kv_blocks` above which the KV blocks its active
     /// requests hold make it full. A rank that does not report `total_kv_blocks` skips it.
-    pub decode_busy_threshold_frac: Option<f64>,
+    decode_busy_threshold_frac: Option<f64>,
 }
 
 impl BusyThresholds {
@@ -76,6 +78,44 @@ impl BusyThresholds {
                 (load.active_decode_blocks() as f64) > threshold * (total_kv_blocks as f64)
             });
         !(absolute_full || fractional_full || decode_full)
+    }
+}
+
+impl crate::host::BusyThresholdsHostExt for BusyThresholds {
+    #[inline]
+    fn with_prefill_busy_threshold(mut self, prefill_busy_threshold: Option<usize>) -> Self {
+        self.prefill_busy_threshold = prefill_busy_threshold;
+        self
+    }
+
+    #[inline]
+    fn with_prefill_busy_threshold_frac(
+        mut self,
+        prefill_busy_threshold_frac: Option<f64>,
+    ) -> Self {
+        self.prefill_busy_threshold_frac = prefill_busy_threshold_frac;
+        self
+    }
+
+    #[inline]
+    fn with_decode_busy_threshold_frac(mut self, decode_busy_threshold_frac: Option<f64>) -> Self {
+        self.decode_busy_threshold_frac = decode_busy_threshold_frac;
+        self
+    }
+
+    #[inline]
+    fn prefill_busy_threshold(&self) -> Option<usize> {
+        self.prefill_busy_threshold
+    }
+
+    #[inline]
+    fn prefill_busy_threshold_frac(&self) -> Option<f64> {
+        self.prefill_busy_threshold_frac
+    }
+
+    #[inline]
+    fn decode_busy_threshold_frac(&self) -> Option<f64> {
+        self.decode_busy_threshold_frac
     }
 }
 
@@ -157,6 +197,30 @@ impl FullRankCounts {
         }
     }
 
+    /// Replace one rank's judgement: the pass recorded it with the projection `before`, and
+    /// it now holds `after`. A worker left without a full rank loses its entry.
+    pub fn rejudge(
+        &mut self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        before: &WorkerLoadProjection,
+        after: &WorkerLoadProjection,
+    ) {
+        let was_full = !self.limits.has_room(before, capacity);
+        let is_full = !self.limits.has_room(after, capacity);
+        if is_full && !was_full {
+            *self.full_ranks.entry(worker.worker_id).or_insert(0) += 1;
+        } else if was_full
+            && !is_full
+            && let Entry::Occupied(mut full) = self.full_ranks.entry(worker.worker_id)
+        {
+            *full.get_mut() -= 1;
+            if *full.get() == 0 {
+                full.remove();
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.full_ranks.is_empty()
     }
@@ -167,5 +231,34 @@ impl FullRankCounts {
         self.full_ranks
             .get(&worker_id)
             .is_some_and(|&full| full >= dp_size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::BusyThresholdsHostExt;
+
+    #[test]
+    fn each_builder_sets_the_limit_its_accessor_returns() {
+        let limits = BusyThresholds::default()
+            .with_prefill_busy_threshold(Some(64))
+            .with_prefill_busy_threshold_frac(Some(0.5))
+            .with_decode_busy_threshold_frac(Some(0.9));
+
+        // Names every field: a new limit fails to compile here until it has a builder and
+        // an accessor in `host::BusyThresholdsHostExt`.
+        assert_eq!(
+            limits,
+            BusyThresholds {
+                prefill_busy_threshold: Some(64),
+                prefill_busy_threshold_frac: Some(0.5),
+                decode_busy_threshold_frac: Some(0.9),
+            }
+        );
+        assert_eq!(limits.prefill_busy_threshold(), Some(64));
+        assert_eq!(limits.prefill_busy_threshold_frac(), Some(0.5));
+        assert_eq!(limits.decode_busy_threshold_frac(), Some(0.9));
+        assert!(limits.is_configured());
     }
 }

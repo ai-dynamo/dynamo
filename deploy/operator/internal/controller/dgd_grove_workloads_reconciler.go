@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -200,6 +201,7 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 		dgd,
 		observedProviderObject,
 		desiredProviderObject,
+		commoncontroller.WithPreservedListOrder(compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations)),
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("sync Grove PodCliqueSet: %w", err)

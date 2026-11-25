@@ -40,6 +40,9 @@
 # trigger must also check the command's SHA when approval is required.
 
 # Maintainers can retry failed jobs from existing PR runs with `/rerun ci`.
+# glamr-failed-ci-retry: v1
+# glamr-agent requests retries with `@dynamo-ops please rerun failed CI for <head-sha>`.
+# The request uses case 4's identity checks and optional label prefix.
 # Copied-branch retries require approval for the current PR head.
 
 name: Trigger CI Approval Flow
@@ -336,7 +339,8 @@ jobs:
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/rerun ci')
+      (contains(github.event.comment.body, '/rerun ci') ||
+       contains(github.event.comment.body, '@dynamo-ops please rerun failed CI for '))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -359,4 +363,7 @@ jobs:
         with:
           script: |
             const rerun = require('./.github/scripts/rerun-ci.js');
-            await rerun({ github, context, core });
+            await rerun({
+              github, context, core,
+              glamrCiRequestsDisabled: ${{ vars.GLAMR_CI_REQUESTS_DISABLED == 'true' }},
+            });

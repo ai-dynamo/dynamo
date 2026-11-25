@@ -15,11 +15,15 @@ Costing, classification, queue placement, readiness and selection share the same
 `QueueEligibility` snapshots. An eligible exclusive soft target supplies the cached
 work and capacity checks; an ineligible target permits fallback within the original
 constraints. Exact pins remain exact. Prepared rows keep main's configuration,
-availability and overload freshness checks. Callers may project loads and fill rows;
-the actor repairs ranks it wrote since, or projects again. Record every actor-side
-write to a rank's load in `ActorWriteLog` after the write, or a prepared projection
-misses it. Configured reject thresholds keep the full load and eligibility pass on
-the actor.
+availability and overload freshness checks. Callers may project loads, count the
+ranks past configured reject thresholds in the same pass, and fill rows; the actor
+repairs and judges again the ranks it wrote since, or projects again. Record every
+actor-side write to a rank's load in `ActorWriteLog` after the write, or a prepared
+projection misses it. A write from another task after the caller's pass (a release,
+a prefill mark, a replica's booking) is not re-read: that selection keeps the
+caller's load and fullness for the rank. When adding an await between receiving a
+request and admitting it, drop its judged prepared load after the await, as the
+overlap refresh does.
 
 Affinity lanes wake on target capacity changes, matching arrivals, or a 100 ms
 `AFFINITY_RECHECK_INTERVAL` while affinity backlog exists. This is a recheck cadence,
@@ -38,7 +42,7 @@ PR numbers point to worked examples; open one only when you need to see how a ru
 
 One `SchedulerQueueActor` task per partition admits every request, so its time per admission caps that partition's request rate. Check a change against the cases below; the `dynamo-perf-best-practices` skill has the general rules and the evidence a PR needs.
 
-- **Adding work to an admission.** If it depends only on the request and worker configuration, do it on the caller's task in `prepare_candidates`. If it depends on load the actor books, the caller may compute it, but the actor must re-read the ranks it wrote since (`ActorWriteLog`, `adopt_prepared_load`). Either way keep the actor-side path: pinned requests and policies with filters get no prepared rows, reject thresholds allow no prepared load, and prepared rows last only the actor turn that received the request (#17465, #18540).
+- **Adding work to an admission.** If it depends only on the request and worker configuration, do it on the caller's task in `prepare_candidates`. If it depends on load the actor books, the caller may compute it, but the actor must re-read the ranks it wrote since (`ActorWriteLog`, `adopt_prepared_load`). Either way keep the actor-side path: pinned requests and policies with filters get no prepared rows, a prepared load is dropped when the reject thresholds, a rank's capacity or the set of ranks changed since its pass, and prepared rows last only the actor turn that received the request (#17465, #18540).
 - **Adding anything inside a loop over ranks.** It runs once per rank per admission, thousands of times at fleet scale. Don't add an allocation, a lock, or a SipHash probe to it; use what the row already carries, its position, or an Fx map (#18008).
 - **Adding a check that can exclude workers.** Drop those rows from the prepared set with `PreparedRows::retain`. Rebuild every row only when the check changes what preparation itself would build (#18009).
 - **Adding a check that can stop early.** Read ranks one at a time through `worker_load_reader` and stop at the first answer. Don't project every rank first, and don't reuse load read for an earlier admission (#17480).

@@ -344,11 +344,42 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
         - With no generation prompt or no recognized open/closed reasoning
           suffix, Dynamo retains the request-based decision.
 
-        A `max_thinking_tokens` budget also enables the reasoning gate when the
-        rendered prompt leaves reasoning open, even without JSON or
-        required/named-tool constraints. The budget caps reasoning tokens;
-        JSON and tool constraints still apply in the answer phase. Plain chat
-        without constraints or a thinking budget does not request this gate.
+        **JSON constraints active from the first token.** With a V2 unified
+        parser, Dynamo streams bare JSON directly for `response_format`
+        requests using `json_object` or `json_schema` when the selected decode
+        worker reports that JSON constraints apply from the first generated
+        token. Requests that allow tool calls keep tool-call parsing. To apply
+        JSON constraints immediately even when the prompt
+        ends in `<think>`, use these settings on the Python workers launched
+        with `python -m dynamo.sglang` or `python -m dynamo.vllm`:
+
+        - **SGLang:** Leave the engine's `--reasoning-parser` unset.
+        - **vLLM:** Leave the engine's `--reasoning-parser` unset, or pass
+          `--structured-outputs-config '{"enable_in_reasoning":true}'`.
+
+        The vLLM and SGLang sidecars advertise a native reasoning gate when
+        detected and leave grammar timing unspecified otherwise. For the open
+        `<think>` case above, Dynamo retains reasoning parsing.
+
+        When streaming JSON directly, Dynamo skips reasoning parsing and
+        preserves literal `<think>` markers inside JSON strings in `content`.
+        If grammar timing is unknown, Dynamo uses its reasoning parser and
+        may buffer JSON until the response ends.
+
+        A `thinking_token_budget` (or `nvext.max_thinking_tokens`) also enables
+        the reasoning gate when the rendered prompt leaves reasoning open,
+        even without JSON or required/named-tool constraints. The budget limits
+        how many tokens the model can spend on reasoning before it starts the
+        answer. JSON and tool constraints still apply in the answer phase.
+        Plain chat without constraints or a thinking budget does not request
+        this gate.
+
+        For the Python SGLang worker, thinking budgets require a compatible
+        native `--reasoning-parser`, `--enable-strict-thinking`, and tokenizer
+        initialization. Leaving the native parser unset for immediate JSON
+        makes thinking budgets unavailable. See
+        [Thinking Token Budgets](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md#thinking-token-budgets)
+        for the supported configuration.
 
         TensorRT-LLM also supports Dynamo's reasoning/content separation. The
         native grammar-gate behavior described here is specific to SGLang and

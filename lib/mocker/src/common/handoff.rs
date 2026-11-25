@@ -259,6 +259,8 @@ fn replay_timing(timing: HandoffTransferTiming) -> aisim_core::replay::HandoffTr
         // Dynamo's handoff contract currently models token KV only.
         state_bytes: 0,
         bandwidth_gb_s: timing.bandwidth_gb_s,
+        // Dynamo does not model pipeline-parallel prefill handoffs.
+        pipeline_fill_ms: 0.0,
     }
 }
 

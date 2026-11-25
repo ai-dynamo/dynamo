@@ -65,7 +65,6 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use dynamo_admission::{
     ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
     DispatchRecheck, PolicyProfile, RequestClassifier, RequestLifecycle, RouterQueuePolicy,
-    WorkerView,
 };
 use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
 use dynamo_router_protocol::session::SessionContext;
@@ -74,6 +73,7 @@ use dynamo_scheduler::test_utils::{
     SimpleWorkerConfig, TestScheduler, local_test_scheduler, test_schedule_request,
 };
 use dynamo_scheduler::{ScheduleMode, ScheduleRequest};
+use dynamo_worker_selection::WorkerCandidates;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -95,9 +95,10 @@ impl RequestClassifier for SessionLanes {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        let session = request.info().session_context();
+        if let Some(session) = session.map(|s| s.session_id().to_owned()) {
             request.set_lane_key(&session);
         }
         Ok(request)
@@ -144,6 +145,7 @@ impl HoldsHeldSessions {
 impl DispatchGate for HoldsHeldSessions {
     fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
         let held = head
+            .info()
             .session_context()
             .is_some_and(|session| session.session_id().starts_with("held"));
         if held {

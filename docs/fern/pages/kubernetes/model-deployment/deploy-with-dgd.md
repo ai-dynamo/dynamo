@@ -45,6 +45,11 @@ spec:
 - `type: worker` runs the inference engine (vLLM, SGLang, or TensorRT-LLM).
 - Per-component fields you will use most: `replicas`, `multinode`, `sharedMemorySize`, and `podTemplate` — a standard Kubernetes [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core). The operator injects its defaults into the container named `main` inside `podTemplate.spec.containers`, where you set the `image`, the `command`/`args` that launch the engine, `resources` (CPU/memory/GPU), `envFrom`, `env`, and `volumeMounts`.
 
+> [!NOTE]
+> Environment variable order affects references and overrides. Review the
+> [environment variable order](#environment-variable-order) before setting DGD-level or component
+> environment variables.
+
 For every backend, a component's `name` is its stable identifier within the DGD. The operator
 uses that name to derive Kubernetes resource names and sets it on the
 `nvidia.com/dynamo-component` label. Keep the name consistent anywhere commands, selectors, scaling
@@ -221,21 +226,21 @@ The worker in the previous step runs **vLLM**. Dynamo also supports **SGLang** a
 <Tab title="vLLM" language="vllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
 ```
 
 </Tab>
 <Tab title="SGLang" language="sglang">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0
 ```
 
 </Tab>
 <Tab title="TensorRT-LLM" language="trtllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.7.0
 ```
 
 </Tab>
@@ -530,6 +535,116 @@ For a stable external address instead of `port-forward`, see [Expose the Fronten
 ## Put it all together: Qwen3-32B
 
 The following spec assembles the steps above into one aggregated Qwen3-32B deployment, adapted from the [agg-round-robin recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml). It reflects the backend you selected earlier. Comments mark the values you substitute for your model, hardware, and scale:
+
+### Environment variable order
+
+For DGDs with operator origin 1.8.0 or later, environment precedence is operator defaults,
+DGD `spec.env`, then the selected component or role PodTemplate's container `env`.
+A more-specific definition replaces the entire general definition, including `valueFrom`;
+cross-layer overrides do not produce duplicate names. Operator-owned topology, GMS, and
+per-engine failover bindings retain their generated values.
+
+For snapshot-less intra-pod vLLM failover, the operator assigns
+`VLLM_NIXL_SIDE_CHANNEL_PORT=5600+engineID` and `DYN_VLLM_KV_EVENT_PORT=20080+engineID`,
+where `engineID` is 0 or 1. Do not override these variables. The operator retains its
+per-engine assignments so the engines use distinct ports within the Pod.
+
+The operator preserves the relative order of surviving entries within each input list. It
+topologically orders references between layers, so a DGD-level variable can reference a
+component-specific override. Independent entries retain their original general-to-specific
+input order; names are never sorted alphabetically. Cycles or conflicting ordering constraints
+fail rendering with the variables and source paths in the error.
+
+```yaml
+spec:
+  env:
+    - name: BASE
+      value: /models
+    - name: MODEL
+      value: "$(BASE)/qwen"
+  components:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: STORAGE
+                  value: /fast
+                - name: BASE
+                  value: "$(STORAGE)/models"
+```
+
+These entries render as `STORAGE`, `BASE`, then `MODEL`. Kubernetes expands `MODEL` to
+`/fast/models/qwen`. Graph-generated DCDs retain the general list in their separate `spec.env`
+until the final renderer adds operator defaults.
+
+Within a single list, Kubernetes' sequential semantics still apply: forward references are not
+reordered and remain literal unless an external value is available. `$$(NAME)` is escaped, and
+shell syntax such as `$NAME` is not a Kubernetes reference. ConfigMap/Secret values, `envFrom`,
+and provider-injected variables remain runtime inputs; the operator does not fetch or expand them
+for ordering.
+
+For SGLang's NIXL exporter-port lookup, the operator replays the final ordered list without changing
+the manifest. Earlier known values are substituted once, including Kubernetes dollar escaping;
+a later definition does not retroactively change an earlier expansion. Values from `valueFrom`,
+`envFrom`, or providers such as Grove remain unknown. An unresolved value alone does not cause
+rendering to fail. Replay also leaves values unknown if their expansion exceeds its shared
+1 MiB output budget. For example, the lookup can resolve
+`NIXL_TELEMETRY_PROMETHEUS_PORT: "$(BASE_PORT)"` when `BASE_PORT` is known earlier in the final list.
+If the base port is unknown, the operator retains existing port declarations; automatic scrape-port
+alignment is not guaranteed. A known invalid port still fails rendering.
+
+Use unique names within the DGD's root `spec.env` list (`spec.envs` in `v1alpha1`), regardless
+of origin. For origins 1.8.0 and later, admission rejects duplicates even when an update leaves
+the list unchanged. Repair a stored duplicate list before making unrelated updates; the operator
+does not silently de-duplicate it. Earlier or missing origins may retain an existing duplicate
+list only when the complete ordered list is unchanged. Changing any value, source, position, or
+member requires unique names throughout the list. Names are case-sensitive. Same-named entries
+in different layers remain valid overrides, as `BASE` demonstrates above. Root DCD `spec.env`
+also rejects duplicates on create and update for origins 1.8.0 and later, including unchanged
+lists; older or missing origins retain their previous validation behavior.
+New or changed root entries must not specify both a non-empty `value` and `valueFrom`.
+
+For example, this root list is rejected on create or when changed on update, and on every
+non-terminating update for origins 1.8.0 and later:
+
+```yaml
+spec:
+  env:
+    - name: BASE
+      value: /models
+    - name: BASE # Duplicate within one root list, not an override between layers.
+      value: /fast/models
+```
+
+Admission enforces this rule without changing the root list's OpenAPI merge semantics. Kubernetes
+does not [ratchet a change to list type or keys](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-ratcheting); adding those schema markers would reject
+unchanged legacy duplicate lists before the webhook could permit them. Container PodTemplate
+schemas and alpha service-level env conversion remain unchanged.
+
+In `v1alpha1`, `service.envs` and `extraPodSpec.mainContainer.env` are combined during API
+conversion. When both lists define the same name, the extra container value replaces the
+service value at its original position. Conversion also de-duplicates entries within
+`extraPodSpec.mainContainer.env`, even when `service.envs` is empty. Only `service.envs`
+retains same-list repeated names through conversion, but admission rejects such repetitions on
+create or list changes because generated child resources require unique names. Only earlier or
+missing origins can retain an unchanged existing service list with duplicates; origins 1.8.0 and
+later reject it. New or changed lists also reject a non-empty `value` combined with `valueFrom`.
+Keep order-dependent variables with unique names together in
+`service.envs`, and avoid redefining those names in the extra
+container list. For direct ordered PodTemplate configuration, use `v1beta1` with
+`podTemplate.spec.containers[*].env`.
+
+DGDs created by an operator older than 1.8.0, or without the
+`nvidia.com/dynamo-operator-origin-version` annotation, retain the legacy sorted and de-duplicated
+output after an operator upgrade. See the
+[Dynamo Platform v1.8.0 upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#environment-variable-order-in-newly-created-dgds)
+for migration guidance.
+
+For origins 1.8.0 and later, changing only environment-list order is a workload change and is
+propagated to the selected provider. Switching to order-sensitive resource hashing may update
+top-level bookkeeping annotations, but does not change an otherwise unchanged workload spec.
 
 <Tabs>
 <Tab title="vLLM" language="vllm">

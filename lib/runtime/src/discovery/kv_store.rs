@@ -404,7 +404,11 @@ impl Discovery for KVStoreDiscovery {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance = spec.into_instance(self.instance_id());
+        self.register_instance(spec.into_instance(self.instance_id()))
+            .await
+    }
+
+    async fn register_instance(&self, instance: DiscoveryInstance) -> Result<DiscoveryInstance> {
         let instance_id = instance.instance_id();
         let is_event_source = matches!(&instance, DiscoveryInstance::EventSource { .. });
         let is_model = matches!(&instance, DiscoveryInstance::Model { .. });
@@ -1221,6 +1225,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(comp1.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn hosted_instances_keep_their_own_ids() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let own = client.instance_id();
+        let mut hosted = Vec::new();
+        for instance_id in [own.wrapping_add(1), own.wrapping_add(2)] {
+            let DiscoveryInstance::Endpoint(mut instance) = endpoint_instance(instance_id) else {
+                unreachable!()
+            };
+            instance.transport =
+                TransportType::Direct(format!("http://engine-{instance_id}:30001"));
+            hosted.push(
+                client
+                    .register_instance(DiscoveryInstance::Endpoint(instance))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let query = DiscoveryQuery::Endpoint {
+            namespace: "ns".to_string(),
+            component: "component".to_string(),
+            endpoint: "endpoint".to_string(),
+        };
+        let ids = |listed: Vec<DiscoveryInstance>| -> HashSet<u64> {
+            listed.iter().map(DiscoveryInstance::instance_id).collect()
+        };
+        assert_eq!(
+            ids(client.list(query.clone()).await.unwrap()),
+            HashSet::from([own.wrapping_add(1), own.wrapping_add(2)])
+        );
+
+        client.unregister(hosted.remove(0)).await.unwrap();
+        assert_eq!(
+            ids(client.list(query).await.unwrap()),
+            HashSet::from([own.wrapping_add(2)])
+        );
     }
 
     #[tokio::test]
