@@ -668,7 +668,74 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::prom_typed::{TypedFamily, build_families};
+    use crate::metrics::prom_typed::{TypedFamily, TypedSample, build_families};
+    use serde::Deserialize;
+    use std::collections::BTreeMap;
+
+    /// Accept a float as either a JSON number or a string, parsing strings with
+    /// `str::parse`, which is correctly rounded.
+    fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Text(String),
+            Num(f64),
+        }
+        match Repr::deserialize(d)? {
+            Repr::Text(t) => t.parse().map_err(serde::de::Error::custom),
+            Repr::Num(v) => Ok(v),
+        }
+    }
+
+    /// The JSON shape of a [`TypedSample`] in this module's fixtures.
+    #[derive(Deserialize)]
+    struct FixtureSample {
+        name: String,
+        labels: BTreeMap<String, String>,
+        /// Fixtures carry this as a string: JSON float parsing can land a ULP off
+        /// the correctly-rounded value, and a fixture must not introduce error the
+        /// real path -- a native f64 across PyO3 -- never has.
+        #[serde(deserialize_with = "de_f64")]
+        value: f64,
+        #[serde(default)]
+        timestamp: Option<f64>,
+    }
+
+    /// The JSON shape of a [`TypedFamily`] in this module's fixtures.
+    #[derive(Deserialize)]
+    struct FixtureFamily {
+        name: String,
+        help: String,
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        unit: String,
+        samples: Vec<FixtureSample>,
+    }
+
+    /// Parse fixture JSON into the typed families `build_families` takes.
+    fn typed_families(json: &str) -> Vec<TypedFamily> {
+        let fixtures: Vec<FixtureFamily> = serde_json::from_str(json).expect("fixture");
+        fixtures
+            .into_iter()
+            .map(|family| TypedFamily {
+                name: family.name,
+                help: family.help,
+                kind: family.kind,
+                unit: family.unit,
+                samples: family
+                    .samples
+                    .into_iter()
+                    .map(|sample| TypedSample {
+                        name: sample.name,
+                        labels: sample.labels,
+                        value: sample.value,
+                        timestamp: sample.timestamp,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
 
     /// Mirror of what `metric_families_combined` assembles, so tests exercise
     /// the same shape the exporter consumes.
@@ -693,8 +760,7 @@ mod tests {
     }
 
     fn export(typed_json: &str) -> Vec<Metric> {
-        let typed: Vec<TypedFamily> = serde_json::from_str(typed_json).expect("typed");
-        let collected = collected_from(build_families(typed));
+        let collected = collected_from(build_families(typed_families(typed_json)));
         let rm = to_resource_metrics(&collected, &[], UNIX_EPOCH);
         rm.scope_metrics.into_iter().next().expect("scope").metrics
     }
@@ -1136,17 +1202,14 @@ mod tests {
     /// dropped at the boundary and backends have nothing to label axes with.
     #[test]
     fn unit_metadata_is_carried_and_translated() {
-        let collected = collected_from(build_families(
-            serde_json::from_str(
-                r#"[{"name":"d_latency_seconds","help":"L","type":"gauge","unit":"seconds",
-                     "samples":[{"name":"d_latency_seconds","labels":{},"value":"0.5"}]},
-                    {"name":"d_widgets","help":"W","type":"gauge","unit":"widgets",
-                     "samples":[{"name":"d_widgets","labels":{},"value":"2"}]},
-                    {"name":"d_plain","help":"P","type":"gauge",
-                     "samples":[{"name":"d_plain","labels":{},"value":"1"}]}]"#,
-            )
-            .expect("fixture"),
-        ));
+        let collected = collected_from(build_families(typed_families(
+            r#"[{"name":"d_latency_seconds","help":"L","type":"gauge","unit":"seconds",
+                 "samples":[{"name":"d_latency_seconds","labels":{},"value":"0.5"}]},
+                {"name":"d_widgets","help":"W","type":"gauge","unit":"widgets",
+                 "samples":[{"name":"d_widgets","labels":{},"value":"2"}]},
+                {"name":"d_plain","help":"P","type":"gauge",
+                 "samples":[{"name":"d_plain","labels":{},"value":"1"}]}]"#,
+        )));
         let metrics = to_resource_metrics(&collected, &[], UNIX_EPOCH)
             .scope_metrics
             .into_iter()
