@@ -211,7 +211,7 @@ What exists only while a request is classified is on the `ClassifyRequest` itsel
 |---|---|
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
-| `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains |
+| `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains. The value does not expose its limits: `is_configured()` says whether any limit is set, and `has_room()` checks one rank |
 | `ingress_at()` | Original router ingress time |
 | `due_at()` | Queue deadline set by the classifier, if any |
 | `progress().context_tokens()` | Live context high-water mark from input and generated tokens; this measures logical context, not physical KV occupancy |

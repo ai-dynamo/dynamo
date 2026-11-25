@@ -38,6 +38,7 @@ use dynamo_scheduler::host::{
 };
 use dynamo_scheduler::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 use dynamo_slot_tracker::BusyThresholds;
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
 use tokio_util::sync::CancellationToken;
 
 const BLOCK_SIZE: u32 = 16;
@@ -259,10 +260,8 @@ fn core_with_reject_thresholds(
         ..Default::default()
     };
     let reject_thresholds = reject.then(|| {
-        Arc::new(|| BusyThresholds {
-            prefill_busy_threshold_frac: Some(1.0),
-            ..Default::default()
-        }) as RejectThresholdsProvider
+        Arc::new(|| BusyThresholds::default().with_prefill_busy_threshold_frac(Some(1.0)))
+            as RejectThresholdsProvider
     });
     let core = local_selection_core_with_host(
         config,

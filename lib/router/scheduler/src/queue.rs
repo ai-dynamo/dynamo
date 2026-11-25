@@ -48,6 +48,7 @@ use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::PrefillLoadHint;
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
@@ -1219,8 +1220,8 @@ impl<
                 policy_class = class.name,
                 queue_policy = %class.queue_policy,
                 quantum = class.quantum,
-                prefill_busy_threshold = ?class.busy_thresholds.prefill_busy_threshold,
-                prefill_busy_threshold_frac = ?class.busy_thresholds.prefill_busy_threshold_frac,
+                prefill_busy_threshold = ?class.busy_thresholds.prefill_busy_threshold(),
+                prefill_busy_threshold_frac = ?class.busy_thresholds.prefill_busy_threshold_frac(),
                 "Router policy class configured"
             );
         }
@@ -4872,7 +4873,7 @@ mod tests {
     async fn exclusive_affinity_queue_zero_limit_rejects_busy_target() {
         let mut capped = class("capped", 1);
         capped.queue_policy = RouterQueuePolicy::Fcfs;
-        capped.busy_thresholds.prefill_busy_threshold = Some(32);
+        capped.busy_thresholds = capped.busy_thresholds.with_prefill_busy_threshold(Some(32));
         capped.request_queue_limit_per_worker = Some(0);
         let profile = policy_profile(Some("capped"), vec![capped]);
         let (queue, slots) = make_queue_with_profile(2, 16, 64, profile);
@@ -4921,10 +4922,9 @@ mod tests {
         let b = WorkerWithDpRank::new(1, 0);
         for source in ["overloaded", "unavailable", "host-full"] {
             let changed = Arc::new(AtomicBool::new(false));
-            let limits = Arc::new(Mutex::new(BusyThresholds {
-                prefill_busy_threshold: Some(96),
-                ..Default::default()
-            }));
+            let limits = Arc::new(Mutex::new(
+                BusyThresholds::default().with_prefill_busy_threshold(Some(96)),
+            ));
             let provider = Arc::clone(&limits);
             let (queue, slots, _configs) = make_queue_with_profile_sender_and_reject(
                 2,
@@ -4991,7 +4991,7 @@ mod tests {
 
             // No enqueue or capacity notification accompanies this snapshot change.
             if source == "host-full" {
-                limits.lock().prefill_busy_threshold = Some(32);
+                *limits.lock() = BusyThresholds::default().with_prefill_busy_threshold(Some(32));
                 let (mut probe, _rx) = make_request("cost-probe", 48);
                 probe.affinity_target = Some(b.into());
                 probe.overlap.effective_cached_tokens.insert(a, 32);
@@ -5840,10 +5840,7 @@ mod tests {
 
     /// Reject thresholds under which a rank past 32 tokens, half its prefill budget, is full.
     fn half_budget_reject() -> BusyThresholds {
-        BusyThresholds {
-            prefill_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        }
+        BusyThresholds::default().with_prefill_busy_threshold_frac(Some(0.5))
     }
 
     /// Book `tokens` of prefill on `worker`, as a pinned request.
@@ -6771,9 +6768,9 @@ mod tests {
             16,
             1_000_000,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
-                decode_busy_threshold_frac: Some(0.5),
-                ..Default::default()
+            Some(Arc::new(|| {
+                dynamo_slot_tracker::BusyThresholds::default()
+                    .with_decode_busy_threshold_frac(Some(0.5))
             })),
         );
         let worker_config = SimpleWorkerConfig {
@@ -6845,9 +6842,9 @@ mod tests {
             16,
             100,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
-                prefill_busy_threshold_frac: Some(0.5),
-                ..Default::default()
+            Some(Arc::new(|| {
+                dynamo_slot_tracker::BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.5))
             })),
         );
         // Worker 0 grows to two ranks with a 100-token prefill budget each.
@@ -6891,10 +6888,10 @@ mod tests {
 
     #[tokio::test]
     async fn reject_thresholds_follow_the_live_provider_on_prefill_tokens() {
-        let live = Arc::new(Mutex::new(dynamo_slot_tracker::BusyThresholds {
-            prefill_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        }));
+        let live = Arc::new(Mutex::new(
+            dynamo_slot_tracker::BusyThresholds::default()
+                .with_prefill_busy_threshold_frac(Some(0.5)),
+        ));
         let provider = Arc::clone(&live);
         let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
         let (queue, slots, _cfg_tx) = make_queue_with_profile_sender_and_reject(
@@ -7062,24 +7059,15 @@ mod tests {
             Some("standard"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold: Some(0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default().with_prefill_busy_threshold(Some(0)),
                     ..class("standard", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold: Some(0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default().with_prefill_busy_threshold(Some(0)),
                     ..class("latency", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold: Some(0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default().with_prefill_busy_threshold(Some(0)),
                     ..class("custom_priority", 1)
                 },
             ],
@@ -7187,10 +7175,8 @@ mod tests {
             vec![PolicyClassConfig {
                 queue_policy: RouterQueuePolicy::Wspt,
                 slo_ttft_ms: NonZeroU32::new(1),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7328,10 +7314,8 @@ mod tests {
             None,
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(1000),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7409,10 +7393,8 @@ mod tests {
             None,
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(1),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7451,10 +7433,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -7505,10 +7485,8 @@ mod tests {
             None,
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(1000),
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -8617,17 +8595,13 @@ mod tests {
             Some("first"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("first", 100)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("second", 100)
                 },
             ],
@@ -8642,28 +8616,22 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("fast", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(200),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("medium", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(300),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("slow", 1)
                 },
             ],
@@ -8718,10 +8686,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 ..class("standard", 1)
             }],
         );
@@ -8862,19 +8828,15 @@ mod tests {
             Some("refreshing"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("refreshing", 100)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(11100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("budgeted", 100)
                 },
             ],
@@ -9407,10 +9369,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 request_queue_limit_per_worker: Some(1),
                 ..class("capped", 1)
             }],
@@ -9459,26 +9419,20 @@ mod tests {
             Some("requests"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     request_queue_limit_per_worker: Some(1),
                     ..class("requests", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(1),
                     ..class("raw_tokens", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     cached_token_queue_limit_per_worker: Some(1),
                     ..class("cached_tokens", 1)
                 },
@@ -9534,19 +9488,15 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(300),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("standard", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(50),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("latency", 1)
                 },
             ],
@@ -9605,27 +9555,21 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("enabled", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("omitted", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: false,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("disabled", 1)
                 },
             ],
@@ -9739,18 +9683,14 @@ mod tests {
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("enforced", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("ordered", 1)
                 },
             ],
@@ -9818,18 +9758,14 @@ mod tests {
                     PolicyClassConfig {
                         slo_ttft_ms: head_budget.then(|| NonZeroU32::new(100).unwrap()),
                         controlled_delay: head_budget,
-                        busy_thresholds: BusyThresholds {
-                            prefill_busy_threshold_frac: Some(0.0),
-                            ..Default::default()
-                        },
+                        busy_thresholds: BusyThresholds::default()
+                            .with_prefill_busy_threshold_frac(Some(0.0)),
                         request_queue_limit_per_worker: Some(1),
                         ..class("limited", 1)
                     },
                     PolicyClassConfig {
-                        busy_thresholds: BusyThresholds {
-                            prefill_busy_threshold_frac: Some(0.0),
-                            ..Default::default()
-                        },
+                        busy_thresholds: BusyThresholds::default()
+                            .with_prefill_busy_threshold_frac(Some(0.0)),
                         ..class("other", 1)
                     },
                 ],
@@ -9958,18 +9894,14 @@ mod tests {
             Some("limited"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(100),
                     ..class("limited", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("other", 1)
                 },
             ],
@@ -10069,18 +10001,14 @@ mod tests {
             Some("a"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(32),
                     ..class("a", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("b", 1)
                 },
             ],
@@ -10187,10 +10115,8 @@ mod tests {
                 None,
                 vec![PolicyClassConfig {
                     queue_policy: RouterQueuePolicy::Fcfs,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     raw_isl_token_queue_limit_per_worker: Some(queue_limit),
                     ..class("a", 1)
                 }],
@@ -10296,18 +10222,14 @@ mod tests {
             Some("a"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     request_queue_limit_per_worker: Some(1),
                     ..class("a", 1)
                 },
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("b", 1)
                 },
             ],
@@ -10551,20 +10473,16 @@ mod tests {
             Some("direct"),
             vec![
                 PolicyClassConfig {
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     request_queue_limit_per_worker: Some(0),
                     ..class("direct", 1)
                 },
                 PolicyClassConfig {
                     slo_ttft_ms: NonZeroU32::new(100),
                     controlled_delay: true,
-                    busy_thresholds: BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.0),
-                        ..Default::default()
-                    },
+                    busy_thresholds: BusyThresholds::default()
+                        .with_prefill_busy_threshold_frac(Some(0.0)),
                     ..class("queued", 1)
                 },
             ],
@@ -10661,10 +10579,8 @@ mod tests {
             vec![PolicyClassConfig {
                 slo_ttft_ms: NonZeroU32::new(100),
                 controlled_delay: true,
-                busy_thresholds: BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.0),
-                    ..Default::default()
-                },
+                busy_thresholds: BusyThresholds::default()
+                    .with_prefill_busy_threshold_frac(Some(0.0)),
                 request_queue_limit_per_worker: Some(2),
                 ..class("capped", 1)
             }],

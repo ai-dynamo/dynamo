@@ -886,16 +886,14 @@ mod tests {
     #[test]
     fn projection_pass_counts_full_ranks_against_each_ranks_capacity() {
         use crate::busy::BusyThresholds;
+        use crate::host::BusyThresholdsHostExt;
 
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
         let worker_c = worker(3, 0);
         let registry = PromptRegistry::new([worker_a, worker_b]);
         let decay_now = Instant::now();
-        let limits = BusyThresholds {
-            decode_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        };
+        let limits = BusyThresholds::default().with_decode_busy_threshold_frac(Some(0.5));
         // Both ranks hold 7 blocks; only worker 1 reports the 8-block capacity that makes
         // 7 blocks "full". An unknown rank cannot be given a capacity.
         let capacity = WorkerCapacity::new(Some(100), Some(8));

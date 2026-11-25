@@ -874,6 +874,7 @@ mod tests {
     };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
+    use dynamo_slot_tracker::host::BusyThresholdsHostExt;
     use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
     use dynamo_worker_selection::WorkerCandidates;
 
@@ -1792,10 +1793,8 @@ mod tests {
                 workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 // The queue's capacity check, run on the classifier's own rows.
-                let thresholds = BusyThresholds {
-                    prefill_busy_threshold_frac: Some(0.5),
-                    ..Default::default()
-                };
+                let thresholds =
+                    BusyThresholds::default().with_prefill_busy_threshold_frac(Some(0.5));
                 *self.0.lock() = Some(
                     workers
                         .iter()

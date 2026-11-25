@@ -513,7 +513,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
-`BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check.
+`BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check. A plugin cannot read the limits of a `BusyThresholds` or build one with limits of its own.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
