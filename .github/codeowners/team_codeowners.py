@@ -13,6 +13,7 @@ from codeowners_match import DELEGATED, match, parse_codeowners, resolve_owners
 PREFIX = ".github/codeowners/CODEOWNERS."
 POLICY = ("CODEOWNERS", ".github/codeowners/areas.yaml")
 PROCESS = "@ai-dynamo/dynamo-process-codeowners"
+REGISTRATION_GLOB = "/" + PREFIX + "*"
 
 
 def team_path(owner: str) -> str:
@@ -53,6 +54,8 @@ def _overlap(left: str, right: str) -> bool:
 def team_routes(rules: list[tuple[str, list[str]]]) -> dict[str, str]:
     routes = {}
     for glob, owners in rules:
+        if glob == REGISTRATION_GLOB and owners == [PROCESS]:
+            continue
         if glob.lstrip("/").startswith(PREFIX):
             if len(owners) != 1 or glob != "/" + team_path(owners[0]):
                 raise ValueError(

@@ -209,11 +209,38 @@ def test_generator_delegates_only_policy_and_registers_empty_teams():
     assert resolve_owners(owners, "CODEOWNERS") == []
     assert resolve_owners(owners, POLICY[1]) == []
     assert resolve_owners(owners, ".github/workflows/codeowners.yml") == ["@org/ops"]
+
+    # GitHub uses the base rules when the next PR introduces a team file.
+    new_path = team_path("@org/later")
+    assert resolve_owners(owners, new_path) == [PROCESS]
+    spec["areas"].append(
+        {"label": "later", "github_team": "@org/later", "path_globs": []}
+    )
+    lines, _ = _render_codeowners(compute_resolution(spec), group=True)
+    registered = generate(
+        {"CODEOWNERS": "\n".join(lines), POLICY[1]: yaml.safe_dump(spec)}
+    )
+    validate(after, registered)
+    assert registered[new_path] == ""
+    assert changed_teams(after, registered) == {new_path}
+    rules = parse_codeowners(registered["CODEOWNERS"])
+    assert resolve_owners(rules, new_path) == ["@org/later"]
+    assert resolve_owners(rules, team_path("@org/ops")) == ["@org/ops"]
+    assert PREFIX + "*" not in registered
+
     bad = dict(after, **{"app.py": ""})
     bad["CODEOWNERS"] += "\n/app.py @org/new\n"
     generate(bad)
     with pytest.raises(ValueError, match="separately"):
         validate(before, bad)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("owners", [[], ["@org/ops"], [PROCESS, "@org/ops"]])
+def test_new_team_fallback_requires_process(owners):
+    rules = f"/{PREFIX}* {' '.join(owners)}\n"
+    with pytest.raises(ValueError, match="exact native owner"):
+        render_team_files(rules, {})
 
 
 @pytest.mark.unit

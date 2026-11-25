@@ -49,6 +49,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from codeowners_match import ResolvedModel, anchor, compute_resolution  # noqa: E402
 from team_codeowners import (  # noqa: E402
     DELEGATED,
+    PROCESS,
+    REGISTRATION_GLOB,
     render_team_files,
     team_path,
     write_team_file,
@@ -303,7 +305,7 @@ def _render_codeowners(
     all_paths = [p for p, _ in base_rules + shared_rules + ft_rules] + [
         anchor(team_path(owner)) for owner in team_owners
     ]
-    all_paths = all_paths or ["*"]
+    all_paths += [REGISTRATION_GLOB]
     width = max(len(p) for p in all_paths) + 2
 
     def fmt(path: str, team: str) -> str:
@@ -368,6 +370,7 @@ def _render_codeowners(
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
 
     lines += ["", "# Native review of each team's generated ownership entries."]
+    lines += [fmt(REGISTRATION_GLOB, PROCESS)]
     lines += [fmt(anchor(team_path(owner)), owner) for owner in team_owners]
     lines += ["", "# Policy changes are reviewed through the affected team files."]
     lines += [anchor(path) for path in sorted(DELEGATED)]
@@ -433,6 +436,7 @@ def main() -> int:
         + stats["shared"]
         + stats["filetype"]
         + stats["team_files"]
+        + 1
         + (1 if model.catch_all else 0)
     )
     print(

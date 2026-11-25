@@ -66,9 +66,12 @@ drift and verifies that every affected old/new owner has a changed team file.
 Unrepresentable wildcard changes fail rather than bypassing an affected owner;
 split the owning glob in that case.
 
-Register new owners first with an empty area or contributor-area list. Existing
-team files cannot be deleted or reassigned through a routing change. GitHub
-enforces native reviews using the repository's existing approval-retention rules.
+Register new owners first with an empty area or contributor-area list. The
+`CODEOWNERS.*` fallback requires Process review for a new team file: GitHub uses
+the base branch's routing, which does not yet contain that file's exact team rule.
+Existing team files keep their exact team owner. They cannot be deleted or
+reassigned through a routing change. GitHub enforces native reviews using the
+repository's existing approval-retention rules.
 
 Root `CODEOWNERS` and `areas.yaml` have no direct native owner; their reviews go
 through the affected team files. These are the only two exceptions. The existing
