@@ -220,7 +220,7 @@ pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
 pub const VLLM_CAUSAL_DECISION_V1: &str = "vllm_causal_decision_v1";
 
 /// Worker-advertised readout contract for noncausal pooling-based decision
-/// classifiers (`task="token_classify"` with `use_activation=false`).
+/// classifiers (`"token_classify"` / `"classify"` with `use_activation=false`).
 pub const VLLM_POOLING_DECISION_V1: &str = "vllm_pooling_decision_v1";
 
 /// Worker-advertised guarantee that disaggregated prefill cancellation is safe

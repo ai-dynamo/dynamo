@@ -100,10 +100,7 @@ async fn mixed_profiles_route_the_whole_request_before_admission() {
         assert_eq!(selected.card.systemone_backend(), Some(backend));
         let mut workers =
             crate::discovery::WorkerSet::new(namespace.into(), namespace.into(), selected.card);
-        workers.generate_engine = match selected.engine {
-            crate::discovery::SystemOneEngine::Generate(engine) => Some(engine),
-            crate::discovery::SystemOneEngine::Pooling(_) => None,
-        };
+        workers.generate_engine = selected.engine.as_generate().cloned();
         workers.systemone_preprocessor = Some(selected.preprocessor);
         let (members, receiver) = tokio::sync::watch::channel(vec![41]);
         workers.set_instance_watcher(receiver);

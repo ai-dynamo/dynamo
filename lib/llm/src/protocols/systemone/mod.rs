@@ -10,9 +10,7 @@ mod vllm;
 pub use native::{build_native_score_request, parse_candidate_scores};
 pub(crate) use pooling::{
     CHUNKED_CONTEXT_END_SENTINEL, CHUNKED_POOLING_SYSTEM_PROMPT, POOLING_SYSTEM_PROMPT,
-};
-pub use pooling::{
-    PoolingDecisionConfig, build_pooling_request, escape_special_tokens, extract_marker_logits,
+    PoolingDecisionConfig, build_pooling_request, extract_marker_logits,
     format_chunked_question_text, format_joint_user_prompt, format_pooling_state_text,
     reduce_head_logits,
 };
@@ -31,7 +29,9 @@ impl ScoringBackend {
         match self {
             Self::Sglang => "sglang",
             Self::Vllm => "vllm",
-            Self::VllmPooling => "vllm_pooling",
+            Self::VllmPooling => {
+                unreachable!("pooling backend dispatches via in-process pooling engine")
+            }
         }
     }
 

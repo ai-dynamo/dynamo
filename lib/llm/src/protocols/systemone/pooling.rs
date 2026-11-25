@@ -35,31 +35,31 @@ pub(crate) const CHUNKED_CONTEXT_END_SENTINEL: &str = "\u{0000}dynamo-pooling-co
 
 /// Worker-advertised readout contract for a noncausal pooling decision classifier.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PoolingDecisionConfig {
-    pub template: String,
-    pub marker: String,
+pub(crate) struct PoolingDecisionConfig {
+    pub(crate) template: String,
+    pub(crate) marker: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub separator: Option<String>,
+    pub(crate) separator: Option<String>,
     #[serde(default)]
-    pub readout_offset: i32,
-    pub codes: Vec<String>,
-    pub temperature: f64,
+    pub(crate) readout_offset: i32,
+    pub(crate) codes: Vec<String>,
+    pub(crate) temperature: f64,
     #[serde(default)]
-    pub max_questions: Option<usize>,
+    pub(crate) max_questions: Option<usize>,
     #[serde(default)]
-    pub max_length: Option<usize>,
+    pub(crate) max_length: Option<usize>,
 }
 
 impl PoolingDecisionConfig {
-    pub fn is_chunked(&self) -> bool {
+    pub(crate) fn is_chunked(&self) -> bool {
         self.template == JOINT_CHUNKED_READOUT_TEMPLATE
     }
 
-    pub fn uses_last_classify(&self) -> bool {
+    pub(crate) fn uses_last_classify(&self) -> bool {
         self.is_chunked() && self.readout_offset == 0
     }
 
-    pub fn num_classes(&self) -> usize {
+    pub(crate) fn num_classes(&self) -> usize {
         self.codes.len()
     }
 
@@ -74,7 +74,7 @@ impl PoolingDecisionConfig {
         extra
     }
 
-    pub fn validate(&self) -> Result<(), SystemOneError> {
+    pub(crate) fn validate(&self) -> Result<(), SystemOneError> {
         match self.template.as_str() {
             JOINT_INLINE_READOUT_TEMPLATE => {
                 if self.separator.as_deref().is_some_and(str::is_empty) {
@@ -127,7 +127,7 @@ impl PoolingDecisionConfig {
         Ok(())
     }
 
-    pub fn from_runtime_value(value: &serde_json::Value) -> Option<Self> {
+    pub(crate) fn from_runtime_value(value: &serde_json::Value) -> Option<Self> {
         let config: Self = serde_json::from_value(value.clone()).ok()?;
         config.validate().ok()?;
         Some(config)
@@ -173,12 +173,6 @@ impl<'a> TokenEscaper<'a> {
         }
         escaped
     }
-}
-
-/// Neutralize special and control tokens (marker, separator, sentinel) in untrusted
-/// text so user input cannot forge control tokens or extra readout positions.
-pub fn escape_special_tokens(text: &str, special_tokens: &[String], extra: &[&str]) -> String {
-    TokenEscaper::new(special_tokens, extra).escape(text)
 }
 
 fn value_as_text(value: &serde_json::Value) -> String {
@@ -284,7 +278,7 @@ fn format_question_section(
 }
 
 /// Format the user message body for one joint-readout pooling sequence.
-pub fn format_joint_user_prompt(
+pub(crate) fn format_joint_user_prompt(
     input: &serde_json::Value,
     questions: &[&CanonicalQuestion],
     dialect: Dialect,
@@ -309,7 +303,7 @@ pub fn format_joint_user_prompt(
 }
 
 /// Format the shared `"State:\n..."` text with control tokens neutralized.
-pub fn format_pooling_state_text(
+pub(crate) fn format_pooling_state_text(
     input: &serde_json::Value,
     config: &PoolingDecisionConfig,
     special_tokens: &[String],
@@ -323,7 +317,7 @@ pub fn format_pooling_state_text(
 
 /// Format one question chunk (`"Question:\n..."`, without trailing marker) for
 /// `joint-chunked-readout-v1`.
-pub fn format_chunked_question_text(
+pub(crate) fn format_chunked_question_text(
     question: &CanonicalQuestion,
     dialect: Dialect,
     config: &PoolingDecisionConfig,
@@ -335,7 +329,7 @@ pub fn format_chunked_question_text(
 }
 
 /// Build an in-process pooling request for raw float32 classifier logits.
-pub fn build_pooling_request(
+pub(crate) fn build_pooling_request(
     model: &str,
     token_ids: Vec<u32>,
     task: &str,
@@ -364,7 +358,7 @@ pub fn build_pooling_request(
 /// Decode only the requested readout rows from a base64-packed little-endian
 /// float32 `[seq_len, width]` (or `[width]` / `[1, width]` for LAST-token
 /// single-marker classify) pooling response, avoiding full-matrix decoding.
-pub fn extract_marker_logits(
+pub(crate) fn extract_marker_logits(
     response: &NvCreatePoolingResponse,
     seq_len: usize,
     width: usize,
@@ -449,7 +443,7 @@ pub fn extract_marker_logits(
 
 /// Convert raw classifier head logits for one question into a validated
 /// `dynamo_decisions::Distribution` with `label_mass: None`.
-pub fn reduce_head_logits(
+pub(crate) fn reduce_head_logits(
     row: &[f32],
     candidate_count: usize,
     is_predicate: bool,
@@ -623,13 +617,14 @@ mod tests {
     #[test]
     fn escape_neutralizes_marker_and_special_tokens() {
         let specials = vec!["<|im_end|>".into(), "[INST]".into()];
-        let out = escape_special_tokens(
-            "hi <|fim_suffix|> and <|im_end|> and [INST]",
-            &specials,
-            &["<|fim_suffix|>"],
-        );
+        let out = TokenEscaper::new(&specials, &["<|fim_suffix|>"])
+            .escape("hi <|fim_suffix|> and <|im_end|> and [INST]");
         assert_eq!(out, "hi ＜|fim_suffix|＞ and ＜|im_end|＞ and ［INST］");
-        assert!(!escape_special_tokens("hi READOUT there", &[], &["READOUT"]).contains("READOUT"));
+        assert!(
+            !TokenEscaper::new(&[], &["READOUT"])
+                .escape("hi READOUT there")
+                .contains("READOUT")
+        );
     }
 
     #[test]
