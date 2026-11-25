@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const NAME: &str = "dynamo-prefill-chunk-table";
 
@@ -95,8 +95,43 @@ struct Parameters {
     profile_file: PathBuf,
 }
 
-fn observe(path: PathBuf) -> std::io::Result<Arc<RwLock<Table>>> {
-    let table = Arc::new(RwLock::new(Table::new()));
+#[derive(Deserialize)]
+struct Publication {
+    model_name: String,
+    routing_group: String,
+    block_size: u32,
+    valid_until_unix_ms: u64,
+    profiles: Vec<RankProfile>,
+}
+
+struct Snapshot {
+    partition: RoutingPartitionId,
+    block_size: u32,
+    expires: SystemTime,
+    ranks: Table,
+}
+
+impl Publication {
+    fn compile(self) -> Result<Snapshot, String> {
+        let expires = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_millis(self.valid_until_unix_ms))
+            .ok_or("profile deadline out of range")?;
+        Ok(Snapshot {
+            partition: RoutingPartitionId::new(self.model_name, self.routing_group),
+            block_size: self.block_size,
+            expires,
+            ranks: Profiles {
+                profiles: self.profiles,
+            }
+            .compile()?,
+        })
+    }
+}
+
+type Published = Arc<RwLock<Option<Snapshot>>>;
+
+fn observe(path: PathBuf) -> std::io::Result<Published> {
+    let table = Arc::new(RwLock::new(None));
     let weak = Arc::downgrade(&table);
     std::thread::Builder::new()
         .name("prefill-chunk-table".into())
@@ -113,14 +148,14 @@ fn observe(path: PathBuf) -> std::io::Result<Arc<RwLock<Table>>> {
                     continue;
                 }
                 let next = bytes.map_err(|error| error.to_string()).and_then(|bytes| {
-                    let profile = serde_json::from_slice::<Profiles>(&bytes);
+                    let profile = serde_json::from_slice::<Publication>(&bytes);
                     previous_bytes = Some(bytes);
                     profile.map_err(|error| error.to_string())?.compile()
                 });
                 match next {
                     Ok(next) => {
                         previous_error = None;
-                        let old = std::mem::replace(&mut *table.write(), next);
+                        let old = table.write().replace(next);
                         drop(old);
                     }
                     Err(error) => {
@@ -142,13 +177,15 @@ fn observe(path: PathBuf) -> std::io::Result<Arc<RwLock<Table>>> {
 }
 
 struct ChunkScorer {
-    table: Arc<RwLock<Table>>,
+    native: Box<dyn WorkerScorer>,
+    partition: RoutingPartitionId,
+    table: Published,
     prefill_scale: f64,
 }
 
 impl WorkerScorer for ChunkScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::PREFERRED_TAINT
+        self.native.required_worker_inputs() | WorkerInputs::CACHE | WorkerInputs::PREFERRED_TAINT
     }
 
     fn score(
@@ -157,18 +194,25 @@ impl WorkerScorer for ChunkScorer {
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        costs.fill(0.0);
+        self.native.score(context, candidates, costs)?;
         if !context.tracks_prefill_tokens() || self.prefill_scale == 0.0 {
             return Ok(());
         }
         let Some(table) = self.table.try_read() else {
             return Ok(());
         };
-        if table.is_empty() {
+        let Some(snapshot) = table.as_ref() else {
+            return Ok(());
+        };
+        if snapshot.partition != self.partition
+            || snapshot.block_size != context.block_size()
+            || SystemTime::now() >= snapshot.expires
+        {
             return Ok(());
         }
         for (candidate, cost) in candidates.iter().zip(costs) {
-            let Some(path) = table
+            let Some(path) = snapshot
+                .ranks
                 .get(&candidate.worker())
                 .and_then(|paths| paths.get(&context.isl_tokens()))
             else {
@@ -187,9 +231,13 @@ impl WorkerScorer for ChunkScorer {
             } else {
                 cache.accounting_cache_estimate().1
             };
-            *cost = path.extra_cost(prefix)
-                * self.prefill_scale
-                * candidate.preferred_taint_multiplier().unwrap_or(1.0);
+            let adjusted = *cost
+                + path.extra_cost(prefix)
+                    * self.prefill_scale
+                    * candidate.preferred_taint_multiplier().unwrap_or(1.0);
+            if adjusted.is_finite() {
+                *cost = adjusted;
+            }
         }
         Ok(())
     }
@@ -198,21 +246,28 @@ impl WorkerScorer for ChunkScorer {
 fn policy(
     config: &SelectionConfig,
     role: WorkerType,
-    table: Arc<RwLock<Table>>,
+    table: Published,
+    partition: RoutingPartitionRef<'_>,
 ) -> WorkerSelectionPolicy {
     let parameters = role_parameters(config, role, PolicyParameters::from(config));
     let label = role.default_selector_label();
-    let mut scorers = vec![scorer::build(&parameters, label)];
-    if role != WorkerType::Decode || config.conditional_disagg_enabled {
-        scorers.push(Box::new(ChunkScorer {
+    let native = scorer::build(&parameters, label);
+    let scorer = if parameters.prefill_load_scale > 0.0
+        && matches!(role, WorkerType::Aggregated | WorkerType::Prefill)
+    {
+        Box::new(ChunkScorer {
+            native,
+            partition: partition.into_owned(),
             table,
             prefill_scale: parameters.prefill_load_scale,
-        }));
-    }
+        }) as Box<dyn WorkerScorer>
+    } else {
+        native
+    };
     WorkerSelectionPolicy::new(
         config.clone(),
         label,
-        scorers,
+        vec![scorer],
         Box::new(picker::DefaultPicker::new(
             parameters.router_temperature,
             None,
@@ -236,8 +291,8 @@ pub(super) fn register(
             let table = observe(parameters.profile_file)
                 .map_err(|error| WorkerSelectionPolicyProviderError::new(error.to_string()))?;
             Ok(Arc::new(
-                move |config: &SelectionConfig, role, _partition| {
-                    policy(config, role, table.clone())
+                move |config: &SelectionConfig, role, partition| {
+                    policy(config, role, table.clone(), partition)
                 },
             ))
         }),

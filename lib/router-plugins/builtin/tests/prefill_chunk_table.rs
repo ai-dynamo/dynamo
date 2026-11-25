@@ -58,16 +58,17 @@ fn partial_prefix_can_change_placement_without_waiting_for_a_profile() {
             .worker_id
     };
     assert_eq!(choose(), 0);
-    let profiles: Vec<_> = (0..2)
+    let profiles: Vec<_> = (0..4)
         .map(|rank| {
             serde_json::json!({
-                "worker_id":0, "dp_rank":rank, "step_cost_blocks":8, "paths":[[32,64,96,160]]
+                "worker_id":rank / 2, "dp_rank":rank % 2, "step_cost_blocks":8,
+                "paths":if rank / 2 == 0 { vec![vec![32,64,96,160]] } else { vec![vec![32,160]] }
             })
         })
         .collect();
     std::fs::write(
         profile,
-        serde_json::to_vec(&serde_json::json!({"profiles":profiles})).unwrap(),
+        serde_json::to_vec(&serde_json::json!({"profiles":profiles,"model_name":"model","routing_group":"default","block_size":16, "valid_until_unix_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 30000})).unwrap(),
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -78,4 +79,16 @@ fn partial_prefix_can_change_placement_without_waiting_for_a_profile() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    // 48 tokens is not a recorded boundary on either rank.
+    for prefix in request.overlap.tier_overlap_blocks.device.values_mut() {
+        *prefix = 3;
+    }
+    assert_eq!(
+        policy
+            .select_worker(selection_input(&workers, &request, 16))
+            .unwrap()
+            .worker
+            .worker_id,
+        0
+    );
 }

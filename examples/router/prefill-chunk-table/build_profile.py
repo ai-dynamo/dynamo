@@ -44,7 +44,7 @@ def publish(window, output):
             "step_cost_blocks": rank["step_cost_blocks"],
             "paths": paths_from_window(rank["samples"]),
         }
-        for rank in window
+        for rank in window["ranks"]
     ]
     # Readers see one complete generation even if this publisher is interrupted.
     with tempfile.NamedTemporaryFile(
@@ -52,7 +52,8 @@ def publish(window, output):
     ) as handle:
         temp_path = Path(handle.name)
         try:
-            json.dump({"profiles": profiles}, handle, allow_nan=False)
+            document = {key: window[key] for key in ("model_name", "routing_group", "block_size", "valid_until_unix_ms")}
+            json.dump({**document, "profiles": profiles}, handle, allow_nan=False)
         except BaseException:
             handle.close()
             temp_path.unlink(missing_ok=True)

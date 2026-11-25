@@ -15,9 +15,10 @@ worker_selection:
 A separate producer supplies a recent observation window from the same model and engine configuration. Each segment is a pair of newly computed tokens and starting context tokens. Include only ranks for the current worker instances. The example below gives one cold prefill in the input file `window.json`:
 
 ```json
-[{"worker_id":1,"dp_rank":0,"step_cost_blocks":0.5,"samples":[
+{"model_name":"model","routing_group":"default","block_size":16,"valid_until_unix_ms":1893456000000,
+ "ranks":[{"worker_id":1,"dp_rank":0,"step_cost_blocks":0.5,"samples":[
   {"q":6144,"c":0,"at_ns":100,"segments":[[2048,0],[2560,2048],[1536,4608]]}
-]}]
+ ]}]}
 ```
 
 Choose `step_cost_blocks` by dividing the measured fixed per-step time on that rank by the reference time for one prefill block. Use the same reference across candidate ranks. The example value illustrates the units.
@@ -25,6 +26,8 @@ Choose `step_cost_blocks` by dividing the measured fixed per-step time on that r
 ```sh
 python3 build_profile.py window.json /var/run/dynamo/prefill-profile.json
 ```
+
+Set `valid_until_unix_ms` to the end of the observation window’s validity in your deployment. The router checks model, routing group, block size and expiry before applying the profile.
 
 The publisher keeps the 64 most recently observed unambiguous lengths per rank, with up to 32 steps per path. It atomically replaces the profile file. Remove ranks or the file when the underlying engine, model or chunk budget changes. A background reader refreshes the profile once per second. Selection uses a nonblocking read and keeps the native score while the profile is unavailable.
 
