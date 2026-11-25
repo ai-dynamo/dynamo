@@ -229,6 +229,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
+    direct: bool
+    direct_backend: str
+    engine_urls: list[str]
     response_plane: Optional[str] = None
     event_plane: Optional[str] = None
     chat_processor: str
@@ -325,6 +328,19 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
             )
+        if self.direct:
+            if not self.engine_urls:
+                raise ValueError("--direct requires at least one --engine-url")
+            if self.interactive or self.kserve_grpc_server:
+                mode_flag = (
+                    "--interactive" if self.interactive else "--kserve-grpc-server"
+                )
+                raise ValueError(
+                    "--direct is only supported by the HTTP frontend, "
+                    f"so it cannot be combined with {mode_flag}"
+                )
+        elif self.engine_urls:
+            raise ValueError("--engine-url requires --direct")
         if self.migration_max_seq_len is not None and (
             self.migration_max_seq_len < 1 or self.migration_max_seq_len > _U32_MAX
         ):
@@ -754,6 +770,48 @@ class FrontendArgGroup(ArgGroup):
                 "Trusted frontend route extension: a name registered under the "
                 "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
                 "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
+                "whitespace-separated values."
+            ),
+            env=self.env,
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--direct",
+            env_var="DYN_DIRECT",
+            default=False,
+            help=(
+                "Dial inference engines directly over their native gRPC API instead of "
+                "discovering Dynamo workers. Requires --engine-url. The engines run "
+                "without a Dynamo sidecar; routing, prefill/decode orchestration and "
+                "migration run in this frontend. Uses in-process discovery, so "
+                "--discovery-backend is ignored."
+            ),
+            env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--direct-backend",
+            env_var="DYN_DIRECT_BACKEND",
+            default="sglang",
+            choices=["sglang"],
+            help=(
+                "Engine family behind --engine-url in --direct mode: SGLang's Rust "
+                "server (SGLANG_RUST_SERVER=1, v0.5.23 or later) with --grpc-port."
+            ),
+            env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--engine-url",
+            env_var="DYN_ENGINE_URLS",
+            default=[],
+            dest="engine_urls",
+            action="append",
+            help=(
+                "Engine gRPC endpoint to route to in --direct mode, for example "
+                "http://host:30001. May be repeated. Each engine reports its own role "
+                "(aggregated, prefill or decode). DYN_ENGINE_URLS accepts "
                 "whitespace-separated values."
             ),
             env=self.env,

@@ -462,7 +462,8 @@ async def async_main():
     warn_if_frontend_cpu_affinity_spans_numa_nodes(logger)
     runtime = DistributedRuntime(
         loop,
-        config.discovery_backend,
+        # Direct engines are registered in the frontend's own discovery.
+        "mem" if config.direct else config.discovery_backend,
         config.request_plane,
         event_plane=config.event_plane,
         response_plane=config.response_plane,
@@ -548,6 +549,10 @@ async def async_main():
 
     if config.router_prefill_load_model == "ais":
         kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
+
+    if config.direct:
+        kwargs["direct_backend"] = config.direct_backend
+        kwargs["engine_urls"] = list(config.engine_urls)
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

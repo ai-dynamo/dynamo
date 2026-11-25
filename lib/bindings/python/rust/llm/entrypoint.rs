@@ -539,13 +539,22 @@ pub(crate) struct EntrypointArgs {
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
     ais_perf_config: Option<AisPerfConfig>,
+    /// Engines a dynamic frontend dials itself instead of reaching sidecars.
+    direct: Option<DirectEngines>,
+}
+
+/// Engines the frontend dials directly over their native gRPC API (`--direct`).
+#[derive(Clone, Debug)]
+struct DirectEngines {
+    backend: String,
+    urls: Vec<String>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None, direct_backend=None, engine_urls=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -585,6 +594,8 @@ impl EntrypointArgs {
         reject_media: Option<bool>,
         reject_media_status_code: Option<u16>,
         default_chat_template_kwargs: Option<&Bound<'_, PyAny>>,
+        direct_backend: Option<String>,
+        engine_urls: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -708,6 +719,10 @@ impl EntrypointArgs {
             migration_max_seq_len,
             chat_engine_factory,
             ais_perf_config,
+            direct: direct_backend.map(|backend| DirectEngines {
+                backend,
+                urls: engine_urls.unwrap_or_default(),
+            }),
         })
     }
 }
@@ -849,6 +864,33 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
     )
 }
 
+/// Start the engines a `--direct` frontend dials. Their dispatch is registered
+/// with the runtime, which routes every request for them through it.
+async fn serve_direct_engines(
+    drt: &dynamo_runtime::DistributedRuntime,
+    direct: DirectEngines,
+    namespace: Option<String>,
+    model_path: Option<String>,
+) -> anyhow::Result<()> {
+    use dynamo_backend_common::direct::{DirectEngineOptions, DirectEngineSpec};
+
+    let options = DirectEngineOptions {
+        namespace: namespace.unwrap_or_else(|| "dynamo".to_string()),
+        model_path,
+    };
+    let factory = match direct.backend.as_str() {
+        "sglang" => dynamo_sglang_sidecar::direct::direct_engine_factory(options),
+        other => anyhow::bail!("--direct-backend {other} is not supported; expected sglang"),
+    };
+    let specs = direct
+        .urls
+        .into_iter()
+        .map(|url| DirectEngineSpec { url })
+        .collect();
+    dynamo_backend_common::direct::serve_direct_engines(drt, specs, factory).await?;
+    Ok(())
+}
+
 async fn select_engine(
     #[allow(unused_variables)] distributed_runtime: super::DistributedRuntime,
     args: EntrypointArgs,
@@ -872,6 +914,17 @@ async fn select_engine(
                     Python::attach(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
+            if let Some(direct) = args.direct {
+                serve_direct_engines(
+                    &distributed_runtime.inner,
+                    direct,
+                    args.namespace.clone(),
+                    args.model_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                )
+                .await?;
+            }
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
                 chat_engine_factory,

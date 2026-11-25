@@ -3123,6 +3123,8 @@ class EntrypointArgs:
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
+        direct_backend: Optional[str] = None,
+        engine_urls: Optional[List[str]] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3166,6 +3168,11 @@ class EntrypointArgs:
             reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
             default_chat_template_kwargs: Chat template kwargs that the frontend applies
                 under each request's own kwargs, for every discovered model
+            direct_backend: Engine family the frontend dials directly ("sglang"); set
+                only in --direct mode, where the dynamic engine serves engines
+                hosted in this process instead of discovered workers
+            engine_urls: Engine gRPC endpoints in --direct mode; each engine
+                reports its own role
         """
         ...
 
