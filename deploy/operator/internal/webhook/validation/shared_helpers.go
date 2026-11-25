@@ -51,8 +51,8 @@ const (
 	runtimeVersionOverrideRequiredMessage = "is required when the specified Dynamo runtime container image has no parseable semantic-version tag"
 )
 
-// runtimeVersionValidationSource identifies the API representation whose field
-// paths must be used for runtime-version validation errors.
+// runtimeVersionValidationSource identifies submitted paths and source-schema differences.
+// Shared runtime semantics are always validated on converted storage-version values.
 type runtimeVersionValidationSource uint8
 
 const (
@@ -83,55 +83,36 @@ func runtimeVersionValidationSourceForGVK(gvk schema.GroupVersionKind) runtimeVe
 	return runtimeVersionSourceV1Beta1
 }
 
-func (v *sharedValidation) validatesRuntimeVersionFor(source runtimeVersionValidationSource) bool {
-	return !v.ratchetRuntimeVersion && v.runtimeVersionSource == source
-}
-
-func (v *sharedValidation) hasRuntimeVersionSource(source runtimeVersionValidationSource) bool {
-	return v.runtimeVersionSource == source
-}
-
-// runtimeVersionImageAndPath returns the Dynamo runtime image and its v1beta1 field path.
-// spec and fldPath must not be nil.
+// runtimeVersionImageAndPath reads the converted runtime image and returns its submitted field path.
+// spec and fldPath must not be nil. source selects diagnostics, never validation ownership.
 func runtimeVersionImageAndPath(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
+	source runtimeVersionValidationSource,
 ) (string, *field.Path) {
 	// In sidecar mode the engine image says nothing about Dynamo compatibility.
 	if spec.PodTemplate != nil {
 		if index := slices.IndexFunc(spec.PodTemplate.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
+			if source == runtimeVersionSourceV1Alpha1 {
+				return spec.PodTemplate.Spec.InitContainers[index].Image, fldPath.Child("extraPodSpec", "initContainers").Index(index).Child("image")
+			}
 			return spec.PodTemplate.Spec.InitContainers[index].Image, fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("image")
 		}
 	}
 
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
+	if source == runtimeVersionSourceV1Alpha1 {
+		imagePath = fldPath.Child("extraPodSpec", "mainContainer", "image")
+	}
 
 	// Resolve the exact container path when the named main container exists.
 	if spec.PodTemplate != nil {
 		if index := mainContainerIndex(spec.PodTemplate.Spec.Containers); index >= 0 {
-			imagePath = imagePath.Index(index).Child("image")
+			if source != runtimeVersionSourceV1Alpha1 {
+				imagePath = imagePath.Index(index).Child("image")
+			}
 			return spec.PodTemplate.Spec.Containers[index].Image, imagePath
 		}
-	}
-	return "", imagePath
-}
-
-// runtimeVersionImageAndPathV1Alpha1 returns the runtime image and its alpha field path.
-// spec and fldPath must not be nil.
-func runtimeVersionImageAndPathV1Alpha1(
-	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) (string, *field.Path) {
-	// Alpha represents init containers directly, so live fields determine the mode.
-	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
-		if index := slices.IndexFunc(spec.ExtraPodSpec.PodSpec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
-			return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, fldPath.Child("extraPodSpec", "initContainers").Index(index).Child("image")
-		}
-	}
-
-	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
-	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
-		return spec.ExtraPodSpec.MainContainer.Image, imagePath
 	}
 	return "", imagePath
 }
@@ -181,17 +162,6 @@ type eppRuntimeContract struct {
 func eppRuntimeContractV1Beta1(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
 	return eppRuntimeContract{
 		componentType:          string(spec.ComponentType),
-		image:                  image,
-		runtimeVersionOverride: spec.RuntimeVersionOverride,
-		hasEPPConfig:           spec.EPPConfig != nil,
-	}
-}
-
-// eppRuntimeContractV1Alpha1 returns the complete runtime-contract inputs represented by spec.
-// spec must not be nil. image is the source-version main container image.
-func eppRuntimeContractV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
-	return eppRuntimeContract{
-		componentType:          spec.ComponentType,
 		image:                  image,
 		runtimeVersionOverride: spec.RuntimeVersionOverride,
 		hasEPPConfig:           spec.EPPConfig != nil,
@@ -429,22 +399,6 @@ func traceClaimPathHasOnlyNamedSegments(subPath string) bool {
 		}
 	}
 	return true
-}
-
-// hasRoleSidecarV1Alpha1 resolves component-wide mode from the authored leader.
-// spec must not be nil.
-func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
-	for _, role := range spec.Roles {
-		if role.Name != nvidiacomv1alpha1.ComponentRoleLeader || role.PodTemplate == nil {
-			continue
-		}
-		for _, container := range role.PodTemplate.Spec.InitContainers {
-			if container.Name == consts.RuntimeContainerName {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // inputSchemaErrors reports native JSON pointers at the shared spec owner. Lowering

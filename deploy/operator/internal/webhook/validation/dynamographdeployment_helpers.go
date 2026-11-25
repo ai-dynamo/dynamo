@@ -54,10 +54,6 @@ func lpxComponentGateErrors(
 	fldPath *field.Path,
 	source runtimeVersionValidationSource,
 ) field.ErrorList {
-	// Existing alpha components are frozen by the source-version update validator.
-	if source == runtimeVersionSourceV1Alpha1 && oldSpec != nil {
-		return nil
-	}
 	if !newSpec.IsLPX() || features.MustGateFrom(ctx).Enabled(features.LPX) ||
 		(oldSpec != nil && apiequality.Semantic.DeepEqual(newSpec, oldSpec)) {
 		return nil

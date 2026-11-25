@@ -23,11 +23,12 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateDynamoComponentDeploymentSharedSpecV1alpha1 validates spec. spec and fldPath must not be nil.
+// validateDynamoComponentDeploymentSharedSpecV1alpha1 supplements storage-version validation
+// for source-only fields, lossy conversion, and source-schema gaps. It must not repeat
+// rules whose inputs survive conversion. spec and fldPath must not be nil.
 // oldEnv is nil on create, otherwise it is the previous source-version envs list.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
@@ -67,13 +68,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	}
 
 	// Alpha envs is not a map-list in the source schema, unlike the converted container env.
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+	if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
 		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"), orderedEnvironment)...)
 	}
 	if spec.Ingress != nil {
 		allErrs = append(allErrs, v.validateIngressSpecV1alpha1(spec.Ingress, fldPath.Child("ingress"))...)
 	}
-	if spec.EPPConfig != nil && v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+	if spec.EPPConfig != nil && v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
 		allErrs = append(allErrs, v.validateEPPConfigV1alpha1(spec.EPPConfig, fldPath.Child("eppConfig"))...)
 	}
 	if spec.FrontendSidecar != nil && spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil &&
@@ -87,156 +88,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
 
-	// Validate runtime compatibility against the source-version fields.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) && !spec.IsLPX() {
-		image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
-		if err := eppRuntimeCompatibilityError(
-			eppRuntimeContractV1Alpha1(spec, image),
-			fldPath.Child("eppConfig"),
-		); err != nil {
-			allErrs = append(allErrs, err)
-		}
-		if hasRolePodTemplatesV1Alpha1(spec) {
-			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionV1Alpha1(spec, fldPath)...)
-		} else if image == "" {
-			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if !v.toleratesMissingRuntimeVersionOverride(spec.ComponentType) &&
-			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
-			allErrs = append(allErrs, field.Required(
-				fldPath.Child("runtimeVersionOverride"),
-				runtimeVersionOverrideRequiredMessage,
-			))
-		}
-	}
-
 	return allErrs
 }
 
-// validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1 validates a preserved v1alpha1 shared spec update.
-// newSpec, oldSpec, and fldPath must not be nil.
-func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
-	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	allErrs := field.ErrorList{}
-
-	// Ratchet only complete, unchanged source-version runtime contract violations.
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) && !newSpec.IsLPX() {
-		newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
-		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
-		overrideChanged := newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride
-
-		if hasRolePodTemplatesV1Alpha1(newSpec) {
-			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(newSpec, oldSpec, fldPath)...)
-		} else if newImage == "" && oldImage != "" {
-			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if !v.toleratesMissingRuntimeVersionOverride(newSpec.ComponentType) &&
-			runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
-			(newImage != oldImage || overrideChanged || newSpec.ComponentType != oldSpec.ComponentType) {
-			allErrs = append(allErrs, field.Required(
-				fldPath.Child("runtimeVersionOverride"),
-				runtimeVersionOverrideRequiredMessage,
-			))
-		}
-
-		if err := eppRuntimeCompatibilityUpdateError(
-			eppRuntimeContractV1Alpha1(newSpec, newImage),
-			eppRuntimeContractV1Alpha1(oldSpec, oldImage),
-			apiequality.Semantic.DeepEqual(newSpec.EPPConfig, oldSpec.EPPConfig),
-			fldPath.Child("eppConfig"),
-		); err != nil {
-			allErrs = append(allErrs, err)
-		}
-	}
-
-	return allErrs
-}
-
-func (v *sharedValidation) validateRolePodTemplateRuntimeVersionV1Alpha1(
-	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	if v.toleratesMissingRuntimeVersionOverride(spec.ComponentType) || spec.RuntimeVersionOverride != "" {
-		return nil
-	}
-
-	// Resolve the component-wide runtime mode once for all roles.
-	sidecar := hasRoleSidecarV1Alpha1(spec)
-	for i := range spec.Roles {
-		image := rolePodTemplateRuntimeImageV1Alpha1(&spec.Roles[i], sidecar)
-		if image != "" && runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
-			return field.ErrorList{field.Required(
-				fldPath.Child("runtimeVersionOverride"),
-				runtimeVersionOverrideRequiredMessage,
-			)}
-		}
-	}
-	return nil
-}
-
-func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(
-	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	if v.toleratesMissingRuntimeVersionOverride(newSpec.ComponentType) || newSpec.RuntimeVersionOverride != "" {
-		return nil
-	}
-
-	// Resolve old role images using the old component-wide runtime mode.
-	oldSidecar := hasRoleSidecarV1Alpha1(oldSpec)
-	oldImages := make(map[string]string, len(oldSpec.Roles))
-	for i := range oldSpec.Roles {
-		oldImages[oldSpec.Roles[i].Name] = rolePodTemplateRuntimeImageV1Alpha1(&oldSpec.Roles[i], oldSidecar)
-	}
-
-	// Compare new role images using the new component-wide runtime mode.
-	newSidecar := hasRoleSidecarV1Alpha1(newSpec)
-	for i := range newSpec.Roles {
-		role := &newSpec.Roles[i]
-		newImage := rolePodTemplateRuntimeImageV1Alpha1(role, newSidecar)
-		if newImage != "" && runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
-			(newImage != oldImages[role.Name] || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride ||
-				newSpec.ComponentType != oldSpec.ComponentType) {
-			return field.ErrorList{field.Required(
-				fldPath.Child("runtimeVersionOverride"),
-				runtimeVersionOverrideRequiredMessage,
-			)}
-		}
-	}
-	return nil
-}
-
-func rolePodTemplateRuntimeImageV1Alpha1(role *nvidiacomv1alpha1.ComponentRoleSpec, sidecarMode bool) string {
-	if role == nil || role.PodTemplate == nil {
-		return ""
-	}
-	if sidecarMode {
-		for _, container := range role.PodTemplate.Spec.InitContainers {
-			if container.Name == "runtime" {
-				return container.Image
-			}
-		}
-		return ""
-	}
-	index := mainContainerIndex(role.PodTemplate.Spec.Containers)
-	if index < 0 {
-		return ""
-	}
-	return role.PodTemplate.Spec.Containers[index].Image
-}
-
-func hasRolePodTemplatesV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
-	for i := range spec.Roles {
-		if spec.Roles[i].PodTemplate != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// validateVolumeMountV1alpha1 validates volumeMount. volumeMount and fldPath must not be nil.
+// validateVolumeMountV1alpha1 checks the source-only compilation-cache flag and mount-point relation.
+// Conversion loses that flag and the original flat-list distinctions.
+// volumeMount and fldPath must not be nil.
 func (v *sharedValidation) validateVolumeMountV1alpha1(
 	volumeMount *nvidiacomv1alpha1.VolumeMount,
 	fldPath *field.Path,
@@ -250,7 +107,8 @@ func (v *sharedValidation) validateVolumeMountV1alpha1(
 	)}
 }
 
-// validateIngressSpecV1alpha1 validates ingress. ingress and fldPath must not be nil.
+// validateIngressSpecV1alpha1 validates ingress, which has no storage-version API counterpart.
+// ingress and fldPath must not be nil.
 func (v *sharedValidation) validateIngressSpecV1alpha1(
 	ingress *nvidiacomv1alpha1.IngressSpec,
 	fldPath *field.Path,
@@ -261,7 +119,9 @@ func (v *sharedValidation) validateIngressSpecV1alpha1(
 	return field.ErrorList{field.Required(fldPath.Child("host"), "is required when ingress is enabled")}
 }
 
-// validateEPPConfigV1alpha1 validates deprecated Go-EPP config. config and fldPath must not be nil.
+// validateEPPConfigV1alpha1 covers the exactly-one rule missing from the Alpha source schema.
+// Config-map reference values survive conversion and are validated by validateEPPConfig.
+// config and fldPath must not be nil.
 func (v *sharedValidation) validateEPPConfigV1alpha1(
 	config *nvidiacomv1alpha1.EPPConfig,
 	fldPath *field.Path,
@@ -273,13 +133,12 @@ func (v *sharedValidation) validateEPPConfigV1alpha1(
 			"exactly one of configMapRef or config is required",
 		))
 	}
-	if config.ConfigMapRef != nil && config.ConfigMapRef.Name == "" {
-		allErrs = append(allErrs, field.Required(fldPath.Child("configMapRef", "name"), "is required"))
-	}
 	return allErrs
 }
 
-// validateFailoverSpecV1alpha1 validates failover. failover and fldPath must not be nil.
+// validateFailoverSpecV1alpha1 covers the intraPod shadow limit absent from the Alpha source schema.
+// Disabled source settings are not represented after conversion; configurable interPod shadow counts
+// remain an intentional Alpha API difference. failover and fldPath must not be nil.
 func (v *sharedValidation) validateFailoverSpecV1alpha1(
 	failover *nvidiacomv1alpha1.FailoverSpec,
 	fldPath *field.Path,

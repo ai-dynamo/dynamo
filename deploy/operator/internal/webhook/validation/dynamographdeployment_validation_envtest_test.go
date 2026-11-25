@@ -101,6 +101,20 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	roleRemoval := roleMutationOld.DeepCopy()
 	betaWorkerComponent(roleRemoval).Roles = betaWorkerComponent(roleRemoval).Roles[:1]
 
+	t.Log("Prepare legacy alpha runtime contracts with normalized worker subtypes")
+	alphaPrefill := alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+		worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+		worker.SubComponentType = "prefill"
+		worker.RuntimeVersionOverride = ""
+		worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
+	})
+	alphaDecode := alphaPrefill.DeepCopy()
+	alphaDecode.Spec.Services[dgdAdmissionWorkerName].SubComponentType = "decode"
+	alphaPrefillRoles := alphaPrefill.DeepCopy()
+	setAlphaExplicitMultinodeRoleTemplates(alphaPrefillRoles.Spec.Services[dgdAdmissionWorkerName], 2)
+	alphaDecodeRoles := alphaPrefillRoles.DeepCopy()
+	alphaDecodeRoles.Spec.Services[dgdAdmissionWorkerName].SubComponentType = "decode"
+
 	tests := []dgdAdmissionTestCase{
 		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
@@ -618,6 +632,20 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
 				dgd.Labels = map[string]string{"updated": "true"}
 			}),
+		},
+		{
+			name:               "alpha normalized subtype changes revalidate the legacy runtime contract",
+			seedWithoutWebhook: true,
+			oldDeployment:      alphaPrefill,
+			deployment:         alphaDecode,
+			wantWebhookErrs:    []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name:               "alpha normalized subtype changes revalidate role runtime contracts",
+			seedWithoutWebhook: true,
+			oldDeployment:      alphaPrefillRoles,
+			deployment:         alphaDecodeRoles,
+			wantWebhookErrs:    []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
 		},
 		{
 			name:               "unchanged legacy alpha service runtime version is ratcheted on update",

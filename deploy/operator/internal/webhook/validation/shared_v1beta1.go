@@ -183,6 +183,7 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 }
 
 type dynamoComponentDeploymentSharedSpecValidationOptions struct {
+	sourcePath                        *field.Path
 	grovePathway                      bool
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
@@ -193,7 +194,8 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
-// Options are supplied by the owning resource.
+// All served versions use this storage-version owner after conversion.
+// options.sourcePath must not be nil; it selects submitted-version diagnostics only.
 //
 //nolint:gocyclo // Shared validation reports the combined upstream and LPX contracts in one pass.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
@@ -333,9 +335,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			))
 		}
 	}
-	// Validate the represented eppConfig once using the submitted API version's field path.
-	if spec.EPPConfig != nil && !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, fldPath.Child("eppConfig"))...)
+	// Conversion preserves the config-map reference for every source version.
+	if spec.EPPConfig != nil {
+		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, options.sourcePath.Child("eppConfig"))...)
 	}
 
 	if spec.FrontendSidecar != nil {
@@ -371,23 +373,23 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 
-	// Validate runtime compatibility against the source-version fields.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) && !spec.IsLPX() {
-		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+	// Validate the converted runtime contract once, regardless of the submitted version.
+	if !v.ratchetRuntimeVersion && !spec.IsLPX() {
+		image, imagePath := runtimeVersionImageAndPath(spec, options.sourcePath, v.runtimeVersionSource)
 		if err := eppRuntimeCompatibilityError(
 			eppRuntimeContractV1Beta1(spec, image),
-			fldPath.Child("eppConfig"),
+			options.sourcePath.Child("eppConfig"),
 		); err != nil {
 			allErrs = append(allErrs, err)
 		}
 		if dynamo.HasRolePodTemplates(spec) {
-			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersion(spec, fldPath)...)
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersion(spec, options.sourcePath)...)
 		} else if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(spec.ComponentType)) &&
 			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
 			allErrs = append(allErrs, field.Required(
-				fldPath.Child("runtimeVersionOverride"),
+				options.sourcePath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
 			))
 		}
@@ -1109,13 +1111,15 @@ func (v *sharedValidation) validateComponentCheckpointJobConfig(
 }
 
 // validateDynamoComponentDeploymentSharedSpecUpdate validates a component update.
-// newComponent, oldComponent, and fldPath must not be nil; ownerKind.Kind must not be empty.
+// newComponent, oldComponent, fldPath, and sourcePath must not be nil; ownerKind.Kind must not be empty.
+// Converted component values own all shared update rules; sourcePath selects diagnostics only.
 //
 //nolint:gocyclo // Update validation reports the combined upstream and LPX contracts in one pass.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
+	sourcePath *field.Path,
 	canModifyReplicas bool,
 	ownerKind schema.GroupKind,
 ) field.ErrorList {
@@ -1240,17 +1244,17 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		}
 	}
 
-	// Ratchet only complete, unchanged source-version runtime contract violations.
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) && !newComponent.IsLPX() {
-		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
-		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+	// Ratchet the complete converted inputs, including normalized component types.
+	if !newComponent.IsLPX() {
+		newImage, imagePath := runtimeVersionImageAndPath(newComponent, sourcePath, v.runtimeVersionSource)
+		oldImage, _ := runtimeVersionImageAndPath(oldComponent, sourcePath, v.runtimeVersionSource)
 		overrideChanged := newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride
 
 		if dynamo.HasRolePodTemplates(newComponent) {
 			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionUpdate(
 				newComponent,
 				oldComponent,
-				fldPath,
+				sourcePath,
 			)...)
 		} else if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
@@ -1258,7 +1262,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
 			(newImage != oldImage || overrideChanged || newComponent.ComponentType != oldComponent.ComponentType) {
 			allErrs = append(allErrs, field.Required(
-				fldPath.Child("runtimeVersionOverride"),
+				sourcePath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
 			))
 		}
@@ -1267,7 +1271,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			eppRuntimeContractV1Beta1(newComponent, newImage),
 			eppRuntimeContractV1Beta1(oldComponent, oldImage),
 			apiequality.Semantic.DeepEqual(newComponent.EPPConfig, oldComponent.EPPConfig),
-			fldPath.Child("eppConfig"),
+			sourcePath.Child("eppConfig"),
 		); err != nil {
 			allErrs = append(allErrs, err)
 		}

@@ -389,7 +389,35 @@ func lpxDGDAdmissionCases(t *testing.T) []dgdAdmissionTestCase {
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
 			}),
-			wantWebhookErrs: []string{alphaLPXGateErr},
+			wantWebhookErrs: []string{"spec.services[lpx].ingress: Forbidden: LPX components require lpx.enabled=true"},
+		},
+		{
+			name:          "v1alpha1 LPX gate separates represented and source-only changes",
+			lpxDisabled:   true,
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services["lpx"]
+				component.LPX.BuildID = "test/replacement"
+				component.Annotations = map[string]string{"example.com/team": "lpx"}
+				component.Labels = map[string]string{"team": "lpx"}
+				component.SubComponentType = "prefill"
+				component.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
+			}),
+			wantWebhookErrs: []string{
+				alphaLPXGateErr,
+				"spec.services[lpx].annotations: Forbidden: LPX components require lpx.enabled=true",
+				"spec.services[lpx].labels: Forbidden: LPX components require lpx.enabled=true",
+				"spec.services[lpx].subComponentType: Forbidden: LPX components require lpx.enabled=true",
+				"spec.services[lpx].ingress: Forbidden: LPX components require lpx.enabled=true",
+			},
+		},
+		{
+			name:          "v1alpha1 LPX gate admits ignored disabled compatibility settings",
+			lpxDisabled:   true,
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].ScalingAdapter = &nvidiacomv1alpha1.ScalingAdapter{Enabled: false}
+			}),
 		},
 		{
 			name:        "v1alpha1 LPX gate admits unrelated updates with unchanged ingress when disabled",

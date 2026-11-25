@@ -138,12 +138,22 @@ Keep this table current whenever a resource validator is migrated.
   schema and CEL, convert only accepted requests through the production path,
   then invoke the public create or update webhook handler.
 - Validate shared semantics once in the storage-version recursion when typed
-  conversion preserves every required input and the reported field path has
-  the same meaning in both versions. Do not repeat that rule in the
-  compatibility-version recursion.
+  conversion preserves every required input, for requests from every served
+  version. Never skip a shared rule just because the request uses Alpha.
+  Different submitted field paths require adapting diagnostics in that owner,
+  not copying its semantics into a compatibility-version recursion.
 - Keep compatibility-version validation only for rules that cannot be
-  faithfully enforced after conversion, such as source-only fields,
-  source-schema gaps, source-specific field paths, or source-specific warnings.
+  faithfully enforced after conversion: source-only information, lossy
+  conversion, source-schema gaps, or warnings about source-only fields. This
+  traversal supplements the storage-version traversal; it never replaces it.
+- Every compatibility validator's Go doc must explain which required input
+  or source-schema constraint is unavailable after conversion. The presence
+  of a field in a reconstructed Alpha object is not a reason to revalidate it.
+  Do not pass complete Beta objects or component maps into Alpha validators
+  or compare complete Alpha specs to enforce shared invariants there.
+- Conversion does not execute the destination version's schema or CEL.
+  Inventory source-schema gaps explicitly, preserving intentional differences
+  between served APIs rather than silently applying all Beta constraints.
 - Determine version ownership from the typed conversion contract, not from
   private preservation annotations. Validation code must never inspect, decode,
   branch on, or expose conversion payload annotations or payload shapes.
