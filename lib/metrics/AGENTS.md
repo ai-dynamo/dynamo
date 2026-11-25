@@ -27,5 +27,6 @@ Keep them consistent: one request transition updates every family through the re
 ```bash
 cargo test -p dynamo-metrics
 cargo test -p dynamo-codegen committed_python_matches_generated
+cargo test -p dynamo-llm --lib frontend_load::tests   # load frame wire compatibility
 cargo test -p dynamo-runtime --lib --features integration metrics::tests   # needs NATS; CI does not build this feature
 ```
