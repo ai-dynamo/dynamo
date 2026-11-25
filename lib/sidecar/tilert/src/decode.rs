@@ -163,6 +163,16 @@ fn status_error(status: reqwest::StatusCode, body: &str) -> DynamoError {
     }
 }
 
+/// The body of an error reply, for the message. The status alone decides the
+/// error kind, so a body that never ends must not hold the request.
+async fn error_text(response: reqwest::Response) -> String {
+    tokio::time::timeout(CONTROL_TIMEOUT, response.text())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+}
+
 fn transport_error(what: &str, error: reqwest::Error) -> DynamoError {
     let message = format!("TileRT decode {what} failed: {error}");
     if error.is_connect() {
@@ -235,7 +245,7 @@ impl DecodeClient {
             .map_err(|error| transport_error(path, error))?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = error_text(response).await;
             return Err(status_error(status, &body));
         }
         let reply: CapabilitiesReply = response
@@ -343,7 +353,7 @@ impl DecodeClient {
             .map_err(|error| transport_error("/pd/decode", error))?;
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
+            let text = error_text(response).await;
             return Err(status_error(status, &text));
         }
         Ok(response)

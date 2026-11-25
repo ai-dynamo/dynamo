@@ -723,6 +723,23 @@ async fn startup_probe_checks_the_kv_handoff() {
         .expect("a prefill that pushes no KV fails startup");
     assert!(is_kind(&error, BackendError::ConnectionTimeout), "{error}");
     assert!(error.to_string().contains("KV connector"), "{error}");
+
+    {
+        let mut shared = fakes.shared.lock().unwrap();
+        shared.no_kv = false;
+        shared.prefill_fails = true;
+    }
+    bounded(TilertSidecarEngine::bootstrap(args(&fakes, &probe)))
+        .await
+        .err()
+        .expect("a failed prefill fails startup");
+    let shared = fakes.shared.lock().unwrap();
+    let release = shared.decode_bodies.last().unwrap();
+    assert_eq!(
+        release["rid"],
+        json!(shared.prefill_requests.last().unwrap().request_id)
+    );
+    assert_eq!(release["max_tokens"], json!(1));
 }
 
 #[tokio::test]

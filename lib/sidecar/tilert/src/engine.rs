@@ -441,7 +441,7 @@ async fn probe(
     let rid = new_request_id();
     let prompt_tokens = token_ids.len();
     let started = Instant::now();
-    let outcome = prefill
+    let prefilled = prefill
         .prefill(PrefillRequest {
             request_id: rid.clone(),
             token_ids,
@@ -453,7 +453,17 @@ async fn probe(
             decode_kv_host: decode_kv_host.to_string(),
             decode_ctrl_port,
         })
-        .await?;
+        .await;
+    let outcome = match prefilled {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // A restart against the same decode server would meet this KV.
+            if !is_kind(&error, BackendError::InvalidArgument) {
+                decode.release(&rid).await;
+            }
+            return Err(error);
+        }
+    };
     let prefill_ms = millis(started);
     let Some(first_token) = outcome.first_token.or(outcome.stop_token) else {
         decode.release(&rid).await;

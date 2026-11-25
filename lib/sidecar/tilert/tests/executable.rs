@@ -6,13 +6,14 @@ use std::time::Duration;
 
 fn sidecar() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-tilert-sidecar"));
-    for (key, _) in std::env::vars().filter(|(key, _)| {
-        key.starts_with("DYN_")
-            || key.starts_with("TILERT_")
-            || key.starts_with("ETCD_")
-            || key.starts_with("NATS_")
-    }) {
-        command.env_remove(key);
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if ["DYN_", "TILERT_", "ETCD_", "NATS_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            command.env_remove(&key);
+        }
     }
     command
 }
