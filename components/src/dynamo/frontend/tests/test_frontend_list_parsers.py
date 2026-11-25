@@ -46,3 +46,11 @@ def test_list_parsers_rejects_a_missing_plugin():
         in result.stderr
     )
     assert "Unknown arguments" not in result.stderr
+
+
+@pytest.mark.timeout(30)
+def test_list_parsers_rejects_a_mistyped_flag():
+    result = _frontend("--list-parsers", "--tool-parser-plugn", "./fixture.so")
+
+    assert result.returncode != 0
+    assert "unrecognized arguments: --tool-parser-plugn ./fixture.so" in result.stderr

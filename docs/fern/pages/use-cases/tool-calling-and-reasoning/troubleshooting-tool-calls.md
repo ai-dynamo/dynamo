@@ -211,6 +211,8 @@ Repeat `--tool-parser-plugin` to load several libraries. The flag has no environ
 
 The library stays local to each process; the model card carries only the selector names. A frontend without the library rejects a model whose card names a plugin parser. Dynamo does not compare the libraries themselves, so a frontend and a worker that load *different* libraries registering the same name are not detected. Deploy the same file to both.
 
+Startup also rejects a plugin that registers a legacy tool or reasoning parser name, such as `phi4`, or that asks to inspect the rendered prompt; Dynamo does not call that hook yet.
+
 To inspect the registry, run `python -m dynamo.frontend --list-parsers`, adding the same `--tool-parser-plugin` flags. It prints JSON and exits without starting the server. Each entry lists the family, aliases, input kinds, guidance, and `source` (`builtin` or `plugin`, with the library's `plugin_identity`).
 
 Startup fails with an error naming the library when:

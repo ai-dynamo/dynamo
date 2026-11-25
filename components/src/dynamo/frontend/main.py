@@ -314,6 +314,8 @@ def parse_args() -> (
     # Plugins register before any model card names their parsers.
     load_parser_plugin_paths(args.tool_parser_plugin)
     if args.list_parsers:
+        if unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
         print(json.dumps(json.loads(get_parser_registry_json()), indent=2))
         sys.exit(0)
 

@@ -20,8 +20,7 @@ use dynamo_parsers_v2::unified::plugin::{
     ABI_VERSION, ABI_VERSION_V2, Command, CommandV2, Entry, Reply, ReplyV2,
 };
 use dynamo_parsers_v2::unified::{
-    LoadedGuidance, LoadedPrompt, ToolCallPolicy, UnifiedParserRegistration,
-    register_loaded_unified_parsers,
+    LoadedGuidance, ToolCallPolicy, UnifiedParserRegistration, register_loaded_unified_parsers,
 };
 use dynamo_parsers_v2::{
     UnifiedParser, UnifiedParserContinuation, UnifiedParserInit, UnifiedParserInputCapabilities,
@@ -74,8 +73,32 @@ pub fn load_parser_plugins(paths: &[PathBuf]) -> Result<Vec<String>> {
 
 /// Register loaded parsers, then drop registry lookups memoized before they existed.
 fn admit(entries: Vec<UnifiedParserRegistration>) -> Result<()> {
+    reject_legacy_selectors(&entries)?;
     register_loaded_unified_parsers(entries)?;
     super::unified_parser::clear_registry_cache();
+    Ok(())
+}
+
+/// Auto mode keeps a legacy-only selector such as `phi4` on the legacy parsers, so a
+/// plugin that claimed one would take over deployments already configured with it.
+fn reject_legacy_selectors(entries: &[UnifiedParserRegistration]) -> Result<()> {
+    let legacy: HashSet<&str> = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers()
+        .into_iter()
+        .chain(dynamo_parsers::reasoning::get_available_reasoning_parsers())
+        .collect();
+    for entry in entries {
+        let descriptor = &entry.descriptor;
+        for name in std::iter::once(&descriptor.family)
+            .chain(&descriptor.aliases)
+            .chain(&descriptor.legacy_configuration_selectors)
+        {
+            ensure!(
+                !legacy.contains(name.as_str()),
+                "parser '{}' cannot claim '{name}': it is a legacy tool or reasoning parser selector",
+                descriptor.family
+            );
+        }
+    }
     Ok(())
 }
 
@@ -174,13 +197,7 @@ fn registration(
             inspect_prompt,
         )
     };
-    // Generated output reaches unified parsers as decoded text. Token-ID input is
-    // used only to replay the built-in Harmony prompt prefix.
-    ensure!(
-        input.text,
-        "parser '{}' accepts only token IDs; this Dynamo build passes decoded text to parser plugins",
-        descriptor.family
-    );
+    check_host_support(&descriptor.family, input, inspect_prompt)?;
     let features = ParserFeatures {
         preserve: descriptor.preserve_special_tokens,
         input,
@@ -194,24 +211,13 @@ fn registration(
         });
         build
     });
-    let inspect_prompt = inspect_prompt.then(|| {
-        let plugin = Arc::clone(&plugin);
-        let inspect: Arc<LoadedPrompt> = Arc::new(move |request| {
-            let (reply, _) = plugin.call(null_mut(), Command::InspectPrompt(request))?;
-            reply
-                .checked()?
-                .prompt
-                .context("plugin did not return prompt state")
-        });
-        inspect
-    });
     descriptor.aliases.sort_unstable();
     descriptor.aliases.dedup();
     Ok(UnifiedParserRegistration::loaded(
         descriptor,
         identity,
         guidance,
-        inspect_prompt,
+        None,
         move |tools| {
             let (reply, handle) = plugin.call(null_mut(), Command::Create(tools.to_vec()))?;
             // Take ownership before checking the reply so a failed Create cannot leak a handle.
@@ -228,6 +234,27 @@ fn registration(
             ))
         },
     ))
+}
+
+/// Reject manifests that ask for host behavior this build does not provide.
+fn check_host_support(
+    family: &str,
+    input: UnifiedParserInputCapabilities,
+    inspect_prompt: bool,
+) -> Result<()> {
+    // Generated output reaches unified parsers as decoded text. Token-ID input is
+    // used only to replay the built-in Harmony prompt prefix.
+    ensure!(
+        input.text,
+        "parser '{family}' accepts only token IDs; this Dynamo build passes decoded text to parser plugins"
+    );
+    // Prompt preprocessing does not call plugin prompt hooks yet, so a parser that
+    // relies on one would start in the wrong reasoning state.
+    ensure!(
+        !inspect_prompt,
+        "parser '{family}' inspects the rendered prompt; this Dynamo build does not call prompt hooks of parser plugins"
+    );
+    Ok(())
 }
 
 struct Plugin {
@@ -808,6 +835,27 @@ pub(crate) mod tests {
         entry.descriptor.aliases.push("hermes".into());
         let error = register_loaded_unified_parsers(vec![entry]).unwrap_err();
         assert!(error.to_string().contains("'hermes'"), "{error}");
+    }
+
+    #[test]
+    fn plugin_selectors_cannot_claim_legacy_only_names() {
+        // `phi4` has a legacy tool parser and no unified registration.
+        assert!(super::super::unified_parser::canonical_family("phi4").is_none());
+        let mut entry = fixture();
+        entry.descriptor.aliases.push("phi4".into());
+        let error = admit(vec![entry]).unwrap_err();
+        assert!(error.to_string().contains("'phi4'"), "{error}");
+    }
+
+    #[test]
+    fn plugins_that_inspect_the_prompt_are_rejected() {
+        let text = UnifiedParserInputCapabilities {
+            text: true,
+            ..Default::default()
+        };
+        check_host_support(FAMILY, text, false).unwrap();
+        let error = check_host_support(FAMILY, text, true).unwrap_err();
+        assert!(error.to_string().contains("prompt hooks"), "{error}");
     }
 
     #[test]
