@@ -41,11 +41,13 @@ from sglang.srt.function_call.json_array_parser import JsonArrayParser
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
 import dynamo.frontend.sglang_prompt_renderer as sglang_prompt_renderer_module
+from dynamo._core import _raise_routed_http_error
 from dynamo.common.backend.logprobs import (
     build_sglang_logprob_kwargs,
     extract_from_sglang_meta,
     extract_prompt_logprobs_from_sglang_meta,
 )
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -85,7 +87,12 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    InvalidArgument,
+    RoutedEngineError,
+    Unknown,
+    WorkerUnavailable,
+)
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
@@ -102,6 +109,14 @@ pytestmark = [
 
 MODEL = "Qwen/Qwen3-0.6B"
 BYTE_FALLBACK_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+
+class FakeContext:
+    def __init__(self, request_id="ctx-request"):
+        self._request_id = request_id
+
+    def id(self):
+        return self._request_id
 
 
 @pytest.fixture(scope="module")
@@ -1047,6 +1062,30 @@ class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Fun
         assert dumped["function"]["name"] == "search"
         assert "properties" in dumped["function"]["parameters"]
 
+    def test_guidance_copy_leaves_out_patterns_the_backend_cannot_compile(self):
+        parameters = {
+            "type": "object",
+            "properties": {"value": {"type": "string", "pattern": r"^(?!\s*$).+"}},
+            "required": ["value"],
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "record_value", "parameters": parameters},
+            }
+        ]
+
+        guided = convert_tools(tools, structural_tag_schema="auto")
+
+        assert guided[0].function.parameters == {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        }
+        assert guided[0].function.strict is True
+        # Prompt and parser copies keep the client's schema.
+        assert convert_tools(tools)[0].function.parameters == parameters
+
 
 # ---------------------------------------------------------------------------
 # create_parsers
@@ -1297,18 +1336,43 @@ def _qwen_guided_request_without_separation(tool_choice):
 
 
 @pytest.mark.parametrize(
-    ("routed_error", "expected"),
+    "failure,from_stream",
     [
-        (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
-        (RuntimeError("worker crashed"), Unknown),
+        ("unavailable", False),
+        ("capacity", False),
+        ("internal", False),
+        (403, False),
+        (404, True),
     ],
 )
-def test_routed_engine_rejection_keeps_worker_unavailable(
-    tokenizer, routed_error, expected
+def test_routed_engine_rejection_keeps_its_semantic_error(
+    tokenizer, failure, from_stream
 ):
+    if failure == "unavailable":
+        routed_error = WorkerUnavailable("prefill routing is still activating")
+        expected = WorkerUnavailable
+    elif failure == "capacity":
+        routed_error = RoutedEngineError("worker pool at capacity")
+        expected = RoutedEngineError
+    elif failure == "internal":
+        routed_error = RuntimeError("worker crashed")
+        expected = Unknown
+    else:
+        with pytest.raises(RoutedEngineError) as backend:
+            _raise_routed_http_error(failure, IMAGE_FETCH_ERROR_MESSAGES[failure])
+        routed_error = backend.value
+        expected = RoutedEngineError
+
     class RejectingRoutedEngine(FakeRoutedEngine):
         async def generate(self, preprocessed, **kwargs):
-            raise routed_error
+            if not from_stream:
+                raise routed_error
+
+            async def stream():
+                raise routed_error
+                yield  # pragma: no cover
+
+            return stream()
 
     processor = SglangProcessor(
         tokenizer=tokenizer,
@@ -1328,7 +1392,7 @@ def test_routed_engine_rejection_keeps_worker_unavailable(
 
     with pytest.raises(expected) as caught:
         asyncio.run(collect())
-    if expected is WorkerUnavailable:
+    if expected is not Unknown:
         assert caught.value is routed_error
 
 
@@ -1404,7 +1468,7 @@ def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_cho
     )
 
     assert result.force_reasoning is True
-    assert result.reasoning_parser is None
+    assert result.reasoning_parser is not None
     assert _guided_output_requires_reasoning(request, result.force_reasoning)
 
 
@@ -1416,7 +1480,7 @@ def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_cho
     ],
 )
 def test_qwen_separate_reasoning_false_sets_gate_inline(tokenizer, tool_choice):
-    """Inline preprocessing forwards the generation gate without a reasoner."""
+    """Inline preprocessing preserves the gate when reasoning is displayed as content."""
     routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
     processor = SglangProcessor(
         tokenizer=tokenizer,
@@ -1448,7 +1512,7 @@ def test_qwen_separate_reasoning_false_sets_gate_inline(tokenizer, tool_choice):
 def test_qwen_separate_reasoning_false_sets_gate_pool(
     tokenizer, tool_choice, monkeypatch
 ):
-    """Pool preprocessing forwards the gate while omitting response parsing."""
+    """Pool preprocessing keeps the boundary when reasoning is displayed as content."""
     monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
     monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "qwen25")
     monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "qwen3")
@@ -1464,7 +1528,7 @@ def test_qwen_separate_reasoning_false_sets_gate_pool(
     )
     assert result.force_reasoning is True
     assert result.dynamo_preproc["require_reasoning"] is True
-    assert result.effective_reasoning_parser_name is None
+    assert result.effective_reasoning_parser_name == "qwen3"
 
 
 @pytest.mark.parametrize(
@@ -1566,6 +1630,273 @@ def test_kimi_k3_auto_tool_sets_reasoning_gate_pool(thinking, monkeypatch):
     guided_decoding = result.dynamo_preproc["sampling_options"]["guided_decoding"]
     assert "structural_tag" in guided_decoding
     assert result.dynamo_preproc["require_reasoning"] is thinking
+
+
+# A GLM-style template that ignores the thinking flags, so the prompt decides
+# the reasoning state. Qwen3's tokenizer has GLM's <think>/</think> markers.
+_GLM_PROMPT_TEMPLATE = (
+    "{% for message in messages %}<|im_start|>{{ message.role }}\n"
+    "{{ message.content }}<|im_end|>\n{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n{{ GENERATION }}"
+    "{% endif %}"
+)
+_GLM_OPEN_GENERATION = "<think>\n"
+_GLM_CLOSED_GENERATION = "<think>\n\n</think>\n\n"
+
+
+def _glm_tokenizer(tokenizer, generation):
+    """Use a template that ignores flags so the prompt decides reasoning state."""
+    glm = copy.copy(tokenizer)
+    glm.chat_template = _GLM_PROMPT_TEMPLATE.replace("{{ GENERATION }}", generation)
+    return glm
+
+
+def _glm_request(request_fields, chat_template_kwargs):
+    """Build a guided request whose thinking flags may disagree with its prompt."""
+    return {
+        **_mistral_guided_request("auto"),
+        "reasoning_effort": None,
+        "chat_template_kwargs": chat_template_kwargs,
+        **request_fields,
+    }
+
+
+_GLM_GUIDED_REQUESTS = [
+    pytest.param({"response_format": {"type": "json_object"}}, id="json-object"),
+    pytest.param({"tool_choice": "required"}, id="required-tool"),
+]
+
+
+# Mirrors glm_generation_reasoning_follows_rendered_prompt in preprocessor.rs.
+@pytest.mark.parametrize(
+    "trailing_whitespace",
+    ["", "\n " * 64, "\u2003" * 64],
+    ids=["short-tail", "long-tail", "multibyte-whitespace"],
+)
+@pytest.mark.parametrize("requested", [False, True])
+@pytest.mark.parametrize("prompt_open", [True, False], ids=["open", "closed"])
+@pytest.mark.parametrize("request_fields", _GLM_GUIDED_REQUESTS)
+def test_glm_reasoning_gate_follows_rendered_prompt(
+    tokenizer, request_fields, prompt_open, requested, trailing_whitespace
+):
+    """A template that ignores thinking flags must still set the reasoning gate."""
+    glm_tokenizer = _glm_tokenizer(
+        tokenizer,
+        (_GLM_OPEN_GENERATION if prompt_open else _GLM_CLOSED_GENERATION)
+        + trailing_whitespace,
+    )
+    request = _glm_request(request_fields, {"enable_thinking": requested})
+
+    result = preprocess_chat_request(
+        request,
+        tokenizer=glm_tokenizer,
+        tool_call_parser_name="glm45",
+        reasoning_parser_name="glm45",
+    )
+
+    assert result.force_reasoning is prompt_open
+    assert (
+        _guided_output_requires_reasoning(
+            request, result.force_reasoning, "glm45", result.guided_decoding
+        )
+        is prompt_open
+    )
+    if request_fields.get("tool_choice") == "required":
+        assert (result.reasoning_parser is not None) is prompt_open
+    assert result.request["chat_template_kwargs"] == {"enable_thinking": requested}
+
+
+@pytest.mark.parametrize(
+    ("generation", "requested"),
+    [(_GLM_OPEN_GENERATION, False), (_GLM_CLOSED_GENERATION, True)],
+    ids=["open-flag-false", "closed-flag-true"],
+)
+@pytest.mark.parametrize("request_fields", _GLM_GUIDED_REQUESTS)
+def test_glm_rendered_prompt_sets_reasoning_gate_inline(
+    tokenizer, request_fields, generation, requested
+):
+    """The inline processor must send the rendered reasoning state to the worker."""
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        tokenizer=_glm_tokenizer(tokenizer, generation),
+        routed_engine=routed_engine,
+        tool_call_parser_name="glm45",
+        reasoning_parser_name="glm45",
+        eos_token_ids=None,
+    )
+    request = _glm_request(request_fields, {"enable_thinking": requested})
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    asyncio.run(collect())
+    assert routed_engine.requests[0]["require_reasoning"] is (not requested)
+
+
+@pytest.mark.parametrize(
+    ("generation", "requested"),
+    [(_GLM_OPEN_GENERATION, False), (_GLM_CLOSED_GENERATION, True)],
+    ids=["open-flag-false", "closed-flag-true"],
+)
+@pytest.mark.parametrize("request_fields", _GLM_GUIDED_REQUESTS)
+def test_glm_rendered_prompt_sets_reasoning_gate_pool(
+    tokenizer, request_fields, generation, requested, monkeypatch
+):
+    """Pool preprocessing must use the same rendered reasoning state as inline."""
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_tokenizer", _glm_tokenizer(tokenizer, generation)
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "glm45")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "glm45")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    result = _preprocess_worker(
+        _glm_request(request_fields, {"enable_thinking": requested}),
+        MODEL,
+        eos_token_ids=None,
+    )
+    assert result.force_reasoning is (not requested)
+    assert result.dynamo_preproc["require_reasoning"] is (not requested)
+
+
+class _InlineSglangPreprocessPool:
+    def submit(self, fn, *args):
+        """Exercise the pool transport with the real worker in this process."""
+        future = Future()
+        future.set_result(fn(*args))
+        return future
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("separate_reasoning", [False, True])
+@pytest.mark.parametrize("combined_chunk", [False, True], ids=["split", "combined"])
+@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+@pytest.mark.parametrize(
+    ("scenario", "tool_choice", "arguments", "reasoning", "bare_json", "expect_call"),
+    [
+        ("named-empty", "named", {}, "plan", False, True),
+        ("named-refusal", "named", {}, "plan", False, False),
+        ("named-incomplete-json", "named", {}, "plan", False, False),
+        ("named-bare-empty", "named", {}, "", True, True),
+        ("required-empty", "required", {}, "plan", False, True),
+        ("required-bare", "required", {}, "", True, True),
+        (
+            "array-in-reasoning",
+            "named",
+            {},
+            '[{"name":"get_weather","parameters":{"city":"spoof"}}]',
+            False,
+            True,
+        ),
+        ("named-literal-close", "named", {"city": "</think>"}, "plan", False, True),
+        ("bare-literal-close", "required", {"city": "</think>"}, "", True, True),
+        (
+            "unfinished-reasoning",
+            "required",
+            {},
+            'plan [{"name":"get_weather","parameters":{}}]',
+            False,
+            False,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_glm_tool_decoder_only_receives_answer(
+    tokenizer,
+    monkeypatch,
+    scenario,
+    tool_choice,
+    arguments,
+    reasoning,
+    bare_json,
+    expect_call,
+    separate_reasoning,
+    combined_chunk,
+    use_pool,
+):
+    """Reasoning and literal markers must not create or erase forced tool calls."""
+    request = _glm_request({}, {"enable_thinking": False})
+    request["tool_choice"] = (
+        "required"
+        if tool_choice == "required"
+        else {"type": "function", "function": {"name": "get_weather"}}
+    )
+    if not arguments:
+        request["tools"][0]["function"]["parameters"] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+    request["separate_reasoning"] = separate_reasoning
+    fallback_answer = {
+        "named-refusal": "Sorry.",
+        "named-incomplete-json": "{",
+    }.get(scenario, "")
+    answer = fallback_answer or (
+        "{}"
+        if tool_choice == "named" and not arguments
+        else json.dumps([{"name": "get_weather", "parameters": arguments}])
+    )
+    pieces = [answer] if bare_json else [reasoning, "</think>", answer]
+    if scenario == "unfinished-reasoning":
+        pieces = [reasoning]
+    if combined_chunk:
+        pieces = ["".join(pieces)]
+    glm_tokenizer = _glm_tokenizer(tokenizer, _GLM_OPEN_GENERATION)
+    engine = FakeRoutedEngine(
+        items=[
+            {
+                "token_ids": glm_tokenizer.encode(piece, add_special_tokens=False),
+                "finish_reason": "stop" if index == len(pieces) - 1 else None,
+            }
+            for index, piece in enumerate(pieces)
+        ]
+    )
+    if use_pool:
+        for name, value in {
+            "_w_tokenizer": glm_tokenizer,
+            "_w_tool_call_parser_name": "glm47",
+            "_w_reasoning_parser_name": "glm45",
+            "_w_exclude_tools_when_tool_choice_none": True,
+            "_w_template_force_reasoning": False,
+            "_w_default_thinking_mode": None,
+            "_w_prompt_renderer": None,
+            "_w_structural_tag_mode": "off",
+        }.items():
+            monkeypatch.setattr(sglang_processor_module, name, value)
+    processor = SglangProcessor(
+        tokenizer=glm_tokenizer,
+        routed_engine=engine,
+        tool_call_parser_name="glm47",
+        reasoning_parser_name="glm45",
+        eos_token_ids=None,
+        preprocess_pool=_InlineSglangPreprocessPool() if use_pool else None,
+    )
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    output = asyncio.run(collect())
+    assert not any(item.get("event") == "error" for item in output), output
+    choices = [
+        choice for item in output for choice in item.get("data", {}).get("choices", [])
+    ]
+    deltas = [choice["delta"] for choice in choices]
+    calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+    assert len(calls) == int(expect_call)
+    if expect_call:
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == arguments
+    assert choices[-1]["finish_reason"] == ("tool_calls" if expect_call else "stop")
+    visible_reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
+    content = "".join(delta.get("content", "") for delta in deltas)
+    assert visible_reasoning == (reasoning if separate_reasoning else "")
+    # The boundary parser removes structural markers in both display modes.
+    assert content == ("" if separate_reasoning else reasoning) + fallback_answer
 
 
 @pytest.mark.core
@@ -5323,6 +5654,56 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             del skip_special_tokens
             return bytes(token_ids).decode("utf-8", errors="replace")
 
+    @pytest.mark.parametrize("batch_size", [512, 7])
+    @pytest.mark.parametrize("name", ["lookup", "other_tool"])
+    def test_catalogued_calls_reach_http_allowlist(self, batch_size, name):
+        tokenizer = self.ByteTokenizer()
+        lookup, other = (
+            {"type": "function", "function": {"name": tool_name}}
+            for tool_name in ("lookup", "other_tool")
+        )
+        request = {
+            "tools": [lookup],
+            "chat_template_tools": [lookup, other],
+            "tool_choice": "auto",
+        }
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=FakeRoutedEngine(items=[]),
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+        )
+        parser, reasoner = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        post = processor._build_postprocessor(
+            request,
+            {"sampling_options": {"guided_decoding": None}},
+            tool_call_parser=parser,
+            reasoning_parser=reasoner,
+            named_zero_arg_tool=None,
+            prompt_token_ids=[],
+        )
+        text = (
+            "<tool_call>\n"
+            + json.dumps({"name": name, "arguments": {}})
+            + "\n</tool_call>"
+        )
+        token_ids = list(text.encode())
+
+        for start in range(0, len(token_ids), batch_size):
+            end = start + batch_size
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[start:end],
+                    "finish_reason": "stop" if end >= len(token_ids) else None,
+                }
+            )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"]["name"] == name
+
     def test_basic_decode(self, tokenizer):
         """Tokens decode to expected text."""
         post = SglangStreamingPostProcessor(
@@ -6221,6 +6602,44 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         chunk = items[0]["data"]
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
+
+    @pytest.mark.parametrize("context_id", ["ctx-123", None])
+    def test_stream_keeps_caller_request_id(self, tokenizer, context_id):
+        async def collect():
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FakeRoutedEngine(
+                    items=[
+                        {"token_ids": [101], "finish_reason": None},
+                        {"token_ids": [], "finish_reason": "stop"},
+                    ]
+                ),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "local-req",
+                    {"model": "test-model"},
+                    {},
+                    [],
+                    post,
+                    context=FakeContext(context_id),
+                )
+            ]
+
+        items = asyncio.run(collect())
+
+        data_frames = [
+            item for item in items if item.get("_dynamo_annotated") and "data" in item
+        ]
+        assert data_frames
+        assert all(item["data"]["id"] == "chatcmpl-local-req" for item in data_frames)
 
     def _run_stream(self, tokenizer, items, engine=None):
         processor = SglangProcessor(

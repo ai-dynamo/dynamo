@@ -3,6 +3,8 @@
 
 //! Worker and rank identities, and the capacity a worker advertises about itself.
 
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 
 /// A worker identifier.
@@ -45,7 +47,10 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 pub struct WorkerCapacity {
     max_num_batched_tokens: Option<u64>,
     total_kv_blocks: Option<u64>,
-    max_num_seqs: Option<u64>,
+    /// `NonZeroU64` so the option adds 8 bytes, not 16: classifier rows copy one
+    /// `WorkerCapacity` per rank.
+    cache_owner_capacity_blocks: Option<NonZeroU64>,
+    max_num_seqs: Option<NonZeroU64>,
 }
 
 impl WorkerCapacity {
@@ -55,14 +60,22 @@ impl WorkerCapacity {
         Self {
             max_num_batched_tokens: max_num_batched_tokens.filter(|&value| value > 0),
             total_kv_blocks: total_kv_blocks.filter(|&value| value > 0),
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
         }
+    }
+
+    /// Set the host-pinned capacity of the cache owner (KVCR instance) attached to the rank;
+    /// a reported zero means unreported.
+    pub fn with_cache_owner_capacity_blocks(mut self, blocks: Option<u64>) -> Self {
+        self.cache_owner_capacity_blocks = blocks.and_then(NonZeroU64::new);
+        self
     }
 
     /// The same capacity with the rank's `max_num_seqs`. A reported zero means unreported,
     /// as for the other values.
     pub fn with_max_num_seqs(mut self, max_num_seqs: Option<u64>) -> Self {
-        self.max_num_seqs = max_num_seqs.filter(|&value| value > 0);
+        self.max_num_seqs = max_num_seqs.and_then(NonZeroU64::new);
         self
     }
 
@@ -78,10 +91,19 @@ impl WorkerCapacity {
         self.total_kv_blocks
     }
 
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached to
+    /// this rank, when the worker advertises it. Experimental: plugins read it through the
+    /// worker-selection stage's `experimental::resident_blocks` module, so it is left out of
+    /// this type's documented surface.
+    #[doc(hidden)]
+    pub fn cache_owner_capacity_blocks(self) -> Option<u64> {
+        self.cache_owner_capacity_blocks.map(NonZeroU64::get)
+    }
+
     /// Requests the rank runs at once, when reported: the engine's batch size, by whatever
     /// name it has there.
     pub fn max_num_seqs(self) -> Option<u64> {
-        self.max_num_seqs
+        self.max_num_seqs.map(NonZeroU64::get)
     }
 
     /// The budget fractional prefill thresholds are taken of: `max_num_batched_tokens`, or

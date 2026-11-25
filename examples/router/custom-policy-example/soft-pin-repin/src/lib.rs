@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 struct SoftPinRepinPicker {
     max_active_requests: usize,
@@ -24,7 +24,7 @@ impl SoftPinRepinPicker {
 
     fn least_loaded_row(
         candidates: &[ScoredWorkerCandidate],
-        loads: &[dynamo_kv_router::plugins::prelude::WorkerLoadInput],
+        loads: &[WorkerLoadInput],
         excluded_target: Option<WorkerAffinityTarget>,
     ) -> Option<usize> {
         candidates
@@ -46,7 +46,7 @@ impl WorkerPicker for SoftPinRepinPicker {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
@@ -54,7 +54,7 @@ impl WorkerPicker for SoftPinRepinPicker {
             WorkerSelectionPolicyError::failed("active load input is unavailable")
         })?;
 
-        if let Some(target) = context.affinity_target()
+        if let Some(target) = request.affinity_target()
             && let Some(target_row) = candidates
                 .iter()
                 .zip(loads)
@@ -89,18 +89,15 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     let max_active_requests = parameters.max_active_requests;
 
-    Ok(Arc::new(
-        move |config: &SelectionConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(SoftPinRepinPicker {
-                    max_active_requests,
-                }),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(SoftPinRepinPicker {
+                max_active_requests,
+            }),
+        )
+    }))
 }
 
 pub fn register(
@@ -111,78 +108,37 @@ pub fn register(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use dynamo_kv_router::plugins::prelude::*;
-    use dynamo_scheduler::host::WorkerSelectionInput;
-    use dynamo_scheduler::host::WorkerSelector;
+    use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
 
     use super::*;
 
-    struct TestWorker;
+    const A: u64 = 29;
+    const B: u64 = 41;
 
-    impl WorkerConfigLike for TestWorker {
-        fn data_parallel_start_rank(&self) -> u32 {
-            0
-        }
-
-        fn data_parallel_size(&self) -> u32 {
-            1
-        }
-
-        fn max_num_batched_tokens(&self) -> Option<u64> {
-            None
-        }
-
-        fn total_kv_blocks(&self) -> Option<u64> {
-            Some(1024)
-        }
+    fn worker(id: u64) -> WorkerWithDpRank {
+        WorkerWithDpRank::from_worker_id(id)
     }
 
-    fn request(affinity_target: Option<WorkerAffinityTarget>) -> SchedulingRequest {
-        SchedulingRequest {
-            accounting_attribution: Default::default(),
-            mode: ScheduleMode::QueryOnly { request_id: None },
-            token_seq: None,
-            isl_tokens: 16,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
-            router_config_override: None,
-            track_prefill_tokens: true,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
-            worker_loads: Default::default(),
-            resp_tx: None,
+    /// A request, bound to `affinity_target` when given, against workers given as
+    /// `(worker_id, active_requests)`.
+    fn case(affinity_target: Option<WorkerWithDpRank>, workers: &[(u64, usize)]) -> SelectionCase {
+        let mut case = SelectionCase::new(16, 16);
+        if let Some(target) = affinity_target {
+            case = case.affinity_target(target);
         }
-    }
-
-    fn set_active_requests(
-        request: &mut SchedulingRequest,
-        worker: WorkerWithDpRank,
-        active_requests: usize,
-    ) {
-        request.worker_loads.insert(
-            worker,
-            WorkerLoadProjection {
-                active_requests,
-                ..Default::default()
-            },
-        );
+        for &(id, active_requests) in workers {
+            case.set_worker(
+                id,
+                CaseWorker::new()
+                    .active_requests(active_requests)
+                    .total_kv_blocks(1024),
+            );
+        }
+        case
     }
 
     fn policy(max_active_requests: usize) -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(SoftPinRepinPicker {
@@ -193,60 +149,23 @@ mod tests {
 
     #[test]
     fn repins_only_after_the_affinity_target_exceeds_the_threshold() {
-        let workers = HashMap::from([(41, TestWorker), (29, TestWorker)]);
-        let worker_a = WorkerWithDpRank::from_worker_id(29);
-        let worker_b = WorkerWithDpRank::from_worker_id(41);
-        let mut unbound = request(None);
-        set_active_requests(&mut unbound, worker_a, 0);
-        set_active_requests(&mut unbound, worker_b, 2);
-        let selected = policy(0)
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &unbound,
-                unbound.eligibility(),
-                16,
-            ))
-            .unwrap();
-        assert_eq!(selected.worker, worker_a);
+        let selected = case(None, &[(A, 0), (B, 2)]).select(&policy(0)).unwrap();
+        assert_eq!(selected, worker(A));
 
-        let mut bound = request(Some(selected.worker.into()));
-        set_active_requests(&mut bound, worker_a, 0);
-        set_active_requests(&mut bound, worker_b, 0);
-        let retained = policy(0)
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &bound,
-                bound.eligibility(),
-                16,
-            ))
+        let retained = case(Some(selected), &[(A, 0), (B, 0)])
+            .select(&policy(0))
             .unwrap();
-        assert_eq!(retained.worker, worker_a);
+        assert_eq!(retained, worker(A));
 
-        set_active_requests(&mut bound, worker_a, 1);
-        let repinned = policy(0)
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &bound,
-                bound.eligibility(),
-                16,
-            ))
+        let repinned = case(Some(selected), &[(A, 1), (B, 0)])
+            .select(&policy(0))
             .unwrap();
-        assert_eq!(repinned.worker, worker_b);
+        assert_eq!(repinned, worker(B));
     }
 
     #[test]
     fn retains_the_only_eligible_affinity_target() {
-        let workers = HashMap::from([(29, TestWorker)]);
-        let mut request = request(Some(WorkerWithDpRank::from_worker_id(29).into()));
-        set_active_requests(&mut request, WorkerWithDpRank::from_worker_id(29), 1);
-        let selected = policy(0)
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
-            .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(29));
+        let selected = case(Some(worker(A)), &[(A, 1)]).select(&policy(0)).unwrap();
+        assert_eq!(selected, worker(A));
     }
 }

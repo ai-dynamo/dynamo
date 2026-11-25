@@ -20,6 +20,7 @@ use dynamo_scheduler::{
     RejectThresholdsProvider, ScheduleMode, SchedulerQueue, SchedulingRequest, SchedulingResponse,
     WorkerCapacityExt, WorkerConfigLike,
 };
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
 use dynamo_slot_tracker::{ActiveSequencesMultiWorker, SchedulerBookingDescriptor};
 use dynamo_worker_selection::WorkerCapacity;
 use dynamo_worker_selection::WorkerInputs;
@@ -181,7 +182,7 @@ fn make_request(
 }
 
 #[tokio::test]
-async fn classifiers_read_class_and_reject_thresholds() {
+async fn classifiers_read_reject_thresholds() {
     let profile = policy_profile(
         r#"
 default_policy_class: latency
@@ -194,10 +195,8 @@ policy_classes:
     prefill_busy_threshold_frac: 0.25
 "#,
     );
-    let reject = dynamo_slot_tracker::BusyThresholds {
-        prefill_busy_threshold_frac: Some(1.0),
-        ..Default::default()
-    };
+    let reject =
+        dynamo_slot_tracker::BusyThresholds::default().with_prefill_busy_threshold_frac(Some(1.0));
     let (queue, _slots, _cfg_tx) = make_queue_with_profile_sender_and_reject(
         1,
         16,
@@ -207,30 +206,15 @@ policy_classes:
     );
     let (mut request, _rx) = make_request("classified", 16);
     request.policy_class = Some("latency".to_string());
-    let (mut classified, _workers) =
+    let (classified, _workers) =
         queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
-
-    let latency = dynamo_slot_tracker::BusyThresholds {
-        decode_busy_threshold_frac: Some(0.5),
-        ..Default::default()
-    };
-    let bulk = dynamo_slot_tracker::BusyThresholds {
-        prefill_busy_threshold_frac: Some(0.25),
-        ..Default::default()
-    };
-    assert_eq!(classified.queue_thresholds(), latency);
-    assert_eq!(classified.queue_thresholds_for("bulk"), Some(bulk));
-    assert_eq!(classified.queue_thresholds_for("missing"), None);
     assert_eq!(classified.reject_thresholds(), reject);
 
-    classified.set_policy_class("bulk");
-    assert_eq!(classified.queue_thresholds(), bulk);
-
-    // An unknown requested class reads the default class's thresholds.
+    // The reject thresholds are router-wide: the requested class does not change them.
     request.policy_class = Some("unknown".to_string());
     let (classified, _workers) =
         queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
-    assert_eq!(classified.queue_thresholds(), latency);
+    assert_eq!(classified.reject_thresholds(), reject);
 }
 
 #[tokio::test]

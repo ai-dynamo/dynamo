@@ -111,13 +111,6 @@ impl<'a> WorkerCandidate<'a> {
         }
     }
 
-    /// Previous name of [`Self::kv_copy`].
-    // TODO(v1.9): Remove this alias.
-    #[deprecated(since = "1.7.0", note = "use `WorkerCandidate::kv_copy`")]
-    pub fn kv_transfer(self) -> Option<WorkerCopyInput> {
-        self.kv_copy()
-    }
-
     /// Preferred-taint cost multiplier, only when this component declared PREFERRED_TAINT.
     /// None means no preference was supplied, access was not requested, or the host pinned the worker.
     #[inline]
@@ -138,6 +131,17 @@ impl<'a> WorkerCandidate<'a> {
         self.cache_snapshot
             .resident_blocks
             .and_then(|counts| counts.resident_blocks(self.data.worker))
+    }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocks::cache_owner_blocks`: the attached
+    /// cache owner's count, under the same gate as [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+            return None;
+        }
+        self.cache_snapshot
+            .resident_blocks?
+            .cache_owner_blocks(self.data.worker)
     }
 }
 
@@ -226,6 +230,10 @@ pub trait ResidentBlockSource {
     /// Blocks held for `worker` as of the host's last event for it, or `None` when the host has
     /// no count for the rank.
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
+
+    /// Host-pinned blocks the host's index holds for the cache owner (KVCR instance) attached
+    /// to `worker`, or `None` when no owner is attached or the host has no count for it.
+    fn cache_owner_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
 }
 
 /// Request-wide facts borrowed once for all cache views in a selection.
@@ -297,6 +305,13 @@ impl WorkerInputRows {
         ))
     }
 }
+
+// A classification future borrows the rows across the await on the classifier lock, so the
+// rows must stay `Send + Sync` for that future to be spawned.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<WorkerInputRows>();
+};
 
 impl std::fmt::Debug for WorkerInputRows {
     #[inline]
@@ -372,11 +387,11 @@ impl<'a> WorkerCacheInputs<'a> {
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
     /// Whether the host observed a projection for this rank; false flags a default row.
-    pub available: bool,
-    pub active_prefill_tokens: usize,
-    pub active_decode_blocks: usize,
-    pub decode_cost_blocks: f64,
-    pub active_requests: usize,
+    pub(crate) available: bool,
+    pub(crate) active_prefill_tokens: usize,
+    pub(crate) active_decode_blocks: usize,
+    pub(crate) decode_cost_blocks: f64,
+    pub(crate) active_requests: usize,
 }
 
 // Every policy copies these rows per candidate per selection. `active_decode_blocks` took the
@@ -394,13 +409,8 @@ pub use dynamo_router_protocol::worker::WorkerCapacity;
 pub struct WorkerCopyInput {
     /// Blocks of the prompt a copy source holds beyond this rank's local prefix, when one
     /// was chosen for the rank.
-    pub source_prefix_blocks: Option<u32>,
+    pub(crate) source_prefix_blocks: Option<u32>,
 }
-
-/// Previous name of [`WorkerCopyInput`].
-// TODO(v1.9): Remove this alias.
-#[deprecated(since = "1.7.0", note = "use `WorkerCopyInput`")]
-pub type WorkerTransferInput = WorkerCopyInput;
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 ///
@@ -415,6 +425,7 @@ pub struct WorkerInputView<'a> {
     load: Option<&'a [WorkerLoadInput]>,
     // Set only on the KV path, for a picker that declared RESIDENT_BLOCKS.
     resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    decode_progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
 }
 
 /// Where a picker's rows come from.
@@ -505,7 +516,8 @@ impl ScoredWorkerCandidate {
 impl<'a> WorkerCacheInput<'a> {
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
-    /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
+    /// Use `loadable_beyond(prefix)` for the blocks the engine can load after a worker's local
+    /// prefix; `hits_beyond(prefix)` also counts hits after a gap, which the engine cannot load.
     #[inline]
     pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
         self.snapshot.shared_hits
@@ -642,6 +654,7 @@ impl<'a> WorkerInputView<'a> {
             cache,
             load,
             resident_blocks,
+            decode_progress: None,
         }
     }
 
@@ -661,7 +674,27 @@ impl<'a> WorkerInputView<'a> {
             cache: None,
             load: None,
             resident_blocks: None,
+            decode_progress: None,
         }
+    }
+
+    pub(crate) fn with_decode_progress(
+        mut self,
+        progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        self.decode_progress = progress;
+        self
+    }
+
+    pub(crate) fn decode_progress_for_row(
+        self,
+        row: usize,
+    ) -> Option<dynamo_slot_tracker::host::DecodeProgress> {
+        let lookup = self.decode_progress?;
+        let PickerRows::Materialized { candidates, .. } = self.rows else {
+            return None;
+        };
+        lookup(candidates.get(row)?.worker)
     }
 
     /// Number of rows, equal to the length of [`Self::candidates`].
@@ -767,5 +800,13 @@ impl<'a> WorkerInputView<'a> {
         self.candidates()
             .get(row)
             .and_then(|candidate| counts.resident_blocks(candidate.worker))
+    }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocksByRow::cache_owner_blocks`: the
+    /// attached cache owner's count for candidate `row`, under the same gate as
+    /// [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self, row: usize) -> Option<u64> {
+        let counts = self.resident_blocks?;
+        counts.cache_owner_blocks(self.candidates().get(row)?.worker)
     }
 }

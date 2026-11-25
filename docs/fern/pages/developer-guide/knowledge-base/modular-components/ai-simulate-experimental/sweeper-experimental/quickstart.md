@@ -21,7 +21,7 @@ to build bindings against the matching AISimulate Rust crate.
 Sweeper requires a `RunnerFactory` supplied by the application that owns replay execution:
 
 ```python
-from aisimulate.sweeper import SmartSearchConfig, Sweeper
+from aisim.sweeper import SmartSearchConfig, Sweeper
 
 config = SmartSearchConfig.from_yaml("sweep.yaml")
 sweeper = Sweeper(runner_factory=my_runner_factory, show_progress=False)

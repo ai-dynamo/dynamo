@@ -90,7 +90,7 @@ def assert_distribution(values):
     assert sum(values) == pytest.approx(1.0, abs=1e-9)
 
 
-def assert_decision_body(body, model, dialect):
+def assert_decision_body(body, model, dialect, *, expected_output_tokens=0):
     assert dialect in ("oai", "systemone")
     assert body["model"] == model
     if dialect == "oai":
@@ -123,12 +123,9 @@ def assert_decision_body(body, model, dialect):
             0 <= usage["input_tokens_details"]["cached_tokens"] <= usage["input_tokens"]
         )
         assert usage["input_tokens_details"]["cache_write_tokens"] == 0
-        assert (
-            usage["output_tokens"]
-            == usage["output_tokens_details"]["reasoning_tokens"]
-            == 0
-        )
-        assert usage["total_tokens"] == usage["input_tokens"]
+        assert usage["output_tokens"] == expected_output_tokens
+        assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+        assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
     else:
         assert list(body["answers"]) == ["route", "urgent", "severity"]
         route, urgent, severity = body["answers"].values()
@@ -144,7 +141,7 @@ def assert_decision_body(body, model, dialect):
             assert severity["type"] == "score"
             assert severity["legend"] == {"0": "Low", "1": "Moderate", "2": "High"}
             assert body["usage"]["input_tokens"] > 0
-            assert body["usage"]["output_tokens"] == 0
+            assert body["usage"]["output_tokens"] == expected_output_tokens
             for answer in (route, urgent, severity):
                 if "x_label_mass" in answer:
                     assert (

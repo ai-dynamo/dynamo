@@ -45,6 +45,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// validateEnvVars requires unique names and valid value/source combinations.
+// Only unchanged lists ratchet; semantic ordering never ratchets duplicate names.
+// fldPath must not be nil; nil oldEnv means there is no previously eligible list.
+func (v *sharedValidation) validateEnvVars(env, oldEnv []corev1.EnvVar, fldPath *field.Path, orderedEnvironment bool) field.ErrorList {
+	unchanged := apiequality.Semantic.DeepEqual(env, oldEnv)
+	if unchanged && !orderedEnvironment {
+		return nil
+	}
+
+	// Check each source independently; equal names in different layers are valid overrides.
+	var allErrs field.ErrorList
+	seen := make(map[string]bool, len(env))
+	for i, entry := range env {
+		if seen[entry.Name] {
+			allErrs = append(allErrs, field.Duplicate(fldPath.Index(i).Child("name"), entry.Name))
+		}
+		seen[entry.Name] = true
+		if !unchanged && entry.Value != "" && entry.ValueFrom != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Index(i).Child("valueFrom"), "may not be specified when value is non-empty"))
+		}
+	}
+	return allErrs
+}
+
 // validatePodTemplateSpec checks LPX role templates beyond the admitted Pod schema.
 // template and fldPath are non-nil; hostsEngine is whether the role's Pods host the engine.
 func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateSpec, fldPath *field.Path, role string, hostsEngine bool) field.ErrorList {

@@ -93,7 +93,7 @@ Planner 会预测下一个 interval 的三个流量形状值：
 3. `profile_results_dir` 中的 NPZ/JSON fallback data
 4. 没有 pre-deployment data 时的 live FPM regression warmup
 
-Planner 通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 创建 `ais_perf_model.roles` 中各角色的模型。AISimulate 负责完整 schema、选择、调优和预测，Dynamo 绑定 worker 身份与运行时上限。新配置默认 `auto + deny`；auto 仍依次查找 op-level、FPM interpolation 和 regression。未提供配置时显式创建对应角色的冷启动 regression 模型。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
+Planner 通过唯一构造接口 `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` 根据 `ais_perf_model` 中的配置（每种 worker 类型一份配置）创建模型。AISimulate 负责完整 schema、选择、调优和预测，Dynamo 绑定 worker 身份与运行时上限。新配置默认 `auto + deny`；auto 仍依次查找 op-level、FPM interpolation 和 regression。未提供配置时显式创建对应角色的冷启动 regression 模型。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
 
 ### Step 4: Proposal 和 Lower Bound
 
@@ -191,11 +191,7 @@ Interpolators 使用 profiling sweep granularity 来决定精度。granularity �
 
 ### Regression Models
 
-三个专用 regression models 位于 `components/src/dynamo/planner/core/perf_model/`：
-
-- **PrefillRegressionModel**：1D regression `sum_prefill_tokens -> wall_time`。通过模拟 chunked prefill scheduling（chunk 大小为 `max_num_batched_tokens`）估算 TTFT。
-- **DecodeRegressionModel**：1D regression `sum_decode_kv_tokens -> wall_time`。估算 total decode load（scheduled + queued + avg decode length）的 ITL。
-- **AggRegressionModel**：2D regression `(sum_prefill_tokens, sum_decode_kv_tokens) -> wall_time`。估算 TTFT（带 piggybacked decode 的 simulated prefill）和 ITL（带 average piggybacked prefill 的 decode）。
+从 FPM observations 到 forward-pass 时间的 regression 由 AISimulate 的 `fpm_regression` estimator 完成。`components/src/dynamo/planner/core/perf_model/` 中的 `PlannerEnginePerfModel` 为每种 worker type 构建一个 estimator，并用观测到的 FPMs 对它进行 tune。Planner 根据它的 forward-pass 估算推导 TTFT（模拟 chunked prefill scheduling，chunk 大小为 `max_num_batched_tokens`）、total decode load 的 ITL，以及单个 engine 的 capacity。
 
 ### Scaling Decisions
 
@@ -209,7 +205,7 @@ Interpolators 使用 profiling sweep granularity 来决定精度。granularity �
 
 ### Aggregated Mode
 
-在 aggregated mode（`mode: agg`）下，engines 同时处理 prefill 和 decode，并使用 chunked prefill。Planner 维护 TTFT 和 ITL 两个 regression models，但使用按 worker 时间平均的 metrics（不是瞬时值）进行 regression training，以平滑 chunked prefill noise。如果 prefill 或 decode 任一信号 overload，则 scale up；只有两者都 underload 时才 scale down。
+在 aggregated mode（`mode: agg`）下，engines 同时处理 prefill 和 decode，并使用 chunked prefill。Planner 为 `aggregated` worker type 构建一个 perf model，用观测到的 FPMs 对它进行 tune，并根据它的 forward-pass 估算同时推导 TTFT 和 ITL。估算 ITL 时，不含 prefill 工作的 decode pass 会按近期 passes 的平均 prefill 工作量来估算。如果 prefill 或 decode 任一信号 overload，则 scale up；只有两者都 underload 时才 scale down。
 
 ## Known Limitations
 

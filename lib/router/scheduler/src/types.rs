@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
-use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::{KvCopySource, KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{RoutingConstraints, SelectionLogFields, WorkerConfigLike};
@@ -75,14 +74,12 @@ impl AvailableWorkerIds {
     }
 }
 
-/// Builds a partition's worker-selection policy from the selection slice, the worker type
-/// this router serves, and the partition the policy is for. The composed router's plugin
-/// registry supplies it; the kernel calls it once per partition.
+/// Builds a partition's worker-selection policy from its context: the selection slice, the
+/// worker type this router serves, and the partition the policy is for. The composed router's
+/// plugin registry supplies it; the kernel calls it once per partition.
 pub type WorkerSelectionPolicyFactory = std::sync::Arc<
     dyn for<'a> Fn(
-            &dynamo_worker_selection::SelectionConfig,
-            dynamo_router_protocol::worker_type::WorkerType,
-            crate::identity::RoutingPartitionRef<'a>,
+            dynamo_worker_selection::WorkerSelectionPolicyContext<'a>,
         ) -> dynamo_worker_selection::WorkerSelectionPolicy
         + Send
         + Sync,
@@ -132,9 +129,6 @@ pub enum KvSchedulerError {
 
     #[error("failed to book scheduler state: {0}")]
     BookingFailed(String),
-
-    #[error("failed to initialize event publisher: {0}")]
-    InitFailed(String),
 
     #[error("request classifier panicked: {0}")]
     RequestClassifierPanicked(String),
@@ -287,22 +281,6 @@ pub enum ScheduleMode {
 }
 
 impl ScheduleMode {
-    pub fn from_legacy(
-        request_id: Option<String>,
-        update_states: bool,
-    ) -> Result<Self, KvSchedulerError> {
-        if !update_states {
-            return Ok(Self::QueryOnly { request_id });
-        }
-
-        let Some(request_id) = request_id else {
-            return Err(KvSchedulerError::BookingFailed(
-                "tracked scheduling request requires a request_id".to_string(),
-            ));
-        };
-        Ok(Self::Tracked { request_id })
-    }
-
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { request_id } => request_id.as_deref(),
@@ -439,17 +417,9 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         }
     }
 
-    pub fn request(&self) -> &'a SchedulingRequest {
-        self.request
-    }
-
     pub(crate) fn with_eligibility(mut self, eligibility: RoutingEligibility<'a>) -> Self {
         self.eligibility = eligibility;
         self
-    }
-
-    pub fn best_effective_prefill_tokens(&self) -> usize {
-        effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
     }
 
     pub fn best_cached_tokens(&self) -> usize {

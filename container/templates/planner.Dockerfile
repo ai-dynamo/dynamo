@@ -40,9 +40,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libgomp1 \
         $EXTRA_PKGS && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    rm -rf /var/lib/apt/lists/* && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 RUN useradd -m -s /bin/bash -g 0 dynamo \
@@ -83,7 +82,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate

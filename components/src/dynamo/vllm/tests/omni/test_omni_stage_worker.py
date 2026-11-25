@@ -189,7 +189,7 @@ async def test_stage_connector_refs_builds_engine_core_request():
 
     # The engine should receive an OmniEngineCoreRequest (not the raw dict)
     assert hasattr(engine.received_prompt, "prompt_token_ids")
-    assert engine.received_prompt.prompt_token_ids == [100, 200, 300]
+    assert list(engine.received_prompt.prompt_token_ids) == [100, 200, 300]
     # Output processor should have been registered
     engine.engine.output_processors[0].add_request.assert_called_once()
 
@@ -977,7 +977,6 @@ def test_create_engine_omits_env_when_stage_declares_none():
 def test_create_engine_preserves_resolved_stage_config(
     monkeypatch, tmp_path, pipeline, stage_id, model_stage, sampling
 ):
-    from vllm_omni.config import resolve_omni_config
     from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 
     from dynamo.vllm.omni.utils import resolve_stage_configs
@@ -1002,19 +1001,6 @@ def test_create_engine_preserves_resolved_stage_config(
             }
         )
     )
-    upstream = resolve_omni_config(
-        model,
-        trust_remote_code=False,
-        deploy_config_path=str(deploy_path),
-        cli_overrides={},
-        stage_overrides=None,
-        strategy_config_path=None,
-    )
-    if not hasattr(upstream.stage_configs[stage_id], "stage_pipeline_config"):
-        pytest.skip(
-            "Requires typed Omni stage configs; the legacy YAML round trip is unsupported"
-        )
-
     _, stages = resolve_stage_configs(
         model, trust_remote_code=False, deploy_config_path=str(deploy_path)
     )

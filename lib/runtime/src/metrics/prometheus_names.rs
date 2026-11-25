@@ -99,6 +99,9 @@ pub mod name_prefix {
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
+    /// Prefix for metrics about the metrics system itself (combined gathers).
+    pub const METRICS: &str = "dynamo_metrics";
+
     /// Prefix for per-phase routing overhead latency (hashing, scheduling).
     /// Raw Prometheus, not component-scoped.
     pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
@@ -587,58 +590,17 @@ pub mod task_tracker {
     pub const TASKS_REJECTED_TOTAL: &str = "tasks_rejected_total";
 }
 
+/// Metrics about merging a DistributedRuntime's registry tree into one gather
+pub mod metrics_merge {
+    /// Metric families skipped because their help or type conflicted with an
+    /// earlier family of the same name
+    pub const CONFLICTS_TOTAL: &str = "merge_conflicts_total";
+}
+
 /// DistributedRuntime core metrics
 pub mod distributed_runtime {
     /// Total uptime of the DistributedRuntime in seconds
     pub const UPTIME_SECONDS: &str = "uptime_seconds";
-}
-
-/// KVBM
-pub mod kvbm {
-    /// The number of offload blocks from device to host
-    pub const OFFLOAD_BLOCKS_D2H: &str = "offload_blocks_d2h";
-
-    /// The number of offload blocks from host to disk
-    pub const OFFLOAD_BLOCKS_H2D: &str = "offload_blocks_h2d";
-
-    /// The number of offload blocks from device to disk (bypassing host memory)
-    pub const OFFLOAD_BLOCKS_D2D: &str = "offload_blocks_d2d";
-
-    /// The number of onboard blocks from host to device
-    pub const ONBOARD_BLOCKS_H2D: &str = "onboard_blocks_h2d";
-
-    /// The number of onboard blocks from disk to device
-    pub const ONBOARD_BLOCKS_D2D: &str = "onboard_blocks_d2d";
-
-    /// The number of matched tokens
-    pub const MATCHED_TOKENS: &str = "matched_tokens";
-
-    /// Host cache hit rate (0.0-1.0) from the sliding window
-    pub const HOST_CACHE_HIT_RATE: &str = "host_cache_hit_rate";
-
-    /// Disk cache hit rate (0.0-1.0) from the sliding window
-    pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
-
-    /// Object storage cache hit rate (0.0-1.0) from the sliding window
-    pub const OBJECT_CACHE_HIT_RATE: &str = "object_cache_hit_rate";
-
-    /// Number of blocks offloaded from device to object storage
-    pub const OFFLOAD_BLOCKS_D2O: &str = "offload_blocks_d2o";
-
-    /// Number of blocks onboarded from object storage to device
-    pub const ONBOARD_BLOCKS_O2D: &str = "onboard_blocks_o2d";
-
-    /// Bytes transferred to object storage (offload)
-    pub const OFFLOAD_BYTES_OBJECT: &str = "offload_bytes_object";
-
-    /// Bytes transferred from object storage (onboard)
-    pub const ONBOARD_BYTES_OBJECT: &str = "onboard_bytes_object";
-
-    /// Number of failed object storage read operations (blocks)
-    pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
-
-    /// Number of failed object storage write operations (blocks)
-    pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
 /// Router per-request metrics (component-scoped via `MetricsHierarchy`).

@@ -18,7 +18,7 @@ Why importlib.metadata vs pip-licenses:
   - importlib.metadata is in stdlib (3.8+) and reads the same METADATA
     files pip-licenses parses.
 
-First-party packages (`ai-dynamo`, `ai-dynamo-runtime`, `kvbm`, `nixl_*`,
+First-party packages (`ai-dynamo`, `ai-dynamo-runtime`, `nixl_*`,
 `nvidia-*`, `dynamo-*`) are KEPT in the output — same principle as Rust.
 """
 
@@ -461,15 +461,19 @@ def generate(
     search_paths: list[Path],
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
+    components: list[Component] | None = None,
 ) -> list[Component]:
     """Read METADATA from each search path, write NOTICES-Python.txt + python-deps.csv.
+
+    `components` reuses an earlier collect_components(search_paths) result.
 
     When `subtract` is provided, components matching (name, version) are
     filtered before writing — used to drop baseline-owned components.
     """
     from . import common
 
-    components = collect_components(search_paths)
+    if components is None:
+        components = collect_components(search_paths)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

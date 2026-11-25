@@ -9,18 +9,18 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use dynamo_slot_tracker::host::{BusyThresholds, SchedulerLoadSnapshot};
+use dynamo_slot_tracker::host::{BusyThresholds, BusyThresholdsHostExt, SchedulerLoadSnapshot};
 use serde::{Deserialize, Serialize};
 
-use crate::http::service::metrics::{
-    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
-    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
-};
 use crate::kv_router::ActiveLoad;
 use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::kv_router::routing_load::SchedulerLoadReceiver;
+use dynamo_http_server::metrics::{
+    UNSET_DP_RANK_LABEL, WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE,
+    WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE, WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
+};
 use dynamo_runtime::component::Client;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 
@@ -28,7 +28,6 @@ use super::runtime_config_watch;
 
 // Re-export worker type constants from timing.rs (single source of truth)
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
-const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Clean up load and latency Prometheus metrics for a worker across the specified dp_ranks.
 ///
@@ -721,15 +720,14 @@ impl From<LoadThresholdConfig> for BusyThresholds {
     /// The queue's vocabulary for the `/busy_threshold` config: token counts narrow to
     /// `usize` saturating, fractions pass through.
     fn from(config: LoadThresholdConfig) -> Self {
-        BusyThresholds {
-            prefill_busy_threshold: config
-                .active_prefill_tokens_threshold
-                .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
-            prefill_busy_threshold_frac: config.active_prefill_tokens_threshold_frac,
-            decode_busy_threshold_frac: config.active_decode_blocks_threshold,
-            // The host's reject thresholds have no request-count limit.
-            request_busy_threshold_frac: None,
-        }
+        BusyThresholds::default()
+            .with_prefill_busy_threshold(
+                config
+                    .active_prefill_tokens_threshold
+                    .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
+            )
+            .with_prefill_busy_threshold_frac(config.active_prefill_tokens_threshold_frac)
+            .with_decode_busy_threshold_frac(config.active_decode_blocks_threshold)
     }
 }
 
@@ -1306,7 +1304,7 @@ mod tests {
     };
     use crate::kv_router::ActiveLoad;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::host::SchedulerLoadSnapshot;
+    use dynamo_slot_tracker::host::{BusyThresholdsHostExt, SchedulerLoadSnapshot};
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -1919,9 +1917,9 @@ mod tests {
             active_prefill_tokens_threshold_frac: Some(0.5),
         };
         let thresholds = BusyThresholds::from(config);
-        assert_eq!(thresholds.decode_busy_threshold_frac, Some(0.9));
-        assert_eq!(thresholds.prefill_busy_threshold, Some(usize::MAX));
-        assert_eq!(thresholds.prefill_busy_threshold_frac, Some(0.5));
+        assert_eq!(thresholds.decode_busy_threshold_frac(), Some(0.9));
+        assert_eq!(thresholds.prefill_busy_threshold(), Some(usize::MAX));
+        assert_eq!(thresholds.prefill_busy_threshold_frac(), Some(0.5));
         assert_eq!(
             BusyThresholds::from(LoadThresholdConfig::default()),
             BusyThresholds::default()

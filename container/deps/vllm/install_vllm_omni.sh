@@ -55,47 +55,30 @@ export VLLM_OMNI_TARGET_DEVICE
 
 # Use --system flag only for CUDA (system Python), omit for CPU/XPU (venv)
 if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
+  # Move the installed OpenTelemetry SDK and exporters with any API version Omni
+  # raises; an API newer than the SDK breaks SDK imports.
+  mapfile -t otel_packages < <(python3 -c '
+import importlib.metadata as md
+# Capped at the tested release; the SDK pins the API. Move with Omni and vLLM.
+for name, version in (
+    ("opentelemetry-sdk", "1.45.2"),
+    ("opentelemetry-exporter-otlp", "1.45.2"),
+    ("opentelemetry-exporter-prometheus", "0.66b2"),
+):
+    try:
+        md.distribution(name)
+    except md.PackageNotFoundError:
+        continue
+    print(f"{name}<={version}")
+')
   uv pip install --system \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
-    "vllm-omni==${VLLM_OMNI_VERSION}"
+    "vllm-omni==${VLLM_OMNI_VERSION}" "${otel_packages[@]}"
 else
   uv pip install \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
     "${OVERRIDE_ARGS[@]}" \
     "vllm-omni==${VLLM_OMNI_VERSION}"
-fi
-
-# vLLM-Omni 0.33 registers its experimental Physis pipelines (vllm-omni#9154) eagerly,
-# so every Omni process imports PyAV, which the CUDA image removes under the codec
-# policy, and Qwen3-TTS fails requests when stage 0 uses FlashInfer. Remove those
-# registrations; remove this once vllm-project/vllm-omni#9939 is fixed.
-if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
-  python3 - <<'PY'
-import importlib.util
-import py_compile
-from pathlib import Path
-
-pkg = Path(importlib.util.find_spec("vllm_omni").submodule_search_locations[0])
-path = pkg / "config" / "pipeline_registry.py"
-lines = path.read_text().splitlines(keepends=True)
-expected = [
-    "from vllm_omni.diffusion.models.physis.h3.pipeline_config import PHYSIS_H3_PIPELINE",
-    "from vllm_omni.diffusion.models.physis.ltx.pipeline_config import PHYSIS_LTX_PIPELINE",
-    "from vllm_omni.diffusion.models.physis.wan.pipeline_config import PHYSIS_WAN_PIPELINE",
-    '"physis_h3": PHYSIS_H3_PIPELINE,',
-    '"physis_ltx": PHYSIS_LTX_PIPELINE,',
-    '"physis_wan": PHYSIS_WAN_PIPELINE,',
-]
-physis = [line.strip() for line in lines if "physis" in line.lower()]
-if physis != expected:
-    raise SystemExit(f"{path}: Physis lines {physis} differ from {expected}; update or remove this patch")
-kept = "".join(line for line in lines if "physis" not in line.lower())
-path.write_text("# Modified by NVIDIA Dynamo: experimental Physis pipelines removed.\n" + kept)
-py_compile.compile(str(path), doraise=True)
-PY
-  # The image purges PyAV in a later step; check Omni's pipeline registry loads without it.
-  # Keep humming from creating a root-owned ~/.humming on import.
-  HUMMING_DISABLE_PARALLEL_BUILD=1 python3 -c "import sys; sys.modules['av'] = None; import vllm_omni.config.pipeline_registry"
 fi
