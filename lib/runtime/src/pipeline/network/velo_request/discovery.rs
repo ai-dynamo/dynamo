@@ -27,8 +27,15 @@ use crate::{
 
 #[derive(Default)]
 pub(in crate::pipeline::network) struct DiscoveryPeers {
-    refs: HashMap<InstanceId, usize>,
+    refs: HashMap<InstanceId, PeerRefs>,
     departed: HashMap<InstanceId, u64>,
+}
+
+#[derive(Default)]
+struct PeerRefs {
+    count: usize,
+    /// A watch saw the peer leave discovery while another watch still held it.
+    left_discovery: bool,
 }
 
 impl DiscoveryPeers {
@@ -36,46 +43,45 @@ impl DiscoveryPeers {
         self.departed.get(&id).is_some_and(|&expires| expires > now)
     }
 
+    /// Drops expired tombstones. The peer sweep calls this, so a burst of
+    /// removals does not rescan the map once per peer.
     pub(in crate::pipeline::network) fn prune(&mut self, now: u64) {
         self.departed.retain(|_, expires| *expires > now);
     }
 
     fn add(&mut self, service: &VeloResponseService, peer: InstanceId) {
         self.departed.remove(&peer);
-        let count = self.refs.entry(peer).or_default();
-        if *count == 0 {
+        let refs = self.refs.entry(peer).or_default();
+        if refs.count == 0 {
             service.rediscover_request_peer(peer);
         }
-        *count += 1;
+        refs.count += 1;
+        refs.left_discovery = false;
     }
 
-    fn remove(&mut self, service: &VeloResponseService, peer: InstanceId) {
-        if self.release(peer) {
-            let now = service.peer_clock();
-            self.prune(now);
-            self.departed.insert(
-                peer,
-                now + crate::pipeline::network::tombstones::TOMBSTONE_TTL.as_secs(),
-            );
-            service.unregister_request_peer(peer);
-        }
-    }
-
-    fn release(&mut self, peer: InstanceId) -> bool {
+    /// Drops one watch's reference. `left_discovery` says the watch saw the
+    /// peer deleted, as opposed to the watch itself ending. The peer is
+    /// retired with the last reference if any watch saw it deleted.
+    fn release(&mut self, service: &VeloResponseService, peer: InstanceId, left_discovery: bool) {
         let Entry::Occupied(mut entry) = self.refs.entry(peer) else {
-            return false;
+            return;
         };
-        *entry.get_mut() -= 1;
-        if *entry.get() == 0 {
-            entry.remove();
-            return true;
+        let refs = entry.get_mut();
+        refs.left_discovery |= left_discovery;
+        refs.count -= 1;
+        if refs.count > 0 || !entry.remove().left_discovery {
+            return;
         }
-        false
+        self.departed.insert(
+            peer,
+            service.peer_clock() + crate::pipeline::network::tombstones::TOMBSTONE_TTL.as_secs(),
+        );
+        service.unregister_request_peer(peer);
     }
 
     #[cfg(test)]
     pub(in crate::pipeline::network) fn count(&self, peer: InstanceId) -> usize {
-        self.refs.get(&peer).copied().unwrap_or_default()
+        self.refs.get(&peer).map_or(0, |refs| refs.count)
     }
 }
 
@@ -215,7 +221,7 @@ impl PeerWatch {
             refs.add(service, peer);
         }
         if let Some(peer) = previous {
-            refs.remove(service, peer);
+            refs.release(service, peer, true);
         }
     }
 
@@ -233,7 +239,7 @@ impl PeerWatch {
         }
         for (endpoint, &peer) in &self.endpoints {
             if next.get(endpoint) != Some(&peer) {
-                refs.remove(service, peer);
+                refs.release(service, peer, true);
             }
         }
         self.endpoints = next;
@@ -243,10 +249,11 @@ impl PeerWatch {
 impl Drop for PeerWatch {
     fn drop(&mut self) {
         if let Some(service) = self.service.upgrade() {
-            // Ending a watch releases its references without recording a discovery delete.
+            // Ending a watch is not a discovery delete. A peer is retired here
+            // only if another watch already saw it deleted.
             let mut refs = service.discovered_request_peers.lock();
             for (_, peer) in self.endpoints.drain() {
-                refs.release(peer);
+                refs.release(&service, peer, false);
             }
         }
     }
@@ -278,6 +285,47 @@ mod tests {
             device_type: None,
             request_plane_codec: None,
         }))
+    }
+    #[tokio::test]
+    async fn a_closing_watch_preserves_another_owners_discovery_delete() {
+        let service = VeloResponseService::new_with_options(
+            ResponseTransport::Tcp,
+            "127.0.0.1:0".parse().unwrap(),
+            VeloServiceOptions {
+                request_plane_enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let watch = || PeerWatch {
+            service: Arc::downgrade(&service),
+            endpoints: HashMap::new(),
+        };
+        let mut live = watch();
+        let mut closing = watch();
+        let peer = InstanceId::new_v4();
+        let added = || {
+            endpoint(TransportType::Velo(format!(
+                "velo://{peer}/AA/1/ns/worker/generate"
+            )))
+        };
+        live.apply(&service, added());
+        closing.apply(&service, added());
+        live.apply(&service, DiscoveryEvent::Resync(vec![]));
+        assert_eq!(service.discovered_request_peers.lock().count(peer), 1);
+
+        // Cancellation wins the second watch's select before it reads the same removal.
+        drop(closing);
+        assert_eq!(service.discovered_request_peers.lock().count(peer), 0);
+        assert_eq!(
+            service
+                .reserve_request_peer(peer)
+                .err()
+                .map(|e| e.error_type()),
+            Some(ErrorType::WorkerUnavailable),
+            "the remaining owner can still contact a peer it saw leave"
+        );
     }
 
     #[tokio::test]
