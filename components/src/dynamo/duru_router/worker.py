@@ -3,20 +3,23 @@
 
 """Observe accepted work without changing native vLLM queue order."""
 
+import os
 import time
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+from dynamo.duru_router.events import CompactFeed
 
 
 class DuruScheduler(AsyncScheduler):
     """Preserve native scheduling while recording only work accepted by the engine."""
 
-    def __init__(self, *args, event_feed, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.num_spec_tokens or self.num_sampled_tokens_per_step != 1:
             raise ValueError("Duru requires non-speculative autoregressive generation")
         self._pending_work = {}
-        self.compact_feed = event_feed
+        self.compact_feed = CompactFeed(os.environ["DURU_WORK_DIR"])
 
     def identity(self, request):
         extra = request.sampling_params.extra_args or {}

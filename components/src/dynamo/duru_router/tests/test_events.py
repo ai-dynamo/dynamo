@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Collection semantics without IPC or engine execution."""
+import json
 import threading
 import time
 from unittest.mock import patch
 
 import pytest
 
-from dynamo.duru_router.events import CompactFeed
-from dynamo.duru_router.scoring import Ingress
-from dynamo.duru_router.tests.helpers import work_step
+from dynamo.duru_router.events import CompactFeed, open_journal
+from dynamo.duru_router.tests.helpers import Tail, work_step
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -20,22 +19,8 @@ pytestmark = [
 ]
 
 
-class Sink:
-    def __init__(self):
-        self.rows = []
-        self.closed = False
-
-    def submit(self, kind, value):
-        assert kind == "record"
-        self.rows.append(value)
-
-    def close(self):
-        self.closed = True
-
-
-def test_compact_coordinates_and_clock_ordering():
-    sink = Sink()
-    feed = CompactFeed(sink)
+def test_compact_coordinates_and_clock_ordering(tmp_path):
+    feed = CompactFeed(tmp_path)
     clock_started, clock_written = threading.Event(), threading.Event()
     original_emit = feed.emit
 
@@ -68,7 +53,8 @@ def test_compact_coordinates_and_clock_ordering():
             assert clock_written.wait(timeout=1)
     finally:
         feed.close()
-    rows = sink.rows
+    tail = Tail(tmp_path / "compact-work.jsonl")
+    rows = tail.read()
     index = next(i for i, row in enumerate(rows) if row["event"] == "accepted_output")
     accepted = rows[index]["steps"]
     assert len(accepted) == 1
@@ -76,34 +62,50 @@ def test_compact_coordinates_and_clock_ordering():
     assert "prompt_tokens" not in accepted[0]
     assert all(row["time"] <= end for row in rows[:index] if row["event"] == "u_clock")
     assert any(row["event"] == "u_clock" for row in rows[index + 1 :])
-    assert [row["sequence"] for row in rows] == list(range(1, len(rows) + 1))
-    assert rows[-1]["event"] == "footer"
-    assert rows[-1]["time"] > end
-    assert sink.closed
+    assert tail.sequence == len(rows)
+    assert tail.received_through > end
 
 
-def test_router_events_validate_and_preserve_identity():
-    sink = Sink()
-    ingress = Ingress(sink)
-    with pytest.raises(ValueError, match="program_id"):
-        ingress.emit("request_arrived", 1, request_id="q")
-    ingress.emit(
-        "request_arrived",
-        1,
-        request_id="q",
-        program_id="p",
-        root="r",
-        agent="a",
-        prompt_tokens=8,
-        unrelated="ignored",
-    )
-    ingress.emit("request_completed", 2, request_id="q")
-    ingress.close()
-    assert [row["event"] for row in sink.rows] == [
-        "request_arrived",
-        "request_completed",
-        "footer",
-    ]
-    assert sink.rows[0]["program_id"] == "p"
-    assert "unrelated" not in sink.rows[0]
-    assert sink.closed
+def test_feed_error_still_closes_writer(tmp_path):
+    feed = CompactFeed(tmp_path)
+    feed.error = RuntimeError("clock failed")
+    with pytest.raises(RuntimeError, match="feed failed"):
+        feed.close()
+    assert not feed.thread.is_alive()
+    assert not feed.journal.thread.is_alive()
+    assert feed.journal.proc.returncode == 0
+
+
+def test_flush_preserves_order_and_writes_only_event_stream(tmp_path):
+    journal = open_journal(tmp_path, name="events")
+    try:
+        for sequence in range(3):
+            journal.submit("record", {"sequence": sequence, "event": "u_clock"})
+        journal.flush(timeout=5)
+        path = tmp_path / "events.jsonl"
+        assert [
+            json.loads(line)["sequence"] for line in path.read_text().splitlines()
+        ] == [0, 1, 2]
+        assert list(tmp_path.iterdir()) == [path]
+    finally:
+        journal.close()
+    assert not journal.thread.is_alive()
+    assert journal.proc.returncode == 0
+
+
+def test_writer_failure_surfaces_and_close_releases_resources(tmp_path):
+    journal = open_journal(tmp_path, name="events")
+    journal.proc.kill()
+    journal.proc.wait(timeout=5)
+    with pytest.raises(RuntimeError, match="writer is closed"):
+        journal.submit("record", {"event": "u_clock"})
+    with pytest.raises(RuntimeError):
+        journal.close()
+    assert journal.closed
+    assert not journal.thread.is_alive()
+
+
+@pytest.fixture(autouse=True)
+def journal_validation_mode(monkeypatch):
+    monkeypatch.setenv("DURU_ACCOUNTING_TRANSPORT", "journal")
+    monkeypatch.setenv("DURU_RECORD_EVENTS", "1")

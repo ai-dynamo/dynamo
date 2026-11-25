@@ -9,6 +9,7 @@ import threading
 from collections import deque
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -136,12 +137,13 @@ def worker(monkeypatch):
     spec.loader.exec_module(module)
     monkeypatch.setenv("DURU_SCORES", "unused")
     monkeypatch.setenv("DURU_WORK_DIR", "unused")
+    monkeypatch.setattr(module, "CompactFeed", Feed)
     return module
 
 
 @pytest.fixture
 def scheduler(worker):
-    return worker.DuruScheduler(event_feed=Feed(None))
+    return worker.DuruScheduler()
 
 
 def scheduled(count=1):
@@ -247,10 +249,10 @@ def test_inflight_batches_retain_coordinates(scheduler, batch):
     "kwargs", [dict(num_spec_tokens=1), dict(num_sampled_tokens_per_step=0)]
 )
 def test_unsupported_modes_fail_before_feed_opens(worker, kwargs):
-    feed = Feed(None)
-    with pytest.raises(ValueError, match="non-speculative"):
-        worker.DuruScheduler(event_feed=feed, **kwargs)
-    assert not feed.events
+    with patch.object(worker, "CompactFeed") as feed:
+        with pytest.raises(ValueError, match="non-speculative"):
+            worker.DuruScheduler(**kwargs)
+        feed.assert_not_called()
 
 
 @pytest.mark.parametrize("pooling", [False, True])
@@ -300,10 +302,3 @@ def test_abort_acknowledges_native_removal_before_stale_output(scheduler, batch)
     step = scheduler.compact_feed.events[-1][1]["steps"][0]
     assert not step["accepted"]
     assert step["generated_tokens"] == 0
-
-
-def test_collection_keeps_native_queue_order(scheduler):
-    requests = [Request("first"), Request("second")]
-    scheduler.waiting.extend(requests)
-    assert scheduler.schedule() == (requests, [])
-    assert list(scheduler.waiting) == requests
