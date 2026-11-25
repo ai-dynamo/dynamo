@@ -201,15 +201,14 @@ const AFFINITY_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 ///
 /// | Check | The caller read | The actor requires | Otherwise it |
 /// |---|---|---|---|
-/// | `TurnPrepared::take_for` | | same turn, no overlap refresh | builds rows and load |
 /// | `TurnPrepared::drop_judged_load` | reject limits | no await since | builds load |
+/// | `TurnPrepared::take_for` | | same turn, no refreshed overlap | builds rows and load |
 /// | `adopt_prepared_load` | limits, overlap, writes, table version | see there | builds load |
 /// | `adopt_prepared_rows` | generation, availability, overload | see there | builds rows |
 /// | `select_with_policy` | the policy's inputs | same inputs, no filters | builds rows |
 ///
-/// "Builds load" is the actor projecting every rank itself. A rank another task changed
-/// after the caller's pass is never checked and keeps the caller's load. When preparation
-/// starts to read another input, add it to the check that owns it and to this table.
+/// "Builds load" is the actor projecting every rank itself. When preparation starts to read
+/// another input, add it to the check that owns it and to this table.
 struct PreparedAdmission {
     candidates: PreparedCandidates,
     /// Configuration generation, loaded before the configuration was read.
@@ -347,8 +346,8 @@ impl TurnPrepared {
         }
     }
 
-    /// The rows for a request leaving the queue: only this turn's request has any, and an
-    /// overlap refresh replaces the overlap they were built from.
+    /// The rows for a request leaving the queue, unless it arrived in an earlier turn or a
+    /// refresh replaced the overlap they were built from.
     fn take_for(&mut self, enqueue_turn: u64, refreshed: bool) -> Option<Box<PreparedAdmission>> {
         if enqueue_turn == self.turn && !refreshed {
             self.prepared.take()
@@ -636,12 +635,9 @@ fn all_eligible_workers_full<C: WorkerConfigLike>(
 }
 
 /// One pass over the ready lane heads, asking whether each may dispatch now: the gate
-/// first, then capacity for a class that queues on it.
-///
-/// Load is read per head, so a head sees the bookings made earlier in the drain. Within
-/// the pass, the ranks past the host's reject thresholds are recorded at most once, when a
-/// head first needs a capacity check, and unconstrained heads share one room answer per
-/// class, so a pass costs one walk of the ranks per class, not one per lane.
+/// first, then capacity for a class that queues on it. Load is read per head, so a head
+/// sees the bookings made earlier in the drain. The ranks past the host's reject
+/// thresholds are recorded at most once per pass, when a head first needs them.
 struct DispatchPass<'a, P: SequencePublisher, C> {
     slots: &'a ActorSlots<P>,
     eligibility: &'a QueueEligibility,
@@ -1761,8 +1757,11 @@ impl<
             let cached_tokens = SchedulingContext::new(request, workers)
                 .with_eligibility(eligibility)
                 .best_cached_tokens();
-            let reject_thresholds =
-                reject_limits(self.reject_thresholds.as_ref()).unwrap_or_default();
+            let reject_thresholds = self
+                .reject_thresholds
+                .as_ref()
+                .map(|provider| provider())
+                .unwrap_or_default();
             let mut classification =
                 ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
                     .with_pinned_worker(request.pinned_worker)
@@ -5703,20 +5702,9 @@ mod tests {
 
             // The release makes worker 0 the least loaded again, though its load was read
             // before it.
-            actor.refresh_workers_generation();
+            let context = AdmissionContext::untracked(0, None);
             assert_eq!(
-                actor.with_projected_loads(
-                    request,
-                    Instant::now(),
-                    prepared,
-                    |actor, request, prepared| {
-                        actor.admit_one_projected(
-                            AdmissionContext::untracked(0, None),
-                            request,
-                            prepared,
-                        )
-                    }
-                ),
+                actor.admit_one(context, request, Instant::now(), prepared),
                 Admission::Booked
             );
             assert_eq!(
@@ -5746,14 +5734,14 @@ mod tests {
         turn_prepared.stash(prepare());
         assert!(turn_prepared.take_for(arrival, true).is_none());
 
-        // The next turn drops them, for the request they were built for and for any other.
+        // The next turn drops them.
         turn_prepared.begin_turn();
+        let next = turn_prepared.turn();
+        assert!(turn_prepared.take_for(next, false).is_none());
+
+        // A request that arrived in an earlier turn does not take this turn's rows.
+        turn_prepared.stash(prepare());
         assert!(turn_prepared.take_for(arrival, false).is_none());
-        assert!(
-            turn_prepared
-                .take_for(turn_prepared.turn(), false)
-                .is_none()
-        );
     }
 
     #[tokio::test]
