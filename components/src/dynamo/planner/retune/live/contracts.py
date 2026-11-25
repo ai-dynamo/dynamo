@@ -204,9 +204,17 @@ class RetuneCapability:
         mount = storage.get("mountPath")
         segments = storage.get("segmentsDir")
         windows = storage.get("windowsDir")
-        if not all(
-            isinstance(item, str) and item
-            for item in (frontend, claim, mount, segments, windows)
+        if (
+            not isinstance(frontend, str)
+            or not frontend
+            or not isinstance(claim, str)
+            or not claim
+            or not isinstance(mount, str)
+            or not mount
+            or not isinstance(segments, str)
+            or not segments
+            or not isinstance(windows, str)
+            or not windows
         ):
             raise ValueError(
                 "Retune capability names and paths must be non-empty strings"

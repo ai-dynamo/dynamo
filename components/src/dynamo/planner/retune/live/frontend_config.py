@@ -97,11 +97,12 @@ def retune_capability(
         )
     projected = _projected_status(dgd)
     published = [
-        projected.get(component.get("name"), {}).get("retune")
+        status.get("retune")
         for component in _components(dgd)
         if _type(component) == PLANNER_TYPE
-        and isinstance(projected.get(component.get("name")), Mapping)
-        and projected[component["name"]].get("retune") is not None
+        and isinstance(name := component.get("name"), str)
+        and isinstance(status := projected.get(name), Mapping)
+        and status.get("retune") is not None
     ]
     if len(published) != 1 or not isinstance(published[0], Mapping):
         raise ValueError(
@@ -241,7 +242,10 @@ def evaluate_premises(
             )
     projected = _projected_status(dgd)
     for component in components:
-        status = projected.get(component.get("name"))
+        name = component.get("name")
+        if not isinstance(name, str):
+            continue
+        status = projected.get(name)
         if (
             _type(component) == PLANNER_TYPE
             and _replicas(component) != 1
