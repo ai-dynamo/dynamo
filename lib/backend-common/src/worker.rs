@@ -175,7 +175,7 @@ pub struct WorkerConfig {
     pub model_input: ModelInput,
     /// Comma-separated list, e.g. `"chat,completions"`.
     /// Accepted values: `chat`, `completions`, `embedding`/`embeddings`,
-    /// `tensor`, `prefill` (see `parse_endpoint_types`).
+    /// `classify`, `tensor`, `prefill` (see `parse_endpoint_types`).
     pub endpoint_types: String,
     /// Optional path to a custom Jinja chat template. When `None`, the
     /// template shipped with `model_name` is used.
@@ -358,6 +358,13 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.health_check_payload().await,
             EngineKind::Raw(e) => e.health_check_payload().await,
+        }
+    }
+
+    fn tensor_model_config(&self) -> Option<dynamo_llm::protocols::tensor::TensorModelConfig> {
+        match self {
+            EngineKind::Llm(_) => None,
+            EngineKind::Raw(engine) => engine.tensor_model_config(),
         }
     }
 
@@ -1065,8 +1072,13 @@ impl Worker {
         } else {
             None
         };
-        let mut local_model =
-            build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
+        let mut local_model = build_local_model(
+            &self.config,
+            engine_config,
+            self.engine.is_raw(),
+            self.engine.tensor_model_config(),
+        )
+        .await?;
         tracing::debug!("local model built");
 
         // An LLM engine admits its network requests through this worker's
@@ -2144,6 +2156,7 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
             "chat" => ModelType::Chat,
             "completions" => ModelType::Completions,
             "embedding" | "embeddings" => ModelType::Embedding,
+            "classify" => ModelType::Classify,
             "tensor" => ModelType::TensorBased,
             // The prefill role is declared via `worker_type` (driven by the
             // disaggregation mode), not as an endpoint type. Reject
@@ -2208,6 +2221,7 @@ async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,
+    tensor_model_config: Option<dynamo_llm::protocols::tensor::TensorModelConfig>,
 ) -> Result<LocalModel, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
@@ -2284,6 +2298,7 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
         .media_fetcher(config.media_fetcher.clone())
+        .tensor_model_config(tensor_model_config)
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine
@@ -2390,6 +2405,10 @@ mod tests {
         assert_eq!(
             parse_endpoint_types("completions").unwrap(),
             ModelType::Completions
+        );
+        assert_eq!(
+            parse_endpoint_types("classify").unwrap(),
+            ModelType::Classify
         );
         assert_eq!(
             parse_endpoint_types("embedding").unwrap(),
@@ -2625,7 +2644,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         let runtime_config = local_model.runtime_config();
@@ -2684,9 +2703,36 @@ mod tests {
             ..EngineConfig::default()
         };
         // name_only=true must succeed offline; name_only=false would fetch.
-        build_local_model(&config, &engine_config, true)
+        build_local_model(&config, &engine_config, true, None)
             .await
             .expect("name-only build must not fetch");
+    }
+
+    #[tokio::test]
+    async fn build_local_model_carries_tensor_model_config() {
+        let tensor_model_config = dynamo_llm::protocols::tensor::TensorModelConfig {
+            name: "identity".to_string(),
+            triton_model_config: Some(vec![1, 2, 3]),
+            ..Default::default()
+        };
+        let engine_config = EngineConfig {
+            model: "identity".to_string(),
+            ..Default::default()
+        };
+
+        let local_model = build_local_model(
+            &WorkerConfig::default(),
+            &engine_config,
+            true,
+            Some(tensor_model_config.clone()),
+        )
+        .await
+        .expect("tensor model card");
+
+        assert_eq!(
+            local_model.card().tensor_model_config.as_ref(),
+            Some(&tensor_model_config)
+        );
     }
 
     #[tokio::test]
@@ -2702,7 +2748,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, true)
+        let local_model = build_local_model(&config, &engine_config, true, None)
             .await
             .expect("name-only model with media config must build");
 
@@ -2743,7 +2789,7 @@ mod tests {
                 (huggingface::HF_HUB_OFFLINE, None),
                 (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
             ],
-            build_local_model(&config, &EngineConfig::default(), false),
+            build_local_model(&config, &EngineConfig::default(), false, None),
         )
         .await
         .expect("a weights-free cache must be enough to register");
@@ -2997,7 +3043,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         assert!(local_model.runtime_config().enable_local_indexer);
@@ -3015,7 +3061,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         assert!(local_model.runtime_config().enable_local_indexer);
@@ -3041,7 +3087,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         let endpoint = local_model
@@ -3065,7 +3111,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         assert!(

@@ -23,7 +23,6 @@ CORE_CRATES = frozenset(
         "dynamo-llm",
         "dynamo-kv-router",
         "dynamo-memory",
-        "kvbm-logical",
     }
 )
 DEVELOPMENT_CRATES = frozenset({"dynamo-mocker"})

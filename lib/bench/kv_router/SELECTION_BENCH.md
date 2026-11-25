@@ -102,7 +102,12 @@ router holds every admission slot waiting on an engine action, trace time moves
 on to the next one (`stall_advances`). The result is booked requests per second,
 from the first window request issued to the last one answered, booked or
 rejected. `harness_wait_share` is the share of the window the bench's own
-threads, not the router, held back; above 5% the run is invalid.
+threads, not the router, held back: the request issuer's waits on prompt
+preparation and engine actions, each weighted by the share of admission slots
+free as it ended. Above 5% the run is invalid. With a queueing router the
+bench's engine timing can still set the rate while both signals read clean: a
+wait with every slot taken counts nothing, and `stall_advances` counts only full
+windows that went 10 ms without an admission finishing.
 
 In both modes, an index more than 20,000 events behind during the window means
 the router routed on a stale index because it could not take the load: the run
@@ -129,6 +134,13 @@ cargo bench -p dynamo-bench --no-default-features --features selection-replay \
   `harness_wait_share` flags a run, raise those counts.
 - `--perf-ctl-fifo` and `--perf-ack-fifo` bracket the measured window for
   `perf record --control fifo:CTL,ACK`; divide by `admitted` for per-admission costs.
+  For events or cache blocks per admission, divide the counters under `window`,
+  which cover that same interval; its prompt hit rate is
+  `window.cache.prompt_hits / prompt_blocks`. `cache`, `index_events_applied` and
+  `prompt_hit_rate` cover the whole run, including the warmup that fills the caches.
+  In saturation the window follows trace time: after a stall moves trace time across
+  a window boundary (`stall_advances`), `admitted` and the `window` counters cover
+  slightly different requests.
 
 ## A/B protocol
 

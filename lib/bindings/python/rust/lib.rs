@@ -46,7 +46,7 @@ use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints, parse_tensor_model_config};
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
-#[pyclass(eq, eq_int)]
+#[pyclass(eq, eq_int, from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum RouterMode {
     RoundRobin,
@@ -238,7 +238,7 @@ pub(crate) fn bridge_runtime() -> &'static tokio::runtime::Runtime {
 pub(crate) fn future_into_py<F, T>(py: Python<'_>, fut: F) -> PyResult<Bound<'_, PyAny>>
 where
     F: std::future::Future<Output = PyResult<T>> + Send + 'static,
-    T: for<'py> IntoPyObject<'py>,
+    T: for<'py> IntoPyObject<'py> + Send + 'static,
 {
     let future = pyo3_async_runtimes::tokio::future_into_py(py, fut)?;
     // Successful conversion initialized the bridge without requiring a Dynamo runtime.
@@ -254,7 +254,7 @@ fn future_into_py_with_locals<F, T>(
 ) -> PyResult<Bound<'_, PyAny>>
 where
     F: std::future::Future<Output = PyResult<T>> + Send + 'static,
-    T: for<'py> IntoPyObject<'py>,
+    T: for<'py> IntoPyObject<'py> + Send + 'static,
 {
     let future = pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, fut)?;
     bridge_runtime();
@@ -268,12 +268,13 @@ where
 const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 
-/// Give Tokio tasks a bounded chance to finish before CPython finalizes the interpreter.
+/// Give Tokio work a bounded chance to finish before CPython finalizes the interpreter.
 ///
-/// A Tokio worker resolving a `future_into_py` future is still inside `Python::with_gil` when
-/// the awaiting coroutine resumes, so the main thread can start finalizing while that worker
-/// still has Python objects to drop, and the process dies by `SIGSEGV`. The bounded wait only
-/// narrows that window: at the timeout, finalization continues regardless.
+/// pyo3-async-runtimes resolves a `future_into_py` future in a `spawn_blocking` closure that can
+/// still be attached to Python when the awaiting coroutine resumes, so the main thread can start
+/// finalizing while that closure still has Python objects to drop, and the process dies by
+/// `SIGSEGV`. The bounded wait only narrows that window: at the timeout, finalization continues
+/// regardless.
 ///
 /// Drains both runtimes a bridge task can be on: Dynamo's process runtime, and the runtime PyO3
 /// built for itself when something reached `future_into_py` before [`adopt_bridge_runtime`]
@@ -291,23 +292,24 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
     if runtimes.iter().all(Option::is_none) {
         return;
     }
-    let alive = || -> usize {
+    let busy = || -> usize {
         runtimes
             .iter()
             .flatten()
-            .map(|rt| rt.metrics().num_alive_tasks())
+            .copied()
+            .map(bridge_busy_work)
             .sum()
     };
     // An atexit callback holds the GIL and the tasks being waited on need it, so
     // waiting without releasing it would deadlock against those same threads.
-    py.allow_threads(|| {
+    py.detach(|| {
         let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
-        while alive() > 0 {
+        while busy() > 0 {
             if std::time::Instant::now() >= deadline {
                 // At the default level, and once per process at most: it is the only thing
                 // that accounts for the extra exit delay the operator just waited through.
                 tracing::info!(
-                    alive_tasks = alive(),
+                    busy_work = busy(),
                     runtimes = runtimes.iter().flatten().count(),
                     "tasks still running at interpreter exit; continuing without them"
                 );
@@ -316,6 +318,58 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
             sleep(BRIDGE_DRAIN_POLL);
         }
     });
+}
+
+/// Work on `rt` that the exit hook waits for: alive tasks, plus queued and busy blocking-pool
+/// closures. `future_into_py` sets each Python result in a `spawn_blocking` closure that no task
+/// awaits, and `num_alive_tasks` does not count that closure.
+fn bridge_busy_work(rt: &tokio::runtime::Runtime) -> usize {
+    let metrics = rt.metrics();
+    metrics.num_alive_tasks()
+        + metrics.blocking_queue_depth()
+        + metrics
+            .num_blocking_threads()
+            .saturating_sub(metrics.num_idle_blocking_threads())
+}
+
+#[cfg(test)]
+mod bridge_drain_tests {
+    use super::bridge_busy_work;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting until {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Same shape as pyo3-async-runtimes 0.30: the task that resolves a Python future ends
+    /// without awaiting the `spawn_blocking` closure that sets the result.
+    #[test]
+    fn busy_work_counts_a_blocking_closure_that_no_task_awaits() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        rt.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        wait_until("the spawning task ends", || {
+            rt.metrics().num_alive_tasks() == 0
+        });
+        assert!(bridge_busy_work(&rt) > 0);
+        release_tx.send(()).unwrap();
+        wait_until("the blocking closure ends", || bridge_busy_work(&rt) == 0);
+    }
 }
 
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -407,6 +461,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(errors::_raise_routed_http_error, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::WorkerSequenceEventPublisher>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SessionBindingStream>()?;
     #[cfg(feature = "select-service")]
@@ -515,14 +571,14 @@ fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// The extension-module entrypoint for a custom policy image.
 #[cfg(feature = "custom-policy")]
-#[pymodule]
+#[pymodule(gil_used = true)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_core_with_router_plugins(m)
 }
 
 /// The stock extension-module entrypoint.
 #[cfg(not(feature = "custom-policy"))]
-#[pymodule]
+#[pymodule(gil_used = true)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_core(m)
 }
@@ -582,7 +638,7 @@ fn resolve_response_plane_mode(
 #[pyo3(signature = (argv=None))]
 fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
-    py.allow_threads(move || llm::kv::run_kv_indexer_cli(argv))
+    py.detach(move || llm::kv::run_kv_indexer_cli(argv))
         .map_err(standalone_to_pyerr)
 }
 
@@ -590,7 +646,7 @@ fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 #[pyo3(signature = (argv=None))]
 fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
-    py.allow_threads(move || llm::kv::run_slot_tracker_cli(argv))
+    py.detach(move || llm::kv::run_slot_tracker_cli(argv))
         .map_err(standalone_to_pyerr)
 }
 
@@ -599,7 +655,7 @@ fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 #[cfg(feature = "select-service")]
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
-    py.allow_threads(move || {
+    py.detach(move || {
         llm::kv::run_select_service_cli(argv, linked_worker_selection_policy_registry())
     })
     .map_err(standalone_to_pyerr)
@@ -610,7 +666,7 @@ fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()>
 #[cfg(not(feature = "select-service"))]
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
-    py.allow_threads(move || llm::kv::run_select_service_cli(argv))
+    py.detach(move || llm::kv::run_select_service_cli(argv))
         .map_err(standalone_to_pyerr)
 }
 
@@ -1077,15 +1133,17 @@ fn fetch_model<'p>(
     crate::future_into_py_with_locals(py, locals, async move {
         LocalModel::fetch(&repo, ignore_weights)
             .await
+            // pyo3 converts PathBuf to pathlib.Path. The stub returns str.
+            .map(std::path::PathBuf::into_os_string)
             .map_err(to_pyerr)
     })
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
-    event_loop: PyObject,
+    event_loop: Py<PyAny>,
     /// The admission gate of the Python worker this runtime serves, shared
     /// with every endpoint it creates: a Python backend's runtime is its
     /// worker, so backends sharing one runtime share one gate.
@@ -1105,11 +1163,11 @@ struct CancellationToken {
     inner: rs::CancellationToken,
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 struct Endpoint {
     inner: rs::component::Endpoint,
-    event_loop: PyObject,
+    event_loop: Py<PyAny>,
     /// The admission gate of the worker this endpoint serves for: its
     /// runtime's, or the backend `Worker`'s that handed it to its engine.
     admission_gate: WorkerAdmissionGate,
@@ -1143,7 +1201,7 @@ struct Client {
 }
 
 /// A read-only view of an instance's transport, wrapping the runtime
-/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp") and its
+/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp" / "direct") and its
 /// `address`; the address format is transport-specific and not a stable parse
 /// target.
 #[pyclass(eq, hash, frozen)]
@@ -1159,6 +1217,7 @@ impl TransportType {
         match &self.inner {
             rs::component::TransportType::Nats(_) => "nats_tcp",
             rs::component::TransportType::Tcp(_) => "tcp",
+            rs::component::TransportType::Direct(_) => "direct",
         }
     }
 
@@ -1231,7 +1290,7 @@ impl Instance {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, PartialEq)]
 struct ModelType {
     inner: llm_rs::model_type::ModelType,
@@ -1339,7 +1398,7 @@ impl ModelType {
     }
 }
 
-#[pyclass(eq, eq_int)]
+#[pyclass(eq, eq_int, from_py_object)]
 #[derive(Clone, PartialEq)]
 enum ModelInput {
     Text = 1,
@@ -1354,7 +1413,7 @@ enum ModelInput {
 /// takes `needs` in DNF form (a list of alternative AND-sets). See the Rust
 /// `WorkerType` enum in `lib/llm/src/worker_type.rs` and
 /// `docs/proposals/health-disagg-readiness.md`.
-#[pyclass(eq, eq_int)]
+#[pyclass(eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WorkerType {
     Prefill = 1,
@@ -1406,7 +1465,7 @@ impl DistributedRuntime {
     #[new]
     #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None, response_plane=None))]
     fn new(
-        event_loop: PyObject,
+        event_loop: Py<PyAny>,
         discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
@@ -1414,7 +1473,7 @@ impl DistributedRuntime {
         response_plane: Option<String>,
     ) -> PyResult<Self> {
         if enable_nats.is_some() {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let warnings = py.import("warnings")?;
                 warnings.call_method1(
                     "warn",
@@ -1554,7 +1613,7 @@ impl DistributedRuntime {
         self.inner.response_plane().name()
     }
 
-    fn event_loop(&self) -> PyObject {
+    fn event_loop(&self) -> Py<PyAny> {
         self.event_loop.clone()
     }
 
@@ -1575,7 +1634,7 @@ impl DistributedRuntime {
         &self,
         py: Python<'_>,
         name: String,
-        callback: PyObject,
+        callback: Py<PyAny>,
     ) -> PyResult<()> {
         if self.inner.system_status_server_info().is_none() {
             return Err(to_pyerr("control handlers require DYN_SYSTEM_PORT"));
@@ -1586,13 +1645,13 @@ impl DistributedRuntime {
             let callback = Arc::clone(&callback);
             let locals = Arc::clone(&locals);
             Box::pin(async move {
-                let future = Python::with_gil(|py| {
+                let future = Python::attach(|py| {
                     let request = pythonize::pythonize(py, &request)?;
                     let coroutine = callback.call1(py, (request,))?;
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
                 })?;
                 let result = future.await?;
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     pythonize::depythonize::<rs::engine_routes::EngineHttpResponse>(result.bind(py))
                         .map_err(anyhow::Error::from)
                 })
@@ -1627,7 +1686,7 @@ impl DistributedRuntime {
         &self,
         py: Python<'_>,
         route_name: String,
-        callback: PyObject,
+        callback: Py<PyAny>,
     ) -> PyResult<()> {
         // Capture TaskLocals at registration time when Python's event loop is running.
         // This is needed because later, when the callback is invoked from an HTTP request,
@@ -1645,7 +1704,7 @@ impl DistributedRuntime {
                 // Return a boxed future
                 Box::pin(async move {
                     // Acquire GIL to call Python callback and convert coroutine to future
-                    let py_future = Python::with_gil(|py| {
+                    let py_future = Python::attach(|py| {
                         // Convert body to Python dict
                         let py_body = pythonize::pythonize(py, &body).map_err(|e| {
                             anyhow::anyhow!("Failed to convert request body to Python: {}", e)
@@ -1672,7 +1731,7 @@ impl DistributedRuntime {
                         .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
 
                     // Convert result back to serde_json::Value
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         pythonize::depythonize::<serde_json::Value>(py_result.bind(py))
                             .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
                     })
@@ -1720,7 +1779,7 @@ impl Endpoint {
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
-        generator: PyObject,
+        generator: Py<PyAny>,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
@@ -1870,7 +1929,7 @@ impl Endpoint {
     fn serve_bidirectional_endpoint<'p>(
         &self,
         py: Python<'p>,
-        generator: PyObject,
+        generator: Py<PyAny>,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2191,7 +2250,7 @@ impl Client {
     fn generate<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2203,7 +2262,7 @@ impl Client {
     fn round_robin<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2237,7 +2296,7 @@ impl Client {
     fn random<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2275,7 +2334,7 @@ impl Client {
     fn device_aware_weighted<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -2311,7 +2370,7 @@ impl Client {
     fn direct<'p>(
         &self,
         py: Python<'p>,
-        request: PyObject,
+        request: Py<PyAny>,
         instance_id: u64,
         annotated: Option<bool>,
         context: Option<context::Context>,
@@ -2350,14 +2409,14 @@ impl Client {
 
 async fn process_stream(
     stream: EngineStream<RsAnnotated<rmpv::Value>>,
-    tx: tokio::sync::mpsc::Sender<RsAnnotated<PyObject>>,
+    tx: tokio::sync::mpsc::Sender<RsAnnotated<Py<PyAny>>>,
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
-        // Convert the response to a PyObject using Python's GIL
+        // Convert the response to a Py<PyAny> using Python's GIL
         let annotated: RsAnnotated<rmpv::Value> = response;
-        let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
+        let annotated: RsAnnotated<Py<PyAny>> = annotated.map_data(|data| {
+            Python::attach(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
             })
@@ -2365,7 +2424,7 @@ async fn process_stream(
 
         let is_error = annotated.is_error();
 
-        // Send the PyObject through the channel or log an error
+        // Send the Py<PyAny> through the channel or log an error
         if let Err(e) = tx.send(annotated).await {
             tracing::error!("Failed to send response: {:?}", e);
             break;
@@ -2379,7 +2438,7 @@ async fn process_stream(
 
 #[pyclass]
 pub(crate) struct AsyncResponseStream {
-    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<Py<PyAny>>>>>,
     annotated: bool,
     /// The stream of a `RoutedEngine`, whose errors raise `RoutedEngineError`.
     routed_engine: bool,
@@ -2387,7 +2446,7 @@ pub(crate) struct AsyncResponseStream {
 
 impl AsyncResponseStream {
     pub(crate) fn new(
-        rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>,
+        rx: tokio::sync::mpsc::Receiver<RsAnnotated<Py<PyAny>>>,
         annotated: bool,
     ) -> Self {
         Self {
@@ -2398,7 +2457,7 @@ impl AsyncResponseStream {
     }
 
     /// The annotated response stream of a `RoutedEngine`.
-    pub(crate) fn routed_engine(rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>) -> Self {
+    pub(crate) fn routed_engine(rx: tokio::sync::mpsc::Receiver<RsAnnotated<Py<PyAny>>>) -> Self {
         Self {
             routed_engine: true,
             ..Self::new(rx, true)
@@ -2429,8 +2488,7 @@ impl AsyncResponseStream {
 
                         if annotated {
                             let object = Annotated { inner: pyobj };
-                            #[allow(deprecated)]
-                            let object = Python::with_gil(|py| object.into_py(py));
+                            let object = Python::attach(|py| object.into_py_any(py))?;
                             return Ok(object);
                         } else {
                             match pyobj.data {
@@ -2448,7 +2506,7 @@ impl AsyncResponseStream {
 
 /// Python-visible inbound iterator for bidirectional engines. Wraps an
 /// mpsc receiver of Python-owned request frames; `__anext__` is a thin
-/// `.recv()` that returns the next `PyObject` directly, with no per-frame
+/// `.recv()` that returns the next `Py<PyAny>` directly, with no per-frame
 /// GIL acquisition or value conversion on the consumer side. The producer
 /// moves the object decoded by the ingress adapter onto the channel.
 ///
@@ -2459,11 +2517,11 @@ impl AsyncResponseStream {
 /// they decide to return or observe `context.is_stopped()`.
 #[pyclass]
 pub(crate) struct PyAsyncRequestStream {
-    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PyObject>>>,
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Py<PyAny>>>>,
 }
 
 impl PyAsyncRequestStream {
-    pub(crate) fn new(rx: tokio::sync::mpsc::Receiver<PyObject>) -> Self {
+    pub(crate) fn new(rx: tokio::sync::mpsc::Receiver<Py<PyAny>>) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
         }
@@ -2495,13 +2553,13 @@ impl PyAsyncRequestStream {
 
 #[pyclass]
 struct Annotated {
-    inner: RsAnnotated<PyObject>,
+    inner: RsAnnotated<Py<PyAny>>,
 }
 
 #[pymethods]
 impl Annotated {
     #[new]
-    fn new(data: PyObject) -> Self {
+    fn new(data: Py<PyAny>) -> Self {
         Annotated {
             inner: RsAnnotated::from_data(data),
         }
@@ -2511,7 +2569,7 @@ impl Annotated {
         self.inner.is_error()
     }
 
-    fn data(&self) -> Option<PyObject> {
+    fn data(&self) -> Option<Py<PyAny>> {
         self.inner.data.clone()
     }
 
@@ -2531,7 +2589,7 @@ impl Annotated {
     fn _repr(&self, py: Python) -> String {
         let data = self.inner.data.clone().map(|obj| {
             obj.call_method0(py, "__repr__")
-                .and_then(|repr_obj| repr_obj.extract::<Py<PyString>>(py))
+                .and_then(|repr_obj| repr_obj.extract::<Py<PyString>>(py).map_err(Into::into))
                 .map(|py_str| py_str.to_string_lossy(py).into_owned())
                 .unwrap_or_else(|_| "<failed_repr>".to_string())
         });

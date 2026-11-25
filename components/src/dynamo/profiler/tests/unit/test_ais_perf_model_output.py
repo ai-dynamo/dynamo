@@ -354,7 +354,7 @@ def _argument_lists(node):
 def test_arguments_for_operator_fixture_input(monkeypatch):
     # The database version the operator fixtures were recorded with.
     monkeypatch.setattr(
-        dgd_generation, "get_latest_database_version", lambda **kwargs: "0.30.0"
+        dgd_generation, "get_latest_database_version", lambda **kwargs: "0.32.0"
     )
     model = "Qwen/Qwen3-0.6B"
     pick = PickedParallelConfig(tp=1)
