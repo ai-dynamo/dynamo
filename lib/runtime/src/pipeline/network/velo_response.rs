@@ -9,18 +9,20 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     pin::Pin,
     sync::{
-        Arc, LazyLock, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, LazyLock, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::sync::{OnceCell, oneshot};
+use tokio::sync::{OnceCell, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use velo::{
@@ -33,7 +35,12 @@ use velo::{
 
 use super::{
     ConnectionInfo, RegisteredResponsePlane, RegisteredStream, ResponseStreamPrologue,
-    StreamPrologueError, StreamReceiver, tombstones::InstanceTombstones,
+    StreamPrologueError, StreamReceiver,
+    tombstones::InstanceTombstones,
+    velo_request::{
+        ACK_SLOTS,
+        peers::{PeerState, register_peer_handler},
+    },
 };
 use crate::{
     discovery::EndpointInstanceId,
@@ -269,10 +276,26 @@ fn service_key(runtime: &crate::runtime::RuntimeType) -> Option<tokio::runtime::
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VeloServiceOptions {
+    pub(crate) staged_payload_max: Option<usize>,
+}
+
+impl VeloServiceOptions {
+    fn check(self, requested: Self) -> Result<()> {
+        ensure!(
+            self == requested,
+            "a process cannot share one Velo between velo-request and other request planes: existing {self:?}, requested {requested:?}"
+        );
+        Ok(())
+    }
+}
+
 /// One owner per Dynamo Runtime, shared by all of that runtime's clones.
 pub(crate) struct RuntimeService {
     runtime: crate::runtime::RuntimeType,
     owner: tokio::sync::Mutex<Option<Arc<SharedService>>>,
+    options: OnceLock<VeloServiceOptions>,
     closed: AtomicBool,
 }
 
@@ -289,6 +312,7 @@ impl RuntimeService {
         Self {
             runtime,
             owner: tokio::sync::Mutex::new(None),
+            options: OnceLock::new(),
             closed: AtomicBool::new(false),
         }
     }
@@ -301,6 +325,11 @@ impl RuntimeService {
     /// still register responses, so migration retries work during a drain.
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
+    }
+
+    #[allow(dead_code)] // Runtime configuration sets this before acquiring the service.
+    pub(crate) fn set_options(&self, options: VeloServiceOptions) -> Result<()> {
+        self.options.get_or_init(|| options).check(options)
     }
 
     /// Keeps the service open for `window`, while a frontend may still admit
@@ -326,17 +355,32 @@ impl RuntimeService {
     }
 
     pub(crate) async fn service(&self) -> Result<Arc<VeloResponseService>> {
+        self.acquire_service(false).await
+    }
+
+    pub(super) async fn service_for_ingress(&self) -> Result<Arc<VeloResponseService>> {
+        self.acquire_service(true).await
+    }
+
+    async fn acquire_service(&self, allow_closed_lease: bool) -> Result<Arc<VeloResponseService>> {
         let mut owner = self.owner.lock().await;
-        ensure!(!self.is_closed(), "Velo response runtime is shut down");
+        ensure!(
+            !self.is_closed() || (allow_closed_lease && owner.is_some()),
+            "Velo response runtime is shut down"
+        );
         if let Some(owner) = owner.as_ref() {
             return Ok(owner.service.clone());
         }
+        let options = *self.options.get_or_init(VeloServiceOptions::default);
         // Acquisition and final-owner shutdown use the same lock. A new
         // runtime cannot acquire a service while that service is closing.
         let key = service_key(&self.runtime);
         let mut shared = PROCESS_SERVICES.lock().await;
         let lease = match shared.get(&key).and_then(Weak::upgrade) {
-            Some(lease) => lease,
+            Some(lease) => {
+                lease.service.options.check(options)?;
+                lease
+            }
             None => {
                 let runtime = self.runtime.clone();
                 // The spawned result owns cleanup even if its caller stops
@@ -346,7 +390,7 @@ impl RuntimeService {
                         .handle()
                         .spawn(async move {
                             Ok::<_, anyhow::Error>(SharedService {
-                                service: VeloResponseService::from_env().await?,
+                                service: VeloResponseService::from_env(options).await?,
                                 runtime,
                             })
                         })
@@ -399,25 +443,14 @@ impl Drop for SharedService {
     }
 }
 
-/// A frontend this worker has registered with Velo.
-#[derive(Default)]
-struct PreparedPeer {
-    /// Registration and the lifecycle handshake, shared by concurrent requests.
-    ready: OnceCell<()>,
-    /// Open senders to this frontend. Only a peer with none is evicted.
-    active: AtomicUsize,
-    /// When its last sender finished, in seconds since the service started.
-    last_used: AtomicU64,
-}
-
 /// Keeps a prepared frontend from eviction while one sender uses it.
 struct PeerLease {
-    peer: Arc<PreparedPeer>,
+    peer: Arc<PeerState>,
     started: tokio::time::Instant,
 }
 
 impl PeerLease {
-    fn new(peer: &Arc<PreparedPeer>, started: tokio::time::Instant) -> Self {
+    fn new(peer: &Arc<PeerState>, started: tokio::time::Instant) -> Self {
         peer.active.fetch_add(1, Ordering::AcqRel);
         Self {
             peer: peer.clone(),
@@ -436,15 +469,23 @@ impl Drop for PeerLease {
     }
 }
 
+#[cfg(test)]
+type SweepHook = Arc<dyn Fn(InstanceId) + Send + Sync>;
+
 pub struct VeloResponseService {
-    velo: Velo,
+    pub(super) velo: Velo,
     transport: ResponseTransport,
     heartbeat: Duration,
     /// This service's `ResponseAddress::peer_address`, encoded once.
     peer_address: String,
     registrations: Mutex<Registrations>,
-    /// Frontends this worker serves, by instance ID. Idle ones are evicted.
-    prepared_peers: dashmap::DashMap<velo::InstanceId, Arc<PreparedPeer>>,
+    peers: dashmap::DashMap<InstanceId, Arc<PeerState>>,
+    pub(super) ack_slots: Semaphore,
+    options: VeloServiceOptions,
+    #[cfg(test)]
+    sweep_hook: Mutex<Option<SweepHook>>,
+    #[cfg(test)]
+    pub(super) peer_pin_calls: AtomicUsize,
     started: tokio::time::Instant,
     stop_sweep: CancellationToken,
     closing: AtomicBool,
@@ -452,7 +493,7 @@ pub struct VeloResponseService {
 }
 
 impl VeloResponseService {
-    async fn from_env() -> Result<Arc<Self>> {
+    async fn from_env(options: VeloServiceOptions) -> Result<Arc<Self>> {
         reject_tls_settings()?;
         let transport = ResponseTransport::configured()?;
         let host = crate::utils::ip_resolver::host_override_from_env(
@@ -463,19 +504,39 @@ impl VeloResponseService {
             Some(host) => crate::utils::ip_resolver::resolve_host_or_interface(&host, &resolver)?,
             None => crate::utils::ip_resolver::resolve_local_host(&resolver)?,
         };
-        Self::new(
+        Self::new_with_options(
             transport,
             SocketAddr::new(host.advertise_ip(), response_port()?),
+            options,
         )
         .await
     }
 
-    async fn new(transport: ResponseTransport, address: SocketAddr) -> Result<Arc<Self>> {
+    #[cfg(test)]
+    pub(crate) async fn new(
+        transport: ResponseTransport,
+        address: SocketAddr,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_options(transport, address, VeloServiceOptions::default()).await
+    }
+
+    async fn new_with_options(
+        transport: ResponseTransport,
+        address: SocketAddr,
+        options: VeloServiceOptions,
+    ) -> Result<Arc<Self>> {
+        ensure!(
+            transport != ResponseTransport::Ucx || options.staged_payload_max.is_none(),
+            "DYN_REQUEST_PLANE=velo cannot be combined with DYN_VELO_RESPONSE_TRANSPORT=ucx: the Velo request plane supports only Velo's TCP transport until Velo exposes its per-device header cap"
+        );
         let heartbeat = response_heartbeat()?;
         let mut builder = Velo::builder()
             .metrics(PROCESS_METRICS.1.clone())
             .mux_only()
             .messenger_mux(response_mux_config()?)?;
+        if let Some(limit) = options.staged_payload_max {
+            builder = builder.staged_payload_max(limit);
+        }
         if transport == ResponseTransport::Ucx {
             // Added first, so Velo prefers UCX for every peer that has it.
             #[cfg(all(target_os = "linux", feature = "velo-ucx"))]
@@ -497,12 +558,19 @@ impl VeloResponseService {
             transport,
             heartbeat,
             registrations: Mutex::new(Registrations::default()),
-            prepared_peers: dashmap::DashMap::new(),
+            peers: dashmap::DashMap::new(),
+            ack_slots: Semaphore::new(ACK_SLOTS),
+            options,
+            #[cfg(test)]
+            sweep_hook: Mutex::new(None),
+            #[cfg(test)]
+            peer_pin_calls: AtomicUsize::new(0),
             started: tokio::time::Instant::now(),
             stop_sweep: CancellationToken::new(),
             closing: AtomicBool::new(false),
             closed: OnceCell::new(),
         });
+        register_peer_handler(&service)?;
         let weak = Arc::downgrade(&service);
         let stop = service.stop_sweep.clone();
         tokio::spawn(async move {
@@ -532,8 +600,11 @@ impl VeloResponseService {
     fn evict_idle_peers(&self, now: u64) -> usize {
         let own = self.velo.instance_id();
         let mut evicted = 0;
-        self.prepared_peers.retain(|peer_id, peer| {
+        #[cfg(test)]
+        let hook = self.sweep_hook.lock().clone();
+        self.peers.retain(|peer_id, peer| {
             let idle = *peer_id != own
+                && !peer.pinned.load(Ordering::Acquire)
                 && peer.active.load(Ordering::Acquire) == 0
                 && (!peer.ready.initialized()
                     || now.saturating_sub(peer.last_used.load(Ordering::Relaxed))
@@ -541,12 +612,33 @@ impl VeloResponseService {
             if idle {
                 // Under the shard lock, so no request can prepare this peer
                 // again until Velo has forgotten it.
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook(*peer_id);
+                }
                 self.velo.unregister_peer(*peer_id);
                 evicted += 1;
             }
             !idle
         });
         evicted
+    }
+
+    pub(super) fn pin(&self, peer_id: InstanceId) -> Arc<PeerState> {
+        let peer = self.peers.entry(peer_id).or_default();
+        peer.pinned.store(true, Ordering::Release);
+        Arc::clone(&peer)
+    }
+
+    pub(super) fn confirmed_peer(&self, peer_id: InstanceId) -> Option<(Arc<PeerState>, u64)> {
+        let peer = self.peers.get(&peer_id)?;
+        let epoch = peer.route.confirmed_epoch()?;
+        Some((Arc::clone(&peer), epoch))
+    }
+
+    #[cfg(test)]
+    fn peer(&self, peer_id: InstanceId) -> Option<Arc<PeerState>> {
+        self.peers.get(&peer_id).map(|peer| Arc::clone(&peer))
     }
 
     async fn shutdown(&self) {
@@ -737,15 +829,12 @@ impl VeloResponseService {
     /// sweep cannot evict the peer while it is in use.
     async fn prepare_peer(&self, peer_id: InstanceId, address: &str) -> Result<PeerLease> {
         // Steady state: the peer is already prepared, so skip the shard write lock.
-        if let Some(peer) = self.prepared_peers.get(&peer_id)
+        if let Some(peer) = self.peers.get(&peer_id)
             && peer.ready.initialized()
         {
             return Ok(PeerLease::new(&peer, self.started));
         }
-        let lease = PeerLease::new(
-            &self.prepared_peers.entry(peer_id).or_default(),
-            self.started,
-        );
+        let lease = PeerLease::new(&self.peers.entry(peer_id).or_default(), self.started);
         // Release the map guard before awaiting. A failed or cancelled attempt
         // leaves the cell empty, so the next caller can retry.
         lease
@@ -1045,6 +1134,10 @@ mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context as EngineContext;
+    use crate::pipeline::network::velo_request::{
+        PEER_HANDLER, REQUEST_HANDLER, encode_identity,
+        peers::{HELLO_CAP, by_deadline, establish_route},
+    };
 
     #[test]
     fn response_batch_policy() {
@@ -1200,7 +1293,9 @@ mod tests {
         ) {
             return;
         }
-        let service = VeloResponseService::from_env().await.unwrap();
+        let service = VeloResponseService::from_env(VeloServiceOptions::default())
+            .await
+            .unwrap();
         assert_eq!(
             tcp_address(&service).port().to_string(),
             std::env::var("DYN_VELO_RESPONSE_PORT").unwrap()
@@ -1262,6 +1357,747 @@ mod tests {
             VeloResponseService::new(transport, address).await.unwrap(),
             VeloResponseService::new(transport, address).await.unwrap(),
         )
+    }
+
+    fn deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(2)
+    }
+
+    async fn open_test_response(
+        frontend: &Arc<VeloResponseService>,
+        worker: &Arc<VeloResponseService>,
+    ) -> (
+        VeloResponseSender,
+        StreamReceiver,
+        Arc<dyn AsyncEngineContext>,
+    ) {
+        by_deadline(deadline(), async {
+            let registered = frontend
+                .register_response(EngineContext::new(()).context(), false)
+                .unwrap();
+            let engine = EngineContext::new(()).context();
+            let mut sender = worker
+                .sender(engine.clone(), registered.connection_info.clone(), None)
+                .await
+                .unwrap();
+            sender.send_prologue(None).await.unwrap();
+            let (_, provider) = registered.into_parts();
+            (sender, provider.await.unwrap().unwrap(), engine)
+        })
+        .await
+        .unwrap()
+    }
+
+    fn stub_request_handler(worker: &VeloResponseService, ack: Bytes) -> Arc<AtomicUsize> {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let count = seen.clone();
+        worker
+            .velo
+            .register_handler(
+                velo::Handler::unary_handler(REQUEST_HANDLER, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Ok(Some(ack.clone()))
+                })
+                .build(),
+            )
+            .unwrap();
+        seen
+    }
+
+    async fn first_request_after_one_sided_eviction(payload: Bytes, ack: Bytes) {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let frontend_id = frontend.velo.instance_id();
+        let worker_id = worker.velo.instance_id();
+        let seen = stub_request_handler(&worker, ack.clone());
+        drop(
+            worker
+                .prepare_peer(frontend_id, &frontend.peer_address)
+                .await
+                .unwrap(),
+        );
+        drop(
+            frontend
+                .prepare_peer(worker_id, &worker.peer_address)
+                .await
+                .unwrap(),
+        );
+
+        let send = || {
+            frontend
+                .velo
+                .unary(REQUEST_HANDLER)
+                .unwrap()
+                .raw_payload(payload.clone())
+                .instance(worker_id)
+                .timeout(Duration::from_secs(2))
+                .send()
+        };
+        assert_eq!(send().await.unwrap(), ack);
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
+        assert_eq!(worker.evict_idle_peers(u64::MAX), 1);
+        assert_eq!(worker.velo.primary_transport_key(frontend_id), None);
+
+        establish_route(&frontend, &worker.velo.peer_info(), deadline())
+            .await
+            .unwrap();
+        assert_eq!(send().await.unwrap(), ack);
+        assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(seen.load(Ordering::Relaxed), 2);
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn first_contact_restores_route_after_one_sided_eviction_eager() {
+        first_request_after_one_sided_eviction(
+            Bytes::from_static(b"request"),
+            Bytes::from_static(b"Server overloaded: worker at capacity"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn first_contact_restores_route_after_one_sided_eviction_staged() {
+        first_request_after_one_sided_eviction(Bytes::from(vec![0; 300 * 1024]), Bytes::new())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sweep_never_evicts_pinned_peers() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let frontend_id = frontend.velo.instance_id();
+        let unpinned_id = InstanceId::new_v4();
+        worker.peers.entry(unpinned_id).or_default();
+        worker.pin(frontend_id);
+        worker
+            .velo
+            .register_peer(frontend.velo.peer_info())
+            .unwrap();
+        *worker.sweep_hook.lock() = Some(Arc::new(move |id| assert_eq!(id, unpinned_id)));
+
+        assert_eq!(worker.evict_idle_peers(u64::MAX), 1);
+        assert!(worker.peer(unpinned_id).is_none());
+        assert_eq!(
+            worker.velo.primary_transport_key(frontend_id).as_deref(),
+            Some("tcp")
+        );
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sweep_wins_before_pin_clones_the_replacement_peer() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let frontend_id = frontend.velo.instance_id();
+        stub_request_handler(&worker, Bytes::new());
+        drop(
+            worker
+                .prepare_peer(frontend_id, &frontend.peer_address)
+                .await
+                .unwrap(),
+        );
+        let old_peer = worker.peer(frontend_id).unwrap();
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (release, released) = std::sync::mpsc::channel();
+        let released = Mutex::new(released);
+        *worker.sweep_hook.lock() = Some(Arc::new(move |id| {
+            assert_eq!(id, frontend_id);
+            signal.notify_one();
+            released
+                .lock()
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+        }));
+        let sweeping = worker.clone();
+        let sweep = tokio::task::spawn_blocking(move || sweeping.evict_idle_peers(u64::MAX));
+        by_deadline(deadline(), entered.notified()).await.unwrap();
+        let (attempting, attempt) = oneshot::channel();
+        let pinning = worker.clone();
+        let mut pin = tokio::task::spawn_blocking(move || {
+            attempting.send(()).unwrap();
+            pinning.pin(frontend_id)
+        });
+        by_deadline(deadline(), attempt).await.unwrap().unwrap();
+        let blocked = tokio::time::timeout(Duration::from_millis(30), &mut pin)
+            .await
+            .is_err();
+        release.send(()).unwrap();
+        assert!(blocked, "pin returned while the sweep held the shard");
+        assert_eq!(by_deadline(deadline(), sweep).await.unwrap().unwrap(), 1);
+        let pinned = by_deadline(deadline(), pin).await.unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&old_peer, &pinned));
+        assert!(Arc::ptr_eq(&worker.peer(frontend_id).unwrap(), &pinned));
+        assert_eq!(worker.velo.primary_transport_key(frontend_id), None);
+
+        establish_route(&frontend, &worker.velo.peer_info(), deadline())
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.velo.primary_transport_key(frontend_id).as_deref(),
+            Some("tcp")
+        );
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn first_contact_is_coalesced() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        stub_request_handler(&worker, Bytes::new());
+        let target = worker.velo.peer_info();
+        let routes = futures::future::join_all(
+            (0..50).map(|_| establish_route(&frontend, &target, deadline())),
+        )
+        .await;
+        let (first, epoch) = routes[0].as_ref().unwrap();
+        assert!(routes.iter().all(|route| {
+            let (peer, used_epoch) = route.as_ref().unwrap();
+            Arc::ptr_eq(peer, first) && used_epoch == epoch
+        }));
+        assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(first.staged.available_permits(), 4);
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn four_unanswered_requests_hold_four_velo_slots() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let entered = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        {
+            let entered = entered.clone();
+            let release = release.clone();
+            worker
+                .velo
+                .register_handler(
+                    velo::Handler::unary_handler_async(REQUEST_HANDLER, move |_| {
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        async move {
+                            entered.add_permits(1);
+                            release.acquire().await.unwrap().forget();
+                            Ok(None)
+                        }
+                    })
+                    .build(),
+                )
+                .unwrap();
+        }
+        let target = worker.velo.peer_info();
+        establish_route(&frontend, &target, deadline())
+            .await
+            .unwrap();
+        let baseline = frontend.velo.response_slots_in_use();
+        let _held = frontend
+            .ack_slots
+            .try_acquire_many((ACK_SLOTS - 4) as u32)
+            .unwrap();
+        let calls: Vec<_> = (0..4)
+            .map(|_| {
+                let permit = frontend.ack_slots.try_acquire().unwrap();
+                let call = frontend
+                    .velo
+                    .unary(REQUEST_HANDLER)
+                    .unwrap()
+                    .send_to(target.instance_id());
+                async move {
+                    let _permit = permit;
+                    call.await
+                }
+            })
+            .collect();
+        by_deadline(deadline(), entered.acquire_many(4))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert_eq!(frontend.velo.response_slots_in_use(), baseline + 4);
+        assert_eq!(frontend.ack_slots.available_permits(), 0);
+        release.add_permits(4);
+        let results = by_deadline(deadline(), futures::future::join_all(calls))
+            .await
+            .unwrap();
+        assert!(results.into_iter().all(|result| result.unwrap().is_empty()));
+        assert_eq!(frontend.velo.response_slots_in_use(), baseline);
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn forced_unregister_recovers_on_next_request() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        stub_request_handler(&worker, Bytes::from_static(b"ok"));
+        let target = worker.velo.peer_info();
+        let mut route = establish_route(&frontend, &target, deadline())
+            .await
+            .unwrap();
+        let send = || {
+            frontend
+                .velo
+                .unary(REQUEST_HANDLER)
+                .unwrap()
+                .timeout(Duration::from_millis(250))
+                .send_to(target.instance_id())
+        };
+        for failures in [1, 10] {
+            worker.velo.unregister_peer(frontend.velo.instance_id());
+            let results = futures::future::join_all((0..failures).map(|_| send())).await;
+            for result in results {
+                assert!(result.unwrap_err().is::<velo::RequestTimeout>());
+                route.0.route.invalidate(route.1);
+            }
+            let before = worker.peer_pin_calls.load(Ordering::Relaxed);
+            let recovered = futures::future::join_all(
+                (0..failures).map(|_| establish_route(&frontend, &target, deadline())),
+            )
+            .await;
+            let next_epoch = recovered[0].as_ref().unwrap().1;
+            assert_ne!(next_epoch, route.1);
+            assert!(
+                recovered
+                    .iter()
+                    .all(|result| result.as_ref().unwrap().1 == next_epoch)
+            );
+            route.0.route.invalidate(route.1);
+            route = establish_route(&frontend, &target, deadline())
+                .await
+                .unwrap();
+            assert_eq!(route.1, next_epoch, "stale failure cleared the new route");
+            assert_eq!(send().await.unwrap(), "ok");
+            assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), before + 1);
+        }
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn identity_mismatch_is_refused_without_registering() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        frontend
+            .velo
+            .register_peer(worker.velo.peer_info())
+            .unwrap();
+        worker
+            .velo
+            .register_peer(frontend.velo.peer_info())
+            .unwrap();
+        let false_id = InstanceId::new_v4();
+        let false_peer = PeerInfo::new(false_id, frontend.velo.peer_info().into_address());
+        let ack = frontend
+            .velo
+            .messenger()
+            .unary_streaming(PEER_HANDLER)
+            .raw_payload(encode_identity(&false_peer).unwrap())
+            .timeout(Duration::from_secs(2))
+            .send_to(worker.velo.instance_id())
+            .await
+            .unwrap();
+        assert_eq!(ack, "Server unavailable: sender identity mismatch");
+        assert!(worker.peer(false_id).is_none());
+        assert_eq!(worker.velo.primary_transport_key(false_id), None);
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn peer_without_request_handlers_is_worker_unavailable() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let error = establish_route(&frontend, &worker.velo.peer_info(), deadline())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.error_type(), ErrorType::WorkerUnavailable);
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_owners_require_equal_velo_options() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::runtime_owners_require_equal_velo_options"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+        let capped = VeloServiceOptions {
+            staged_payload_max: Some(1024 * 1024),
+        };
+        let uncapped = VeloServiceOptions::default();
+        for (existing, conflict) in [(uncapped, capped), (capped, uncapped)] {
+            let first = crate::Runtime::from_current().unwrap();
+            let first_clone = first.clone();
+            let equal = crate::Runtime::from_current().unwrap();
+            let other = crate::Runtime::from_current().unwrap();
+            let first = first.velo_response_service();
+            let first_clone = first_clone.velo_response_service();
+            let equal = equal.velo_response_service();
+            let other = other.velo_response_service();
+
+            first.set_options(existing).unwrap();
+            let service = first.service().await.unwrap();
+            first_clone.set_options(existing).unwrap();
+            let cloned_error = first_clone.set_options(conflict).unwrap_err();
+            assert!(cloned_error.to_string().contains("cannot share one Velo"));
+            assert!(Arc::ptr_eq(&service, &first_clone.service().await.unwrap()));
+
+            equal.set_options(existing).unwrap();
+            assert!(Arc::ptr_eq(&service, &equal.service().await.unwrap()));
+            other.set_options(conflict).unwrap();
+            let shared_error = other.service().await.err().unwrap();
+            assert!(shared_error.to_string().contains("cannot share one Velo"));
+            assert!(Arc::ptr_eq(
+                &service,
+                &first.service_for_ingress().await.unwrap()
+            ));
+
+            equal.shutdown().await;
+            other.shutdown().await;
+            first.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cloned_runtime_cannot_change_an_implicitly_uncapped_lease() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::cloned_runtime_cannot_change_an_implicitly_uncapped_lease"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+        let runtime = crate::Runtime::from_current().unwrap();
+        let owner = runtime.velo_response_service();
+        owner.service().await.unwrap();
+        let cloned_owner = runtime.clone().velo_response_service();
+        let error = cloned_owner
+            .set_options(VeloServiceOptions {
+                staged_payload_max: Some(1024 * 1024),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot share one Velo"));
+        owner.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn first_ingress_lookup_racing_close_retains_an_existing_lease() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::first_ingress_lookup_racing_close_retains_an_existing_lease"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+        let runtime = crate::Runtime::from_current().unwrap();
+        let owner = runtime.velo_response_service();
+        let service = owner.service().await.unwrap();
+        let owner_guard = owner.owner.lock().await;
+        let mut acquire = std::pin::pin!(owner.service_for_ingress());
+        assert!(futures::poll!(&mut acquire).is_pending());
+        owner.close();
+        drop(owner_guard);
+        let acquired = by_deadline(deadline(), acquire).await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&service, &acquired));
+
+        let no_lease = crate::Runtime::from_current()
+            .unwrap()
+            .velo_response_service();
+        no_lease.close();
+        assert!(no_lease.service_for_ingress().await.is_err());
+        owner.shutdown().await;
+        assert!(owner.service_for_ingress().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn velo_request_options_refuse_ucx_before_constructing_transport() {
+        let result = VeloResponseService::new_with_options(
+            ResponseTransport::Ucx,
+            "127.0.0.1:0".parse().unwrap(),
+            VeloServiceOptions {
+                staged_payload_max: Some(1024 * 1024),
+            },
+        )
+        .await;
+        let error = result.err().unwrap().to_string();
+        assert!(error.contains("DYN_REQUEST_PLANE=velo"));
+        assert!(error.contains("DYN_VELO_RESPONSE_TRANSPORT=ucx"));
+        assert!(error.contains("per-device header cap"));
+    }
+
+    #[tokio::test]
+    async fn velo_staged_receive_limit_ends_only_the_oversized_response_stream() {
+        let addr = "127.0.0.1:0".parse().unwrap();
+        let options = VeloServiceOptions {
+            staged_payload_max: Some(1024 * 1024),
+        };
+        let frontend = VeloResponseService::new_with_options(ResponseTransport::Tcp, addr, options)
+            .await
+            .unwrap();
+        let worker = VeloResponseService::new(ResponseTransport::Tcp, addr)
+            .await
+            .unwrap();
+        let (oversized_sender, mut oversized, _) = open_test_response(&frontend, &worker).await;
+        let (sender, mut receiver, _) = open_test_response(&frontend, &worker).await;
+
+        by_deadline(
+            deadline(),
+            oversized_sender.send(Bytes::from(vec![0; 2 * 1024 * 1024])),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let result = by_deadline(deadline(), oversized.rx.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let Err(error) = result else {
+            panic!("received an oversized response item");
+        };
+        assert!(
+            error.to_string().contains("limit of 1048576 bytes"),
+            "{error:#}"
+        );
+        assert!(
+            by_deadline(deadline(), oversized.rx.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let small = Bytes::from(vec![0; 300 * 1024]);
+        by_deadline(deadline(), sender.send(small.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            by_deadline(deadline(), receiver.rx.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            small
+        );
+        worker.shutdown().await;
+        frontend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn long_stream_survives_forced_sweep_and_cancel_reaches_worker() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let worker_id = worker.velo.instance_id();
+        stub_request_handler(&worker, Bytes::new());
+        establish_route(&frontend, &worker.velo.peer_info(), deadline())
+            .await
+            .unwrap();
+
+        let (mut sender, mut receiver, _) = open_test_response(&frontend, &worker).await;
+        let (_cancel_sender, cancel_receiver, cancel_engine) =
+            open_test_response(&frontend, &worker).await;
+        sender
+            .send(Bytes::from_static(b"before sweep"))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), receiver.rx.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            Bytes::from_static(b"before sweep"),
+        );
+
+        frontend.evict_idle_peers(u64::MAX);
+        worker.evict_idle_peers(u64::MAX);
+        drop(cancel_receiver);
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                async {
+                    for _ in 1..100 {
+                        sender.send(Bytes::from_static(b"after sweep")).await?;
+                    }
+                    sender.finish().await
+                },
+                async {
+                    for _ in 1..100 {
+                        assert_eq!(
+                            receiver.rx.next().await.unwrap().unwrap(),
+                            b"after sweep"[..]
+                        );
+                    }
+                    assert!(receiver.rx.next().await.is_none());
+                },
+                cancel_engine.killed(),
+            )
+        })
+        .await;
+        let route = frontend.velo.primary_transport_key(worker_id);
+        worker.shutdown().await;
+        frontend.shutdown().await;
+        let (sent, (), ()) = result.unwrap_or_else(|error| {
+            panic!("stream or cancellation stalled after sweep; frontend route: {route:?}; {error}")
+        });
+        sent.unwrap();
+    }
+
+    struct SweepBeforeHelloReply {
+        worker: Arc<VeloResponseService>,
+        frontend_id: InstanceId,
+        triggered: Arc<AtomicBool>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SweepBeforeHelloReply {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "crate::messenger::system" {
+                return;
+            }
+            #[derive(Default)]
+            struct HelloRegistered(bool);
+            impl tracing::field::Visit for HelloRegistered {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}") == "Completed _hello handshake";
+                    }
+                }
+            }
+            let mut hello = HelloRegistered::default();
+            event.record(&mut hello);
+            if hello.0 {
+                assert!(
+                    self.worker
+                        .velo
+                        .primary_transport_key(self.frontend_id)
+                        .is_some()
+                );
+                assert!(
+                    self.worker
+                        .peer(self.frontend_id)
+                        .unwrap()
+                        .pinned
+                        .load(Ordering::Acquire)
+                );
+                self.worker.evict_idle_peers(u64::MAX);
+                self.triggered.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_pin_keeps_the_following_hello_reply_route_through_sweep() {
+        use tracing_subscriber::prelude::*;
+
+        // Keep other tests' tracing subscribers out of the handshake hook.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::cold_pin_keeps_the_following_hello_reply_route_through_sweep"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let frontend_id = frontend.velo.instance_id();
+        stub_request_handler(&worker, Bytes::new());
+        drop(
+            worker
+                .prepare_peer(frontend_id, &frontend.peer_address)
+                .await
+                .unwrap(),
+        );
+        let triggered = Arc::new(AtomicBool::new(false));
+        let layer = SweepBeforeHelloReply {
+            worker: worker.clone(),
+            frontend_id,
+            triggered: triggered.clone(),
+        };
+        // Velo emits this event between registering the reverse route and
+        // sending the reply. Force the sweep at that point on this runtime.
+        let result = {
+            let _guard =
+                tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+            establish_route(&frontend, &worker.velo.peer_info(), deadline()).await
+        };
+        worker.shutdown().await;
+        frontend.shutdown().await;
+        result.expect("hello lost its reply during the sweep");
+        assert!(triggered.load(Ordering::Acquire), "sweep hook did not run");
+        assert_eq!(worker.peer_pin_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "waits for both hello deadlines to expire"]
+    async fn velo_hello_cap_wins_when_both_deadlines_are_ready() {
+        let (frontend, worker) = pair(ResponseTransport::Tcp).await;
+        let address = tcp_address(&worker);
+        let peer = worker.velo.peer_info();
+        let entry = peer.worker_address().get_entry("tcp").unwrap().unwrap();
+        let endpoints = velo::transports::utils::interfaces::parse_endpoints(&entry).unwrap();
+        assert_eq!(endpoints.len(), 1);
+        worker.shutdown().await;
+
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_reuseaddr(true).unwrap();
+        socket.bind(address).unwrap();
+        let listener = socket.listen(8).unwrap();
+        let worker_id = peer.instance_id();
+        frontend.velo.register_peer(peer).unwrap();
+
+        let start = tokio::time::Instant::now();
+        let hello_deadline = start + HELLO_CAP;
+        let mut hello = std::pin::pin!(by_deadline(
+            hello_deadline,
+            frontend.velo.refresh_handlers(worker_id)
+        ));
+        assert!(futures::poll!(&mut hello).is_pending());
+        assert_eq!(frontend.velo.response_slots_in_use(), 1);
+        let (silent_connection, _) =
+            tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        let ((regular, elapsed), delayed) = tokio::join!(
+            async {
+                let result =
+                    by_deadline(hello_deadline, frontend.velo.refresh_handlers(worker_id)).await;
+                (result, start.elapsed())
+            },
+            async {
+                tokio::time::sleep_until(start + Duration::from_secs(31)).await;
+                hello.await
+            },
+        );
+        drop(silent_connection);
+        frontend.shutdown().await;
+
+        assert_eq!(
+            regular.unwrap_err().error_type(),
+            ErrorType::ConnectionTimeout
+        );
+        assert!(
+            (Duration::from_secs(25)..Duration::from_secs(29)).contains(&elapsed),
+            "hello elapsed {elapsed:?}"
+        );
+        assert_eq!(
+            delayed.unwrap_err().error_type(),
+            ErrorType::ConnectionTimeout
+        );
     }
 
     /// UCX services also listen on TCP. A frontend and worker set to different
@@ -1364,7 +2200,7 @@ mod tests {
         assert_eq!(producer.evict_idle_peers(u64::MAX), 0);
         drop(lease);
         let used = producer
-            .prepared_peers
+            .peers
             .get(&peer)
             .unwrap()
             .last_used
@@ -1372,7 +2208,7 @@ mod tests {
         let ttl = PEER_IDLE_TTL.as_secs();
         assert_eq!(producer.evict_idle_peers(used + ttl - 1), 0);
         assert_eq!(producer.evict_idle_peers(used + ttl), 1);
-        assert!(producer.prepared_peers.is_empty());
+        assert!(producer.peers.is_empty());
         assert_eq!(producer.velo.primary_transport_key(peer), None);
 
         let registered = consumer

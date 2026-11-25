@@ -15,6 +15,7 @@ pub mod manager;
 pub mod quic_response;
 pub mod tcp;
 mod tombstones;
+mod velo_request;
 pub mod velo_response;
 
 use crate::SystemHealth;
@@ -126,7 +127,7 @@ impl ResponsePlaneMode {
 
     /// Velo has no TLS, so a Velo selection gives way to tcp while any
     /// `DYN_TCP_TLS_*` setting is present.
-    pub(crate) fn tcp_under_tls(self) -> Self {
+    pub fn tcp_under_tls(self) -> Self {
         self.tcp_if_tls_set(&velo_response::tcp_tls_settings())
     }
 
@@ -901,6 +902,40 @@ mod tests {
         tokens: Vec<u32>,
     }
 
+    #[tokio::test]
+    async fn velo_ingress_can_open_its_first_response_after_owner_close() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::velo_ingress_can_open_its_first_response_after_owner_close"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+        let runtime = crate::Runtime::from_current().unwrap();
+        let owner = runtime.velo_response_service();
+        let service = owner.service().await.unwrap();
+        let ingress = Ingress::<SingleIn<String>, ManyOut<String>>::new();
+        ingress
+            .velo_response_owner
+            .set(Arc::downgrade(&owner))
+            .unwrap();
+        assert!(ingress.velo_response_service.get().is_none());
+
+        owner.close();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ingress.velo_response_service(),
+        )
+        .await
+        .unwrap();
+        owner.shutdown().await;
+
+        let from_ingress = result.expect("accepted ingress work could not use the live lease");
+        assert!(Arc::ptr_eq(&service, from_ingress));
+    }
+
     #[test]
     fn velo_request_address_shape_is_precise() {
         const ID: &str = "3e0f0f0c-1a2b-4c3d-8e9f-0123456789ab";
@@ -1599,12 +1634,17 @@ where
                 )
             })?;
         if owner.is_closed() {
-            return Err(PipelineError::Generic(
-                "Velo response runtime is shut down".into(),
-            ));
+            let service = owner
+                .service_for_ingress()
+                .await
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
+            return Ok(self
+                .velo_response_service
+                .get_or_init(|| async { service })
+                .await);
         }
         self.velo_response_service
-            .get_or_try_init(|| owner.service())
+            .get_or_try_init(|| owner.service_for_ingress())
             .await
             .map_err(|error| PipelineError::Generic(error.to_string()))
     }
