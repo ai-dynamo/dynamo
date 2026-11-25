@@ -1328,8 +1328,6 @@ impl DistributedConfig {
         })
     }
 
-    /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
-    /// same process.
     /// Checks the request and response plane pair exactly as
     /// [`DistributedRuntime::new`] does, without starting anything, so a
     /// caller can report a bad pair as a configuration error.
@@ -1340,6 +1338,8 @@ impl DistributedConfig {
         )
     }
 
+    /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
+    /// same process.
     pub fn process_local() -> DistributedConfig {
         DistributedConfig {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::Memory),
