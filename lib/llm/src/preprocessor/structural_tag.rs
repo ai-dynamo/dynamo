@@ -188,10 +188,8 @@ fn structural_tag_parser<'a>(tool: Option<&'a str>, reasoning: Option<&'a str>) 
 }
 
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
-    // Native, marker-delimited formats (K2/Muse Spark forced calls, K3 named calls)
-    // cannot use the generic JSON-schema fallback. Treat their structural tags as part
-    // of implementing these standard OpenAI request shapes, not as an operator opt-in.
-    // K3 required remains on its intentional prompt-level XTML path.
+    // Native, marker-delimited forced formats cannot use the generic JSON-schema fallback, so
+    // their structural tags are not an operator opt-in. K3 required stays on prompt-level XTML.
     forced_choice_is_named(tool_choice).is_some_and(|named| {
         forced_tool_guidance(parser_name).is_some_and(|guidance| guidance.prefers_tag(named))
     })
@@ -763,9 +761,8 @@ impl OpenAIPreprocessor {
             structured_output_schema: structured_output_schema.as_deref(),
         };
 
-        // A forced choice whose registration requires its native tag cannot fall back
-        // to prompting: without the tag the backend generates unconstrained and the
-        // forced choice ends with no tool call.
+        // Without its native tag a tag-required forced choice runs unconstrained and ends
+        // with no tool call, so it cannot fall back to prompting.
         let requires_tag = forced_choice_is_named(tool_choice).is_some_and(|named| {
             forced_tool_guidance(Some(parser_name))
                 .is_some_and(|guidance| guidance.requires_tag(named))
