@@ -1311,4 +1311,116 @@ mod tests {
             "the checkpoint was already gone"
         );
     }
+
+    /// Routers used to keep one residency per recurrent group and call a
+    /// checkpoint complete where every group was resident in one tier. Now the
+    /// worker joins the groups and this table only records its events. Drive
+    /// both with the same random stream of per-group engine events and require
+    /// the same complete checkpoints after every event.
+    #[test]
+    fn joined_group_events_match_a_per_group_reference() {
+        use dynamo_kv_events::zmq_wire::{
+            BlockHashValue, KvCacheSpecKind, RawKvEvent, ZmqEventNormalizer,
+        };
+
+        const GROUPS: u32 = 3;
+        const HASHES: u64 = 12;
+        let tiers = [
+            (None, StorageTier::Device),
+            (Some("CPU"), StorageTier::HostPinned),
+        ];
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let mut normalizer =
+            ZmqEventNormalizer::new(4).with_recurrent_groups(Some((0..GROUPS).collect()));
+        let table = KvCacheGroupResidency::new();
+        // The per-group reference: (hash, tier) to the groups resident there.
+        let mut reference: FxHashMap<(u64, StorageTier), u32> = FxHashMap::default();
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut published, mut complete_seen) = (0u32, 0u32);
+        for step in 0..4_000u64 {
+            let (medium, tier) = tiers[next(2) as usize];
+            let group = next(u64::from(GROUPS)) as u32;
+            let first = 1 + next(HASHES - 2);
+            let hashes: Vec<u64> = (first..=first + next(3)).collect();
+            let block_hashes = hashes
+                .iter()
+                .map(|&hash| BlockHashValue::Unsigned(hash))
+                .collect();
+            let raw = match next(400) {
+                0 => {
+                    reference.clear();
+                    RawKvEvent::AllBlocksCleared { ownership: None }
+                }
+                1..=220 => {
+                    for &hash in &hashes {
+                        *reference.entry((hash, tier)).or_default() |= 1 << group;
+                    }
+                    RawKvEvent::BlockStored {
+                        block_hashes,
+                        parent_block_hash: None,
+                        token_ids: Vec::new(),
+                        block_size: 4,
+                        medium: medium.map(str::to_string),
+                        lora_name: None,
+                        cache_namespace: None,
+                        block_mm_infos: None,
+                        is_eagle: None,
+                        group_idx: Some(group),
+                        kv_cache_spec_kind: Some(KvCacheSpecKind::Mamba),
+                        kv_cache_spec_sliding_window: None,
+                        locality: None,
+                        ownership: None,
+                        session_id: None,
+                    }
+                }
+                _ => {
+                    for &hash in &hashes {
+                        if let Some(resident) = reference.get_mut(&(hash, tier)) {
+                            *resident &= !(1 << group);
+                        }
+                    }
+                    RawKvEvent::BlockRemoved {
+                        block_hashes,
+                        medium: medium.map(str::to_string),
+                        group_idx: Some(group),
+                        kv_cache_spec_kind: None,
+                        kv_cache_spec_sliding_window: None,
+                        locality: None,
+                        ownership: None,
+                    }
+                }
+            };
+            if let Some(event) = normalizer.normalize(raw, step, worker) {
+                published += 1;
+                let event = event.into_router_event().unwrap();
+                // As the indexer does: tagged events go to this table, and an
+                // untagged clear drops the worker's checkpoints.
+                if !table.apply(&event) {
+                    table.clear_event(&event);
+                }
+            }
+            for hash in 1..=HASHES {
+                for (_, tier) in tiers {
+                    let expected = reference.get(&(hash, tier)) == Some(&((1 << GROUPS) - 1));
+                    complete_seen += u32::from(expected);
+                    assert_eq!(
+                        has_checkpoint(&table, owner, hash, tier),
+                        expected,
+                        "step {step}, hash {hash}, {tier:?}"
+                    );
+                }
+            }
+        }
+        // The stream must have exercised both sides, and the join must have
+        // published far fewer events than the engine reported.
+        assert!(complete_seen > 1_000, "{complete_seen}");
+        assert!(published > 100 && published < 3_000, "{published}");
+    }
 }
