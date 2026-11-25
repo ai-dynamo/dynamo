@@ -170,3 +170,20 @@ async def test_poll_helper_times_out_and_rejects_duplicate_owners():
 
     with pytest.raises(RuntimeError, match="several workers"):
         await gpu.claim_hidden_states(twice, "h", 60)
+
+
+def test_worker_start_warms_nixl_off_the_engine_thread(monkeypatch):
+    connector = _connector()
+    connector._is_tp_rank_zero = True
+    monkeypatch.setattr(
+        gpu.ExampleHiddenStatesConnector,
+        "register_kv_caches",
+        lambda self, caches: None,
+    )
+    connector.register_kv_caches({})
+    assert [fn.__name__ for fn, _ in connector.scheduled] == ["_warm_nixl"]
+
+    connector.scheduled.clear()
+    connector._is_tp_rank_zero = False
+    connector.register_kv_caches({})
+    assert connector.scheduled == []

@@ -100,6 +100,27 @@ class DynamoGpuHiddenStatesConnector(ExampleHiddenStatesConnector):
 
     # ---- worker side ----------------------------------------------------
 
+    def register_kv_caches(self, kv_caches):
+        super().register_kv_caches(kv_caches)
+        if self._is_tp_rank_zero:
+            # Start the NIXL agent (about a second) on the private loop now, so
+            # the first claim, which runs on vLLM's engine thread, doesn't wait.
+            self._call_soon(self._warm_nixl)
+
+    async def _warm_nixl(self) -> None:
+        try:
+            await self._nixl_connection()
+        except Exception:  # noqa: BLE001 -- the first claim retries and reports
+            logger.exception("Starting the hidden-state NIXL agent failed")
+
+    async def _nixl_connection(self):
+        import dynamo.nixl_connect as nixl_connect
+
+        if self._nixl_connector is None:
+            self._nixl_connector = nixl_connect.Connector()
+        # Idempotent; nixl_connect has no public accessor for its shared agent.
+        return await self._nixl_connector._create_connection()
+
     def wait_for_save(self) -> None:
         # The example connector pre-creates lock files here; nothing to lock.
         return
@@ -203,8 +224,7 @@ class DynamoGpuHiddenStatesConnector(ExampleHiddenStatesConnector):
     async def _register(self, req_id: str, tensor: torch.Tensor):
         import dynamo.nixl_connect as nixl_connect
 
-        if self._nixl_connector is None:
-            self._nixl_connector = nixl_connect.Connector()
+        await self._nixl_connection()
         operation = await self._nixl_connector.create_readable(
             nixl_connect.Descriptor(tensor)
         )
