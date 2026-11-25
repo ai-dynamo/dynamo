@@ -7,6 +7,7 @@ import json
 import os
 import pickle
 import queue
+import select
 import socket
 import struct
 import subprocess
@@ -15,6 +16,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -194,9 +196,19 @@ def test_local_channel_concurrent_producer_and_consumer():
 def read_until(receiver, count):
     rows = []
     deadline = time.monotonic() + 5
-    while len(rows) < count and time.monotonic() < deadline:
+    while len(rows) < count:
         rows.extend(receiver.read())
-        time.sleep(0.001)
+        if len(rows) >= count:
+            break
+        peer = (
+            receiver.receiver.peer
+            if isinstance(receiver, EventStreamReader)
+            else receiver.peer
+        )
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "Timed out waiting for event records"
+        ready, _, _ = select.select([peer], [], [], remaining)
+        assert ready, "Timed out waiting for event records"
     assert len(rows) == count
     return rows
 
@@ -227,7 +239,8 @@ def event_frame(row, *, extended=False):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(10)
 @pytest.mark.parametrize(
     "extended, split",
     [(False, 1), (False, 3), (False, 4), (False, 7), (True, 4), (True, 9)],
@@ -302,7 +315,8 @@ def test_receiver_delivers_valid_prefix_before_terminal_error(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(20)
 def test_bounded_queue_overflow_and_cross_process(tmp_path):
     path = tmp_path / "channel"
     sender = Sender(path, capacity=512)
@@ -316,9 +330,29 @@ def test_bounded_queue_overflow_and_cross_process(tmp_path):
             [
                 sys.executable,
                 "-c",
-                "from dynamo.duru_router.transport import Receiver; import sys,time; "
-                "r=Receiver(sys.argv[1]); time.sleep(.1); rows=r.read(); "
-                'assert rows[0]["number"]==0; assert len(rows)>=3; r.close()',
+                """
+import select
+import sys
+import time
+
+from dynamo.duru_router.transport import Receiver
+
+receiver = Receiver(sys.argv[1])
+try:
+    rows = []
+    deadline = time.monotonic() + 5
+    while len(rows) < 3:
+        rows.extend(receiver.read())
+        if len(rows) >= 3:
+            break
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "Timed out waiting for event records"
+        ready, _, _ = select.select([receiver.peer], [], [], remaining)
+        assert ready, "Timed out waiting for event records"
+    assert [row["number"] for row in rows[:3]] == [0, 1, 2]
+finally:
+    receiver.close()
+""",
                 str(path),
             ],
             capture_output=True,
@@ -429,7 +463,8 @@ def test_sender_close_drains_full_queue_without_holding_submit_lock(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(15)
 def test_default_feed_needs_no_journal_and_rejects_second_producer(tmp_path):
     feed = open_feed(tmp_path / "events", name="ingress")
     tail = EventStreamReader(tmp_path / "events/ingress.jsonl")
@@ -447,7 +482,8 @@ def test_default_feed_needs_no_journal_and_rejects_second_producer(tmp_path):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.unit
+@pytest.mark.integration
+@pytest.mark.timeout(15)
 def test_memory_sequence_gap_fails_closed(tmp_path):
     feed = open_feed(tmp_path, name="worker")
     feed.submit("record", dict(sequence=2, event="footer", time=2))
@@ -634,8 +670,6 @@ def test_missing_stale_future_and_disconnect_never_use_file(endpoint, monkeypatc
 @pytest.mark.timeout(30)
 def test_scores_reach_separate_worker_processes(endpoint):
     _, address = endpoint
-    publisher = ScorePublisher(address)
-    publisher.publish(snapshot(7))
     code = """import os,time,json
 from dynamo.duru_router.scoring import Reader
 r=Reader();deadline=time.monotonic()+5
@@ -648,28 +682,29 @@ try:
  else: raise RuntimeError('No scores')
 finally: r.close()
 """
-    processes = [
-        subprocess.Popen(
-            [sys.executable, "-c", code],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for _ in range(3)
-    ]
-    try:
+    with ExitStack() as cleanup:
+        publisher = ScorePublisher(address)
+        cleanup.callback(publisher.close)
+        publisher.publish(snapshot(7))
+        processes = []
+        for _ in range(3):
+            process = cleanup.enter_context(
+                subprocess.Popen(
+                    [sys.executable, "-c", code],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+            # Kill unfinished workers before Popen.__exit__ waits and closes pipes.
+            cleanup.callback(process.kill)
+            processes.append(process)
         for process in processes:
             output, error = process.communicate(timeout=10)
             assert process.returncode == 0, error
             result = json.loads(output)
             assert result["pid"] != os.getpid()
             assert result["score"] == 7
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-        publisher.close()
 
 
 @pytest.mark.pre_merge

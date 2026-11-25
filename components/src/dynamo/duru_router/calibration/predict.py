@@ -58,7 +58,10 @@ def predict_prefill_table(table, p, d, *, extrapolate=False):
 
 
 def predict(table, step):
-    """Continue outer grid edge slopes without blending across graph regimes."""
+    """Continue edge slopes across outer ranges, flooring extrapolated costs at zero.
+
+    In-grid interpolation and separation of graph regimes remain unchanged.
+    """
     if step["phase"] == "prefill":
         value = predict_prefill_table(table, step["p"], step["d"], extrapolate=True)
         outside = not (
@@ -73,6 +76,8 @@ def predict(table, step):
         outside = not axis[0] <= step["k"] <= axis[-1]
     else:
         raise ValueError("Unknown calibration phase")
+    if outside:
+        value = max(0.0, value)
     return value, outside
 
 

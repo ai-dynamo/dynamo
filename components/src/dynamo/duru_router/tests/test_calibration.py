@@ -64,6 +64,34 @@ def test_live_outer_edge_extrapolation_preserved():
         predict_prefill_table(table, 3, 2)
 
 
+@pytest.mark.parametrize(
+    "k, expected, outside",
+    [(2, 0, True), (44.5, 1, False), (45, 1.5, False), (46.5, 3, True)],
+)
+def test_decode_prediction_nonnegative(k, expected, outside):
+    table = dict(grid=[dict(K=44.5, wall_ms=1), dict(K=45.5, wall_ms=2)])
+    value, actual_outside = predict(table, dict(phase="decode", k=k))
+    assert value == pytest.approx(expected)
+    assert actual_outside is outside
+
+
+@pytest.mark.parametrize("axis", ["p", "d"])
+@pytest.mark.parametrize(
+    "coordinate, expected, outside",
+    [(2, 0, True), (44.5, 1.5, False), (46, 3, True)],
+)
+def test_prefill_prediction_nonnegative(axis, coordinate, expected, outside):
+    if axis == "p":
+        table = dict(P=[44, 45], D=[0, 1], wall_ms=[[1, 1], [2, 2]])
+    else:
+        table = dict(P=[1, 2], D=[44, 45], wall_ms=[[1, 2], [1, 2]])
+    step = dict(phase="prefill", p=1, d=0)
+    step[axis] = coordinate
+    value, actual_outside = predict(table, step)
+    assert value == pytest.approx(expected)
+    assert actual_outside is outside
+
+
 def test_measure_resume_and_load_without_accuracy_gate(tmp_path):
     root = tmp_path
     ledger = root / "accepted.jsonl"
