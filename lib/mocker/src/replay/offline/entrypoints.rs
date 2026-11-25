@@ -93,9 +93,12 @@ fn validate_agentic_host_offload(
             args.decode_speedup_ratio == 1.0
                 && args.aic_nextn.is_none()
                 && args.ais_perf_config().is_none_or(|config| {
-                    config
-                        .get("speculation")
-                        .is_none_or(serde_json::Value::is_null)
+                    // An explicit `{"kind": "none"}` means speculation is disabled.
+                    config.get("speculation").is_none_or(|speculation| {
+                        speculation.is_null()
+                            || speculation.get("kind").and_then(serde_json::Value::as_str)
+                                == Some("none")
+                    })
                 }),
             "agentic host offload requires speculative decoding disabled"
         );
@@ -992,6 +995,17 @@ mod agentic_host_offload_tests {
     }
 
     #[test]
+    fn accepts_explicit_none_speculation_in_ais_config() {
+        let input = agentic_input();
+        let mut role = args(Some("dp_rank_local"));
+        role.timing_model = aisim_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({"speculation": {"kind": "none"}}),
+        };
+        validate_agentic_host_offload(&input, &[(1, &role)], false).unwrap();
+    }
+
+    #[test]
     fn rejects_unsupported_deployment_on_every_active_role() {
         let input = agentic_input();
         let offloaded = args(Some("dp_rank_local"));
@@ -1036,6 +1050,20 @@ mod agentic_host_offload_tests {
         invalid.timing_model = aisim_core::engine::TimingModelConfig::External {
             provider: "ais".to_string(),
             config: serde_json::json!({"speculation": {"nextn": 2}}),
+        };
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        let mut invalid = args(None);
+        invalid.timing_model = aisim_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({
+                "speculation": {
+                    "kind": "ngram",
+                    "params": {"num_speculative_tokens": 2},
+                },
+            }),
         };
         invalid_roles.push((
             invalid,
