@@ -423,6 +423,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn silent_pin_ack_obeys_a_request_deadline_shorter_than_the_cap() {
+        assert_contact_timeout(
+            PEER_HANDLER,
+            Duration::from_millis(200),
+            Duration::from_secs(2),
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn waiters_share_a_recent_first_contact_failure() {
         let frontend = request_peer().await;
         let worker = request_peer().await;
