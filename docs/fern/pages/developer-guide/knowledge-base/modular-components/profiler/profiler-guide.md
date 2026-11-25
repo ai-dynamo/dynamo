@@ -92,6 +92,40 @@ searchStrategy: rapid
   not add support for additional GPU SKUs.
 - No GPU resources consumed during profiling
 
+#### Reviewing other configurations that meet the SLA
+
+The rapid strategy deploys only its rank-1 pick, but the simulation usually
+finds other configurations that also meet the SLA and trade per-user speed for
+per-GPU throughput differently. The profiler writes all of them to
+`sla_candidates.csv` in the output directory and lists the file under
+`outputs.sla_candidates` in `profiler_status.yaml`. The file is written even
+when no configuration meets the SLA.
+
+Each row is one configuration. The first columns are:
+
+| Column | Meaning |
+|---|---|
+| `mode` | Serving mode or experiment the row comes from, such as `agg` or `disagg` |
+| `selected` | `true` for the configuration written to `final_config.yaml` |
+| `ttft`, `tpot`, `request_latency` | Estimated latencies in milliseconds |
+| `tokens/s/user`, `tokens/s/gpu` | Estimated per-user and per-GPU throughput |
+| `num_total_gpus` | GPUs for one replica of the configuration |
+
+The remaining columns are AIC's own output, including the parallelism of each
+worker (`tp`, `pp`, `dp`, `moe_tp`, `moe_ep`, with `(p)` and `(d)` prefixes for
+prefill and decode workers in disaggregated rows) and the batch sizes. Columns
+that apply only to one serving mode are empty in rows of the other mode. Rows
+are sorted by `tokens/s/gpu`, highest first.
+
+A row is kept when it meets the SLA: estimated TTFT within `sla.ttft` and TPOT
+within `sla.itl`, or request latency within `sla.e2eLatency` when that is set
+instead. The selected configuration is always kept, even when it misses the
+SLA.
+
+To choose a configuration other than the selected one, you can sort or filter
+the CSV directly, or give it to a coding agent together with your priorities,
+such as the lowest TPOT that still reaches a given tokens/s/gpu.
+
 ### Thorough
 
 Enumerates candidate parallelization configs, deploys each as a real K8s workload, and benchmarks with AIPerf.

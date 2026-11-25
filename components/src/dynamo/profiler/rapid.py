@@ -34,6 +34,7 @@ from dynamo.profiler.utils.profile_common import (
     needs_profile_data,
     resolve_model_path,
 )
+from dynamo.profiler.utils.sla_candidates import collect_sla_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +327,7 @@ def _run_default_sim(
         load_kwargs["target_concurrency"] = dgdr.workload.concurrency
         load_kwargs["max_total_gpus"] = total_gpus
 
-    chosen, best_configs, _, _, best_latencies_map, _ = _execute_tasks(
+    chosen, best_configs, pareto_fronts, _, best_latencies_map, _ = _execute_tasks(
         task_configs,
         mode="default",
         top_n=5,
@@ -366,6 +367,17 @@ def _run_default_sim(
         dgdr, best_config_df, chosen, task_configs, picking_mode
     )
 
+    # Every config AIC found that meets the SLA, not only the rank-1 pick,
+    # so users can choose a different trade-off.
+    sla_candidates_df = collect_sla_candidates(
+        pareto_fronts,
+        best_configs,
+        target_ttft=target_ttft,
+        target_tpot=target_tpot,
+        target_request_latency=request_latency,
+        chosen_exp=chosen,
+    )
+
     # When backend="auto" AIC expands to per-backend task configs; the winning
     # row carries the concrete backend name so downstream consumers (e.g.
     # run_interpolation) can use it without re-encountering "auto".
@@ -384,6 +396,7 @@ def _run_default_sim(
         "chosen_exp": chosen,
         "task_configs": task_configs,
         "resolved_backend": resolved_backend,
+        "sla_candidates_df": sla_candidates_df,
     }
 
 

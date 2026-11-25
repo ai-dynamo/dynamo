@@ -471,6 +471,25 @@ class TestWriteFinalOutput:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_extra_outputs_are_listed_in_status(self, tmp_path):
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+
+        result = _write_final_output(
+            ops, {"kind": "DGD"}, {"sla_candidates": "sla_candidates.csv"}
+        )
+
+        assert result is True
+        status = yaml.safe_load(
+            (Path(ops.output_dir) / "profiler_status.yaml").read_text()
+        )
+        assert status["outputs"] == {
+            "final_config": "final_config.yaml",
+            "sla_candidates": "sla_candidates.csv",
+        }
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_list_config_writes_multi_doc_yaml(self, tmp_path):
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
