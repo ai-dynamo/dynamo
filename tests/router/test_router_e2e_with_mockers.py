@@ -14,6 +14,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -1888,18 +1889,35 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             asyncio.run(run_test(workers))
 
 
-def _velo_request_handler_count(system_port: int) -> float:
-    """Sum the worker's Velo handler counter for the request handler."""
+def _velo_worker_metrics(system_port: int) -> tuple[float, float]:
+    """Return the worker's request-handler and response-frame counters."""
     response = requests.get(f"http://127.0.0.1:{system_port}/metrics", timeout=10)
     response.raise_for_status()
-    total = 0.0
+    handler_requests = 0.0
+    response_records = 0.0
     for line in response.text.splitlines():
-        if not line.startswith("velo_messenger_handler_requests_total{"):
-            continue
-        labels, _, value = line.rpartition(" ")
-        if 'handler="dynamo_request"' in labels:
-            total += float(value)
-    return total
+        if line.startswith("velo_messenger_handler_requests_total{"):
+            labels, _, value = line.rpartition(" ")
+            if 'handler="dynamo_request"' in labels:
+                handler_requests += float(value)
+        elif line.startswith("velo_streaming_mux_records_sent_total{"):
+            labels, _, value = line.rpartition(" ")
+            if 'record_type="data"' in labels:
+                response_records += float(value)
+    return handler_requests, response_records
+
+
+def _settle_worker_metrics(system_port: int) -> tuple[float, float]:
+    """Wait for the readiness request and its response to leave the counters."""
+    previous = _velo_worker_metrics(system_port)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        current = _velo_worker_metrics(system_port)
+        if current == previous:
+            return current
+        previous = current
+    return previous
 
 
 async def _send_velo_plane_requests(frontend_url: str, count: int) -> None:
@@ -1947,7 +1965,7 @@ def test_mocker_velo_request_plane(
             "speedup_ratio": SPEEDUP_RATIO,
             "block_size": BLOCK_SIZE,
         },
-        num_mockers=NUM_MOCKERS,
+        num_mockers=1,
         store_backend="file",
         request_plane="velo",
         env_overrides={
@@ -1974,11 +1992,28 @@ def test_mocker_velo_request_plane(
                 )
             )
 
-            before = _velo_request_handler_count(system_port)
+            before_requests, before_frames = _settle_worker_metrics(system_port)
             asyncio.run(_send_velo_plane_requests(frontend_url, VELO_REQUESTS))
-            after = _velo_request_handler_count(system_port)
 
-            assert after - before >= VELO_REQUESTS, (
+            deadline = time.monotonic() + 10
+            while True:
+                after_requests, after_frames = _velo_worker_metrics(system_port)
+                if (
+                    after_requests - before_requests >= VELO_REQUESTS
+                    and after_frames - before_frames >= VELO_REQUESTS
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.1)
+
+            assert after_requests - before_requests >= VELO_REQUESTS, (
                 "worker dynamo_request handler count grew by "
-                f"{after - before}, expected at least {VELO_REQUESTS}"
+                f"{after_requests - before_requests}, expected at least "
+                f"{VELO_REQUESTS}"
+            )
+            assert after_frames - before_frames >= VELO_REQUESTS, (
+                'worker velo_streaming_mux_records_sent_total{record_type="data"} '
+                f"grew by {after_frames - before_frames}, expected at least "
+                f"{VELO_REQUESTS}; the responses did not travel over Velo"
             )
