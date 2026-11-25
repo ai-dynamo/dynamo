@@ -1912,6 +1912,21 @@ VELO_COUNTER_POLL_S = 0.05
 VELO_COUNTER_DEADLINE_S = 10.0
 
 
+def _wait_for_frontend_models(frontend_url: str, timeout: float = 120.0) -> None:
+    """Wait for /v1/models to list a model without dispatching a model request."""
+    url = f"{frontend_url}/v1/models"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200 and response.json().get("data"):
+                return
+        except (requests.RequestException, ValueError):
+            pass
+        time.sleep(0.1)
+    raise TimeoutError(f"{url} did not list a model within {timeout}s")
+
+
 def _stable_worker_metrics(system_port: int) -> tuple[float, float]:
     """Wait until both worker counters have been unchanged for the quiet window."""
     deadline = time.monotonic() + VELO_COUNTER_DEADLINE_S
@@ -1966,7 +1981,11 @@ def test_mocker_velo_request_plane(
     predownload_tokenizers,
     file_storage_backend,
 ):
-    """Both planes Velo: every request decodes tokens and reaches the worker handler."""
+    """Both planes Velo: every request decodes tokens and reaches the worker handler.
+
+    Readiness polls GET /v1/models only, so it cannot dispatch a model request
+    and add to the worker's dynamo_request counter.
+    """
     system_port = allocate_ports(1, DynamoPortRange.SERVE.value)[0]
     request.addfinalizer(lambda: deallocate_ports([system_port]))
     frontend_port = allocate_frontend_ports(request, 1)[0]
@@ -1996,13 +2015,7 @@ def test_mocker_velo_request_plane(
             extra_env={"DYN_RESPONSE_PLANE": "velo"},
         ):
             frontend_url = f"http://localhost:{frontend_port}"
-            asyncio.run(
-                wait_for_frontend_ready(
-                    frontend_url=frontend_url,
-                    store_backend="file",
-                    request_plane="velo",
-                )
-            )
+            _wait_for_frontend_models(frontend_url)
 
             before_requests, before_frames = _stable_worker_metrics(system_port)
             asyncio.run(_send_velo_plane_requests(frontend_url, VELO_REQUESTS))
