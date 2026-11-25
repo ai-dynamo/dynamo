@@ -3,11 +3,18 @@
 
 //! Metrics of the runtime.
 //!
-//! The registry, the metric names and the typed helpers live in `dynamo-metrics` and are
-//! re-exported here. This module adds what needs the runtime: the transport and Tokio
-//! instruments and the OTLP exporter.
+//! The registry, the metric names, the typed helpers and the frontend pipeline instruments live
+//! in `dynamo-metrics` and are re-exported here by name. The rest of that crate (the request
+//! metrics, the load frames and its environment names) is not: take it from `dynamo_metrics`.
+//! This module adds what needs the runtime: the transport and Tokio instruments and the OTLP
+//! exporter.
 
-pub use dynamo_metrics::*;
+pub use dynamo_metrics::{
+    AttachedPrometheusRegistry, CollectedFamilies, MetricOptions, Metrics, MetricsHierarchy,
+    MetricsRegistry, PrometheusExpositionFormatCallback, PrometheusMetric, PrometheusTypedCallback,
+    PrometheusUpdateCallback, create_metric, create_metric_with_options, frontend_perf, prom_typed,
+    prometheus_names,
+};
 
 pub mod otlp_export;
 pub mod quic_response;

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # dynamo-metrics
 
-`dynamo-metrics` is the Prometheus vocabulary, registry and frontend request metrics Dynamo components share. It depends on `prometheus` and not on `dynamo-runtime` or an HTTP server, so a crate can name, register and record metrics without linking either. `dynamo-runtime` re-exports the registry, names and typed helpers as `dynamo_runtime::metrics`.
+`dynamo-metrics` is the Prometheus vocabulary, registry and frontend request metrics Dynamo components share. It depends on `prometheus` and not on `dynamo-runtime` or an HTTP server, so a crate can name, register and record metrics without linking either. `dynamo-runtime` re-exports the registry, names, typed helpers and `frontend_perf` as `dynamo_runtime::metrics`; take the request metrics and load frames from `dynamo_metrics`.
 
 | Module | Contents |
 |---|---|
