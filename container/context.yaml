@@ -125,8 +125,9 @@ vllm:
     tokenizers_version: "0.23.3"
     baseline_sbom: vllm-openai-xpu@cb55d8cf
     # NIXL for the XPU source build. CUDA uses upstream vLLM's NIXL.
-    # vLLM 0.33's NIXL connector requires NIXL >= 1.5.0 (check_nixl_version).
-    nixl_ref: v1.5.0
+    # v1.5.2 is the NIXL vLLM 0.34 pins (requirements/kv_connectors.txt); its
+    # NIXL connector still accepts NIXL >= 1.5.0 (check_nixl_version).
+    nixl_ref: v1.5.2
     nixl_ucx_ref: v1.23.0-rc1
   cpu:
     base_image: ubuntu
