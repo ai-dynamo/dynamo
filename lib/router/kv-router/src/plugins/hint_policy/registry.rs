@@ -11,7 +11,7 @@ use thiserror::Error;
 use super::{HintHost, HintPolicyConstructor, HintPolicyEntry, HintPolicyFactory};
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
-use crate::plugins::worker_selection::{
+use crate::plugins::worker_selection::config::{
     WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection,
 };
 
@@ -60,10 +60,12 @@ pub enum HintPolicyRegistryError {
     EmptyName,
     #[error("hint-policy type {name:?} is already registered")]
     Duplicate { name: String },
+    /// It carries the configuration error as its message and source only: that error's type
+    /// is the host's.
     #[error("could not load worker_selection hints: {source}")]
     Config {
         #[source]
-        source: crate::scheduling::config::WorkerSelectionPolicyConfigError,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("unknown hint-policy type {name:?}; linked hint-policy types: {available}")]
     UnknownType { name: String, available: String },
@@ -185,14 +187,18 @@ impl HintPolicyRegistry {
     ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
         let selected = config
             .selected_worker_selection_policy_instances()
-            .map_err(|source| HintPolicyRegistryError::Config { source })?;
+            .map_err(|source| HintPolicyRegistryError::Config {
+                source: Box::new(source),
+            })?;
         let worker_selection =
             config
                 .worker_selection_config()
                 .map_err(|source| HintPolicyRegistryError::Config {
-                    source: crate::scheduling::config::WorkerSelectionPolicyConfigError::Config {
-                        source,
-                    },
+                    source: Box::new(
+                        crate::scheduling::config::WorkerSelectionPolicyConfigError::Config {
+                            source,
+                        },
+                    ),
                 })?;
         let mut roles = Vec::with_capacity(WORKER_TYPES.len());
         for worker_type in WORKER_TYPES {

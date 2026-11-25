@@ -16,6 +16,7 @@ use dynamo_kv_hints::{
 use dynamo_kv_indexer::host::RouterHintSourceMetadata;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::{
@@ -292,7 +293,7 @@ pub(super) struct ReplayRole {
 }
 
 /// Check one replay worker pool's role as the live router does at startup
-/// ([`dynamo_kv_router::plugins::check_role`]), rejecting what it rejects.
+/// ([`dynamo_kv_router::plugins::host::check_role`]), rejecting what it rejects.
 pub(super) fn replay_role(
     config: &KvRouterConfig,
     worker_type: WorkerType,

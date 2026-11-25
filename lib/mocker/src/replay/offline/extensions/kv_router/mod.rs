@@ -4370,7 +4370,7 @@ policy_classes:
             "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {shared_cache_multiplier: 0.5}\n    hints: []\n",
         )
         .unwrap();
-        use dynamo_kv_router::plugins::PluginConfigError;
+        use dynamo_kv_router::plugins::host::PluginConfigError;
         let no_chain = |config| (with_kv_fetch_hints(config), true);
         for (case, (config, copy_sources_unavailable)) in [
             no_chain(KvRouterConfig {

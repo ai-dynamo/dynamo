@@ -90,10 +90,10 @@ pub fn test_router_config(
 
 /// The reference worker-selection policy as a factory.
 pub fn reference_policy_factory() -> crate::types::WorkerSelectionPolicyFactory {
-    std::sync::Arc::new(|config, role, _| {
+    std::sync::Arc::new(|context| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
+            context.selection_config().clone(),
+            context.worker_type().default_selector_label(),
         )
     })
 }
