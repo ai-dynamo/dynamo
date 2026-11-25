@@ -689,21 +689,33 @@ class ThunderAgentScheduler:
         if not programs:
             return
         packing = None
+        shortlisted = None
         if plan.native_packing:
-            programs, packing = self._native_resume_queue_locked(
+            selected, packing = self._native_resume_queue_locked(
                 programs, usage, plan.resume_ceiling
             )
+            shortlisted = {program.program_id for program in selected}
+            programs = selected + [
+                program for program in programs if program.program_id not in shortlisted
+            ]
 
         resumed_this_tick = 0
         for program in programs:
-            if packing is not None and not packing:
-                break
             plan.before_attempt(program)
             required = program.token_total + self._cfg.buffer_per_program
             ceiling = plan.ceiling(program)
             # Finish this candidate's fit/exception decision before considering
-            # a lower-ranked backfill candidate. The policy cannot bypass fit.
-            choice = self._select_resume_locked(usage, required, ceiling, packing)
+            # a lower-ranked backfill candidate. Excluded native candidates
+            # remain eligible only for explicit policy exceptions.
+            choice = None
+            if shortlisted is None or program.program_id in shortlisted:
+                choice = self._select_resume_locked(
+                    usage,
+                    required,
+                    ceiling,
+                    packing,
+                    packing_ceiling=plan.resume_ceiling,
+                )
             if choice is None and plan.may_force_admit(program):
                 choice = self._select_resume_override_locked(usage, ceiling)
             if choice is None:
@@ -716,12 +728,21 @@ class ThunderAgentScheduler:
             if packing is not None:
                 # Native packing charges full footprint, even for weighted
                 # ACTING reservations. Preserve that independent packing budget.
-                remaining = choice.remaining - required
-                if remaining > self._cfg.buffer_per_program:
-                    packing[0] = (choice.replica, remaining)
-                    packing.sort(key=lambda item: -item[1])
-                else:
-                    packing.pop(0)
+                index = next(
+                    (
+                        i
+                        for i, (replica, _) in enumerate(packing)
+                        if replica == choice.replica
+                    ),
+                    None,
+                )
+                if index is not None:
+                    remaining = packing[index][1] - required
+                    if remaining > self._cfg.buffer_per_program:
+                        packing[index] = (choice.replica, remaining)
+                        packing.sort(key=lambda item: -item[1])
+                    else:
+                        packing.pop(index)
             if choice.forced:
                 self._stat_forced_resumes += 1
             resumed_this_tick += 1
@@ -764,12 +785,19 @@ class ThunderAgentScheduler:
         required: int,
         ceiling: float,
         packing: Optional[list[tuple[ReplicaKey, int]]] = None,
+        packing_ceiling: Optional[float] = None,
     ) -> Optional[ResumeChoice]:
         """Normal capacity admission, owned by ThunderAgent for every policy."""
         if packing is not None:
             if not packing or packing[0][1] < required:
                 return None
             replica, remaining = packing[0]
+            # Equal ceilings retain native full-footprint accounting, including
+            # its treatment of weighted ACTING reservations.
+            if ceiling != packing_ceiling:
+                entry = usage[replica]
+                if int(entry.capacity * ceiling) - entry.used < required:
+                    return None
             return ResumeChoice(replica, remaining, ceiling)
 
         best = None

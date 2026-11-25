@@ -64,21 +64,26 @@ def usage(router: ThunderAgentScheduler):
     return router._replica_usage_locked(router._capacity.snapshot())
 
 
+@pytest.mark.parametrize("acting_token_weight", [0.5, 1.0, 2.0])
 @pytest.mark.asyncio
-async def test_resume_preserves_native_shortlist_and_packing():
+async def test_resume_preserves_native_shortlist_and_packing(acting_token_weight):
     router, _ = make_router(
         capacity_workers={(7, 1): 600, (7, 0): 600},
         config=ThunderAgentConfig(
-            buffer_per_program=0, pause_threshold=1.0, resume_hysteresis=0.0
+            buffer_per_program=0,
+            pause_threshold=1.0,
+            resume_hysteresis=0.0,
+            acting_token_weight=acting_token_weight,
         ),
     )
     for pid, tokens in [("small", 100), ("large", 500), ("medium", 400), ("next", 300)]:
         program = router._table.begin_request(pid, tokens)
+        program.status = ProgramStatus.ACTING
         program.lifecycle = ProgramLifecycle.PAUSED
         program.waiting = asyncio.Event()
         router._table.paused[pid] = None
 
-    await router._scheduler_tick()
+    await router._greedy_resume(router._capacity.snapshot())
 
     # The native shortlist takes 100 + 300 + 400; 500 exceeds the remaining
     # aggregate budget. It then places 400, 300, 100, preserving replica ties.
@@ -88,8 +93,8 @@ async def test_resume_preserves_native_shortlist_and_packing():
     assert list(router._table.paused) == ["large"]
     assert router._table.programs["large"].waiting is not None
     snapshot = await router.status_snapshot()
-    assert snapshot["workers"]["7:0"]["used"] == 400
-    assert snapshot["workers"]["7:1"]["used"] == 400
+    assert snapshot["workers"]["7:0"]["used"] == int(400 * acting_token_weight)
+    assert snapshot["workers"]["7:1"]["used"] == int(400 * acting_token_weight)
 
 
 @pytest.mark.asyncio
@@ -116,6 +121,122 @@ async def test_policy_queue_cannot_bypass_host_capacity_check(monkeypatch):
 
     assert list(router._table.paused) == ["nonfit"]
     assert usage(router)[(1, 0)].used == 800
+    assert router._stat_forced_resumes == 0
+
+
+@pytest.mark.parametrize("occupied", [0, 850])
+@pytest.mark.asyncio
+async def test_policy_can_force_candidates_excluded_from_native_shortlist(
+    monkeypatch, occupied
+):
+    router, _ = make_router(
+        capacity_workers={(1, 0): 1000},
+        config=ThunderAgentConfig(buffer_per_program=0),
+    )
+    existing = router._table.begin_request("existing", occupied)
+    existing.assigned_replica = (1, 0)
+    program = router._table.begin_request("oversized", 1000)
+    program.lifecycle = ProgramLifecycle.PAUSED
+    program.waiting = asyncio.Event()
+    waiter = program.waiting
+    router._table.paused[program.program_id] = None
+
+    class ForcedPlan(ResumePlan):
+        def may_force_admit(self, candidate):
+            return candidate is program
+
+    monkeypatch.setattr(
+        router._policy,
+        "prepare_resume",
+        lambda programs, config: ForcedPlan(programs=programs, resume_ceiling=0.85),
+    )
+
+    await router._greedy_resume(router._capacity.snapshot())
+
+    assert program.lifecycle == ProgramLifecycle.ACTIVE
+    assert program.assigned_replica == (1, 0)
+    assert waiter.is_set()
+    assert not router._table.paused
+    assert usage(router)[(1, 0)].used == occupied + 1000
+    assert router._stat_forced_resumes == 1
+
+
+@pytest.mark.parametrize(
+    "candidates, forced_ceiling, expected_usage",
+    [
+        ([("forced", 1000), ("normal", 500)], 0.85, (500, 1900)),
+        ([("normal", 700), ("forced", 500), ("backfill", 250)], 0.2, (700, 1650)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_forced_admission_updates_only_chosen_replica_packing(
+    monkeypatch, candidates, forced_ceiling, expected_usage
+):
+    router, _ = make_router(
+        capacity_workers={(1, 0): 1000, (2, 0): 2000},
+        config=ThunderAgentConfig(buffer_per_program=0),
+    )
+    existing = router._table.begin_request("existing", 900)
+    existing.assigned_replica = (2, 0)
+    for pid, tokens in candidates:
+        program = router._table.begin_request(pid, tokens)
+        program.lifecycle = ProgramLifecycle.PAUSED
+        router._table.paused[pid] = None
+
+    class ForcedPlan(ResumePlan):
+        def ceiling(self, program):
+            return (
+                forced_ceiling
+                if program.program_id == "forced"
+                else self.resume_ceiling
+            )
+
+        def may_force_admit(self, program):
+            return program.program_id == "forced"
+
+    monkeypatch.setattr(
+        router._policy,
+        "prepare_resume",
+        lambda programs, config: ForcedPlan(programs=programs, resume_ceiling=0.85),
+    )
+
+    await router._greedy_resume(router._capacity.snapshot())
+
+    assert router._table.programs["forced"].assigned_replica == (2, 0)
+    assert router._table.programs["normal"].assigned_replica == (1, 0)
+    assert not router._table.paused
+    assert usage(router)[(1, 0)].used == expected_usage[0]
+    assert usage(router)[(2, 0)].used == expected_usage[1]
+    assert router._stat_forced_resumes == 1
+
+
+@pytest.mark.parametrize("ceiling, admitted", [(0.5, False), (0.85, True)])
+@pytest.mark.asyncio
+async def test_native_packing_respects_per_program_ceiling(
+    monkeypatch, ceiling, admitted
+):
+    router, _ = make_router(
+        capacity_workers={(1, 0): 1000},
+        config=ThunderAgentConfig(buffer_per_program=0),
+    )
+    program = router._table.begin_request("candidate", 700)
+    program.lifecycle = ProgramLifecycle.PAUSED
+    router._table.paused[program.program_id] = None
+
+    class LimitedPlan(ResumePlan):
+        def ceiling(self, candidate):
+            return ceiling
+
+    monkeypatch.setattr(
+        router._policy,
+        "prepare_resume",
+        lambda programs, config: LimitedPlan(programs=programs, resume_ceiling=0.85),
+    )
+
+    await router._greedy_resume(router._capacity.snapshot())
+
+    assert (program.lifecycle == ProgramLifecycle.ACTIVE) is admitted
+    assert program.assigned_replica == ((1, 0) if admitted else None)
     assert router._stat_forced_resumes == 0
 
 
