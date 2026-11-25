@@ -27,7 +27,7 @@ import (
 )
 
 // validateDynamoComponentDeploymentSharedSpecV1alpha1 supplements storage-version validation
-// for source-only fields, lossy conversion, and source-schema gaps. It must not repeat
+// for source-only fields and information lost by conversion. It must not repeat
 // rules whose inputs survive conversion. spec and fldPath must not be nil.
 // oldEnv is nil on create, otherwise it is the previous source-version envs list.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
@@ -74,18 +74,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	if spec.Ingress != nil {
 		allErrs = append(allErrs, v.validateIngressSpecV1alpha1(spec.Ingress, fldPath.Child("ingress"))...)
 	}
-	if spec.EPPConfig != nil && v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
-		allErrs = append(allErrs, v.validateEPPConfigV1alpha1(spec.EPPConfig, fldPath.Child("eppConfig"))...)
-	}
 	if spec.FrontendSidecar != nil && spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil &&
 		hasContainerNamed(spec.ExtraPodSpec.PodSpec.Containers, consts.FrontendSidecarContainerName) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("frontendSidecar"),
 			fmt.Sprintf("cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers", consts.FrontendSidecarContainerName),
 		))
-	}
-	if spec.Failover != nil {
-		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
 
 	return allErrs
@@ -117,39 +111,4 @@ func (v *sharedValidation) validateIngressSpecV1alpha1(
 		return nil
 	}
 	return field.ErrorList{field.Required(fldPath.Child("host"), "is required when ingress is enabled")}
-}
-
-// validateEPPConfigV1alpha1 covers the exactly-one rule missing from the Alpha source schema.
-// Config-map reference values survive conversion and are validated by validateEPPConfig.
-// config and fldPath must not be nil.
-func (v *sharedValidation) validateEPPConfigV1alpha1(
-	config *nvidiacomv1alpha1.EPPConfig,
-	fldPath *field.Path,
-) field.ErrorList {
-	allErrs := field.ErrorList{}
-	if (config.ConfigMapRef == nil) == (config.Config == nil) {
-		allErrs = append(allErrs, field.Forbidden(
-			fldPath,
-			"exactly one of configMapRef or config is required",
-		))
-	}
-	return allErrs
-}
-
-// validateFailoverSpecV1alpha1 covers the intraPod shadow limit absent from the Alpha source schema.
-// Disabled source settings are not represented after conversion; configurable interPod shadow counts
-// remain an intentional Alpha API difference. failover and fldPath must not be nil.
-func (v *sharedValidation) validateFailoverSpecV1alpha1(
-	failover *nvidiacomv1alpha1.FailoverSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	if !failover.Enabled || failover.Mode != nvidiacomv1alpha1.GMSModeIntraPod ||
-		failover.NumShadows == 0 || failover.NumShadows == 1 {
-		return nil
-	}
-	return field.ErrorList{field.Invalid(
-		fldPath.Child("numShadows"),
-		failover.NumShadows,
-		fmt.Sprintf("is invalid for mode=%q: intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode=%q to configure numShadows", nvidiacomv1alpha1.GMSModeIntraPod, nvidiacomv1alpha1.GMSModeInterPod),
-	)}
 }

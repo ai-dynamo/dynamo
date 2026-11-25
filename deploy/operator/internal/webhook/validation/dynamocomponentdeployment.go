@@ -78,7 +78,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 // ValidateUpdate performs complete validation of an updated v1beta1 DCD and
 // compares its state with the previous object.
 // Shared rules run on converted values for every source API. Alpha validation
-// supplements source-only inputs and source-schema gaps, never shared semantics.
+// supplements source-only inputs and information lost by conversion, never shared semantics.
 // ctx, oldDCD, and newDCD must not be nil. runtimeVersionSource identifies the request's source API.
 func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	ctx context.Context,

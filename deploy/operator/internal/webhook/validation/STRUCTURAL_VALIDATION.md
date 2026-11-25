@@ -144,11 +144,14 @@ Keep this table current whenever a resource validator is migrated.
   not copying its semantics into a compatibility-version recursion.
 - Keep compatibility-version validation only for rules that cannot be
   faithfully enforced after conversion: source-only information, lossy
-  conversion, source-schema gaps, or warnings about source-only fields. This
-  traversal supplements the storage-version traversal; it never replaces it.
+  conversion, or warnings about source-only fields. This traversal supplements
+  the storage-version traversal; it never replaces it.
+- A source-schema or CEL gap does not justify an Alpha validator when the
+  converted values preserve the required inputs. Enforce that invariant in
+  shared storage-version Go validation even if Beta source CEL already checks it.
 - Every compatibility validator's Go doc must explain which required input
-  or source-schema constraint is unavailable after conversion. The presence
-  of a field in a reconstructed Alpha object is not a reason to revalidate it.
+  is unavailable after conversion. A field's presence in a reconstructed Alpha
+  object is not a reason to revalidate it.
   Do not pass complete Beta objects or component maps into Alpha validators
   or compare complete Alpha specs to enforce shared invariants there.
 - Conversion does not execute the destination version's schema or CEL.

@@ -27,7 +27,7 @@ import (
 )
 
 // validateDynamoGraphDeploymentV1alpha1 supplements storage validation with Alpha-only
-// PVC/component fields and env-list/schema distinctions lost by conversion.
+// PVC/component fields and env-list distinctions lost by conversion.
 // Shared semantics remain in the storage-version owner. dgd must not be nil.
 // oldDGD is nil on create, otherwise it is the previous source-version object.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
@@ -53,7 +53,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 }
 
 // validateDynamoGraphDeploymentSpecV1alpha1 visits Alpha-only PVC declarations and
-// component settings, plus source env-list/schema gaps unavailable in storage validation.
+// component settings, plus source env-list information unavailable in storage validation.
 // spec and fldPath must not be nil.
 // oldSpec is nil on create, otherwise it contains the previous source-version lists.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alpha1(

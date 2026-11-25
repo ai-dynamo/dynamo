@@ -720,6 +720,7 @@ func TestValidateExperimentalSpecDoesNotExposePodTemplate(t *testing.T) {
 		&nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: gms},
 		fldPath,
 		experimentalSpecValidationOptions{
+			failoverPath:  fldPath.Child("failover"),
 			componentType: nvidiacomv1beta1.ComponentTypeWorker,
 			grovePathway:  true,
 		},

@@ -2572,6 +2572,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
 		},
 		{
+			name: "alpha role templates retain independent failover shadow errors",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				setAlphaExplicitMultinodeRoleTemplates(worker, 2)
+				worker.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: nvidiacomv1alpha1.GMSModeIntraPod}
+				worker.Failover = &nvidiacomv1alpha1.FailoverSpec{Enabled: true, Mode: nvidiacomv1alpha1.GMSModeIntraPod, NumShadows: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].experimental.gpuMemoryService: Forbidden: cannot be combined with role PodTemplates because this layout requires operator-managed launch wiring",
+				"spec.components[0].experimental.failover: Forbidden: cannot be combined with role PodTemplates because this layout requires operator-managed launch wiring",
+				`spec.services[worker].failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`,
+			},
+		},
+		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].Failover = &nvidiacomv1alpha1.FailoverSpec{
@@ -2582,7 +2597,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Invalid value: "": must be "container" when intra-pod failover is configured`,
-				`spec.components[0].experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "IntraPod"`,
+				`spec.services[worker].failover: Forbidden: gpuMemoryService is required when failover mode is "IntraPod"`,
 				`spec.services[worker].failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`,
 			},
 		},

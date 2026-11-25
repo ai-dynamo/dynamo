@@ -79,7 +79,7 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 
 // Validate validates current state on a converted storage-version DynamoGraphDeployment.
 // Shared rules run for every source API; Alpha validation only supplements inputs
-// and source-schema constraints unavailable after conversion.
+// unavailable after conversion.
 // ctx and deployment must not be nil.
 func (v *DynamoGraphDeploymentValidator) Validate(
 	ctx context.Context,

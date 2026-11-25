@@ -10,9 +10,12 @@
 // requests or copied into Alpha validators.
 //
 // Compatibility validators supplement that traversal only for source-only
-// information, lossy conversion, source-schema gaps, and source-only warnings.
-// Their Go docs must explain the information or constraint conversion cannot
-// preserve. They must not compare whole compatibility objects or receive full
-// storage-version objects to repeat shared rules. Conversion does not execute
-// the destination API version's schema or CEL rules.
+// information, lossy conversion, and source-only warnings. Their Go docs must
+// explain the information conversion cannot preserve. They must not compare
+// whole compatibility objects or receive full storage-version objects to
+// repeat shared rules.
+//
+// Conversion does not execute the destination API version's schema or CEL.
+// Missing source-schema coverage is still owned by shared storage-version Go
+// validation when converted values contain the inputs required by the rule.
 package validation

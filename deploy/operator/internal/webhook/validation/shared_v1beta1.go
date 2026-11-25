@@ -371,7 +371,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 
 	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
-	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
+	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.sourcePath, options.grovePathway)...)
 
 	// Validate the converted runtime contract once, regardless of the submitted version.
 	if !v.ratchetRuntimeVersion && !spec.IsLPX() {
@@ -398,9 +398,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	return allErrs
 }
 
+// validateSharedExperimentalSpec validates converted experimental children for every served version.
+// spec, fldPath, and sourcePath must not be nil; sourcePath selects diagnostics only.
 func (v *sharedValidation) validateSharedExperimentalSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
+	sourcePath *field.Path,
 	grovePathway bool,
 ) field.ErrorList {
 	if spec.Experimental == nil {
@@ -409,6 +412,10 @@ func (v *sharedValidation) validateSharedExperimentalSpec(
 
 	allErrs := field.ErrorList{}
 	experimentalPath := fldPath.Child("experimental")
+	failoverPath := experimentalPath.Child("failover")
+	if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+		failoverPath = sourcePath.Child("failover")
+	}
 	rolePodTemplates := dynamo.HasRolePodTemplates(spec)
 
 	// Reject layouts whose launch contract still requires operator-generated role commands.
@@ -429,6 +436,7 @@ func (v *sharedValidation) validateSharedExperimentalSpec(
 		spec.Experimental,
 		experimentalPath,
 		experimentalSpecValidationOptions{
+			failoverPath:     failoverPath,
 			componentType:    spec.ComponentType,
 			resources:        dynamo.GetMainContainerResources(spec),
 			containers:       podTemplateContainers(spec.PodTemplate),
@@ -826,15 +834,21 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	return allErrs
 }
 
-// validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
+// validateEPPConfig validates converted Go-EPP settings for every source version.
+// The shared check also covers Alpha requests, which do not run Beta CEL.
+// config and fldPath must not be nil.
 func (v *sharedValidation) validateEPPConfig(
 	config *nvidiacomv1beta1.EPPConfig,
 	fldPath *field.Path,
 ) field.ErrorList {
-	if config.ConfigMapRef == nil || config.ConfigMapRef.Name != "" {
-		return nil
+	allErrs := field.ErrorList{}
+	if (config.ConfigMapRef == nil) == (config.Config == nil) {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "exactly one of configMapRef or config is required"))
 	}
-	return field.ErrorList{field.Required(fldPath.Child("configMapRef", "name"), "is required")}
+	if config.ConfigMapRef != nil && config.ConfigMapRef.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("configMapRef", "name"), "is required"))
+	}
+	return allErrs
 }
 
 // validateTopologyConstraint validates constraint. constraint, specConstraint, and fldPath must not be nil.
@@ -873,6 +887,7 @@ func (v *sharedValidation) validateTopologyConstraint(
 }
 
 type experimentalSpecValidationOptions struct {
+	failoverPath     *field.Path
 	componentType    nvidiacomv1beta1.ComponentType
 	resources        corev1.ResourceRequirements
 	containers       []corev1.Container
@@ -880,7 +895,7 @@ type experimentalSpecValidationOptions struct {
 	rolePodTemplates bool
 }
 
-// validateExperimentalSpec validates experimental. experimental and fldPath must not be nil.
+// validateExperimentalSpec validates experimental. experimental, fldPath, and options.failoverPath must not be nil.
 func (v *sharedValidation) validateExperimentalSpec(
 	experimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
@@ -896,13 +911,18 @@ func (v *sharedValidation) validateExperimentalSpec(
 			options.containers,
 		)...)
 	}
-	if experimental.Failover != nil && !options.rolePodTemplates {
+	if experimental.Failover != nil {
+		// Role templates have no single component GPU allocation to validate.
+		var resources *corev1.ResourceRequirements
+		if !options.rolePodTemplates {
+			resources = &options.resources
+		}
 		allErrs = append(allErrs, v.validateFailoverSpec(
 			experimental.Failover,
-			fldPath.Child("failover"),
+			options.failoverPath,
 			experimental.GPUMemoryService,
 			options.componentType,
-			options.resources,
+			resources,
 		)...)
 	}
 	if experimental.Grove != nil {
@@ -989,13 +1009,14 @@ func (v *sharedValidation) validateGPUMemoryServiceSpec(
 }
 
 // validateFailoverSpec validates failover. failover and fldPath must not be nil.
-// gms may be nil because failover validates that sibling relationship.
+// gms may be nil. Nil resources means role templates have no single component
+// GPU allocation; scalar, sibling-mode, and component-type checks still run.
 func (v *sharedValidation) validateFailoverSpec(
 	failover *nvidiacomv1beta1.FailoverSpec,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 	componentType nvidiacomv1beta1.ComponentType,
-	resources corev1.ResourceRequirements,
+	resources *corev1.ResourceRequirements,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	failoverMode := effectiveGMSMode(failover.Mode)
@@ -1012,18 +1033,28 @@ func (v *sharedValidation) validateFailoverSpec(
 		))
 	}
 
+	if failoverMode == nvidiacomv1beta1.GMSModeIntraPod && failover.NumShadows > 1 {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("numShadows"),
+			failover.NumShadows,
+			`is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`,
+		))
+	}
+
 	if failoverMode == nvidiacomv1beta1.GMSModeInterPod {
-		gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(resources)
-		if err != nil {
-			allErrs = append(allErrs, field.Forbidden(
-				fldPath,
-				fmt.Sprintf("failed to read main-container GPU limit: %v", err),
-			))
-		} else if gpuCount < 1 {
-			allErrs = append(allErrs, field.Forbidden(
-				fldPath,
-				"GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu",
-			))
+		if resources != nil {
+			gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(*resources)
+			if err != nil {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath,
+					fmt.Sprintf("failed to read main-container GPU limit: %v", err),
+				))
+			} else if gpuCount < 1 {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath,
+					"GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu",
+				))
+			}
 		}
 
 		switch componentType {
