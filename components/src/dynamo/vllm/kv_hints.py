@@ -79,6 +79,18 @@ def kvcr_host_capacity_blocks(
     return slots * int(chunk_tokens) // router_block_size
 
 
+def kvcr_inventory_is_process_local(engine_args: AsyncEngineArgs) -> bool:
+    """Return whether this worker's KVCR pool lives in the engine process.
+
+    A ``kvcr`` tier keeps its pool in the vLLM process unless
+    ``kvcr_service_socket_path`` hands it to a KVCR memory service, whose pool
+    survives an engine restart. A worker without a ``kvcr`` tier owns no KVCR
+    inventory.
+    """
+    kvcr = [t for _, t in _secondary_tiers(engine_args) if t.get("type") == "kvcr"]
+    return bool(kvcr) and all(t.get("kvcr_service_socket_path") is None for t in kvcr)
+
+
 def _supports_transfer_hint(tier: Mapping[str, Any]) -> bool:
     """Return whether a secondary tier advertises TRANSFER capability."""
     capabilities = tier.get("router_capabilities")

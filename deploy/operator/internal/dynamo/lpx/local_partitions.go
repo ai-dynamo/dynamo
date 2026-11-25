@@ -14,6 +14,7 @@ import (
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -97,14 +98,12 @@ func selectRemoteUnits(
 
 // applyLocalPartitionIDs publishes the operator-owned selection. An empty value
 // clears envFrom defaults; units runtimes require it even with no local roots.
-func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
+func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection, environment *semanticenv.ContainerLayers) {
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)
 	}
 
-	prependEnv(container, corev1.EnvVar{
-		Name:  localPartitionIDsEnv,
-		Value: strings.Join(ids, ","),
-	})
+	// Publish the owned selection, including an empty value that clears envFrom defaults.
+	environment.Prepend(container, "operator.lpx.partitions", []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")}})
 }

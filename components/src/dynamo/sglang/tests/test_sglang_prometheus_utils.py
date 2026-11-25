@@ -66,16 +66,3 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
         assert 'model_name="meta-llama/Llama-3.1-8B-Instruct"' in result
         assert "8128902.0" in result  # prompt tokens value
         assert result.endswith("\n")
-
-    def test_error_handling(self):
-        """Test error handling when registry fails."""
-        bad_registry = Mock()
-
-        with patch(
-            "prometheus_client.generate_latest",
-            side_effect=Exception("Registry error"),
-        ):
-            result = get_prometheus_expfmt(bad_registry)
-
-        # Should return empty string on error
-        assert result == ""

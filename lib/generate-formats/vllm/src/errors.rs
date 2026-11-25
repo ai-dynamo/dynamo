@@ -3,8 +3,8 @@
 
 use axum::http::StatusCode;
 use dynamo_error::http::SanitizedError;
+use dynamo_http_server::metrics::*;
 use dynamo_llm::generate_format::{ErrorPhase, WorkerError};
-use dynamo_llm::http::service::metrics::*;
 
 pub(super) fn classify(
     error: &(dyn std::error::Error + 'static),

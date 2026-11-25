@@ -17,9 +17,9 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 **Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Supported causal backends are aggregated, single-rank SGLang and vLLM workers using their qualified serialized scoring profiles. See [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for SGLang launch commands and [Decision API Reference](../api/decision-apis.md) for wire contracts, usage accounting, and errors.
 
-For a qualified vLLM 0.33.0 causal worker, enable `--systemone-serial` or set `DYN_VLLM_SYSTEMONE_SERIAL=true`, together with `--max-num-seqs=1` and `--logprobs-mode=raw_logprobs`. The worker opt-in defaults to `false`; `--no-systemone-serial` overrides an enabled environment setting. It does not change engine scheduling settings, and incompatible profiles fail worker startup. Without the opt-in, ordinary vLLM workers do not advertise decision capability or change model-discovery checksums for decision support. The frontend flag remains independently required to expose the APIs.
+For a vLLM causal worker, enable `--systemone-serial` or set `DYN_VLLM_SYSTEMONE_SERIAL=true`, together with `--max-num-seqs=1` and `--logprobs-mode=raw_logprobs`. The worker opt-in defaults to `false`; `--no-systemone-serial` overrides an enabled environment setting. It does not change engine scheduling settings, and incompatible profiles fail worker startup. Without the opt-in, ordinary vLLM workers do not advertise decision capability or change model-discovery checksums for decision support. The frontend flag remains independently required to expose the APIs.
 
-The vLLM profile rejects forward-pass instrumentation enabled by `DYN_FORWARDPASS_METRIC_PORT`, `--fpm-trace`, or `DYN_FPM_TRACE`, including operator-injected settings. Startup also verifies installed cache-accounting source files against the qualified vLLM 0.33.0 release; patches to those files require requalification. Each question generates one internal engine token, so `usage.output_tokens` equals the question count in either public contract. SGLang's non-generating profile reports zero output tokens.
+The vLLM profile rejects forward-pass instrumentation enabled by `DYN_FORWARDPASS_METRIC_PORT`, `--fpm-trace`, or `DYN_FPM_TRACE`, including operator-injected settings. Each question generates one internal engine token, so `usage.output_tokens` equals the question count in either public contract. SGLang's non-generating profile reports zero output tokens.
 
 The Dynamo Kubernetes operator sets `DYN_FORWARDPASS_METRIC_PORT` on every worker, and a DynamoGraphDeployment (DGD) cannot unset it. Operator-managed vLLM workers therefore cannot use this decision profile yet. Run the qualified profile outside operator management; operator support requires a separate change to forward-pass instrumentation.
 
@@ -995,6 +995,28 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/videos/generations` | Video generation |
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
+
+### Log-probability limits
+
+`top_logprobs` on `/v1/chat/completions` and `/v1/responses`, and `logprobs` on
+`/v1/completions`, accept counts from 0 to 20 by default. A worker can publish
+its engine's own limit as `max_logprobs` in the model's runtime data, and the
+frontend then uses that limit for the model, whether it is above or below 20:
+
+- `/v1/chat/completions` and `/v1/completions` return `400` for a larger count.
+- `/v1/responses` lowers a larger count to the limit and reports the lowered
+  value in the response.
+
+The frontend uses the smallest limit among the model's workers, and a worker
+that publishes none counts as 20. The request fields are 8-bit, so the frontend
+rejects a count above 255 when it parses the request, whatever the workers
+publish.
+
+The vLLM worker (`dynamo.vllm`) publishes the engine's `--max-logprobs`. With
+`--max-logprobs -1` (no cap) the frontend accepts up to 255 entries per token,
+and response size grows with the count. Other workers publish no limit. To
+publish one from a custom backend, see
+[Writing unified backends](../../developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md).
 
 ### Image API Compatibility
 

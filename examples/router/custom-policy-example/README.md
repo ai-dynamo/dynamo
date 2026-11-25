@@ -24,7 +24,7 @@ Declare `WorkerInputs::CACHE` to read cache data through `candidate.cache()` (fi
 
 Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, that component receives `None`, even if another component requested it. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
 
-Declare `plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, and import that module's `ResidentBlocks` trait to read `resident_blocks()` from a candidate, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer holds for that worker rank, including cached blocks no running request uses, as of the last event the indexer applied. Without the declaration, with a remote indexer, or for a rank the indexer has held no blocks for or has removed, it returns `None`; a cleared rank returns `0`. The `experimental` module has no compatibility guarantee.
+Declare `plugins::experimental::resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, and import that module's `ResidentBlocks` trait to read `resident_blocks()` from a candidate, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer holds for that worker rank, including cached blocks no running request uses, as of the last event the indexer applied. Without the declaration, with a remote indexer, or for a rank the indexer has held no blocks for or has removed, it returns `None`; a cleared rank returns `0`. The `experimental` module has no compatibility guarantee.
 
 ### Read Experimental Decode Progress
 
@@ -33,10 +33,10 @@ signal. The declaration enables collection. Import the extension alongside the
 plugin API:
 
 ```rust
-use dynamo_kv_router::plugins::prelude::WorkerInputView;
-use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+use dynamo_kv_router::plugins::experimental::decode_progress::{
     DECODE_PROGRESS, DecodeProgressByRow,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerInputView;
 use std::time::Duration;
 
 // Return DECODE_PROGRESS from the picker's required_worker_inputs().
@@ -62,9 +62,9 @@ for fields and missing-data behavior.
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
-The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `info().session_context().input_trigger()`.
 
-Custom filters, scorers, and pickers can also read opaque agent headers through `session_context().agent_headers()`, without an additional `WorkerInputs` group. Header values are untrusted observations for the current request. A missing key means no observation was captured. The map preserves unknown names within supported header families and repeated values; plugins own any parsing and cross-agent normalization. See [Captured Agent Headers](../../../docs/fern/pages/use-cases/agents/session-ids.mdx#agent-headers) for capture rules and limits.
+Custom filters, scorers, and pickers can also read opaque agent headers through `info().session_context().agent_headers()`, without an additional `WorkerInputs` group. Header values are untrusted observations for the current request. A missing key means no observation was captured. The map preserves unknown names within supported header families and repeated values; plugins own any parsing and cross-agent normalization. See [Captured Agent Headers](../../../docs/fern/pages/use-cases/agents/session-ids.mdx#agent-headers) for capture rules and limits.
 
 The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
 
@@ -132,7 +132,7 @@ fn provider(
     }
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |config, worker_type, _partition| {
+    Ok(Arc::new(move |context| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter {
                 min_device_overlap_blocks,
@@ -140,8 +140,7 @@ fn provider(
         ];
 
         WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
-            worker_type.as_str(),
+            context.worker_type().as_str(),
             filters,
             vec![Box::new(ActiveRequestsScorer)],
             Box::new(RequestAwarePicker),
@@ -150,7 +149,7 @@ fn provider(
 }
 ```
 
-`worker_type` is a typed `WorkerType`. `WorkerSelectionPolicy` accepts a static worker label for its routing logs, so `as_str()` converts only at the constructor boundary. Match on the enum before this conversion when each role needs different behavior.
+`context.worker_type()` is a typed `WorkerType`. `WorkerSelectionPolicy` accepts a static worker label for its routing logs, so `as_str()` converts only at the constructor boundary. Match on the enum before this conversion when each role needs different behavior.
 
 The provider and factory have different lifetimes:
 
@@ -159,7 +158,7 @@ The provider and factory have different lifetimes:
 3. Dynamo calls the factory once for each model and routing-group partition.
 4. Each factory call creates a new filter, scorer, and picker set for that partition.
 
-The factory also receives the typed `WorkerType` role. Hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use the partition value when models or routing groups need separate policy state.
+The factory receives one `WorkerSelectionPolicyContext`. `context.worker_type()` is the typed `WorkerType` role: hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use `context.partition()` when models or routing groups need separate policy state. `context.selection_config()` holds the scoring and sampling settings of the model that partition serves. Read a setting with the accessor of its name, as in `context.selection_config().router_temperature()`.
 
 ## 4. Register the Policy Type
 
@@ -296,7 +295,7 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 - Prove that filter failures, all-filtered candidate sets, scorer failures, and invalid picker rows do not reserve a worker.
 - Benchmark stateful or input-heavy policies at the expected worker count.
 
-The [custom routing API reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) lists the available context and worker signals.
+The [custom routing API reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) lists the available request and worker signals.
 
 ## Try the Policies End to End With Mocker
 

@@ -26,6 +26,7 @@ import (
 	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,7 +66,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 		}
 		wasModified, syncedDCD, err := commoncontroller.SyncResource(ctx, &syncer, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 			return dcd, false, nil
-		})
+		}, commoncontroller.WithPreservedListOrder(compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations)))
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to sync non-DisaggregatedSet DynamoComponentDeployment %s: %w", dcd.Name, err)
 		}

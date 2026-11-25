@@ -27,12 +27,15 @@ cryptography>=50.0.0
 # to the current patch release. dnspython has no required dependencies.
 dnspython==2.9.2
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
-# Refresh the upstream image's bundled lmcache to the tested patch release.
-# Pinned exactly: the install is --no-deps, so a later 0.5.x could add a
-# requirement the image never gets. 0.5.6 adds one requirement,
-# grpcio-observability. lmcache imports it behind an ImportError guard, so the
-# image runs without it, but `pip check` lists it as missing. CUDA only:
-# stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
+# Held at 0.5.6: 0.5.7.post1 moved the in-process adapter that vLLM's
+# LMCacheConnectorV1 imports and 0.5.8rc1 removed it. The CUDA image adapts 0.5.6
+# to vLLM 0.34 with deps/vllm/patch_lmcache.py; revisit both when an LMCache
+# release supports vLLM 0.34. Pinned exactly: the install
+# is --no-deps, so a later 0.5.x could add a requirement the image never gets.
+# 0.5.6 adds one requirement, grpcio-observability. lmcache imports it behind an
+# ImportError guard, so the image runs without it, but `pip check` lists it as
+# missing. CUDA only: stripped for the XPU and CPU images in
+# vllm_runtime.Dockerfile.
 lmcache==0.5.6
 # Refresh the upstream image's bundled mooncake wheel: older builds vendor a
 # stale Go dependency set inside libetcd_wrapper.so, and current wheels carry

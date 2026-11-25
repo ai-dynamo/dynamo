@@ -11,7 +11,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use filter::MinimumDeviceOverlapFilter;
 use picker::{DecodePicker, PrefillPicker, UnsupportedWorkerTypePicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};
@@ -34,16 +34,12 @@ fn validate_min_device_overlap_blocks(
 }
 
 /// Builds the complete policy used by prefill routes.
-fn create_prefill_policy(
-    config: &SelectionConfig,
-    min_device_overlap_blocks: f64,
-) -> WorkerSelectionPolicy {
+fn create_prefill_policy(min_device_overlap_blocks: f64) -> WorkerSelectionPolicy {
     let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
         min_device_overlap_blocks,
     })];
 
     WorkerSelectionPolicy::new_with_filters(
-        config.clone(),
         WorkerType::Prefill.default_selector_label(),
         filters,
         vec![Box::new(PrefillLoadScorer)],
@@ -52,16 +48,12 @@ fn create_prefill_policy(
 }
 
 /// Builds the complete policy used by decode routes.
-fn create_decode_policy(
-    config: &SelectionConfig,
-    min_device_overlap_blocks: f64,
-) -> WorkerSelectionPolicy {
+fn create_decode_policy(min_device_overlap_blocks: f64) -> WorkerSelectionPolicy {
     let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
         min_device_overlap_blocks,
     })];
 
     WorkerSelectionPolicy::new_with_filters(
-        config.clone(),
         WorkerType::Decode.default_selector_label(),
         filters,
         vec![Box::new(DecodeLoadScorer)],
@@ -72,16 +64,11 @@ fn create_decode_policy(
 /// Selects a policy from the routing stage supplied by the embedded frontend.
 ///
 /// Discovery has already scoped the worker pool before the factory receives this stage.
-fn create_policy(
-    config: &SelectionConfig,
-    worker_type: WorkerType,
-    min_device_overlap_blocks: f64,
-) -> WorkerSelectionPolicy {
+fn create_policy(worker_type: WorkerType, min_device_overlap_blocks: f64) -> WorkerSelectionPolicy {
     match worker_type {
-        WorkerType::Prefill => create_prefill_policy(config, min_device_overlap_blocks),
-        WorkerType::Decode => create_decode_policy(config, min_device_overlap_blocks),
+        WorkerType::Prefill => create_prefill_policy(min_device_overlap_blocks),
+        WorkerType::Decode => create_decode_policy(min_device_overlap_blocks),
         unsupported => WorkerSelectionPolicy::new(
-            config.clone(),
             unsupported.as_str(),
             Vec::new(),
             Box::new(UnsupportedWorkerTypePicker::new(unsupported)),
@@ -96,8 +83,8 @@ fn provider(
     validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |config, worker_type, _partition| {
-        create_policy(config, worker_type, min_device_overlap_blocks)
+    Ok(Arc::new(move |context| {
+        create_policy(context.worker_type(), min_device_overlap_blocks)
     }))
 }
 
@@ -110,60 +97,9 @@ pub fn register(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use dynamo_kv_router::plugins::prelude::*;
-    use dynamo_scheduler::host::WorkerSelectionInput;
-    use dynamo_scheduler::host::WorkerSelector;
+    use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase, SelectionCaseError};
 
     use super::*;
-
-    struct TestWorker;
-
-    impl WorkerConfigLike for TestWorker {
-        fn data_parallel_start_rank(&self) -> u32 {
-            0
-        }
-
-        fn data_parallel_size(&self) -> u32 {
-            1
-        }
-
-        fn max_num_batched_tokens(&self) -> Option<u64> {
-            None
-        }
-
-        fn total_kv_blocks(&self) -> Option<u64> {
-            Some(1024)
-        }
-    }
-
-    fn request() -> SchedulingRequest {
-        SchedulingRequest {
-            accounting_attribution: Default::default(),
-            mode: ScheduleMode::QueryOnly { request_id: None },
-            token_seq: None,
-            isl_tokens: 16,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
-            router_config_override: None,
-            track_prefill_tokens: true,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
-            worker_loads: Default::default(),
-            resp_tx: None,
-        }
-    }
 
     #[test]
     fn validates_min_device_overlap_blocks() {
@@ -175,29 +111,20 @@ mod tests {
 
     #[test]
     fn creates_each_supported_worker_policy() {
-        let config = SelectionConfig::default();
-        create_policy(&config, WorkerType::Prefill, 0.0);
-        create_policy(&config, WorkerType::Decode, 0.0);
+        create_policy(WorkerType::Prefill, 0.0);
+        create_policy(WorkerType::Decode, 0.0);
     }
 
     #[test]
     fn unsupported_worker_types_return_selection_errors() {
-        let workers = HashMap::from([(0, TestWorker)]);
-        let request = request();
+        let case = SelectionCase::new(16, 16).worker(0, CaseWorker::new().total_kv_blocks(1024));
 
         for worker_type in [WorkerType::Aggregated, WorkerType::Encode] {
-            let policy = create_policy(&SelectionConfig::default(), worker_type, 0.0);
-            let error = policy
-                .select_worker(WorkerSelectionInput::configured(
-                    &workers,
-                    &request,
-                    request.eligibility(),
-                    16,
-                ))
-                .unwrap_err();
+            let policy = create_policy(worker_type, 0.0);
+            let error = case.select(&policy).unwrap_err();
             assert!(matches!(
                 error,
-                KvSchedulerError::WorkerSelectionPolicy(WorkerSelectionPolicyError::Failed(message))
+                SelectionCaseError::Policy(WorkerSelectionPolicyError::Failed(message))
                     if message.contains(worker_type.as_str())
             ));
         }

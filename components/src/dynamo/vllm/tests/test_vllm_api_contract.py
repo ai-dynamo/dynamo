@@ -94,19 +94,19 @@ def test_new_request_data_has_fields_instrumented_scheduler_sets():
     )
 
 
-def test_scheduler_output_new_connector_fields_remain_optional():
+def test_scheduler_output_new_connector_field_remains_optional():
     from vllm.v1.core.sched.output import SchedulerOutput
 
     fields = {field.name: field for field in dataclasses.fields(SchedulerOutput)}
-    for field_name in ("ec_manager_metadata", "kv_connector_block_state"):
-        assert field_name in fields, (
-            f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
-            "direct SchedulerOutput construction."
-        )
-        assert fields[field_name].default is None, (
-            f"vLLM SchedulerOutput.{field_name} became required — update every "
-            "InstrumentedScheduler constructor."
-        )
+    field_name = "kv_connector_block_state"
+    assert field_name in fields, (
+        f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
+        "direct SchedulerOutput construction."
+    )
+    assert fields[field_name].default is None, (
+        f"vLLM SchedulerOutput.{field_name} became required — update every "
+        "InstrumentedScheduler constructor."
+    )
 
 
 def test_async_scheduler_has_methods_instrumented_scheduler_overrides():

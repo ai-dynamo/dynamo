@@ -1,49 +1,49 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Public filter, scorer, and picker contracts and their input signals.
+//! The worker-selection plugin API: everything a filter, scorer, or picker names, in one
+//! import.
 //!
-//! The stage lives in `dynamo-worker-selection`; this module re-exports it at the paths
-//! plugins and hosts already name and adds what only the composed router knows: the
-//! policy factory keyed by routing partition, the host's instance config, the registry,
-//! and the kernel's config- and projection-derived row columns.
+//! ```
+//! use dynamo_kv_router::plugins::worker_selection::*;
+//! ```
+//!
+//! Stability and scope are those of [`super`]. The stage lives in `dynamo-worker-selection`;
+//! what only a routing host or the scheduler names from it is in [`super::host`] and in that
+//! crate's `host` module, not here.
 
-mod config;
+pub(crate) mod config;
 
-#[allow(deprecated)]
-pub use dynamo_worker_selection::WorkerTransferInput;
-pub use dynamo_worker_selection::experimental;
-/// The selection slice of the router config, with its defaults and validators.
-pub mod selection_config {
-    pub use dynamo_worker_selection::{
-        SelectionConfig, SharedCacheType, default_decode_active_request_weight,
-        default_disk_cache_hit_weight, default_host_cache_hit_weight,
-        default_overlap_score_credit_decay, default_prefill_load_scale,
-        validate_finite_non_negative, validate_overlap_score_credit, validate_range,
-    };
-}
+// The three traits a policy is built from, the policy they assemble into, and the factory
+// that creates one policy per routing partition.
+pub use dynamo_scheduler::WorkerSelectionPolicyFactory;
+pub use dynamo_worker_selection::{
+    SelectionConfig, SharedCacheType, WorkerFilter, WorkerPicker, WorkerScorer,
+    WorkerSelectionPolicy, WorkerSelectionPolicyContext, WorkerSelectionPolicyError,
+};
+
+// Parameters a policy lets an operator change while it runs. The update and the snapshot are
+// here, although a host applies them, so that a policy's tests can exercise its builder
+// through `WorkerSelectionPolicy::update_runtime_config`.
+pub use dynamo_worker_selection::{
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
+
+// The request a policy reads.
+pub use dynamo_session_affinity::{
+    MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, WorkerAffinityTarget,
+};
+pub use dynamo_worker_selection::{SharedCacheHits, WorkerSelectionRequest};
+
+// The table a picker reads: the surviving candidates with their costs.
+pub use dynamo_worker_selection::{ScoredWorkerCandidate, WorkerCacheInputs, WorkerInputView};
+
+// Registration: the parameters a provider is built from, and its errors.
 pub use super::registry::{
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
-pub(crate) use config::RawWorkerSelectionConfig;
-pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
-pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
-pub use dynamo_scheduler::{
-    Commitments, KvCopyLocations, KvCopySource, WorkerCapacityExt, WorkerInfoExt,
-    WorkerLoadInputExt,
-};
-pub use dynamo_worker_selection::{
-    CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
-    HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,
-    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
-    ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
-    SelectionTraceSpec, SharedCacheHits, SharedCacheType, WorkerCacheData, WorkerCacheInput,
-    WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput,
-    WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError,
-};
 
-/// Factory that creates one worker-selection policy per routing partition.
-pub use dynamo_scheduler::WorkerSelectionPolicyFactory;
+// What both kinds share, so that this module is the one import a plugin needs. The names are
+// listed once, in `plugins::shared`.
+pub use super::shared::*;

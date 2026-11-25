@@ -279,6 +279,21 @@ impl Model {
             .any(|worker_set| worker_set.has_decode_engine())
     }
 
+    /// Largest log-probability count a request to this model may ask for: the
+    /// smallest limit among the WorkerSets that receive the count (decode,
+    /// and prefill, which gets the same request), so admission does not
+    /// depend on where the request is routed. The OpenAI limit when the
+    /// model has no such WorkerSet.
+    pub fn max_logprobs(&self) -> u8 {
+        self.worker_sets
+            .load()
+            .values()
+            .filter(|worker_set| worker_set.has_decode_engine() || worker_set.is_prefill_set())
+            .map(|worker_set| worker_set.max_logprobs())
+            .min()
+            .unwrap_or(crate::protocols::openai::validate::MAX_TOP_LOGPROBS)
+    }
+
     /// Check if this model tracks prefill (any WorkerSet is a prefill set).
     pub fn has_prefill(&self) -> bool {
         self.worker_sets
@@ -1540,6 +1555,73 @@ mod tests {
                 .unwrap();
             assert!(Arc::ptr_eq(&engine, &flagged_engine));
         }
+    }
+
+    #[test]
+    fn max_logprobs_is_the_smallest_limit_among_admitted_workers() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use crate::protocols::openai::validate::MAX_TOP_LOGPROBS;
+        let card = |published: Option<serde_json::Value>| {
+            let mut card = ModelDeploymentCard::default();
+            if let Some(published) = published {
+                card.runtime_config
+                    .runtime_data
+                    .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), published);
+            }
+            card
+        };
+        let set = |namespace: &str, published: Option<serde_json::Value>, decode: bool| {
+            let mut ws = WorkerSet::new(
+                namespace.to_string(),
+                format!("{namespace}-sum"),
+                card(published),
+            );
+            if decode {
+                ws.chat_engine = Some(make_test_chat_engine());
+            }
+            Arc::new(ws)
+        };
+
+        // What one worker's card publishes. The request fields are u8, so a
+        // larger limit saturates. Anything but a non-negative integer counts
+        // as not published.
+        assert_eq!(set("a", None, true).max_logprobs(), MAX_TOP_LOGPROBS);
+        assert_eq!(set("a", Some(32.into()), true).max_logprobs(), 32);
+        assert_eq!(set("a", Some(151_936.into()), true).max_logprobs(), u8::MAX);
+        for malformed in [serde_json::json!("32"), serde_json::json!(-1)] {
+            assert_eq!(
+                set("a", Some(malformed), true).max_logprobs(),
+                MAX_TOP_LOGPROBS
+            );
+        }
+
+        // Within a set the smallest admitted worker wins, and a worker that
+        // publishes nothing counts as the default. A LoRA adapter served
+        // through the set follows it.
+        let raised = set("raised", Some(32.into()), true);
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".to_string(),
+            max_gpu_lora_count: None,
+        });
+        let adapter = raised.adapter_view(adapter_card);
+        raised.update_max_logprobs([card(Some(32.into())), card(None)].iter());
+        assert_eq!(raised.max_logprobs(), MAX_TOP_LOGPROBS);
+        assert_eq!(adapter.max_logprobs(), MAX_TOP_LOGPROBS);
+        raised.update_max_logprobs([card(Some(32.into()))].iter());
+        assert_eq!(raised.max_logprobs(), 32);
+        assert_eq!(adapter.max_logprobs(), 32);
+
+        // Across a model's sets the smallest limit wins too. A prefill set
+        // counts: it receives the same request.
+        let model = Model::new("logprobs".to_string());
+        assert_eq!(model.max_logprobs(), MAX_TOP_LOGPROBS);
+        model.add_worker_set("raised".to_string(), raised);
+        assert_eq!(model.max_logprobs(), 32);
+        model.add_worker_set("higher".to_string(), set("higher", Some(64.into()), true));
+        assert_eq!(model.max_logprobs(), 32);
+        model.add_worker_set("prefill".to_string(), set("prefill", Some(5.into()), false));
+        assert_eq!(model.max_logprobs(), 5);
     }
 
     fn systemone_worker_set(

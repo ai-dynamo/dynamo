@@ -552,9 +552,11 @@ def image_video_processor(monkeypatch):
     PIL image and whose input processor asks for ``video_format`` video (None:
     no preference).
 
-    The test media URLs are link-local. The processor reads the URL policy when
-    it is built, so internal URLs are allowed before any processor is built."""
+    The test media URLs are link-local ``http://`` URLs. The processor reads the
+    URL policy when it is built, so remote and internal URLs are allowed before
+    any processor is built."""
     monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "1")
 
     def make(video_format: str | None, model_type: str = "multimodal"):
         processor = MultimodalRequestProcessor(
@@ -619,35 +621,40 @@ def _request(image: bool = True, video: bool = True, video_first: bool = False) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["nvdec", "vendor"])
-async def test_video_next_to_an_image_is_handed_over_as_uint8(
-    path, image_video_processor, monkeypatch
+@pytest.mark.parametrize("image", [True, False], ids=["with_image", "video_only"])
+async def test_video_is_handed_over_as_uint8(
+    path, image, image_video_processor, monkeypatch
 ) -> None:
-    """Qwen3-VL rescales images and videos together and rejects a PIL image
-    next to float [0,1] video frames. With an image in the request, videos go
-    over as the uint8 (N, H, W, 3) array the model asks for, holding exactly
-    the decoded pixels; the image and the metadata are untouched."""
-    processor, image = image_video_processor("np")
+    """Videos go over as the uint8 (N, H, W, 3) array the model asks for,
+    holding exactly the decoded pixels, with or without an image, as
+    trtllm-serve sends them, so a clip reaches the model in the same form in
+    both kinds of request. Next to an image, Qwen3-VL also needs this: it
+    rescales images and videos together and rejects a PIL image next to float
+    [0,1] video frames. The image and the metadata are untouched."""
+    processor, pil_image = image_video_processor("np")
     frames_u8 = _decoded_frames()
     source = _pt_video(frames_u8)
     _route_video(monkeypatch, path, source)
 
     processed = await processor.process_openai_request(
-        _request(), embeddings=None, ep_disaggregated_params=None
+        _request(image=image), embeddings=None, ep_disaggregated_params=None
     )
 
     mm_data = processed["multi_modal_data"]
-    assert mm_data["image"] == [image]
+    assert mm_data.get("image") == ([pil_image] if image else None)
     (video,) = mm_data["video"]
     assert isinstance(video.frames, np.ndarray)
     assert video.frames.dtype == np.uint8
     assert np.array_equal(video.frames, frames_u8)
     assert video.metadata == source.metadata
     assert isinstance(source.frames[0], torch.Tensor)  # the input is not modified
+    assert ("mm_item_order" in processed) == image
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("image", [True, False], ids=["with_image", "video_only"])
 async def test_video_conversion_runs_off_the_event_loop(
-    image_video_processor, monkeypatch
+    image, image_video_processor, monkeypatch
 ) -> None:
     """Converting a clip takes CPU time that grows with its frame count, so it
     must not hold up other requests on the worker's event loop."""
@@ -662,7 +669,7 @@ async def test_video_conversion_runs_off_the_event_loop(
     monkeypatch.setattr(mmp, "_video_frames_to_uint8", spy)
 
     await processor.process_openai_request(
-        _request(), embeddings=None, ep_disaggregated_params=None
+        _request(image=image), embeddings=None, ep_disaggregated_params=None
     )
 
     assert threads and threading.get_ident() not in threads
@@ -684,10 +691,10 @@ async def test_image_only_request_keeps_pil_images(
 
 
 @pytest.mark.asyncio
-async def test_video_only_request_keeps_float_frames(
+async def test_video_only_request_keeps_float_frames_without_a_preference(
     image_video_processor, monkeypatch
 ) -> None:
-    processor, _ = image_video_processor("np")
+    processor, _ = image_video_processor(None)
     source = _pt_video(_decoded_frames())
     _route_video(monkeypatch, "nvdec", source)
 
@@ -695,9 +702,8 @@ async def test_video_only_request_keeps_float_frames(
         _request(image=False), embeddings=None, ep_disaggregated_params=None
     )
 
-    assert processed["multi_modal_data"]["video"] == [source]
+    assert processed["multi_modal_data"]["video"][0] is source
     assert "mm_item_order" not in processed
-    processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -784,15 +790,17 @@ async def test_image_and_video_request_keeps_float_frames_for_other_models(
 
 
 def test_video_frames_to_uint8_round_trips_every_value() -> None:
-    """Every uint8 value survives the 1/255 scaling both decode paths apply."""
-    levels = np.arange(256, dtype=np.uint8).reshape(1, 16, 16, 1)
-    frames_u8 = np.repeat(levels, 3, axis=3)
+    """Every uint8 value survives the 1/255 scaling both decode paths apply,
+    and each frame lands in its own place in the output."""
+    # 360 values a frame: four distinct frames (384, with w=16, would repeat
+    # every other one), and every value in each channel.
+    frames_u8 = _decoded_frames(n=4, h=8, w=15)
     source = _pt_video(frames_u8)
     before = [f.clone() for f in source.frames]
 
     video = mmp._video_frames_to_uint8(source)
 
-    assert video.frames.shape == (1, 16, 16, 3)
+    assert video.frames.shape == (4, 8, 15, 3)
     assert np.array_equal(video.frames, frames_u8)
     assert video.metadata == source.metadata and video.audio is source.audio
     assert all(torch.equal(a, b) for a, b in zip(before, source.frames))
