@@ -39,8 +39,9 @@ func TestProjectConsumerContract(t *testing.T) {
 		DeletionTimestamp: &now,
 		ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
 		Spec: corev1.PodSpec{
-			NodeName:      "node-a",
-			SchedulerName: "lpx-scheduler",
+			NodeName:        "node-a",
+			SchedulerName:   "lpx-scheduler",
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: "grove.io/podgang-pending-creation"}, {Name: "lpx.nvidia.com/fabric-pod-pending"}},
 			ResourceClaims: []corev1.PodResourceClaim{{
 				Name:              "lpu-partition",
 				ResourceClaimName: new("lpu-partition-0"),
@@ -201,6 +202,11 @@ func TestProjectConsumerContract(t *testing.T) {
 			Name:          gms.ServerContainerName,
 			RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 		}}, got.Spec.InitContainers)
+	})
+	t.Run("LPX Cyborg placement retains the scheduling gates", func(t *testing.T) {
+		assert.Equal(t, []corev1.PodSchedulingGate{
+			{Name: "grove.io/podgang-pending-creation"}, {Name: "lpx.nvidia.com/fabric-pod-pending"},
+		}, got.Spec.SchedulingGates)
 	})
 	t.Run("unused heavyweight fields are removed", func(t *testing.T) {
 		assert.Nil(t, got.ManagedFields)

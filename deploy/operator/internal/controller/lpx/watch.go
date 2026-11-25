@@ -63,12 +63,15 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("register LPR owner UID index: %w", err)
 	}
 
-	return ctrlBuilder.Owns(&corev1.Service{}).
+	ctrlBuilder = ctrlBuilder.Owns(&corev1.Service{}).
 		Owns(&grovev1alpha1.PodCliqueSet{}).
 		Watches(&grovev1alpha1.PodClique{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliquePredicate())).
 		Watches(&grovev1alpha1.PodCliqueScalingGroup{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliqueScalingGroupPredicate())).
 		Watches(&lpxv1alpha1.LPUPipelineRequest{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment)).
-		Complete(r)
+		// Fabric-pod placement pins each Cyborg Pod that Grove creates.
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(predicate.NewPredicateFuncs(hasCyborgPlacement)))
+
+	return ctrlBuilder.Complete(r)
 }
 
 func pipelineRequestOwnerUID(obj client.Object) []string {
@@ -206,4 +209,11 @@ func podCliqueScalingGroupPredicate() predicate.Funcs {
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
+}
+
+// hasCyborgPlacement selects the Cyborg PodCliques, and their Pods, that this
+// controller places by fabric pod. Grove copies the label of the PodClique
+// template to the PodClique and to its Pods.
+func hasCyborgPlacement(obj client.Object) bool {
+	return obj.GetLabels()[cyborgPlacementLabel] != ""
 }

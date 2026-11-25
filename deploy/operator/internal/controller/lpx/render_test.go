@@ -44,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
@@ -1323,4 +1324,138 @@ func independentXTUnits(count int) []testfixture.Unit {
 }
 func singleHXUnit() []testfixture.Unit {
 	return []testfixture.Unit{{Reservations: []testfixture.Reservation{{IDs: []uint32{1}, HX: []uint8{1, 1, 1}}}}}
+}
+
+func TestLPXCyborgPlacementLabelAndGate(t *testing.T) {
+	placementGate, quotaGate := corev1.PodSchedulingGate{Name: cyborgPlacementGate}, corev1.PodSchedulingGate{Name: "example.com/quota"}
+
+	for _, tc := range []struct {
+		name        string
+		annotations map[string]string
+		labels      map[string]string
+		gates       []corev1.PodSchedulingGate
+		allLocal    bool
+		want        string
+		wantGates   []corev1.PodSchedulingGate
+		wantErr     string
+	}{
+		{name: "a workload that does not select the placement has no label and no gate"},
+		{
+			name:        "a Cyborg that runs every partition on its GPU has no LPU fabric pod to follow",
+			annotations: map[string]string{cyborgPlacementAnnotation: cyborgPlacementPerFabricPod},
+			allLocal:    true,
+		},
+		{
+			name:        "an unknown placement mode is an error",
+			annotations: map[string]string{cyborgPlacementAnnotation: "per-rack"},
+			wantErr:     "per-rack",
+		},
+		{
+			name:        "the annotation on the conductor role marks and gates the Cyborg Pods",
+			annotations: map[string]string{cyborgPlacementAnnotation: cyborgPlacementPerFabricPod},
+			want:        cyborgPlacementPerFabricPod,
+			wantGates:   []corev1.PodSchedulingGate{placementGate},
+		},
+		{
+			name:        "a placed workload loses the authored labels that only this controller sets, and gets the gate one time",
+			annotations: map[string]string{cyborgPlacementAnnotation: cyborgPlacementPerFabricPod},
+			labels:      map[string]string{cyborgFabricPodLabel: "a", cyborgFabricPodRankLabel: "0", cyborgReplicaIndexLabel: "0", "authored": "kept"},
+			gates:       []corev1.PodSchedulingGate{placementGate, quotaGate},
+			want:        cyborgPlacementPerFabricPod,
+			wantGates:   []corev1.PodSchedulingGate{quotaGate, placementGate},
+		},
+		{
+			name: "an authored label or gate does not mark or hold Pods that this controller does not place",
+			labels: map[string]string{
+				cyborgPlacementLabel: cyborgPlacementPerFabricPod, cyborgFabricPodLabel: "a",
+				cyborgFabricPodRankLabel: "0", cyborgReplicaIndexLabel: "0", "authored": "kept",
+			},
+			gates:     []corev1.PodSchedulingGate{placementGate, quotaGate},
+			wantGates: []corev1.PodSchedulingGate{quotaGate},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			t.Log("Given a hybrid workload with the authored conductor annotations, labels and scheduling gates")
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+			conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+			conductor.PodTemplate.Annotations, conductor.PodTemplate.Labels = tc.annotations, tc.labels
+			conductor.PodTemplate.Spec.SchedulingGates = tc.gates
+			if tc.allLocal {
+				dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{
+					LocalPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
+				}
+			}
+			authored := conductor.PodTemplate.DeepCopy()
+			r := newLPXTestReconciler(t, registry, child, dgd)
+			workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+			require.NoError(t, err)
+
+			t.Log("When the controller renders the PodCliqueSet")
+			pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+
+			t.Log("Then only the Cyborg template of a placed workload has the placement label and the placement gate")
+			for _, clique := range pcs.Spec.Template.Cliques {
+				want := ""
+				if clique.Name == plans["lpx"].CyborgTemplate {
+					want = tc.want
+					require.Equal(t, tc.labels["authored"], clique.Labels["authored"], "authored labels reach the Cyborg template")
+					require.Equal(t, tc.wantGates, clique.Spec.PodSpec.SchedulingGates, "Grove copies the gates of the template to each Pod; only the pin removes the placement gate")
+				} else {
+					require.NotContains(t, clique.Spec.PodSpec.SchedulingGates, placementGate, "no controller removes the placement gate from a Pod of %s", clique.Name)
+				}
+				require.Equal(t, want, clique.Labels[cyborgPlacementLabel], clique.Name)
+				require.NotContains(t, clique.Labels, cyborgFabricPodLabel, "an authored fabric pod would make a new Pod look placed")
+				require.NotContains(t, clique.Labels, cyborgFabricPodRankLabel, "an authored rank would give each Pod of a fabric pod the same pipeline stage")
+				require.NotContains(t, clique.Labels, cyborgReplicaIndexLabel, "an authored replica index would give each Pod the same route and slots")
+			}
+			require.Equal(t, authored, conductor.PodTemplate, "rendering must not change the authored template")
+		})
+	}
+}
+
+func TestLPXCyborgPlacementRejectsCoherentUpdates(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Select per-fabric-pod placement together with the Coherent update strategy")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: cyborgPlacementPerFabricPod}
+	dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: string(grovev1alpha1.CoherentStrategy)}
+	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a"))
+	workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+	require.NoError(t, err)
+
+	t.Log("Report that Grove defers the Cyborg capacity that a replaced replica needs")
+	_, _, err = r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.ErrorContains(t, err, "Coherent update strategy")
+
+	t.Log("The other update strategies keep the placement")
+	dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = string(grovev1alpha1.RollingRecreateStrategy)
+	_, _, err = r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.NoError(t, err)
+}
+
+func TestLPXCyborgPlacementRejectsNamespaceRestrictedMode(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Select per-fabric-pod placement while the operator can read only one namespace")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: cyborgPlacementPerFabricPod}
+	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a"))
+	r.config.Namespace.Restricted = child.Namespace
+
+	t.Log("Report the missing Node access before a PodCliqueSet can create a Pod with the placement label")
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.ErrorContains(t, err, "namespace-restricted")
+	sets := &grovev1alpha1.PodCliqueSetList{}
+	require.NoError(t, r.List(ctx, sets))
+	require.Empty(t, sets.Items)
 }

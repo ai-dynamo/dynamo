@@ -142,9 +142,40 @@ func (r *graphReconciler) renderPodCliqueSet(
 		if serving == "" {
 			serving = plan.Agents[len(plan.Agents)-1].TemplateName
 		}
+
+		placed, err := cyborgPlacementApplies(dgd.GetComponentByName(groupName), plan)
+		if err != nil {
+			return nil, nil, err
+		}
+		if placed && r.config.Namespace.Restricted != "" {
+			return nil, nil, fmt.Errorf("component %q: annotation %s needs cluster-wide Node access, which namespace-restricted mode does not have",
+				groupName, cyborgPlacementAnnotation)
+		}
+
+		// Grove refuses replica changes during a Coherent update, but each replaced
+		// replica starts with the template count and needs a Cyborg Pod in every fabric pod.
+		if placed && dynamo.GroveCoherentUpdateSelected(pcs) {
+			return nil, nil, fmt.Errorf("component %q: annotation %s is not supported with the Coherent update strategy, which defers the Cyborg capacity that a replaced replica needs",
+				groupName, cyborgPlacementAnnotation)
+		}
+
 		for _, clique := range rendered.Cliques {
 			if token := deployment.Annotations[dynamo.LPXRestartAnnotation]; token != "" {
 				clique.Annotations[consts.RestartAnnotation] = token
+			}
+			// Only this controller sets the placement label, the placement gate and the
+			// labels of a pin. An authored label would make a new Pod look placed, and no
+			// controller removes an authored gate. Kubernetes accepts a gate only at Pod
+			// creation, so the gate of a placed Cyborg is in its template.
+			for _, label := range []string{cyborgPlacementLabel, cyborgFabricPodLabel, cyborgFabricPodRankLabel, cyborgReplicaIndexLabel} {
+				delete(clique.Labels, label)
+			}
+			clique.Spec.PodSpec.SchedulingGates = slices.DeleteFunc(slices.Clone(clique.Spec.PodSpec.SchedulingGates), func(gate corev1.PodSchedulingGate) bool {
+				return gate.Name == cyborgPlacementGate
+			})
+			if placed && clique.Name == plan.CyborgTemplate {
+				clique.Labels[cyborgPlacementLabel] = cyborgPlacementPerFabricPod
+				clique.Spec.PodSpec.SchedulingGates = append(clique.Spec.PodSpec.SchedulingGates, corev1.PodSchedulingGate{Name: cyborgPlacementGate})
 			}
 			delete(clique.Labels, dynamo.LPXServingLabel)
 			if clique.Name == serving {
