@@ -1558,15 +1558,7 @@ impl<
             _marker: PhantomData,
         }
     }
-}
 
-impl<
-    P: SequencePublisher + 'static,
-    C: WorkerConfigLike + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + 'static,
-    RF: OverlapScoresRefresh + Send + Sync + 'static,
-> SchedulerQueue<P, C, Sel, RF>
-{
     /// Install the observer for admitted selections that sacrifice KV overlap.
     ///
     /// Returns `false` when an observer is already installed.
