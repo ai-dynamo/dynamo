@@ -1426,12 +1426,6 @@ pub(crate) fn output_text_logprobs_to_events(entries: &[LogProb]) -> Vec<Respons
         .collect()
 }
 
-/// Lowers a Responses `top_logprobs` to `max`, the serving model's limit. The
-/// Responses API lowers an over-limit count instead of refusing the request.
-pub(crate) fn convert_top_logprobs(input: Option<u8>, max: u8) -> Option<u8> {
-    input.map(|x| x.min(max))
-}
-
 // ---------------------------------------------------------------------------
 // Chat Completions -> Responses API response conversion
 // ---------------------------------------------------------------------------
@@ -4438,18 +4432,6 @@ mod tests {
             panic!("expected function call");
         };
         assert_eq!(call.namespace.as_deref(), Some("agents"));
-    }
-
-    #[test]
-    fn test_convert_top_logprobs_clamped() {
-        assert_eq!(convert_top_logprobs(Some(5), 20), Some(5));
-        assert_eq!(convert_top_logprobs(Some(21), 20), Some(20));
-        assert_eq!(convert_top_logprobs(Some(255), 20), Some(20));
-        assert_eq!(convert_top_logprobs(None, 20), None);
-        // A model that publishes its own limit is lowered to that instead.
-        assert_eq!(convert_top_logprobs(Some(32), 32), Some(32));
-        assert_eq!(convert_top_logprobs(Some(33), 32), Some(32));
-        assert_eq!(convert_top_logprobs(Some(10), 5), Some(5));
     }
 
     #[test]

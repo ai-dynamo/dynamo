@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Any
 
-from dynamo.common.max_logprobs import publish_max_logprobs
+from dynamo.common.constants import MAX_LOGPROBS_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,9 @@ def publish_vllm_max_logprobs(runtime_config: Any, model_config: Any) -> None:
     if max_logprobs == -1:
         # vLLM's "no cap": it checks requests against the vocabulary size.
         max_logprobs = model_config.get_vocab_size()
-    publish_max_logprobs(runtime_config, max_logprobs)
+    runtime_config.set_engine_specific(
+        MAX_LOGPROBS_RUNTIME_KEY, json.dumps(max_logprobs)
+    )
 
 
 def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:

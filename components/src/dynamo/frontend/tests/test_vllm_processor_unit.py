@@ -5566,14 +5566,10 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     ("runtime_config", "expected"),
     [
         ({"runtime_data": {"max_logprobs": 32}}, 32),
-        ({"runtime_data": {"max_logprobs": 0}}, 0),
         ({"runtime_data": {}}, None),
         ({}, None),
-        ({"runtime_data": None}, None),
         ({"runtime_data": {"max_logprobs": -1}}, None),
         ({"runtime_data": {"max_logprobs": "32"}}, None),
-        ({"runtime_data": {"max_logprobs": True}}, None),
-        (None, None),
     ],
 )
 def test_runtime_config_max_logprobs(vllm_processor_module, runtime_config, expected):

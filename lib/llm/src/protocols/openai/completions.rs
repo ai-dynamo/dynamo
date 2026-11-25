@@ -639,7 +639,7 @@ impl NvCreateCompletionRequest {
         )?;
         // none for stream
         // none for stream_options
-        validate::validate_logprobs(self.inner.logprobs, max_logprobs)?;
+        validate::validate_max_logprobs("Logprobs", self.inner.logprobs, max_logprobs)?;
         // none for echo
         validate::validate_stop(&self.inner.stop)?;
         validate::validate_presence_penalty(self.inner.presence_penalty)?;

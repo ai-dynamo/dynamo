@@ -1007,10 +1007,13 @@ frontend then uses that limit for the model, whether it is above or below 20:
 - `/v1/responses` lowers a larger count to the limit and reports the lowered
   value in the response.
 
-The vLLM worker (`dynamo.vllm`) publishes the engine's `--max-logprobs`, so
-raising it there is enough. Other workers publish no limit and keep 20. When a
-model is served by several worker groups with different limits, the frontend
-uses the smallest. To publish a limit from a custom backend, see
+The frontend uses the smallest limit among the model's workers, and a worker
+that publishes none counts as 20. The request fields are 8-bit, so the frontend
+rejects a count above 255 when it parses the request, whatever the workers
+publish.
+
+The vLLM worker (`dynamo.vllm`) publishes the engine's `--max-logprobs`. Other
+workers publish no limit. To publish one from a custom backend, see
 [Writing unified backends](../../developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md).
 
 ### Image API Compatibility

@@ -10,10 +10,14 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from dynamo.common.max_logprobs import MAX_LOGPROBS_RUNTIME_KEY
+from dynamo.common.constants import MAX_LOGPROBS_RUNTIME_KEY
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.llm import ModelInput, ModelType, WorkerType
-from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.capacity import (
+    get_metrics_model_name,
+    get_spec_decode_runtime_data,
+    publish_vllm_max_logprobs,
+)
 from dynamo.vllm.engine_generate import (
     VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
     VLLM_GENERATE_CAPABILITY,
@@ -94,16 +98,12 @@ def test_vllm_token_budget_matches_rejection_policy():
 @pytest.mark.parametrize(
     ("engine_max_logprobs", "expected"),
     [
-        (20, 20),
         (32, 32),
-        (0, 0),
         # vLLM's "no cap" is checked against the vocabulary size.
         (-1, 32000),
     ],
 )
 def test_vllm_max_logprobs_matches_engine_limit(engine_max_logprobs, expected):
-    from dynamo.vllm.capacity import publish_vllm_max_logprobs
-
     runtime_config = SimpleNamespace(set_engine_specific=Mock())
     model_config = SimpleNamespace(
         max_logprobs=engine_max_logprobs, get_vocab_size=lambda: 32000

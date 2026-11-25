@@ -16,11 +16,11 @@ pub use dynamo_protocols::validation::openai::{
     MAX_BEST_OF, MAX_FREQUENCY_PENALTY, MAX_LOGIT_BIAS, MAX_N, MAX_PRESENCE_PENALTY,
     MAX_TEMPERATURE, MAX_TOP_LOGPROBS, MIN_BEST_OF, MIN_FREQUENCY_PENALTY, MIN_LOGIT_BIAS, MIN_N,
     MIN_PRESENCE_PENALTY, MIN_TEMPERATURE, MIN_TOP_LOGPROBS, validate_frequency_penalty,
-    validate_n, validate_presence_penalty, validate_temperature,
+    validate_n, validate_presence_penalty, validate_temperature, validate_top_logprobs,
 };
 pub use dynamo_protocols::validation::vllm::{
     MAX_LOGPROBS, MAX_MIN_P, MAX_TOP_P, MIN_LOGPROBS, MIN_MIN_P, MIN_TOP_P_EXCLUSIVE,
-    validate_min_p, validate_top_p,
+    validate_completion_logprobs as validate_logprobs, validate_min_p, validate_top_p,
 };
 
 use dynamo_runtime::config::{
@@ -842,35 +842,17 @@ pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow:
     Ok(())
 }
 
-/// Checks an optional log-probability count against `[min, max]`. None succeeds;
-/// a value outside the range returns a plain-text error without mutation.
-fn validate_logprobs_count(
-    count: Option<u8>,
-    min: u8,
-    max: u8,
-    label: &str,
-) -> Result<(), anyhow::Error> {
+/// Checks an optional log-probability count against `max`, the serving
+/// model's limit: 20 unless its workers publish their own `max_logprobs`. The
+/// library rules are fixed at 20, so this check is local. `label` names the
+/// field in the error (`Top_logprobs` or `Logprobs`).
+pub fn validate_max_logprobs(label: &str, count: Option<u8>, max: u8) -> Result<(), anyhow::Error> {
     if let Some(count) = count
-        && !(min..=max).contains(&count)
+        && count > max
     {
-        anyhow::bail!("{label} must be between {min} and {max}, got {count}");
+        anyhow::bail!("{label} must be between 0 and {max}, got {count}");
     }
     Ok(())
-}
-
-/// Checks the optional chat `top_logprobs` count against `[0, max]`. `max` is
-/// the serving model's limit: [`MAX_TOP_LOGPROBS`] unless its workers publish
-/// their own `max_logprobs`. The library rule is fixed at 20, so the check is
-/// local.
-pub fn validate_top_logprobs(top_logprobs: Option<u8>, max: u8) -> Result<(), anyhow::Error> {
-    validate_logprobs_count(top_logprobs, MIN_TOP_LOGPROBS, max, "Top_logprobs")
-}
-
-/// Checks the optional completions `logprobs` count against `[0, max]`. `max` is
-/// the serving model's limit: [`MAX_LOGPROBS`] unless its workers publish their
-/// own `max_logprobs`. The library rule is fixed at 20, so the check is local.
-pub fn validate_logprobs(logprobs: Option<u8>, max: u8) -> Result<(), anyhow::Error> {
-    validate_logprobs_count(logprobs, MIN_LOGPROBS, max, "Logprobs")
 }
 
 /// Checks the optional OpenAI `best_of` count [0, 20], then Dynamo's local
@@ -1322,32 +1304,31 @@ mod tests {
 
     #[test]
     fn validate_logprobs_matches_top_logprobs_limit() {
-        validate_logprobs(Some(MAX_TOP_LOGPROBS), MAX_LOGPROBS).unwrap();
-        let err = validate_logprobs(Some(MAX_TOP_LOGPROBS + 1), MAX_LOGPROBS).unwrap_err();
+        validate_logprobs(Some(MAX_TOP_LOGPROBS)).unwrap();
+        let err = validate_logprobs(Some(MAX_TOP_LOGPROBS + 1)).unwrap_err();
         assert!(err.to_string().contains("between 0 and 20"), "{err}");
     }
 
-    /// The limit is the serving model's, so both counts follow the maximum
-    /// they are given, above or below the default.
+    /// The limit is the serving model's, so the check follows the maximum it
+    /// is given, above or below the default, in the library rule's words.
     #[test]
-    fn logprobs_counts_follow_the_given_maximum() {
-        for max in [5, 20, 32, u8::MAX] {
+    fn validate_max_logprobs_follows_the_given_maximum() {
+        for max in [0, 5, MAX_TOP_LOGPROBS, 32, u8::MAX] {
             for accepted in [None, Some(0), Some(max)] {
-                validate_top_logprobs(accepted, max).unwrap();
-                validate_logprobs(accepted, max).unwrap();
+                validate_max_logprobs("Top_logprobs", accepted, max).unwrap();
             }
         }
         assert_eq!(
-            validate_top_logprobs(Some(33), 32).unwrap_err().to_string(),
+            validate_max_logprobs("Top_logprobs", Some(33), 32)
+                .unwrap_err()
+                .to_string(),
             "Top_logprobs must be between 0 and 32, got 33"
         );
         assert_eq!(
-            validate_logprobs(Some(33), 32).unwrap_err().to_string(),
-            "Logprobs must be between 0 and 32, got 33"
-        );
-        assert_eq!(
-            validate_top_logprobs(Some(6), 5).unwrap_err().to_string(),
-            "Top_logprobs must be between 0 and 5, got 6"
+            validate_max_logprobs("Logprobs", Some(21), MAX_LOGPROBS)
+                .unwrap_err()
+                .to_string(),
+            validate_logprobs(Some(21)).unwrap_err().to_string()
         );
     }
 
@@ -1577,11 +1558,11 @@ mod tests {
         }
 
         assert_plain_error(
-            validate_logprobs(Some(21), MAX_LOGPROBS),
+            validate_logprobs(Some(21)),
             "Logprobs must be between 0 and 20, got 21",
         );
         assert_plain_error(
-            validate_top_logprobs(Some(21), MAX_TOP_LOGPROBS),
+            validate_top_logprobs(Some(21)),
             "Top_logprobs must be between 0 and 20, got 21",
         );
         assert_plain_error(validate_n(Some(0)), "n must be between 1 and 128, got 0");

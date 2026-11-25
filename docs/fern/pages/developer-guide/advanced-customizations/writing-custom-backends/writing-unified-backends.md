@@ -309,11 +309,9 @@ engine's limit. An engine that returns more, or fewer, publishes the
 limit through `runtime_data`:
 
 ```python
-from dynamo.common.max_logprobs import MAX_LOGPROBS_RUNTIME_KEY
-
 return EngineConfig(
     model=self.model_name,
-    runtime_data={MAX_LOGPROBS_RUNTIME_KEY: 32},
+    runtime_data={"max_logprobs": 32},
 )
 ```
 

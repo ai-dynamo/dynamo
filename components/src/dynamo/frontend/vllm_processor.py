@@ -31,7 +31,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutp
 from vllm.v1.engine.parallel_sampling import ParentRequest
 
 from dynamo._internal import ModelDeploymentCard
-from dynamo.common.max_logprobs import read_max_logprobs
+from dynamo.common.constants import MAX_LOGPROBS_RUNTIME_KEY
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsSender,
@@ -464,7 +464,18 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
 
 def _runtime_config_max_logprobs(mdc: ModelDeploymentCard) -> int | None:
     """The log-probability limit the model's workers publish, if any."""
-    return read_max_logprobs(mdc.runtime_config())
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+
+    max_logprobs = runtime_data.get(MAX_LOGPROBS_RUNTIME_KEY)
+    if type(max_logprobs) is not int or max_logprobs < 0:
+        return None
+    return max_logprobs
 
 
 def _ensure_chat_template(

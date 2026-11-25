@@ -102,7 +102,8 @@ fn worker_set_key(
 }
 
 /// Refresh committed capability records without changing controller admission.
-fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+fn update_member_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+    worker_set.update_max_logprobs(members.iter().map(|member| &member.card));
     if let Some(admission) = &worker_set.image_edit_admission {
         admission.replace(members.iter().map(|member| {
             (
@@ -1312,7 +1313,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
-        update_image_edit_capabilities(&worker_set, members);
+        update_member_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1401,7 +1402,7 @@ impl ControllerHost for ModelWatcher {
             .get_committed_model(&key.model_name)
             .and_then(|model| model.get_worker_set(&key.worker_set_key))
         {
-            update_image_edit_capabilities(&worker_set, members);
+            update_member_capabilities(&worker_set, members);
         }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
@@ -1453,7 +1454,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
-        update_image_edit_capabilities(&worker_set, members);
+        update_member_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))

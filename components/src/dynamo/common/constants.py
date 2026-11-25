@@ -19,6 +19,10 @@ KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
     "router_hint_source_control_endpoints"
 )
 
+# Runtime-data key for the engine's log-probability limit. Must match
+# `MAX_LOGPROBS_RUNTIME_KEY` in `lib/llm/src/local_model/runtime_config.rs`.
+MAX_LOGPROBS_RUNTIME_KEY = "max_logprobs"
+
 
 class DisaggregationMode(Enum):
     """Disaggregation mode for LLM workers."""
