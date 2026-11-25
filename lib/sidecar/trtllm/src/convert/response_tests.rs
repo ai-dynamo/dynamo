@@ -115,6 +115,16 @@ fn engine_error_event_is_surfaced_as_error() {
     };
     let error = state.convert(error).expect_err("engine error must surface");
     assert!(error.to_string().contains("boom"));
+    let upstream = error.upstream_error().unwrap();
+    assert_eq!(upstream.message(), "boom");
+    assert_eq!(
+        upstream.error_type_name(),
+        Some("openengine.v1.EngineError")
+    );
+    assert_eq!(
+        upstream.code_value(),
+        Some((pb::ErrorCode::Internal as i32).to_string().as_str())
+    );
 }
 
 /// Cache hits are measured during the context phase, so a decode worker can
@@ -258,6 +268,26 @@ fn a_role_mismatch_names_the_misconfiguration() {
         error.to_string().contains("--disaggregation-mode"),
         "the error must name the flag the operator has to check: {error}"
     );
+    assert_eq!(
+        error.upstream_error().unwrap().message(),
+        "generation_only request on a context engine"
+    );
+}
+
+#[test]
+fn unfamiliar_engine_error_retains_its_received_code_and_message() {
+    let error = engine_error(pb::EngineError {
+        code: 9_999,
+        message: "new engine failure".into(),
+        retryable: false,
+    });
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(dynamo_backend_common::BackendError::Unknown)
+    );
+    let upstream = error.upstream_error().unwrap();
+    assert_eq!(upstream.message(), "new engine failure");
+    assert_eq!(upstream.code_value(), Some("9999"));
 }
 
 /// A handoff the decode engine cannot resolve is not migratable: the retry

@@ -405,6 +405,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(errors::_raise_routed_http_error, m)?)?;
+    m.add_function(wrap_pyfunction!(errors::_raise_dispatch_error, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -2225,9 +2226,12 @@ impl Client {
                         .round_robin(request_ctx)
                         .instrument(span)
                         .await
-                        .map_err(to_pyerr)?
+                        .map_err(errors::dispatch_error_to_pyerr)?
                 }
-                _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
+                _ => client
+                    .round_robin(request_ctx)
+                    .await
+                    .map_err(errors::dispatch_error_to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream::new(rx, annotated))
@@ -2259,9 +2263,12 @@ impl Client {
                         .random(request_ctx)
                         .instrument(span)
                         .await
-                        .map_err(to_pyerr)?
+                        .map_err(errors::dispatch_error_to_pyerr)?
                 }
-                _ => client.random(request_ctx).await.map_err(to_pyerr)?,
+                _ => client
+                    .random(request_ctx)
+                    .await
+                    .map_err(errors::dispatch_error_to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream::new(rx, annotated))
@@ -2296,12 +2303,12 @@ impl Client {
                         .device_aware_weighted(request_ctx)
                         .instrument(span)
                         .await
-                        .map_err(to_pyerr)?
+                        .map_err(errors::dispatch_error_to_pyerr)?
                 }
                 _ => client
                     .device_aware_weighted(request_ctx)
                     .await
-                    .map_err(to_pyerr)?,
+                    .map_err(errors::dispatch_error_to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream::new(rx, annotated))
@@ -2335,12 +2342,12 @@ impl Client {
                         .direct(request_ctx, instance_id)
                         .instrument(span)
                         .await
-                        .map_err(to_pyerr)?
+                        .map_err(errors::dispatch_error_to_pyerr)?
                 }
                 _ => client
                     .direct(request_ctx, instance_id)
                     .await
-                    .map_err(to_pyerr)?,
+                    .map_err(errors::dispatch_error_to_pyerr)?,
             };
 
             tokio::spawn(process_stream(stream, tx));

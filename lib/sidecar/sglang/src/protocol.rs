@@ -766,19 +766,37 @@ pub(crate) fn stream_error_to_dynamo(error: &pb::GenerateStreamError) -> DynamoE
         .map_or("SGLang reported an error without a body", |body| {
             body.message.as_str()
         });
-    coded_error("Generate", message, stream_error_code(error))
+    let mut mapped = coded_error("Generate", message, stream_error_code(error));
+    if let Some(body) = &error.error {
+        if let Some(kind) = &body.r#type
+            && let Some(upstream) = mapped.upstream_error.take()
+        {
+            mapped.upstream_error = Some(Box::new(upstream.error_type(kind)));
+        }
+    } else {
+        mapped.upstream_error = None;
+    }
+    mapped
 }
 
 /// Classify a gRPC error item or native HTTP error frame by its HTTP status:
 /// 499 is a cancellation, another 4xx the request's fault, anything else
-/// (503 included) the engine's, so none migrates. The message stays private.
+/// (503 included) the engine's, so none migrates.
 pub(crate) fn coded_error(operation: &str, message: &str, code: u32) -> DynamoError {
     let detail = format!("{operation}: {message} (code {code})");
-    match code {
+    let mut error = match code {
         CLIENT_CLOSED_REQUEST => client::cancelled(detail),
         400..=499 => client::invalid_arg(detail),
         _ => client::protocol_error(detail),
+    };
+    let mut upstream = dynamo_backend_common::UpstreamError::new(message).code(code.to_string());
+    if let Ok(status) = u16::try_from(code)
+        && (400..=599).contains(&status)
+    {
+        upstream = upstream.http_status(status);
     }
+    error.upstream_error = Some(Box::new(upstream));
+    error
 }
 
 pub(crate) fn terminal_from_meta(
@@ -858,11 +876,28 @@ pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError
             .unwrap_or_else(|| "unknown".to_string()),
         err_type.unwrap_or("unknown")
     );
-    if matches!(status_code, Some(400..=499)) {
+    let mut error = if matches!(status_code, Some(400..=499)) {
         client::invalid_arg(detail)
     } else {
         client::protocol_error(detail)
+    };
+    let mut upstream = dynamo_backend_common::UpstreamError::new(message);
+    if let Some(code) = status_code {
+        upstream = upstream.code(code.to_string());
+        if let Ok(status) = u16::try_from(code)
+            && (400..=599).contains(&status)
+        {
+            upstream = upstream.http_status(status);
+        }
     }
+    if let Some(kind) = err_type {
+        upstream = upstream.error_type(kind);
+    }
+    error.upstream_error = finish
+        .get("message")
+        .and_then(Value::as_str)
+        .map(|_| Box::new(upstream));
+    error
 }
 
 /// A matched user stop token is reported; system and hidden stop tokens are not.

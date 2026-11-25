@@ -144,6 +144,26 @@ failures arrive as error events in the stream, even when the HTTP status is 200.
 Clients must check these events rather than treating HTTP 200 as successful completion.
 An error ends the current stream; any retry is a new request.
 
+The frontend selects error response content independently of HTTP status and retry policy.
+Existing status selection and backend 5xx normalization remain in force.
+An existing authored public message or structured context-length explanation takes precedence;
+otherwise, a received backend explanation is forwarded by default. Private Dynamo diagnostics
+and transport wrappers are never used as the fallback explanation.
+
+A shared frontend blocklist masks media-fetch diagnostics, Dynamo connection and incomplete-stream
+failures, Python programming errors (`TypeError`, `AttributeError`, and `KeyError`), and known
+XGrammar compiler source locations. Masking removes the original message and structured details
+from the response. Existing fixed media-recovery messages remain visible. Unrecognized engine
+error types are not masked solely because their classification is internal or unknown.
+
+Captured messages are limited to 4,096 bytes. The same policy applies to OpenAI, Anthropic, and
+native Generate error bodies, including terminal streaming errors. Producers from older releases
+that do not carry the received explanation retain their existing response fallback.
+
+Rules are compiled into the frontend. Updating a rule that uses existing error metadata requires
+rebuilding and deploying the frontend; workers and loaded models can remain running. There is
+no YAML policy or live-reload option.
+
 Image-fetch failures caused by an origin HTTP 403 or 404 return API HTTP 400
 before headers are committed. In OpenAI chat-completion and completion streams,
 late failures carry error code 400 under HTTP 200; other streaming APIs use their

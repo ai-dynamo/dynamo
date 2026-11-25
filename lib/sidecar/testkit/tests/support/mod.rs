@@ -78,6 +78,24 @@ pub trait WireFixture: SidecarFixture {
     async fn scheduler_active(&self);
 }
 
+/// A pinned engine's remote-fetch message and native gRPC code.
+pub struct MediaErrorCase {
+    pub name: &'static str,
+    pub message: &'static str,
+    pub code: i32,
+}
+
+/// Inject engine-specific media errors while sharing the sidecar disclosure scenario.
+pub trait MediaErrorFixture: SidecarFixture {
+    const NAME: &'static str;
+    const FETCH_KIND: BackendError;
+    const FETCH_FAILURES: &'static [MediaErrorCase];
+    const VALIDATION_MESSAGE: &'static str;
+
+    fn advertise_media(&self) {}
+    fn fail_media_request(&self, request_id: &str, code: i32, message: &str, on_stream: bool);
+}
+
 fn fast_engine_args(engine_type: EngineType) -> MockerConfig {
     MockerConfig::from_value(serde_json::json!({
         "dp_size": 1,

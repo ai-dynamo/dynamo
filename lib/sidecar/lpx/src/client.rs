@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use dynamo_backend_common::DynamoError;
+use dynamo_backend_common::{DynamoError, UpstreamError};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
     connection_timeout,
@@ -238,13 +238,21 @@ impl OpenEngineClient {
         // A request already gone is not an error; an unspecified status is drift.
         match pb::AbortStatus::try_from(response.status) {
             Ok(pb::AbortStatus::Aborted | pb::AbortStatus::AlreadyFinished) => Ok(()),
-            _ => Err(protocol_error(
-                &self.peer,
-                format!(
-                    "the server returned an unexpected abort status {}: {}",
-                    response.status, response.message
-                ),
-            )),
+            _ => {
+                let mut error = protocol_error(
+                    &self.peer,
+                    format!(
+                        "the server returned an unexpected abort status {}: {}",
+                        response.status, response.message
+                    ),
+                );
+                error.upstream_error = Some(Box::new(
+                    UpstreamError::new(response.message)
+                        .error_type("openengine.v1.AbortResponse")
+                        .code(response.status.to_string()),
+                ));
+                Err(error)
+            }
         }
     }
 }

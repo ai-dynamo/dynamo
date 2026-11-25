@@ -32,6 +32,7 @@ from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
     image_token_metrics_payload,
+    media_error_payload,
 )
 
 # NVDEC H.264/H.265 serve cases hardware-decode via libnvcuvid, which needs the
@@ -519,7 +520,42 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=12.0,
                 requested_vllm_kv_cache_bytes=922_354_000,
                 tests=[
-                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        # Invalid image data and unreachable URLs exercise
+                        # Dynamo's ImageLoader on this existing launch.
+                        followup_payloads=[
+                            *[
+                                media_error_payload(
+                                    image_url,
+                                    expected_status_code=200 if stream else error_code,
+                                    expected_error_code=error_code,
+                                    expected_message=message,
+                                    stream=stream,
+                                )
+                                for image_url, error_code, message in (
+                                    # Port 1 is a failing input URL, not a listener.
+                                    (
+                                        "http://127.0.0.1:1/x.png",
+                                        400,
+                                        "Invalid request",
+                                    ),
+                                    (
+                                        "http://media.invalid/x.png",
+                                        400,
+                                        "Invalid request",
+                                    ),
+                                    (
+                                        "data:image/png;base64,bm90IGFuIGltYWdl",
+                                        415,
+                                        "Unsupported media type",
+                                    ),
+                                )
+                                for stream in (False, True)
+                            ],
+                            make_image_payload(["green"]),
+                        ],
+                    ),
                     MmCase(
                         suffix="uuid_passthrough",
                         payload=make_image_payload_uuid_passthrough(

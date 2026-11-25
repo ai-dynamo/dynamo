@@ -31,9 +31,12 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use super::{
-    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture,
-    SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, MediaErrorCase,
+    MediaErrorFixture, ProcessFixture, SidecarFixture, WireFixture, fast_engine_args,
+    sidecar_command, wait_scheduler_idle,
 };
+
+type ScriptedResponses = Result<Vec<Result<pb::GenerateStreamItem, Status>>, Status>;
 
 /// Rewrites one discovery response, as a script step.
 pub type ModelInfoPatch = Box<dyn Fn(&mut pb::GetModelInfoResponse) + Send + Sync>;
@@ -48,7 +51,7 @@ pub struct Fixture {
     config: FixtureConfig,
     service: SglangMockerService,
     pub(crate) server: TestServer,
-    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateStreamItem>>>>,
+    scripted: Arc<Mutex<HashMap<String, ScriptedResponses>>>,
     model_info: Arc<Mutex<Option<ModelInfoPatch>>>,
     server_info: Arc<Mutex<VecDeque<ServerInfoPatch>>>,
     health: watch::Sender<Option<bool>>,
@@ -108,7 +111,10 @@ impl Fixture {
             self.scripted
                 .lock()
                 .unwrap()
-                .insert(request_id.to_owned(), items)
+                .insert(
+                    request_id.to_owned(),
+                    Ok(items.into_iter().map(Ok).collect())
+                )
                 .is_none()
         );
     }
@@ -277,6 +283,55 @@ impl Fixture {
     /// Generate requests this listener opened, in arrival order.
     pub fn received(&self) -> Vec<String> {
         self.received.borrow().clone()
+    }
+}
+
+impl MediaErrorFixture for Fixture {
+    const NAME: &'static str = "sglang";
+    const FETCH_KIND: BackendError = BackendError::InvalidArgument;
+    const VALIDATION_MESSAGE: &'static str = "max_tokens must be positive";
+    const FETCH_FAILURES: &'static [MediaErrorCase] = &[
+        MediaErrorCase {
+            name: "connection_refused",
+            code: 3,
+            message: "media fetch: GET https://PRIVATE_MEDIA_HOST/image.png: Connection Failed: Connection refused (os error 111)",
+        },
+        MediaErrorCase {
+            name: "dns",
+            code: 3,
+            message: "media fetch: GET https://PRIVATE_MEDIA_HOST/image.png: Dns Failed: resolve failed",
+        },
+        MediaErrorCase {
+            name: "timeout",
+            code: 3,
+            message: "media fetch: GET https://PRIVATE_MEDIA_HOST/image.png: timed out",
+        },
+        MediaErrorCase {
+            name: "remote_404",
+            code: 3,
+            message: "media fetch: GET https://PRIVATE_MEDIA_HOST/image.png: status code 404",
+        },
+        MediaErrorCase {
+            name: "remote_503",
+            code: 3,
+            message: "media fetch: GET https://PRIVATE_MEDIA_HOST/image.png: status code 503",
+        },
+    ];
+
+    fn fail_media_request(&self, request_id: &str, code: i32, message: &str, on_stream: bool) {
+        let error = Status::new(tonic::Code::from_i32(code), message);
+        let response = if on_stream {
+            Ok(vec![Err(error)])
+        } else {
+            Err(error)
+        };
+        assert!(
+            self.scripted
+                .lock()
+                .unwrap()
+                .insert(request_id.to_owned(), response)
+                .is_none()
+        );
     }
 }
 
@@ -618,7 +673,7 @@ impl WireFixture for Fixture {
 struct ControlledService {
     inner: SglangMockerService,
     control: Controller<Adapter>,
-    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateStreamItem>>>>,
+    scripted: Arc<Mutex<HashMap<String, ScriptedResponses>>>,
     model_info: Arc<Mutex<Option<ModelInfoPatch>>>,
     server_info: Arc<Mutex<VecDeque<ServerInfoPatch>>>,
     health: watch::Receiver<Option<bool>>,
@@ -646,8 +701,9 @@ dynamo_sglang_mocker::impl_sglang_service! {
                 .unwrap()
                 .remove(Adapter::request_id(request.get_ref()));
             if let Some(items) = scripted {
+                let items = items?;
                 return Ok(Response::new(
-                    opened.wrap(Box::pin(futures::stream::iter(items.into_iter().map(Ok)))),
+                    opened.wrap(Box::pin(futures::stream::iter(items))),
                 ));
             }
             let response = self.inner.generate(request).await?;

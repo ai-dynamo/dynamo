@@ -33,6 +33,7 @@ from tests.utils.payloads import (
     LoraTestChatPayload,
     MetricsPayload,
     PoolingPayload,
+    PublicErrorPayload,
     ResponsesPayload,
     ResponsesPayloadWithLogprobs,
     ResponsesStreamPayload,
@@ -350,6 +351,46 @@ def multimodal_payload_default(
         expected_log=expected_log or [],
         max_tokens=max_tokens,
         temperature=temperature,
+        stream=stream,
+    )
+
+
+def public_error_payload(
+    body: Dict[str, Any],
+    *,
+    expected_status_code: int,
+    expected_error_code: int,
+    expected_message: str,
+    stream: bool = False,
+) -> PublicErrorPayload:
+    """Check an observed error response using the same loaded CI deployment."""
+    return PublicErrorPayload(
+        body={**body, "stream": stream},
+        endpoint="/v1/chat/completions",
+        expected_status_code=expected_status_code,
+        expected_error_code=expected_error_code,
+        expected_message=expected_message,
+        expected_response=[],
+        expected_log=[],
+        http_stream=stream,
+    )
+
+
+def media_error_payload(
+    image_url: str,
+    *,
+    expected_status_code: int,
+    expected_error_code: int,
+    expected_message: str,
+    stream: bool = False,
+) -> PublicErrorPayload:
+    """Exercise the real image loader and assert its recorded public error contract."""
+    body = multimodal_payload_default(image_url=image_url, max_tokens=8).body
+    return public_error_payload(
+        body,
+        expected_status_code=expected_status_code,
+        expected_error_code=expected_error_code,
+        expected_message=expected_message,
         stream=stream,
     )
 

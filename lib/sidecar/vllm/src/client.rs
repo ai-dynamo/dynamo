@@ -295,6 +295,7 @@ pub(crate) struct LoraRpcError {
     pub(crate) rpc: &'static str,
     pub(crate) code: tonic::Code,
     pub(crate) message: String,
+    transport: bool,
 }
 
 impl LoraRpcError {
@@ -310,7 +311,13 @@ impl LoraRpcError {
     }
 
     pub(crate) fn into_dynamo(self) -> DynamoError {
-        status_to_dynamo(self.rpc, tonic::Status::new(self.code, self.message))
+        let mut error = status_to_dynamo(self.rpc, tonic::Status::new(self.code, self.message));
+        if self.transport
+            && let Some(upstream) = error.upstream_error.take()
+        {
+            error.upstream_error = Some(Box::new(upstream.family("transport")));
+        }
+        error
     }
 }
 
@@ -330,11 +337,39 @@ async fn lora_rpc<T>(
             rpc,
             code: status.code(),
             message: status.message().to_string(),
+            transport: std::error::Error::source(&status).is_some(),
         }),
         Err(_) => Err(LoraRpcError {
             rpc,
             code: tonic::Code::DeadlineExceeded,
             message: format!("{rpc} exceeded the {LORA_RPC_DEADLINE:?} lifecycle deadline"),
+            transport: true,
         }),
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lora_rpc_keeps_received_text_and_transport_identity() {
+        for (status, transport) in [
+            (tonic::Status::invalid_argument("invalid adapter"), false),
+            (
+                tonic::Status::from_error(Box::new(std::io::Error::other("local socket detail"))),
+                true,
+            ),
+        ] {
+            let message = status.message().to_owned();
+            let error = lora_rpc::<()>("LoadLora", async { Err(status) })
+                .await
+                .unwrap_err()
+                .into_dynamo();
+            let upstream = error.upstream_error().unwrap();
+            assert_eq!(upstream.message(), message);
+            assert_eq!(upstream.family_name(), transport.then_some("transport"));
+            assert!(error.to_string().contains("LoadLora:"));
+        }
     }
 }

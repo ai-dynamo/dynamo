@@ -43,7 +43,7 @@ pub use engine::{
     PromptTokensDetails, RawEngine, SamplingOptions, StopConditions, StopReason, TopLogprob,
     TopLogprobs, chunk, usage,
 };
-pub use error::{BackendError, DynamoError, ErrorType};
+pub use error::{BackendError, DynamoError, ErrorType, UpstreamError};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use rl::{RlAdminBaseUrl, RlWorkerMetadata};
 pub use run::{run, run_raw};

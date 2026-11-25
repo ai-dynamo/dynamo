@@ -24,15 +24,18 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use super::{
-    FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_active, wait_scheduler_idle,
+    FixtureConfig, GenerateOpening, HandoffFixture, MediaErrorCase, MediaErrorFixture,
+    ProcessFixture, SidecarFixture, WireFixture, fast_engine_args, sidecar_command,
+    wait_scheduler_active, wait_scheduler_idle,
 };
+
+type ScriptedResponses = Result<Vec<Result<pb::GenerateResponse, Status>>, Status>;
 
 pub struct Fixture {
     config: FixtureConfig,
     service: TrtllmMockerService,
     server: TestServer,
-    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    scripted: Arc<Mutex<HashMap<String, ScriptedResponses>>>,
     pub discovery: Arc<Discovery>,
     health: tonic_health::server::HealthReporter,
 }
@@ -95,7 +98,83 @@ impl Fixture {
             self.scripted
                 .lock()
                 .unwrap()
-                .insert(request_id.to_owned(), responses)
+                .insert(
+                    request_id.to_owned(),
+                    Ok(responses.into_iter().map(Ok).collect())
+                )
+                .is_none()
+        );
+    }
+}
+
+impl MediaErrorFixture for Fixture {
+    const NAME: &'static str = "trtllm";
+    const FETCH_KIND: BackendError = BackendError::InvalidArgument;
+    const VALIDATION_MESSAGE: &'static str = "max_tokens must be positive";
+    const FETCH_FAILURES: &'static [MediaErrorCase] = &[
+        MediaErrorCase {
+            name: "connection_refused",
+            code: 9,
+            message: "media[0].url is temporarily unavailable: remote media fetch failed: Cannot connect to host PRIVATE_MEDIA_HOST:8080 [Connect call failed ('10.0.0.5', 8080)]",
+        },
+        MediaErrorCase {
+            name: "dns",
+            code: 3,
+            message: "media[0].url could not be loaded: Could not resolve hostname 'PRIVATE_MEDIA_HOST'",
+        },
+        MediaErrorCase {
+            name: "temporary_dns",
+            code: 9,
+            message: "media[0].url is temporarily unavailable: Could not resolve hostname 'PRIVATE_MEDIA_HOST'",
+        },
+        MediaErrorCase {
+            name: "timeout",
+            code: 9,
+            message: "media[0].url is temporarily unavailable: remote media fetch failed: ",
+        },
+        MediaErrorCase {
+            name: "remote_404",
+            code: 3,
+            message: "media[0].url could not be loaded: 404, message='Not Found', url='https://PRIVATE_MEDIA_HOST/image.png'",
+        },
+        MediaErrorCase {
+            name: "remote_503",
+            code: 9,
+            message: "media[0].url is temporarily unavailable: remote media server returned HTTP 503",
+        },
+    ];
+
+    fn advertise_media(&self) {
+        *self.discovery.model_info.lock().unwrap() = Some(pb::ModelInfo {
+            model_id: self.config.model.clone(),
+            served_model_name: self.config.model.clone(),
+            max_context_length: Some(32768),
+            supports_multimodal: Some(true),
+            supports_text_input: Some(true),
+            supports_token_ids_input: Some(true),
+            extra: Some(
+                dynamo_sidecar_common::json_to_struct(
+                    serde_json::json!({"trtllm_supported_modalities": ["image"]}),
+                    "test media capabilities",
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+    }
+
+    fn fail_media_request(&self, request_id: &str, code: i32, message: &str, on_stream: bool) {
+        let error = Status::new(tonic::Code::from_i32(code), message);
+        let response = if on_stream {
+            Ok(vec![Err(error)])
+        } else {
+            Err(error)
+        };
+        assert!(
+            self.scripted
+                .lock()
+                .unwrap()
+                .insert(request_id.to_owned(), response)
                 .is_none()
         );
     }
@@ -387,7 +466,7 @@ impl WireFixture for Fixture {
 
 #[derive(Clone)]
 struct ControlledInference {
-    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    scripted: Arc<Mutex<HashMap<String, ScriptedResponses>>>,
     inner: TrtllmMockerService,
     control: Controller<Adapter>,
 }
@@ -407,9 +486,10 @@ impl Inference for ControlledInference {
             .unwrap()
             .remove(&request.get_ref().request_id);
         if let Some(responses) = scripted {
-            return Ok(Response::new(opened.wrap(Box::pin(futures::stream::iter(
-                responses.into_iter().map(Ok),
-            )))));
+            let responses = responses?;
+            return Ok(Response::new(
+                opened.wrap(Box::pin(futures::stream::iter(responses))),
+            ));
         }
         let response = self.inner.generate(request).await?;
         Ok(Response::new(opened.wrap(response.into_inner())))

@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use dynamo_backend_common::{
     CompletionUsage, DisaggregationMode, DynamoError, FinishReason, LLMEngineOutput,
-    MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
+    MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob,
+    UpstreamError, usage,
 };
 
 use dynamo_kv_events::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
@@ -1270,13 +1271,16 @@ fn cached_prompt_tokens(cached: Option<u32>, prompt_tokens: u32) -> Option<Promp
 }
 
 pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
+    let upstream = UpstreamError::new(&error.message)
+        .error_type("openengine.v1.EngineError")
+        .code(error.code.to_string());
     let code = pb::ErrorCode::try_from(error.code).unwrap_or(pb::ErrorCode::Unspecified);
     let message = if error.message.trim().is_empty() {
         format!("TensorRT-LLM reported engine error {code:?}")
     } else {
         format!("TensorRT-LLM engine error: {}", error.message)
     };
-    match code {
+    let mut mapped = match code {
         pb::ErrorCode::InvalidArgument | pb::ErrorCode::UnsupportedFeature => {
             client::invalid_argument(message)
         }
@@ -1312,7 +1316,9 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
             ))
         }
         _ => client::engine_error(message),
-    }
+    };
+    mapped.upstream_error = Some(Box::new(upstream));
+    mapped
 }
 
 #[cfg(test)]

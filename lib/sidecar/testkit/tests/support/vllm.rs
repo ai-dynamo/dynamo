@@ -6,6 +6,7 @@ use tonic_v14 as tonic;
 
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
@@ -33,17 +34,21 @@ use tonic_health::pb::{
 };
 
 use super::{
-    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture,
-    SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, MediaErrorCase,
+    MediaErrorFixture, ProcessFixture, SidecarFixture, WireFixture, fast_engine_args,
+    sidecar_command, wait_scheduler_idle,
 };
+
+type ScriptedResponses = Result<Vec<Result<pb::GenerateResponse, Status>>, Status>;
 
 pub struct Fixture {
     config: FixtureConfig,
     pub service: VllmMockerService,
     pub server: TestServer,
-    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    scripted: Arc<Mutex<HashMap<String, ScriptedResponses>>>,
     served_model_name: Arc<Mutex<Option<String>>>,
     reasoning_parser: Arc<Mutex<String>>,
+    multimodal: Arc<AtomicBool>,
     readiness: watch::Sender<Option<bool>>,
     health_received: watch::Receiver<bool>,
     health: tonic_health::server::HealthReporter,
@@ -70,7 +75,63 @@ impl Fixture {
             self.scripted
                 .lock()
                 .unwrap()
-                .insert(request_id.to_owned(), responses)
+                .insert(
+                    request_id.to_owned(),
+                    Ok(responses.into_iter().map(Ok).collect())
+                )
+                .is_none()
+        );
+    }
+}
+
+impl MediaErrorFixture for Fixture {
+    const NAME: &'static str = "vllm";
+    const FETCH_KIND: BackendError = BackendError::Unknown;
+    const VALIDATION_MESSAGE: &'static str = "max_new_tokens must be positive";
+    const FETCH_FAILURES: &'static [MediaErrorCase] = &[
+        MediaErrorCase {
+            name: "connection_refused",
+            code: 13,
+            message: "multimodal preprocessing error: HTTP error while fetching media: error sending request for url (https://PRIVATE_MEDIA_HOST/image.png): Connection refused (os error 111)",
+        },
+        MediaErrorCase {
+            name: "dns",
+            code: 13,
+            message: "multimodal preprocessing error: media host 'PRIVATE_MEDIA_HOST' could not be resolved: Name or service not known",
+        },
+        MediaErrorCase {
+            name: "timeout",
+            code: 13,
+            message: "multimodal preprocessing error: media fetch of https://PRIVATE_MEDIA_HOST/image.png timed out after 30s",
+        },
+        MediaErrorCase {
+            name: "remote_404",
+            code: 13,
+            message: "multimodal preprocessing error: HTTP error while fetching media: HTTP status client error (404 Not Found) for url (https://PRIVATE_MEDIA_HOST/image.png)",
+        },
+        MediaErrorCase {
+            name: "remote_503",
+            code: 13,
+            message: "multimodal preprocessing error: HTTP error while fetching media: HTTP status server error (503 Service Unavailable) for url (https://PRIVATE_MEDIA_HOST/image.png)",
+        },
+    ];
+
+    fn advertise_media(&self) {
+        self.multimodal.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_media_request(&self, request_id: &str, code: i32, message: &str, on_stream: bool) {
+        let error = Status::new(tonic::Code::from_i32(code), message);
+        let response = if on_stream {
+            Ok(vec![Err(error)])
+        } else {
+            Err(error)
+        };
+        assert!(
+            self.scripted
+                .lock()
+                .unwrap()
+                .insert(request_id.to_owned(), response)
                 .is_none()
         );
     }
@@ -101,12 +162,14 @@ impl SidecarFixture for Fixture {
         let scripted = Arc::new(Mutex::new(HashMap::new()));
         let served_model_name = Arc::new(Mutex::new(None));
         let reasoning_parser = Arc::new(Mutex::new(String::new()));
+        let multimodal = Arc::new(AtomicBool::new(false));
         let controlled = ControlledService {
             inner: service.clone(),
             control,
             scripted: scripted.clone(),
             served_model_name: served_model_name.clone(),
             reasoning_parser: reasoning_parser.clone(),
+            multimodal: multimodal.clone(),
         };
         let control_service = controlled.clone();
         let health = tonic_health::server::HealthReporter::new();
@@ -147,6 +210,7 @@ impl SidecarFixture for Fixture {
             scripted,
             served_model_name,
             reasoning_parser,
+            multimodal,
             readiness,
             health_received,
             health,
@@ -355,9 +419,10 @@ impl WireFixture for Fixture {
 struct ControlledService {
     inner: VllmMockerService,
     control: Controller<Adapter>,
-    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    scripted: Arc<Mutex<HashMap<String, ScriptedResponses>>>,
     served_model_name: Arc<Mutex<Option<String>>>,
     reasoning_parser: Arc<Mutex<String>>,
+    multimodal: Arc<AtomicBool>,
 }
 
 impl ControlledService {
@@ -391,9 +456,10 @@ impl Inference for ControlledService {
             .unwrap()
             .remove(&request.get_ref().request_id);
         if let Some(responses) = scripted {
-            return Ok(Response::new(opened.wrap(Box::pin(futures::stream::iter(
-                responses.into_iter().map(Ok),
-            )))));
+            let responses = responses?;
+            return Ok(Response::new(
+                opened.wrap(Box::pin(futures::stream::iter(responses))),
+            ));
         }
         self.normalize_model_alias(request.get_mut());
         let response = self.inner.generate_stream(request).await?;
@@ -414,6 +480,7 @@ macro_rules! delegate_control {
                     response.get_mut().served_model_name.clone_from(name);
                 }
                 response.get_mut().reasoning_parser.clone_from(&self.reasoning_parser.lock().unwrap());
+                response.get_mut().supports_multimodal = self.multimodal.load(Ordering::SeqCst);
                 Ok(response)
             }
 

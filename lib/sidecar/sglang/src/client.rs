@@ -648,6 +648,12 @@ pub fn protocol_error(message: impl Into<String>) -> DynamoError {
 }
 
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
+    let mut upstream = dynamo_backend_common::UpstreamError::new(status.message())
+        .error_type("grpc.Status")
+        .code(format!("{:?}", status.code()));
+    if std::error::Error::source(&status).is_some() {
+        upstream = upstream.family("transport");
+    }
     let kind = match status.code() {
         tonic::Code::InvalidArgument | tonic::Code::NotFound | tonic::Code::OutOfRange => {
             BackendError::InvalidArgument
@@ -657,10 +663,12 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
     };
-    backend(
+    let mut error = backend(
         kind,
         format!("{rpc}: {} ({:?})", status.message(), status.code()),
-    )
+    );
+    error.upstream_error = Some(Box::new(upstream));
+    error
 }
 
 /// For a generate stream: a broken stream maps as in
@@ -830,6 +838,10 @@ mod tests {
             assert_eq!(error.error_type(), ErrorType::Backend(kind));
             assert!(error.to_string().contains("GetModelInfo: native failure"));
             assert!(error.to_string().contains(&format!("{code:?}")));
+            let upstream = error.upstream_error().unwrap();
+            assert_eq!(upstream.message(), "native failure");
+            assert_eq!(upstream.code_value(), Some(format!("{code:?}").as_str()));
+            assert_eq!(upstream.family_name(), None);
         }
     }
 

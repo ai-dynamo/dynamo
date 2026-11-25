@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Error, Result, anyhow as error};
+use anyhow::{Error, Result};
 use pyo3::prelude::*;
 
 use crate::{CancellationToken, DistributedRuntime, engine::*, to_pyerr};
@@ -201,6 +201,31 @@ struct HttpError {
     message: String,
 }
 
+/// Keep raw HTTP status ownership while carrying disclosure facts outside the source chain.
+fn map_http_async_error(error: Error) -> Error {
+    let Some(exception) = error.downcast_ref::<PyErr>() else {
+        return error;
+    };
+    Python::with_gil(|py| {
+        if let Ok(HttpError { code, message }) = exception.value(py).extract() {
+            let captured = crate::errors::preserve_python_error_content(
+                py,
+                exception,
+                crate::errors::build_http_like_error(code, message.clone()),
+            );
+            // An anyhow context remains downcastable without becoming a typed
+            // source node that could override main's raw HttpError status path.
+            return Error::new(dynamo_error::http::HttpError {
+                code,
+                message: message.replace(['\r', '\n'], ""),
+            })
+            .context(captured);
+        }
+        let mapped = dynamo_runtime::error::DynamoError::msg(format!("Python Error: {exception}"));
+        crate::errors::preserve_python_error_content(py, exception, mapped).into()
+    })
+}
+
 #[async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for HttpAsyncEngine
 where
@@ -208,28 +233,87 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        match self.0.generate(request).await {
-            Ok(res) => Ok(res),
+        self.0.generate(request).await.map_err(map_http_async_error)
+    }
+}
 
-            // Inspect the error - if it was an HttpError from Python, extract the code and message
-            // and return the rust version of HttpError
-            Err(e) => {
-                if let Some(py_err) = e.downcast_ref::<PyErr>() {
-                    Python::with_gil(|py| {
-                        // With the Stable ABI, we can't subclass Python's built-in exceptions in PyO3, so instead we
-                        // implement the exception in Python and assume that it's an HttpError if the code and message
-                        // are present.
-                        if let Ok(HttpError { code, message }) = py_err.value(py).extract() {
-                            // SSE panics if there are carriage returns or newlines
-                            let message = message.replace(['\r', '\n'], "");
-                            return Err(dynamo_error::http::HttpError { code, message })?;
-                        }
-                        Err(error!("Python Error: {}", py_err))
-                    })
-                } else {
-                    Err(e)
-                }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_runtime::error::{DynamoError, ErrorClass, UpstreamError};
+    use pyo3::{ffi::c_str, types::PyModule};
+
+    #[test]
+    fn http_adapter_keeps_raw_status_separate_from_disclosure_context() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::from_code(
+                py,
+                c_str!(
+                    r#"
+class HttpError(Exception):
+    __module__ = 'dynamo.common.http.base'
+    def __init__(self, code):
+        self.code = code
+        self.status_code = 503
+        self.message = 'PRIVATE_HTTP_SOURCE\r\nprivate continuation'
+        super().__init__(self.message)
+def fail(code):
+    raise HttpError(code)
+"#
+                ),
+                c_str!("http_adapter_test.py"),
+                c_str!("http_adapter_test"),
+            )
+            .unwrap();
+            for status in [7, 422, 502, 504] {
+                let exception = module
+                    .getattr("fail")
+                    .unwrap()
+                    .call1((status,))
+                    .unwrap_err();
+                let mapped = map_http_async_error(exception.into());
+                let raw = mapped
+                    .downcast_ref::<dynamo_error::http::HttpError>()
+                    .unwrap();
+                assert_eq!(raw.code, status);
+                assert!(!raw.message.contains('\r') && !raw.message.contains('\n'));
+                assert!(
+                    dynamo_error::http::find_canonical_error_in_chain(mapped.as_ref()).is_none()
+                );
+                let captured = mapped.downcast_ref::<DynamoError>().unwrap();
+                let upstream = captured.upstream_error().unwrap();
+                assert_eq!(upstream.family_name(), Some("media_fetch"));
+                assert_eq!(upstream.http_status_value(), Some(503));
+                assert!(upstream.message().contains("PRIVATE_HTTP_SOURCE"));
+                assert_eq!(
+                    mapped
+                        .downcast::<dynamo_error::http::HttpError>()
+                        .unwrap()
+                        .code,
+                    status
+                );
             }
-        }
+        });
+    }
+
+    #[test]
+    fn http_adapter_leaves_existing_semantic_errors_unchanged() {
+        let source = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .public_message("Authored validation replacement")
+            .upstream_error(UpstreamError::new("received explanation").http_status(503))
+            .build();
+        let mapped = map_http_async_error(source.clone().into());
+        let captured = mapped.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(captured.class(), source.class());
+        assert_eq!(captured.reason(), source.reason());
+        assert_eq!(captured.public_details(), source.public_details());
+        assert_eq!(captured.upstream_error(), source.upstream_error());
+        assert!(
+            mapped
+                .downcast_ref::<dynamo_error::http::HttpError>()
+                .is_none()
+        );
     }
 }

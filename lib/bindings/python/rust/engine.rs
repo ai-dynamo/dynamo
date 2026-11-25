@@ -39,8 +39,8 @@ use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::{
-    http_like_error_to_dynamo, py_exception_to_backend_error, routed_engine_error_to_dynamo,
-    worker_unavailable_to_dynamo,
+    http_like_error_to_dynamo, preserve_python_error_content, py_exception_to_backend_error,
+    routed_engine_error_to_dynamo, worker_unavailable_to_dynamo,
 };
 use crate::python_payload::{
     EncodedPythonResponse, PythonPayload, PythonResponseItem, WaitClassification,
@@ -547,15 +547,15 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
     Python::with_gil(|py| {
         error.display(py);
 
-        // Checked before the backend mapping, whose `DynamoException` fallback
-        // would otherwise classify it as `Unknown`.
-        if let Some(error) = worker_unavailable_to_dynamo(py, &error) {
-            return error;
-        }
         // A `RoutedEngineError` a chat engine let escape keeps its backend's
         // class and status. No worker endpoint can hold one.
         if let Some(error) = routed_engine_error_to_dynamo(py, &error) {
             return error;
+        }
+        // Checked before the backend mapping, whose `DynamoException` fallback
+        // would otherwise classify it as `Unknown`.
+        if let Some(mapped) = worker_unavailable_to_dynamo(py, &error) {
+            return preserve_python_error_content(py, &error, mapped);
         }
 
         if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
@@ -565,7 +565,7 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
             if backend_err == BackendError::InvalidArgument {
                 builder = builder.public_message(message);
             }
-            return builder.build();
+            return preserve_python_error_content(py, &error, builder.build());
         }
 
         if let Some(error) = http_like_error_to_dynamo(py, &error) {
@@ -573,10 +573,11 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
         }
 
         if error.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            return DynamoError::builder()
+            let mapped = DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::EngineShutdown))
                 .message("engine shutting down")
                 .build();
+            return preserve_python_error_content(py, &error, mapped);
         }
 
         let backend_err = if error.is_instance_of::<pyo3::exceptions::PyValueError>(py)
@@ -598,10 +599,11 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
             BackendError::Unknown
         };
 
-        DynamoError::builder()
+        let mapped = DynamoError::builder()
             .error_type(ErrorType::Backend(backend_err))
             .message(error.to_string())
-            .build()
+            .build();
+        preserve_python_error_content(py, &error, mapped)
     })
 }
 

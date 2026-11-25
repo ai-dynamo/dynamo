@@ -15,14 +15,15 @@
 
 # This test verifies that the HTTP server can be started and responds correctly to requests.
 
+import ast
 import asyncio
 import base64
 import contextlib
 import json
-import re
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Dict
+from unittest.mock import AsyncMock
 
 import aiohttp
 import numpy as np
@@ -30,16 +31,26 @@ import pytest
 import pytest_asyncio
 from aiohttp import web
 
-from dynamo._core import Context, _raise_routed_http_error
+from dynamo._core import (
+    Context,
+    InvalidArgument,
+    _raise_dispatch_error,
+    _raise_routed_http_error,
+)
+from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
 from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
 try:
+    from dynamo.common.multimodal.audio_loader import AudioLoader
     from dynamo.common.multimodal.image_loader import ImageLoader
+    from dynamo.common.multimodal.video_loader import VideoLoader
 except ImportError:
     # CPU text-only test images do not install all multimodal dependencies.
+    AudioLoader = None
     ImageLoader = None
+    VideoLoader = None
 
 # Real VP9 clip. The probe names vp9, so this is a video, not a 415.
 _VALID_CLIP = Path(__file__).resolve().parents[4] / "lib/llm/tests/data/media/2p_10.mp4"
@@ -49,7 +60,147 @@ MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 MSG_CONTAINS_ROUTED_ERROR = "This message contains a routed worker's error."
+MSG_CONTAINS_LONG_ERROR = "This message contains a long HTTP error."
+LONG_ERROR_MESSAGE = "Engine validation failure: " + "x" * 8192
 MSG_SETS_RESPONSE_HEADER = "This message sets a response header."
+AUTHORED_VALIDATION_MESSAGE = "Unknown template 'missing'. Choose a different template."
+NONMEDIA_422_MESSAGE = "Output budget is invalid (parameter=max_tokens, value=7)"
+
+
+async def _raise_batch_media_fetch_error(media_kind: str, kind: str) -> None:
+    """Exercise real batch aggregation with raw per-item coroutine failures.
+
+    Per-item normalization differs by loader; the stand-ins target their
+    aggregate fallback and both mixed orders without external networking.
+    """
+    loader_type = {"image": ImageLoader, "audio": AudioLoader, "video": VideoLoader}[
+        media_kind
+    ]
+    loader = loader_type()
+    detail = "PRIVATE_BATCH private-batch-host.internal errno=111 at 10.20.30.40"
+    if kind in ("mixed_fetch_first", "mixed_decode_first"):
+        failures = [
+            HttpConnectionError(detail),
+            RuntimeError("decoder unavailable"),
+        ]
+        if kind == "mixed_decode_first":
+            failures.reverse()
+    else:
+        error_type = {
+            "connection": HttpConnectionError,
+            "timeout": HttpTimeoutError,
+        }[kind]
+        failures = [error_type(detail), error_type(detail)]
+    setattr(loader, f"load_{media_kind}", AsyncMock(side_effect=failures))
+    await getattr(loader, f"load_{media_kind}_batch")(
+        [
+            {"Url": "https://example.com/one.png"},
+            {"Url": "https://example.com/two.png"},
+        ]
+    )
+
+
+def _raise_context_or_media_error(case: str) -> None:
+    """Produce real Python exception chains without a model or media decoder."""
+    if case in ("authored_retained_422", "authored_retained_503"):
+        status = 422 if case.endswith("422") else 503
+        try:
+            _raise_routed_http_error(status, "PRIVATE_RETAINED_SOURCE_STATUS")
+        except (ValueError, InvalidArgument) as error:
+            # Received HTTP metadata must not override the new local verdict.
+            raise InvalidArgument(AUTHORED_VALIDATION_MESSAGE) from error
+
+    if case == "authored_hidden_routed_status":
+        try:
+            _raise_routed_http_error(503, "PRIVATE_UNRELATED_RELAY")
+        except ValueError:
+            raise InvalidArgument(AUTHORED_VALIDATION_MESSAGE) from ValueError(
+                "translation helper"
+            )
+
+    if case.startswith("authored_"):
+        try:
+            raise KeyError("missing")
+        except KeyError as error:
+            # The authored message includes the KeyError's short quoted text;
+            # that substring does not make it a copied programming diagnostic.
+            if case == "authored_explicit":
+                raise InvalidArgument(AUTHORED_VALIDATION_MESSAGE) from error
+            if case == "authored_from_none":
+                raise InvalidArgument(AUTHORED_VALIDATION_MESSAGE) from None
+            raise InvalidArgument(AUTHORED_VALIDATION_MESSAGE)
+
+    if case.startswith("aiohttp_"):
+        from aiohttp.client_reqrep import ConnectionKey
+
+        key = ConnectionKey(
+            host="PRIVATE_AIOHTTP_HOST",
+            port=443,
+            is_ssl=True,
+            ssl=True,
+            proxy=None,
+            proxy_auth=None,
+            proxy_headers_hash=None,
+        )
+        try:
+            raise aiohttp.ClientConnectorError(key, OSError("PRIVATE_CONNECTOR"))
+        except aiohttp.ClientConnectorError as error:
+            if case == "aiohttp_wrapped":
+                raise ValueError(str(error)) from error
+            raise
+
+    if case == "copied_media_from_none":
+        try:
+            raise HttpStatusError(
+                403,
+                "PRIVATE_MEDIA_FAILURE",
+                "https://private-origin.example/image?token=PRIVATE_QUERY",
+            )
+        except HttpStatusError as error:
+            raise InvalidArgument(str(error)) from None
+
+    if case.startswith("retained_"):
+        try:
+            # A non-400 routed exception displays its private diagnostic. A
+            # 400 would already display "Invalid request", hiding the bug.
+            _raise_routed_http_error(500, "PRIVATE_RELAY_DIAGNOSTIC")
+        except ValueError as error:
+            payload = json.loads(error._dynamo_error)
+            payload.pop("public", None)
+            if case == "retained_legacy_from_none":
+                # An older producer has only a private diagnostic, never a
+                # received message eligible for default forwarding.
+                payload.pop("upstream_error", None)
+            else:
+                # Model a received media error retained by a routed stream.
+                payload["upstream_error"]["family"] = "media_fetch"
+            error._dynamo_error = json.dumps(payload)
+            raise InvalidArgument(str(error)) from None
+
+    if case.startswith("vllm_"):
+        from vllm.exceptions import VLLMUnprocessableEntityError
+
+        from dynamo.vllm.errors import vllm_client_error_to_http_error
+
+        media = case != "vllm_nonmedia_422"
+        try:
+            raise VLLMUnprocessableEntityError(
+                "Unable to fetch media" if media else "Output budget is invalid",
+                parameter="image_url" if media else "max_tokens",
+                value=(
+                    "https://private-origin.example/image?token=PRIVATE_VLLM_QUERY"
+                    if media
+                    else 7
+                ),
+            )
+        except VLLMUnprocessableEntityError as error:
+            # This is the production embedding handler's 422 conversion. The
+            # typed wrapper itself carries media provenance without aiohttp.
+            if case == "vllm_media_422_from_none":
+                raise vllm_client_error_to_http_error(error) from None
+            raise vllm_client_error_to_http_error(error) from error
+
+    raise AssertionError(f"unknown context/media regression case: {case}")
 
 
 class _OpenIfCodec:
@@ -168,7 +319,23 @@ class MockHttpEngine:
 
         if user_message.startswith("public-http-test:"):
             status, message = json.loads(user_message.split(":", 1)[1])
-            raise _StatusLikeError(status, message)
+            raise HttpStatusError(status, message, "https://example.com/image")
+        if user_message.startswith("context-media-test:"):
+            _raise_context_or_media_error(user_message.split(":", 1)[1])
+        if user_message.startswith("batch-image-fetch-test:"):
+            await _raise_batch_media_fetch_error("image", user_message.split(":", 1)[1])
+        if user_message.startswith("batch-media-fetch-test:"):
+            _, media_kind, kind = user_message.split(":", 2)
+            await _raise_batch_media_fetch_error(media_kind, kind)
+        if user_message.startswith("dispatch-error-test:"):
+            case = user_message.split(":", 1)[1]
+            _raise_dispatch_error(
+                "TCP timeout connecting to 10.20.30.40:4321 PRIVATE_DISPATCH",
+                typed=case != "untyped",
+                received=case == "received",
+            )
+        if MSG_CONTAINS_LONG_ERROR.lower() in user_message.lower():
+            raise HttpError(code=422, message=LONG_ERROR_MESSAGE)
         if MSG_CONTAINS_ERROR.lower() in user_message.lower():
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
@@ -381,38 +548,53 @@ async def test_chat_completion_success(http_server):
 
 
 HTTP_ERROR_CASES = (
-    (MSG_CONTAINS_ERROR, 400, "Bad Request", "Bad Request"),
+    (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
     (
         MSG_CONTAINS_STATUS_ERROR,
         415,
-        "Unsupported Media Type",
+        MSG_CONTAINS_STATUS_ERROR,
         "Unsupported Media Type",
     ),
     (
         MSG_CONTAINS_INVALID_ARGUMENT,
         400,
-        "Invalid request",
+        MSG_CONTAINS_INVALID_ARGUMENT,
         "Bad Request",
     ),
     (
         MSG_CONTAINS_INTERNAL_ERROR,
         500,
-        "Internal server error",
+        "Simulated internal error",
         "Internal Server Error",
     ),
     (
         MSG_CONTAINS_ROUTED_ERROR,
         503,
-        "Internal server error",
+        MSG_CONTAINS_ROUTED_ERROR,
         "Service Unavailable",
+    ),
+    pytest.param(
+        MSG_CONTAINS_LONG_ERROR,
+        400,
+        # Main's semantic class remains InvalidRequest when the legacy JSON
+        # diagnostic is truncated; received text has its own 4096-byte bound.
+        LONG_ERROR_MESSAGE[:4082] + "...[truncated]",
+        "Bad Request",
+        id="long_message_keeps_main_class_status",
     ),
 )
 
 
-def expected_error_body(status: int, message: str, error_type: str) -> Dict:
+def expected_error_body(
+    status: int,
+    message: str,
+    error_type: str,
+    *,
+    backend_status: int | None = None,
+) -> Dict:
     body = {"message": message, "type": error_type, "code": status}
-    if status == 500:
-        body["details"] = {"backend_status": status}
+    if backend_status is not None:
+        body["details"] = {"backend_status": backend_status}
     return body
 
 
@@ -442,7 +624,10 @@ async def test_chat_completion_http_error(
         async with session.post(url, json=data) as response:
             assert response.status == status
             assert await response.json() == expected_error_body(
-                status, expected_message, expected_type
+                status,
+                expected_message,
+                expected_type,
+                backend_status=500 if status == 500 else None,
             )
 
 
@@ -540,23 +725,188 @@ async def test_non_video_data_url_is_unsupported_over_sse(http_server):
 
 
 def test_video_public_message_matches_binding_allowlist():
-    """The Python producer and the Rust allowlist must agree on the video 415 text.
-
-    A reworded sentence on either side would silently fall back to the catalog
-    text, so this checks the literal in both files."""
+    """The Python producer's sentence retains its actual Rust public projection."""
     repo = Path(__file__).resolve().parents[4]
-    sentence = "Unsupported video media"
-    loader_src = (
-        repo / "components/src/dynamo/common/multimodal/video_loader.py"
-    ).read_text()
-    errors_src = (repo / "lib/bindings/python/rust/errors.rs").read_text()
-
-    assert f'"{sentence}"' in loader_src
-    allowlist = re.search(
-        r"PUBLIC_HTTP_MESSAGES: &\[&str\] = &\[(.*?)\];", errors_src, re.DOTALL
+    loader_source = repo / "components/src/dynamo/common/multimodal/video_loader.py"
+    loader = ast.parse(loader_source.read_text())
+    producer = next(
+        node
+        for node in loader.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_unsupported_video_input"
     )
-    assert allowlist is not None, "PUBLIC_HTTP_MESSAGES not found in errors.rs"
-    assert f'"{sentence}"' in allowlist.group(1)
+    returned = next(node for node in ast.walk(producer) if isinstance(node, ast.Return))
+    assert isinstance(returned.value, ast.Call)
+    assert ast.literal_eval(returned.value.args[0]) == 415
+    sentence = ast.literal_eval(returned.value.args[1])
+    assert sentence == "Unsupported video media"
+    with pytest.raises(ValueError) as caught:
+        _raise_routed_http_error(415, sentence)
+    payload = json.loads(caught.value._dynamo_error)
+    assert payload["public"] == {"type": "message", "message": sentence}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pixel_limit_http_server", [{"peek_ms": 0}], indirect=True)
+@pytest.mark.parametrize("stream", [False, True], ids=["http", "sse"])
+@pytest.mark.parametrize(
+    ("case", "unary_status", "expected_message"),
+    [
+        ("authored_implicit", 400, AUTHORED_VALIDATION_MESSAGE),
+        ("authored_explicit", 400, AUTHORED_VALIDATION_MESSAGE),
+        ("authored_from_none", 400, AUTHORED_VALIDATION_MESSAGE),
+        ("authored_hidden_routed_status", 400, AUTHORED_VALIDATION_MESSAGE),
+        ("authored_retained_422", 400, AUTHORED_VALIDATION_MESSAGE),
+        ("authored_retained_503", 400, AUTHORED_VALIDATION_MESSAGE),
+        ("aiohttp_connector", 500, "Internal server error"),
+        ("aiohttp_wrapped", 400, "Invalid request"),
+        ("copied_media_from_none", 400, "Invalid request"),
+        ("retained_media_from_none", 400, "Invalid request"),
+        ("retained_legacy_from_none", 400, "Invalid request"),
+        ("vllm_media_422", 422, "Invalid request"),
+        ("vllm_media_422_from_none", 422, "Invalid request"),
+        ("vllm_nonmedia_422", 422, NONMEDIA_422_MESSAGE),
+    ],
+    ids=[
+        "authored_implicit",
+        "authored_explicit",
+        "authored_from_none",
+        "authored_hidden_routed_status",
+        "authored_retained_422",
+        "authored_retained_503",
+        "aiohttp_connector",
+        "aiohttp_wrapped",
+        "copied_media_from_none",
+        "retained_media_from_none",
+        "retained_legacy_from_none",
+        "vllm_media_422",
+        "vllm_media_422_from_none",
+        "vllm_nonmedia_422",
+    ],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_python_error_context_and_media_privacy_over_http_and_sse(
+    pixel_limit_http_server, case, unary_status, expected_message, stream
+):
+    """Preserve authored validation while masking copied media and relay text."""
+    if case.startswith("vllm_"):
+        pytest.importorskip("vllm.exceptions")
+    status = unary_status
+    if stream and case in (
+        "vllm_media_422",
+        "vllm_media_422_from_none",
+        "vllm_nonmedia_422",
+    ):
+        # Main's unary legacy envelope keeps short HTTP 422, while committed
+        # SSE renders the bridge's InvalidRequest class as error code 400.
+        status = 400
+    base_url, model_name = pixel_limit_http_server
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": f"context-media-test:{case}"}],
+        "stream": stream,
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            raw = await response.text()
+            assert response.status == (200 if stream else status), raw
+            if stream:
+                assert response.content_type == "text/event-stream"
+    error = _sse_error(raw) if stream else json.loads(raw)
+    assert error["code"] == status, raw
+    assert error["message"] == expected_message, raw
+    if stream:
+        expected_type = (
+            "internal_server_error" if status == 500 else "invalid_request_error"
+        )
+    else:
+        expected_type = {
+            400: "Bad Request",
+            422: "Unprocessable Entity",
+            500: "Internal Server Error",
+        }[status]
+    assert error["type"] == expected_type, raw
+    if not stream and status == 500:
+        assert error["details"] == {"backend_status": 500}, raw
+    else:
+        assert "details" not in error, raw
+    assert "PRIVATE_" not in raw
+    assert "private-origin.example" not in raw
+    assert "This is a mock response." not in raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pixel_limit_http_server", [{"peek_ms": 0}], indirect=True)
+@pytest.mark.parametrize("stream", [False, True], ids=["http", "sse"])
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        *[
+            pytest.param(
+                f"batch-media-fetch-test:{media_kind}:{kind}",
+                id=f"batch_{media_kind}_{kind}",
+            )
+            for media_kind in ("image", "audio", "video")
+            for kind in (
+                "connection",
+                "timeout",
+                "mixed_fetch_first",
+                "mixed_decode_first",
+            )
+        ],
+        pytest.param("dispatch-error-test:received", id="dispatch_received"),
+        pytest.param("dispatch-error-test:no_received", id="dispatch_no_received"),
+        pytest.param("dispatch-error-test:untyped", id="dispatch_untyped"),
+    ],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_batch_media_and_dispatch_privacy_over_http_and_sse(
+    pixel_limit_http_server, trigger, stream
+):
+    """Mask aggregate/dispatch diagnostics and keep the service usable afterward."""
+    if trigger.startswith("batch-media-fetch-test:") and ImageLoader is None:
+        pytest.skip("multimodal loader dependencies are not installed")
+    base_url, model_name = pixel_limit_http_server
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": trigger}],
+        "stream": stream,
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            raw = await response.text()
+            assert response.status == (200 if stream else 500), raw
+            if stream:
+                assert response.content_type == "text/event-stream"
+        error = _sse_error(raw) if stream else json.loads(raw)
+        assert error == expected_error_body(
+            500,
+            "Internal server error",
+            "internal_server_error" if stream else "Internal Server Error",
+            backend_status=None if stream else 500,
+        ), raw
+        assert "PRIVATE_" not in raw
+        assert "10.20.30." not in raw
+        assert "private-batch-host" not in raw
+        assert "errno" not in raw
+
+        data["messages"][0]["content"] = "Reply normally after the rejected request."
+        data["stream"] = False
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            recovered = await response.text()
+            assert response.status == 200, recovered
+            assert "This is a mock response." in recovered
 
 
 @pytest.mark.asyncio
@@ -657,7 +1007,7 @@ async def test_streaming_chat_completion_http_error_waits_for_first_item(http_se
         async with session.post(url, json=data) as response:
             assert response.status == 400
             assert await response.json() == expected_error_body(
-                400, "Bad Request", "Bad Request"
+                400, MSG_CONTAINS_ERROR, "Bad Request"
             )
 
 
@@ -681,12 +1031,11 @@ async def test_streaming_chat_completion_http_error_default_commits_200(http_ser
             assert response.content_type == "text/event-stream"
             body = await response.text()
 
-    # The frame carries the sanitized stream error, not the backend's own
-    # message: HTTP 200 is already committed, so there is no status left to
-    # carry the 400, and the stream formatter does not forward backend text.
-    assert (
-        '"error"' in body
-    ), f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
+    # HTTP 200 is already committed; the SSE frame retains the error's status
+    # and the same forwarded engine message as the unary response.
+    error = _sse_error(body)
+    assert error["message"] == MSG_CONTAINS_ERROR
+    assert error["code"] == 400
     assert "mock response" not in body, (
         f"the generator raised before its first yield, so the stream must "
         f"carry no content; got: {body}"

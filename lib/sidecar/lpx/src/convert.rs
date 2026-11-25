@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use dynamo_backend_common::{
     BackendError, CompletionUsage, DynamoError, ErrorType, FinishReason, LLMEngineOutput,
-    PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason, usage,
+    PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason, UpstreamError, usage,
 };
 
 use crate::client::{
@@ -562,11 +562,19 @@ pub(crate) fn dispatch_failure(status: tonic::Status) -> DispatchFailure {
 /// broken connection is migratable too.
 pub(crate) fn stream_status(status: tonic::Status) -> DynamoError {
     if status.code() == tonic::Code::Unavailable {
-        engine_shutdown(format!(
+        let mut upstream = UpstreamError::new(status.message())
+            .error_type("grpc.Status")
+            .code(format!("{:?}", status.code()));
+        if std::error::Error::source(&status).is_some() {
+            upstream = upstream.family("transport");
+        }
+        let mut error = engine_shutdown(format!(
             "Generate: {} ({:?})",
             status.message(),
             status.code()
-        ))
+        ));
+        error.upstream_error = Some(Box::new(upstream));
+        error
     } else {
         stream_status_to_dynamo("Generate", status)
     }
@@ -576,24 +584,30 @@ pub(crate) fn stream_status(status: tonic::Status) -> DynamoError {
 /// engine sends these; the LPU-only engine reports every failure as a gRPC
 /// status.
 fn engine_error(error: pb::EngineError, engine: &str) -> DynamoError {
+    let upstream = UpstreamError::new(&error.message)
+        .error_type("openengine.v1.EngineError")
+        .code(error.code.to_string());
     let code = pb::ErrorCode::try_from(error.code).unwrap_or(pb::ErrorCode::Unspecified);
     let message = if error.message.trim().is_empty() {
         format!("{engine} reported engine error {code:?}")
     } else {
         format!("{engine} engine error: {}", error.message)
     };
-    if error.retryable {
-        return engine_shutdown(message);
-    }
-    match code {
-        pb::ErrorCode::InvalidArgument
-        | pb::ErrorCode::UnsupportedFeature
-        | pb::ErrorCode::DuplicateRequest
-        | pb::ErrorCode::RoleMismatch => invalid_argument(message),
-        // A decode engine reports a failed KV pull as INTERNAL with a "KV
-        // transfer failed: …" message, which passes through.
-        _ => unknown(message),
-    }
+    let mut mapped = if error.retryable {
+        engine_shutdown(message)
+    } else {
+        match code {
+            pb::ErrorCode::InvalidArgument
+            | pb::ErrorCode::UnsupportedFeature
+            | pb::ErrorCode::DuplicateRequest
+            | pb::ErrorCode::RoleMismatch => invalid_argument(message),
+            // A decode engine reports a failed KV pull as INTERNAL with a "KV
+            // transfer failed: …" message, which passes through.
+            _ => unknown(message),
+        }
+    };
+    mapped.upstream_error = Some(Box::new(upstream));
+    mapped
 }
 
 fn unknown(message: String) -> DynamoError {

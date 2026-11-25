@@ -15,6 +15,7 @@ use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+    media_error::{EngineFlavor, MediaErrorContext},
 };
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
@@ -858,6 +859,7 @@ impl LLMEngine for VllmSidecarEngine {
         request: dynamo_backend_common::PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let media = MediaErrorContext::from_request(&request);
         if request_has_multimodal_input(&request) && !self.model.supports_multimodal {
             return Err(client::invalid_argument(format!(
                 "model `{}` does not advertise multimodal support",
@@ -914,6 +916,7 @@ impl LLMEngine for VllmSidecarEngine {
             client
                 .generate_stream(proto_request, data_parallel_rank)
                 .await
+                .map_err(|error| media.tag(EngineFlavor::Vllm, error))
         };
         let defer_request_cancellation = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
@@ -997,7 +1000,7 @@ impl LLMEngine for VllmSidecarEngine {
                                 break;
                             }
                             Err(error) => {
-                                yield Err(error);
+                                yield Err(media.tag(EngineFlavor::Vllm, error));
                                 break;
                             }
                         }
@@ -1024,7 +1027,10 @@ impl LLMEngine for VllmSidecarEngine {
                         break;
                     }
                     Err(status) => {
-                        yield Err(client::stream_status_to_dynamo("GenerateStream", status));
+                        yield Err(media.tag(
+                            EngineFlavor::Vllm,
+                            client::stream_status_to_dynamo("GenerateStream", status),
+                        ));
                         break;
                     }
                 }
