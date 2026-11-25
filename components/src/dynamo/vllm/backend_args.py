@@ -16,6 +16,7 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
 from dynamo.common.configuration.utils import (
+    Deprecated,
     add_argument,
     add_negatable_bool_argument,
     parse_bool,
@@ -138,6 +139,19 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYNAMO_ARTIFACT_ROUTER_PROFILE",
             default=None,
             help="JSON array of [router_id, expert_count, top_k] entries for generation-artifact route capture.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--systemone-serial",
+            env_var="DYN_VLLM_SYSTEMONE_SERIAL",
+            default=False,
+            env_value_type=parse_bool,
+            help=(
+                "Opt in to decision scoring on a qualified serialized worker. "
+                "Requires --max-num-seqs=1 and --logprobs-mode=raw_logprobs; "
+                "does not change engine scheduling settings."
+            ),
         )
 
         add_negatable_bool_argument(
@@ -286,6 +300,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--realtime",
             env_var="DYN_VLLM_REALTIME",
             default=False,
+            deprecated=Deprecated("--endpoint-types realtime", remove_in="v1.9"),
             help="Serve a ModelType.Realtime bidirectional endpoint through "
             "the OpenAI /v1/realtime protocol. Standard vLLM currently "
             "supports text-only realtime and transcription sessions. "
@@ -613,6 +628,7 @@ class DynamoVllmConfig(ConfigBase):
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
     artifact_router_profile: Optional[str] = None
+    systemone_serial: bool = False
     use_vllm_tokenizer: bool
 
     # Multimodal
@@ -690,6 +706,7 @@ class DynamoVllmConfig(ConfigBase):
         _configured_artifact_router_profile(self.artifact_router_profile)
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
+        self._validate_systemone_serial()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_frontend_tokenization()
         self._validate_embedding_worker_exclusivity()
@@ -702,6 +719,30 @@ class DynamoVllmConfig(ConfigBase):
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
+
+    def _validate_systemone_serial(self) -> None:
+        if not self.systemone_serial:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError("--systemone-serial requires --disaggregation-mode=agg")
+        incompatible = (
+            "use_vllm_tokenizer",
+            "enable_rl",
+            "enable_multimodal",
+            "route_to_encoder",
+            "custom_encoder_class",
+            "embedding_worker",
+            "transcription_worker",
+            "classify_worker",
+            "realtime",
+            "headless",
+            "benchmark_mode",
+        )
+        for name in incompatible:
+            if getattr(self, name):
+                raise ValueError(
+                    f"--systemone-serial is incompatible with --{name.replace('_', '-')}"
+                )
 
     def _load_explicit_benchmark_points(self) -> None:
         self._benchmark_points = None
@@ -1052,12 +1093,16 @@ class DynamoVllmConfig(ConfigBase):
                 else self.disaggregation_mode
             )
             raise ValueError(
-                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
+                f"--endpoint-types realtime is only valid with --disaggregation-mode=agg (got {mode})."
             )
         if self.embedding_worker:
-            raise ValueError("--realtime cannot be combined with --embedding-worker.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --embedding-worker."
+            )
         if self.classify_worker:
-            raise ValueError("--realtime cannot be combined with --classify-worker.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --classify-worker."
+            )
         for enabled, option in (
             (bool(self.custom_encoder_class), "--custom-encoder-class"),
             (self.gms_shadow_mode, "--gms-shadow-mode"),
@@ -1065,15 +1110,21 @@ class DynamoVllmConfig(ConfigBase):
             (self.headless, "--headless"),
         ):
             if enabled:
-                raise ValueError(f"--realtime cannot be combined with {option}.")
+                raise ValueError(
+                    f"--endpoint-types realtime cannot be combined with {option}."
+                )
         if self.enable_multimodal:
             raise ValueError(
-                "--realtime cannot be combined with multimodal worker flags."
+                "--endpoint-types realtime cannot be combined with multimodal worker flags."
             )
         if self.benchmark_mode is not None:
-            raise ValueError("--realtime cannot be combined with --benchmark-mode.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --benchmark-mode."
+            )
         if getattr(getattr(self, "engine_args", None), "enable_lora", False):
-            raise ValueError("--realtime cannot be combined with --enable-lora.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --enable-lora."
+            )
 
     def _validate_transcription_worker_exclusivity(self) -> None:
         """Transcription serving uses a dedicated aggregated ASR worker."""
@@ -1092,7 +1143,7 @@ class DynamoVllmConfig(ConfigBase):
         for enabled, option in (
             (self.embedding_worker, "--embedding-worker"),
             (self.classify_worker, "--classify-worker"),
-            (self.realtime, "--realtime"),
+            (self.realtime, "--endpoint-types realtime"),
             (bool(self.custom_encoder_class), "--custom-encoder-class"),
             (self.gms_shadow_mode, "--gms-shadow-mode"),
             (self.enable_rl, "--enable-rl"),

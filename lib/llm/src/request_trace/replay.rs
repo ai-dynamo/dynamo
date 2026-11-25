@@ -4,9 +4,9 @@
 //! Replay-oriented request hash capture for live traces.
 
 use bytemuck::cast_slice;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, LocalBlockHash, XXH3_SEED, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, XXH3_SEED, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_tokens::compute_hash_v2;
 

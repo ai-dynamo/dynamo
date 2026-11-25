@@ -203,7 +203,9 @@ func fuzzMutatedV1Beta1HubEnvelope(t *testing.T) {
 }
 
 type v1Beta2SpokeEnvelopeMutationOps struct {
+	// +required
 	t *testing.T
+	// +required
 	f *randfill.Filler
 }
 
@@ -247,7 +249,9 @@ func (v1Beta2SpokeEnvelopeMutationOps) convertBack(
 }
 
 type v1Beta1HubEnvelopeMutationOps struct {
+	// +required
 	t *testing.T
+	// +required
 	f *randfill.Filler
 }
 

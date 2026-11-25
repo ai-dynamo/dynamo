@@ -1,23 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! NIXL backend configuration with Figment support.
-//!
-//! This module provides configuration extraction for NIXL backends from
-//! environment variables with the pattern: `DYN_KVBM_NIXL_BACKEND_<backend>=<value>`
+//! NIXL backend configuration.
 
-use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Configuration for NIXL backends.
-///
-/// Supports extracting backend configurations from environment variables:
-/// - `DYN_KVBM_NIXL_BACKEND_UCX=true` - Enable UCX backend with default params
-/// - `DYN_KVBM_NIXL_BACKEND_GDS=false` - Explicitly disable GDS backend
-/// - Valid values: true/false, 1/0, on/off, yes/no (case-insensitive)
-/// - Invalid values (e.g., "maybe", "random") will cause an error
-/// - Custom params (e.g., `DYN_KVBM_NIXL_BACKEND_UCX_PARAM1=value`) will cause an error
 ///
 /// # Data Structure
 ///
@@ -52,54 +41,6 @@ impl NixlBackendConfig {
     /// For an empty configuration with no backends, use [`Default::default()`].
     pub fn new(backends: HashMap<String, HashMap<String, String>>) -> Self {
         Self { backends }
-    }
-
-    /// Create configuration from environment variables.
-    ///
-    /// Extracts backends from `DYN_KVBM_NIXL_BACKEND_<backend>=<value>` variables.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Custom parameters are detected (not yet supported)
-    /// - Invalid boolean values are provided (must be truthy or falsey)
-    pub fn from_env() -> Result<Self> {
-        let mut backends = HashMap::new();
-
-        // Extract all environment variables that match our pattern
-        for (key, value) in std::env::vars() {
-            if let Some(remainder) = key.strip_prefix("DYN_KVBM_NIXL_BACKEND_") {
-                // Check if there's an underscore (indicating custom params)
-                if remainder.contains('_') {
-                    bail!(
-                        "Custom NIXL backend parameters are not yet supported. \
-                         Found: {}. Please use only DYN_KVBM_NIXL_BACKEND_<backend>=true \
-                         to enable backends with default parameters.",
-                        key
-                    );
-                }
-
-                // Simple backend enablement (e.g., DYN_KVBM_NIXL_BACKEND_UCX=true).
-                // Empty or unrecognized values are rejected rather than treated
-                // as false: silently dropping a backend hides misconfiguration.
-                let backend_name = remainder.to_uppercase();
-                match crate::parse_bool_opt(&value) {
-                    Some(true) => {
-                        backends.insert(backend_name, HashMap::new());
-                    }
-                    Some(false) => {
-                        // Explicitly disabled, don't add to backends
-                        continue;
-                    }
-                    None => bail!(
-                        "Invalid value for {}: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
-                        key,
-                        value
-                    ),
-                }
-            }
-        }
-
-        Ok(Self { backends })
     }
 
     /// Add a backend with default parameters.
@@ -241,7 +182,4 @@ mod tests {
         let items: Vec<_> = config.iter().collect();
         assert_eq!(items.len(), 2);
     }
-
-    // Note: Testing from_env() would require setting environment variables,
-    // which is challenging in unit tests. This is better tested with integration tests.
 }

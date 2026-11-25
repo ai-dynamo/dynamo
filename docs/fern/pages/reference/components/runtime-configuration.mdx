@@ -83,7 +83,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--endpoint-types" type="string" default="chat,completions">
-  Comma-separated list of OpenAI-compatible endpoint types to enable. Use `completions` alone for models that do not have a chat template. The obsolete alias `--dyn-endpoint-types` is accepted for backward compatibility.
+  Comma-separated list of OpenAI-compatible endpoint types to enable. Use `completions` alone for models that do not have a chat template. vLLM workers also accept `realtime` for the `/v1/realtime` endpoint: `realtime` serves it alone, and `chat,realtime` also serves chat completions from the same engine. The obsolete alias `--dyn-endpoint-types` is accepted for backward compatibility.
 
   Environment variable: `DYN_ENDPOINT_TYPES`
 </ParamField>

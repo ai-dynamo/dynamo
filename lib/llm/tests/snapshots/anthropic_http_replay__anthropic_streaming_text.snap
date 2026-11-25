@@ -63,7 +63,8 @@ expression: "canonicalize(serde_json::to_value(events).unwrap())"
     "data": {
       "type": "message_delta",
       "delta": {
-        "stop_reason": "end_turn"
+        "stop_reason": "end_turn",
+        "stop_sequence": null
       },
       "usage": {
         "input_tokens": 5,

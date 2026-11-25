@@ -41,7 +41,7 @@ class _Worker:
 
     @classmethod
     @contextlib.asynccontextmanager
-    async def serve(cls, endpoint_path):
+    async def serve(cls, endpoint_path, handler=_generate_error):
         runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
         try:
             endpoint = runtime.endpoint(endpoint_path)
@@ -57,9 +57,7 @@ class _Worker:
                     "outputs": [],
                 },
             )
-            server_task = asyncio.ensure_future(
-                endpoint.serve_endpoint(_generate_error)
-            )
+            server_task = asyncio.ensure_future(endpoint.serve_endpoint(handler))
         except BaseException:
             runtime.shutdown()
             raise
@@ -166,3 +164,44 @@ async def test_worker_teardown_leaves_sibling_worker_reachable(
     router = KvRouter(survivor_endpoint, 4, KvRouterConfig(use_kv_events=False))
     with pytest.raises(ValueError, match="intentional KV-router failure"):
         await asyncio.wait_for(_generate_and_collect(router, 100), timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_generate_from_request_adds_to_an_upstream_arrival_stamp(
+    router_runtime, monkeypatch
+):
+    """A request another router stamped keeps that age when this router dispatches it.
+
+    The request tracker is not serialized, so `generate_from_request` gives the request a
+    new one. The dispatch stamp must add this router's time to the stamp the request
+    arrived with, not replace it with this router's time alone.
+    """
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
+    dispatched = []
+
+    async def record(request, _context=None):
+        dispatched.append(request.get("elapsed_since_arrival_ms"))
+        yield {"token_ids": [1], "finish_reason": "stop"}
+
+    request = {
+        "model": "test-model",
+        "token_ids": [1, 2, 3],
+        "stop_conditions": {},
+        "sampling_options": {},
+        "output_options": {},
+    }
+    async with _Worker.serve(
+        f"stamp-router-{uuid.uuid4().hex}.worker.generate", record
+    ) as worker:
+        endpoint = router_runtime.endpoint(worker.endpoint_path)
+        await _wait_for_single_instance(endpoint)
+        router = KvRouter(endpoint, 4, KvRouterConfig(use_kv_events=False))
+        for upstream in ({"elapsed_since_arrival_ms": 1500.0}, {}):
+            stream = await router.generate_from_request({**request, **upstream})
+            async for _ in stream:
+                pass
+
+    stamped, unstamped = dispatched
+    assert stamped >= 1500.0
+    assert 0.0 <= unstamped < 1500.0

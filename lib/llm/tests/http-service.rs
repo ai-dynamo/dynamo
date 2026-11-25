@@ -4,6 +4,8 @@
 use anyhow::Error;
 use async_stream::stream;
 use base64::Engine as _;
+use dynamo_error::http::HttpError;
+use dynamo_http_server::metrics::{Endpoint, ErrorType, Metrics, RequestType, Status};
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -19,12 +21,7 @@ use dynamo_llm::types::openai::audios::OpenAIAudiosStreamingEngine;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_llm::{
     endpoint_type::EndpointType,
-    http::service::{
-        Metrics,
-        error::HttpError,
-        metrics::{Endpoint, ErrorType, RequestType, Status},
-        service_v2::{BackendErrorCheck, HttpService},
-    },
+    http::service::service_v2::{BackendErrorCheck, HttpService},
     model_card::ModelDeploymentCard,
 };
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
@@ -2707,7 +2704,7 @@ async fn assert_pre_commit_disconnect_is_recorded_once(on_kill: OnKill) {
         1,
         "one disconnect must be recorded once"
     );
-    let cancellation_labels = dynamo_llm::http::service::metrics::CancellationLabels {
+    let cancellation_labels = dynamo_http_server::metrics::CancellationLabels {
         model: MODEL.to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: RequestType::Stream.as_str().to_string(),
@@ -4462,7 +4459,7 @@ async fn test_reject_media_disabled_preserves_anthropic_model_lookup_precedence(
         .json(&serde_json::json!({
             "model": "unregistered", "max_tokens": 16,
             "messages": [{"role": "user", "content": [{
-                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png", "media_type": "image/png", "data": ""}
+                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}
             }]}]
         }))
         .send()

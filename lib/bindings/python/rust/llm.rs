@@ -34,5 +34,6 @@ pub mod lora;
 pub mod model_card;
 pub mod pool_relay;
 pub mod preprocessor;
+pub(crate) mod py_convert;
 pub mod replay;
 pub mod routed_engine;

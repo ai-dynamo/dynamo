@@ -58,7 +58,7 @@ impl KvStateAgentHost {
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
         crate::future_into_py(py, async move {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize::pythonize(py, inner.status().as_ref())
                     .map(|value| value.unbind())
                     .map_err(to_pyerr)
@@ -108,7 +108,9 @@ struct AttachmentDescriptorInput {
     #[serde(default)]
     engine_owned_mm_identity: bool,
     #[serde(default)]
-    router_hint_source: Option<dynamo_kv_router::protocols::RouterHintSourceMetadata>,
+    process_local_inventory: bool,
+    #[serde(default)]
+    router_hint_source: Option<dynamo_kv_indexer::host::RouterHintSourceMetadata>,
 }
 
 #[pyclass]
@@ -130,7 +132,7 @@ impl KvStateAttachmentOwner {
             .map(|input| {
                 Ok(llm_rs::kv_router::publisher::KvStateAttachmentDescriptor {
                     cache_owner_id: input.cache_owner_id.parse()?,
-                    worker: dynamo_kv_router::protocols::WorkerWithDpRank {
+                    worker: dynamo_router_protocol::worker::WorkerWithDpRank {
                         worker_id,
                         dp_rank: input.global_dp_rank,
                     },
@@ -145,6 +147,7 @@ impl KvStateAttachmentOwner {
                     image_token_id: input.image_token_id,
                     video_token_id: input.video_token_id,
                     engine_owned_mm_identity: input.engine_owned_mm_identity,
+                    process_local_inventory: input.process_local_inventory,
                     router_hint_source: input.router_hint_source,
                 })
             })

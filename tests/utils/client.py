@@ -33,7 +33,13 @@ def _sanitize_payload_for_logging(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # Handle chat completions with multimodal content
     if "messages" in sanitized:
-        for message in sanitized["messages"]:
+        messages = sanitized["messages"]
+        # Batched embedding requests send a list of conversations.
+        if messages and all(isinstance(m, list) for m in messages):
+            messages = [m for conversation in messages for m in conversation]
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
             content = message.get("content")
             # Content can be string or list of content parts (multimodal)
             if isinstance(content, list):

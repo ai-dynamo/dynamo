@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
-use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
@@ -28,6 +27,7 @@ use dynamo_llm::tokenizers::Encoding;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
 };
@@ -35,6 +35,7 @@ use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_scheduler::host::{RouterConfigOverride, RoutingConstraints};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -3182,7 +3183,7 @@ mod tests {
 
     #[test]
     fn only_a_top_level_invalid_argument_decode_error_is_invalid_input() {
-        use dynamo_kv_router::scheduling::KvSchedulerError;
+        use dynamo_scheduler::host::KvSchedulerError;
 
         let pick = |error: anyhow::Error| decode_pick_error(decode_query_error(error));
         let invalid_argument = |message: &str| {
@@ -3232,11 +3233,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_prefill_class_fails_the_pick_instead_of_falling_back() {
         use dynamo_kv_router::config::KvRouterConfig;
-        use dynamo_kv_router::scheduling::KvSchedulerError;
         use dynamo_llm::kv_router::prefill_router::PrefillError;
         use dynamo_llm::kv_router::{KvRouter, SelectionPolicySource};
         use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
         use dynamo_runtime::distributed::DistributedConfig;
+        use dynamo_scheduler::host::KvSchedulerError;
 
         async fn kv_router(
             drt: &DistributedRuntime,

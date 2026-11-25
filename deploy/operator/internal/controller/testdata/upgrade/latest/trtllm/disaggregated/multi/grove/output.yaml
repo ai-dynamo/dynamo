@@ -149,7 +149,7 @@ spec:
               && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\nIdentityFile '$HOME'/.ssh/id_rsa\nStrictHostKeyChecking
               no\nPort 2222\n' > $HOME/.ssh/config && mpirun $([ "$(id -u)" = "0"
               ] && echo --allow-run-as-root) --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-prefill-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-prefill-wkr-0.$(GROVE_HEADLESS_SERVICE)
-              --mca pml ob1 --mca plm_rsh_args "-p 2222 -o StrictHostKeyChecking=no
+              --map-by ppr:1:node --mca pml ob1 --mca plm_rsh_args "-p 2222 -o StrictHostKeyChecking=no
               -i $HOME/.ssh/id_rsa" -x CPATH -x CUDA_VISIBLE_DEVICES -x DYNAMO_LEADER_ADDRESS
               -x DYNAMO_RANK -x DYN_COMPONENT -x DYN_DISCOVERY_BACKEND -x DYN_FORWARDPASS_METRIC_PORT
               -x DYN_HEALTH_CHECK_ENABLED -x DYN_NAMESPACE -x DYN_NAMESPACE_WORKER_SUFFIX
@@ -421,7 +421,7 @@ spec:
               && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\nIdentityFile '$HOME'/.ssh/id_rsa\nStrictHostKeyChecking
               no\nPort 2222\n' > $HOME/.ssh/config && mpirun $([ "$(id -u)" = "0"
               ] && echo --allow-run-as-root) --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-decode-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-decode-wkr-0.$(GROVE_HEADLESS_SERVICE)
-              --mca pml ob1 --mca plm_rsh_args "-p 2222 -o StrictHostKeyChecking=no
+              --map-by ppr:1:node --mca pml ob1 --mca plm_rsh_args "-p 2222 -o StrictHostKeyChecking=no
               -i $HOME/.ssh/id_rsa" -x CPATH -x CUDA_VISIBLE_DEVICES -x DYNAMO_LEADER_ADDRESS
               -x DYNAMO_RANK -x DYN_COMPONENT -x DYN_DISCOVERY_BACKEND -x DYN_FORWARDPASS_METRIC_PORT
               -x DYN_HEALTH_CHECK_ENABLED -x DYN_NAMESPACE -x DYN_NAMESPACE_WORKER_SUFFIX
