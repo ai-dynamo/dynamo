@@ -25,9 +25,12 @@ from dynamo.artifacts.vllm.format import (  # noqa: E402
     SelectedLogprobs,
     Tensor,
     TopKLogprobs,
+    assemble_hidden_states,
+    chunk_hidden_states,
     compact_routes,
     decode_generation_artifact,
     encode_generation_artifact,
+    hidden_state_chunk_rows,
     iter_generation_artifact,
 )
 
@@ -102,7 +105,7 @@ def test_decode_rejects_noncontiguous_buffer():
 def test_unknown_minor_version_requires_explicit_reader_support():
     encoded = encode_generation_artifact(_view()).data
     magic, major, _, codec, manifest_bytes, payload_bytes = PRELUDE.unpack_from(encoded)
-    header = PRELUDE.pack(magic, major, 2, codec, manifest_bytes, payload_bytes)
+    header = PRELUDE.pack(magic, major, 3, codec, manifest_bytes, payload_bytes)
     with pytest.raises(GenerationArtifactFormatError, match="version"):
         decode_generation_artifact(header + encoded[PRELUDE.size :])
 
@@ -545,3 +548,118 @@ def test_hidden_states_with_nonzero_start_roundtrip():
     assert decode_generation_artifact(
         encode_generation_artifact(_view(hidden)).data
     ) == _view(hidden)
+
+
+def _chunked(token_start=0, rows=3, chunk_tokens=2, dtype="fp32", values=None):
+    width = 2 * 4
+    if values is None:
+        values = np.arange((token_start + rows) * width, dtype=np.float32)
+        values = values.reshape(-1, width)[token_start:]
+    native = {"fp32": np.float32, "fp16": np.float16}[dtype]
+    return chunk_hidden_states(
+        token_start=token_start,
+        layer_ids=(2, 5),
+        hidden_size=4,
+        dtype=dtype,
+        data=np.ascontiguousarray(values, dtype=native).tobytes(),
+        chunk_tokens=chunk_tokens,
+    )
+
+
+@pytest.mark.parametrize(
+    "start,extent,size,expected",
+    [
+        (0, 5, 2, [2, 2, 1]),
+        (1, 5, 2, [1, 2, 1]),
+        (3, 4, 8, [1]),
+        (4, 4, 2, []),
+        (0, 4, 4, [4]),
+    ],
+)
+def test_chunks_align_to_absolute_positions(start, extent, size, expected):
+    assert hidden_state_chunk_rows(start, extent, size) == expected
+
+
+def test_chunked_hidden_states_round_trip_as_version_1_2():
+    component, blobs = _chunked()
+    encoded = encode_generation_artifact(_view(component)).data
+    assert PRELUDE.unpack_from(encoded)[2] == 2
+    (decoded,) = decode_generation_artifact(encoded).choices[0].components
+    assert decoded == component
+    assembled = assemble_hidden_states(decoded, blobs.__getitem__)
+    assert assembled.tobytes() == np.arange(24, dtype=np.float32).tobytes()
+
+
+def test_unchunked_objects_keep_their_older_minor_versions():
+    hidden = HiddenStates(0, (2, 5), 4, Tensor.from_array(np.zeros((3, 8), np.float32)))
+    assert PRELUDE.unpack_from(encode_generation_artifact(_view(hidden)).data)[2] == 1
+    assert PRELUDE.unpack_from(encode_generation_artifact(_view()).data)[2] == 0
+
+
+def test_chunked_hidden_states_require_version_1_2():
+    component, _ = _chunked()
+    encoded = encode_generation_artifact(_view(component), codec=CODEC_NONE).data
+    magic, major, _, codec, manifest_bytes, payload_bytes = PRELUDE.unpack_from(encoded)
+    header = PRELUDE.pack(magic, major, 1, codec, manifest_bytes, payload_bytes)
+    with pytest.raises(GenerationArtifactFormatError, match="version 1.2"):
+        decode_generation_artifact(header + encoded[PRELUDE.size :])
+
+
+def test_identical_rows_share_a_chunk_digest():
+    values = np.ones((4, 8), np.float32)
+    component, blobs = _chunked(rows=4, values=values)
+    assert len({chunk.sha256 for chunk in component.chunks}) == 1
+    assert len(blobs) == 1
+    assembled = assemble_hidden_states(component, blobs.__getitem__)
+    assert assembled.shape == (4, 8)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda c: replace(c, chunks=c.chunks[:-1]),
+        lambda c: replace(c, chunks=(replace(c.chunks[0], rows=1), *c.chunks[1:])),
+        lambda c: replace(
+            c, chunks=(replace(c.chunks[0], sha256="A" * 64), *c.chunks[1:])
+        ),
+        lambda c: replace(c, chunk_tokens=3),
+        lambda c: replace(c, dtype="i64"),
+    ],
+)
+def test_chunk_layout_is_checked_on_write(change):
+    component, _ = _chunked()
+    with pytest.raises(GenerationArtifactFormatError):
+        encode_generation_artifact(_view(change(component)))
+
+
+def test_only_one_hidden_state_component_per_choice():
+    component, _ = _chunked()
+    hidden = HiddenStates(0, (2, 5), 4, Tensor.from_array(np.zeros((3, 8), np.float32)))
+    with pytest.raises(GenerationArtifactFormatError, match="hidden-state component"):
+        encode_generation_artifact(_view(component, hidden))
+
+
+def test_assembly_rejects_a_chunk_that_differs_from_its_digest():
+    component, blobs = _chunked()
+    first = component.chunks[0].sha256
+    tampered = {**blobs, first: bytes(len(blobs[first]))}
+    with pytest.raises(GenerationArtifactFormatError, match="digest"):
+        assemble_hidden_states(component, tampered.__getitem__)
+
+
+def test_nonfinite_rows_are_rejected_before_chunking():
+    values = np.zeros((3, 8), np.float32)
+    values[2, 3] = np.inf
+    with pytest.raises(GenerationArtifactFormatError, match="hidden-state value"):
+        _chunked(values=values)
+
+
+def test_assembly_is_bounded():
+    component, blobs = _chunked()
+    with pytest.raises(GenerationArtifactFormatError, match="max_bytes"):
+        assemble_hidden_states(component, blobs.__getitem__, max_bytes=64)
+
+
+def test_chunk_count_is_bounded():
+    with pytest.raises(GenerationArtifactFormatError, match="too many"):
+        _chunked(rows=4097, chunk_tokens=1, values=np.zeros((4097, 8), np.float32))

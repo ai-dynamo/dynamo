@@ -166,6 +166,7 @@ class ArtifactOperationStore:
                 raise ValueError("operation is already terminal")
             allowed = (
                 {"actual_bytes", "sha256", "object_id", "provider_identity"}
+                | _CHUNK_FIELDS
                 if state == "ready"
                 else {"error_code"}
             )
@@ -206,6 +207,8 @@ class ArtifactOperationStore:
 
 
 Transfer = Callable[[bytes, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
+# Summary of a chunked artifact's separately stored parts, on a ready receipt.
+_CHUNK_FIELDS = frozenset({"chunk_count", "chunk_bytes", "reused_chunk_bytes"})
 
 
 class ArtifactService:
@@ -221,6 +224,7 @@ class ArtifactService:
         concurrency: int = 2,
         timeout_seconds: float = 60,
         max_pending_operations: int = 128,
+        deliver_part: Transfer | None = None,
     ):
         if (
             max_source_bytes <= 0
@@ -233,6 +237,9 @@ class ArtifactService:
         self.store = store
         self.transfer = transfer
         self.verify = verify
+        # Stores and verifies one content-addressed part; reports "reused" when
+        # the store already held it.
+        self.deliver_part = deliver_part
         self.max_source_bytes = max_source_bytes
         self.timeout_seconds = timeout_seconds
         self.max_pending_operations = max_pending_operations
@@ -249,20 +256,38 @@ class ArtifactService:
             return self._source_bytes
 
     async def submit(
-        self, data: bytes, owner: str, contents: list[str], target: Mapping[str, Any]
+        self,
+        data: bytes,
+        owner: str,
+        contents: list[str],
+        target: Mapping[str, Any],
+        *,
+        parts: tuple[tuple[bytes, Mapping[str, Any]], ...] = (),
     ):
+        """Deliver ``data`` after every part; the receipt is ready only if all are.
+
+        Parts are stored before the object, so an object that exists implies its
+        parts do. A part's target carries the ``sha256`` its bytes must have.
+        """
         loop = asyncio.get_running_loop()
-        if type(data) is not bytes:
+        if type(data) is not bytes or any(type(part) is not bytes for part, _ in parts):
             raise ValueError("artifact source must be immutable bytes")
+        if parts and self.deliver_part is None:
+            raise ValueError("chunked artifact delivery is unavailable")
         sealed_target = json.loads(json.dumps(dict(target)))
+        sealed_parts = tuple(
+            (part, json.loads(json.dumps(dict(part_target))))
+            for part, part_target in parts
+        )
         sealed_contents = list(contents)
+        source_size = len(data) + sum(len(part) for part, _ in parts)
         with self._lock:
             if (
-                self._source_bytes + len(data) > self.max_source_bytes
+                self._source_bytes + source_size > self.max_source_bytes
                 or self._pending_count >= self.max_pending_operations
             ):
                 raise ValueError("artifact delivery capacity exhausted")
-            self._source_bytes += len(data)
+            self._source_bytes += source_size
             self._pending_count += 1
         admission = loop.create_future()
         self._admissions.add(admission)
@@ -280,17 +305,24 @@ class ArtifactService:
                 raise asyncio.CancelledError
             started = asyncio.Event()
             task = loop.create_task(
-                self._deliver(data, sealed_target, pending["operation_id"], started)
+                self._deliver(
+                    data,
+                    sealed_target,
+                    pending["operation_id"],
+                    started,
+                    sealed_parts,
+                    source_size,
+                )
             )
             self._tasks.add(task)
             task.add_done_callback(
                 partial(
-                    self._delivery_done, pending["operation_id"], len(data), started
+                    self._delivery_done, pending["operation_id"], source_size, started
                 )
             )
             return pending
         except BaseException:
-            self._release_source(len(data))
+            self._release_source(source_size)
             raise
         finally:
             self._admissions.discard(admission)
@@ -341,10 +373,12 @@ class ArtifactService:
                     traceback.clear_frames(error.__traceback__)
                     error = error.__cause__ or error.__context__
 
-    async def _deliver(self, data, target, operation_id, started):
+    async def _deliver(
+        self, data, target, operation_id, started, parts=(), source_size=None
+    ):
         started.set()
         try:
-            fields = await self._bounded_transfer(data, target)
+            fields = await self._bounded_transfer(data, target, parts)
             # Keep the fenced commit owned by this task through cancellation.
             await self._finish(operation_id, "ready", **fields)
         except asyncio.CancelledError:
@@ -372,10 +406,10 @@ class ArtifactService:
             ):
                 raise
         finally:
-            self._release_source(len(data))
+            self._release_source(len(data) if source_size is None else source_size)
 
-    async def _bounded_transfer(self, data, target):
-        child = asyncio.create_task(self._transfer_and_verify(data, target))
+    async def _bounded_transfer(self, data, target, parts=()):
+        child = asyncio.create_task(self._transfer_all(data, target, parts))
         try:
             return await asyncio.shield(child)
         except BaseException:
@@ -383,6 +417,40 @@ class ArtifactService:
             # Repeated caller cancellation cannot detach transfer cleanup.
             await _settle(asyncio.gather(child, return_exceptions=True))
             raise
+
+    async def _transfer_all(self, data, target, parts):
+        if not parts:
+            return await self._transfer_and_verify(data, target)
+        tasks = [
+            asyncio.create_task(self._deliver_one_part(part, part_target))
+            for part, part_target in parts
+        ]
+        try:
+            reused = sum(await asyncio.gather(*tasks))
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await _settle(asyncio.gather(*tasks, return_exceptions=True))
+            raise
+        fields = await self._transfer_and_verify(data, target)
+        return {
+            **fields,
+            "chunk_count": len(parts),
+            "chunk_bytes": sum(len(part) for part, _ in parts),
+            "reused_chunk_bytes": reused,
+        }
+
+    async def _deliver_one_part(self, part, target):
+        """Store one part; return its size if the store already held it, else 0."""
+        async with self._semaphore:
+            verified = await asyncio.wait_for(
+                self.deliver_part(part, target), self.timeout_seconds
+            )
+        if verified.get("sha256") != target.get("sha256") or verified.get(
+            "actual_bytes"
+        ) != len(part):
+            raise ValueError("part verification failed")
+        return len(part) if verified.get("reused") else 0
 
     async def _transfer_and_verify(self, data, target):
         async with self._semaphore:

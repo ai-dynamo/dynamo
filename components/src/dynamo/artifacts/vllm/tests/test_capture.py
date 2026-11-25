@@ -704,3 +704,205 @@ async def test_token_start_beyond_observed_prompt_is_capture_invalid(tmp_path):
     result = await capture.finalize()
     assert result["error_code"] == "capture_invalid"
     assert not path.exists()
+
+
+class _ChunkRuntime:
+    """Records what capture submits; mimics a delivery runtime's size cap."""
+
+    def __init__(self, max_artifact_bytes=1 << 30):
+        self.max_artifact_bytes = max_artifact_bytes
+        self.validated = []
+        self.submitted = []
+
+    def validate(self, destination, mode):
+        self.validated.append((dict(destination), mode))
+
+    async def submit(self, data, contents, destination, *, mode, parts=None):
+        self.submitted.append((data, contents, destination, mode, parts))
+        return {"kind": "generation_artifact", "mode": mode, "state": "pending"}
+
+
+_CHUNKED_DESTINATION = {
+    "kind": "managed_store",
+    "profile": "approved",
+    "object_key": "runs/r1/sample-0",
+    "chunk_prefix": "runs/r1/chunks",
+}
+
+
+def _chunked_request(chunk_tokens=2, mode="object_store", destination=None):
+    if destination is None:
+        destination = (
+            dict(_CHUNKED_DESTINATION)
+            if mode == "object_store"
+            else {"kind": "nixl_read", "lease_seconds": 60}
+        )
+    req = request(("hidden_states",), mode=mode, destination=destination)
+    req["extra_args"]["nvext"]["metadata_upload"]["content_options"] = {
+        "hidden_states": {"chunk_tokens": chunk_tokens}
+    }
+    return req
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["object_store", "nixl_read"])
+async def test_chunked_hidden_states_travel_as_parts(tmp_path, mode):
+    from dynamo.artifacts.vllm.format import HiddenStateChunks, assemble_hidden_states
+
+    torch = pytest.importorskip("torch")
+    runtime = _ChunkRuntime()
+    capture = VllmArtifactSession.from_request(
+        _chunked_request(chunk_tokens=2, mode=mode),
+        prompt_token_count=3,
+        max_tokens=3,
+        budget=CaptureBudget(1 << 20),
+        runtime=runtime,
+        hidden_state_profile=_hidden_profile(tmp_path),
+    )
+    path = tmp_path / "req.safetensors"
+    hidden = _write_hidden(path, 5, [10, 11, 12, 13, 14])
+    capture.observe(SimpleNamespace(index=0, token_ids=[13, 14, 15]), [10, 11, 12])
+    capture.observe_transfer({"hidden_states_path": str(path)})
+    result = await capture.finalize()
+
+    assert result["state"] == "pending"
+    ((data, _, _, submitted_mode, parts),) = runtime.submitted
+    assert submitted_mode == mode
+    (component,) = decode_generation_artifact(data).choices[0].components
+    assert isinstance(component, HiddenStateChunks)
+    # Positions 0..4 in chunks of 2, aligned to absolute positions.
+    assert [chunk.rows for chunk in component.chunks] == [2, 2, 1]
+    assembled = assemble_hidden_states(component, parts.__getitem__)
+    assert (
+        assembled.tobytes() == hidden.to(torch.float16).reshape(5, 8).numpy().tobytes()
+    )
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_shared_prompt_chunks_match_across_requests(tmp_path):
+    """Two samples of one prompt produce the same digests for full prompt chunks."""
+    digests = []
+    for completion in ([20, 21], [30, 31]):
+        runtime = _ChunkRuntime()
+        capture = VllmArtifactSession.from_request(
+            _chunked_request(chunk_tokens=2),
+            prompt_token_count=4,
+            max_tokens=2,
+            budget=CaptureBudget(1 << 20),
+            runtime=runtime,
+            hidden_state_profile=_hidden_profile(tmp_path),
+        )
+        path = tmp_path / "req.safetensors"
+        _write_hidden(path, 5, [10, 11, 12, 13, completion[0]])
+        capture.observe(
+            SimpleNamespace(index=0, token_ids=completion), [10, 11, 12, 13]
+        )
+        capture.observe_transfer({"hidden_states_path": str(path)})
+        await capture.finalize()
+        ((data, *_),) = runtime.submitted
+        (component,) = decode_generation_artifact(data).choices[0].components
+        digests.append([chunk.sha256 for chunk in component.chunks])
+    # The fixture's rows depend only on position, so every chunk matches here;
+    # what matters is that the prompt's chunks start at the same positions.
+    assert digests[0][:2] == digests[1][:2]
+
+
+def test_chunking_lifts_the_single_object_cap(tmp_path):
+    profile = _hidden_profile(tmp_path, layers=(1, 2, 3), hidden_size=4096)
+    rows = (96 << 20) // profile.row_bytes
+    kwargs = dict(
+        prompt_token_count=rows,
+        max_tokens=0,
+        budget=CaptureBudget(1 << 30),
+        runtime=_ChunkRuntime(),
+        hidden_state_profile=profile,
+    )
+    unchunked = {k: v for k, v in _CHUNKED_DESTINATION.items() if k != "chunk_prefix"}
+    with pytest.raises(ValueError, match="worst-case size"):
+        VllmArtifactSession.from_request(
+            request(("hidden_states",), "object_store", unchunked), **kwargs
+        )
+    capture = VllmArtifactSession.from_request(
+        _chunked_request(chunk_tokens=1024), **kwargs
+    )
+    capture.close()
+
+
+def test_chunked_request_beyond_delivery_capacity_fails_at_admission(tmp_path):
+    budget = CaptureBudget(1 << 30)
+    with pytest.raises(ValueError, match="delivery capacity"):
+        VllmArtifactSession.from_request(
+            _chunked_request(chunk_tokens=64),
+            prompt_token_count=1000,
+            max_tokens=0,
+            budget=budget,
+            runtime=_ChunkRuntime(max_artifact_bytes=1 << 16),
+            hidden_state_profile=_hidden_profile(tmp_path, hidden_size=4096),
+        )
+    assert budget.used == 0
+
+
+@pytest.mark.parametrize(
+    "req_args,match",
+    [
+        (
+            {
+                "mode": "object_store",
+                "destination": {
+                    "kind": "managed_store",
+                    "profile": "approved",
+                    "object_key": "a",
+                },
+            },
+            "chunk_prefix",
+        ),
+        (
+            {"mode": "relay_store", "destination": {"kind": "mooncake_store"}},
+            "object_store or nixl_read",
+        ),
+        ({"chunk_tokens": 0}, "chunk_tokens"),
+        ({"chunk_tokens": True}, "chunk_tokens"),
+    ],
+)
+def test_invalid_chunked_requests_fail_before_admission(tmp_path, req_args, match):
+    budget = CaptureBudget(1 << 30)
+    with pytest.raises(ValueError, match=match):
+        VllmArtifactSession.from_request(
+            _chunked_request(**req_args),
+            prompt_token_count=4,
+            max_tokens=2,
+            budget=budget,
+            runtime=_ChunkRuntime(),
+            hidden_state_profile=_hidden_profile(tmp_path, hidden_size=1 << 14),
+        )
+    assert budget.used == 0
+
+
+def test_chunk_prefix_without_chunking_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="chunk_prefix requires"):
+        session(
+            request(("hidden_states",), "object_store", dict(_CHUNKED_DESTINATION)),
+            runtime=_ChunkRuntime(),
+            hidden_state_profile=_hidden_profile(tmp_path),
+        )
+
+
+def test_inline_chunked_request_is_rejected(tmp_path):
+    req = _hidden_request({"hidden_states": {"chunk_tokens": 2}})
+    with pytest.raises(ValueError, match="object_store or nixl_read"):
+        session(req, hidden_state_profile=_hidden_profile(tmp_path))
+
+
+def test_chunk_larger_than_one_object_is_rejected(tmp_path):
+    profile = _hidden_profile(tmp_path, layers=(1, 2, 3), hidden_size=4096)
+    rows = (96 << 20) // profile.row_bytes
+    with pytest.raises(ValueError, match="chunk size"):
+        VllmArtifactSession.from_request(
+            _chunked_request(chunk_tokens=rows),
+            prompt_token_count=rows,
+            max_tokens=0,
+            budget=CaptureBudget(1 << 30),
+            runtime=_ChunkRuntime(),
+            hidden_state_profile=profile,
+        )

@@ -13,14 +13,16 @@ import ipaddress
 import json
 import os
 import re
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import asdict
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from dynamo.artifacts.operations import ArtifactOperationStore, ArtifactService
 from dynamo.artifacts.storage import (
+    ArtifactStorageError,
     ManagedProfile,
     ManagedStoreTarget,
     PresignedHttpPutTarget,
@@ -31,6 +33,9 @@ from dynamo.artifacts.storage import (
 
 _SAFE_URL_KEY = re.compile(r"[A-Za-z0-9._~/-]+\Z")
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
+# Chunk keys this process has verified, remembered so a repeat costs a stat
+# instead of a full read-back.
+_MAX_VERIFIED_CHUNKS = 16384
 
 
 class ArtifactDependencyError(RuntimeError):
@@ -52,6 +57,8 @@ class ArtifactRuntime:
         self._authority_file = None
         self._closing = False
         self._admission_lock = asyncio.Lock()
+        self._verified_chunks: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._chunk_tasks: dict[tuple[str, str], asyncio.Future] = {}
         try:
             self._initialize(config, capability_key)
         except ArtifactDependencyError:
@@ -122,6 +129,7 @@ class ArtifactRuntime:
             self._verify,
             max_source_bytes=config.get("max_source_bytes", 256 << 20),
             max_pending_operations=config.get("max_pending_operations", 128),
+            deliver_part=self._deliver_chunk,
         )
 
     def _validate_verifier_prefix(self, prefix):
@@ -197,8 +205,14 @@ class ArtifactRuntime:
             configured[name] = dict(entry)
         return configured
 
+    @property
+    def max_artifact_bytes(self):
+        """Largest artifact, object plus chunks, this authority can hold pending."""
+        return self.service.max_source_bytes
+
     def _target(self, settings):
         settings = dict(settings)
+        settings.pop("chunk_prefix", None)
         kind = settings.pop("kind", None)
         if kind == "managed_store":
             return ManagedStoreTarget(**settings)
@@ -261,6 +275,15 @@ class ArtifactRuntime:
         from dynamo.artifacts.storage import validate_managed_target
 
         validate_managed_target(confined, self.profiles)
+        if "chunk_prefix" in settings:
+            # Chunks are content-addressed under one shared prefix so requests
+            # that share rows store them once. Presigned grants name one object.
+            if settings["kind"] != "managed_store":
+                raise ValueError("chunked artifacts require a managed store")
+            validate_managed_target(
+                ManagedStoreTarget(settings["profile"], settings["chunk_prefix"]),
+                self.profiles,
+            )
 
     async def _transfer(self, data, settings):
         receipt = await put_artifact(
@@ -302,12 +325,127 @@ class ArtifactRuntime:
             "provider_identity": receipt.get("provider_identity"),
         }
 
-    async def submit(self, data, contents, destination, *, mode="object_store"):
+    async def _deliver_chunk(self, data, target):
+        """Store one content-addressed chunk once; concurrent callers share it."""
+        key = (target["profile"], target["object_key"])
+        task = self._chunk_tasks.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._put_chunk(data, *key, target["sha256"]))
+            self._chunk_tasks[key] = task
+            task.add_done_callback(partial(self._chunk_done, key))
+        # A caller's timeout must not cancel a write other requests wait on.
+        return await asyncio.shield(task)
+
+    def _chunk_done(self, key, task):
+        if self._chunk_tasks.get(key) is task:
+            del self._chunk_tasks[key]
+        if not task.cancelled():
+            task.exception()
+
+    def _remember_chunk(self, key):
+        self._verified_chunks[key] = None
+        self._verified_chunks.move_to_end(key)
+        while len(self._verified_chunks) > _MAX_VERIFIED_CHUNKS:
+            self._verified_chunks.popitem(last=False)
+
+    async def _put_chunk(self, data, profile_name, object_key, sha256):
+        import opendal
+
+        key = (profile_name, object_key)
+        operator = self.profiles[profile_name].operator
+        result = {"actual_bytes": len(data), "sha256": sha256}
+        try:
+            metadata = await asyncio.wait_for(
+                operator.stat(object_key), self.policy.timeout_seconds
+            )
+        except opendal.exceptions.NotFound:
+            metadata = None
+        except Exception:  # noqa: BLE001 -- sanitize provider errors
+            raise ValueError("stored chunk lookup unavailable") from None
+        if metadata is not None:
+            if metadata.content_length != len(data):
+                raise ValueError("stored chunk length differs")
+            if key in self._verified_chunks:
+                self._verified_chunks.move_to_end(key)
+                return {**result, "reused": True}
+            await self._verify_chunk(operator, object_key, data, sha256)
+            self._remember_chunk(key)
+            return {**result, "reused": True}
+        ambiguous = False
+        try:
+            await put_artifact(
+                data,
+                ManagedStoreTarget(profile_name, object_key),
+                policy=self.policy,
+                profiles=self.profiles,
+            )
+        except ArtifactStorageError as exc:
+            if exc.outcome != "ambiguous":
+                raise
+            # Another writer may have stored the same chunk; read back once.
+            ambiguous = True
+        try:
+            await self._verify_chunk(operator, object_key, data, sha256)
+        except ValueError:
+            if ambiguous:
+                raise ArtifactStorageError(
+                    "commit_unknown",
+                    "chunk write outcome cannot be verified",
+                    outcome="ambiguous",
+                ) from None
+            raise
+        self._remember_chunk(key)
+        return {**result, "reused": False}
+
+    async def _verify_chunk(self, operator, object_key, data, sha256):
+        try:
+            stored = await asyncio.wait_for(
+                operator.read(object_key, offset=0, size=len(data)),
+                self.policy.timeout_seconds,
+            )
+        except Exception:  # noqa: BLE001 -- sanitize provider errors
+            raise ValueError("stored chunk verification unavailable") from None
+        if len(stored) != len(data) or hashlib.sha256(stored).hexdigest() != sha256:
+            raise ValueError("stored chunk differs from its digest")
+
+    async def submit(
+        self, data, contents, destination, *, mode="object_store", parts=None
+    ):
+        """Deliver ``data``; ``parts`` maps SHA-256 to chunk bytes stored first."""
         if self._closing:
             raise ArtifactAuthorityClosed("artifact authority is closed")
         async with self._admission_lock:
             self.validate(destination, mode)
-            return await self.service.submit(data, self.owner, contents, destination)
+            chunk_parts = ()
+            if parts:
+                prefix = destination.get("chunk_prefix")
+                if prefix is None:
+                    raise ValueError("chunked artifacts require a chunk_prefix")
+                chunk_parts = tuple(
+                    self._chunk_part(destination["profile"], prefix, digest, blob)
+                    for digest, blob in parts.items()
+                )
+            return await self.service.submit(
+                data, self.owner, contents, destination, parts=chunk_parts
+            )
+
+    @staticmethod
+    def _chunk_part(profile, prefix, digest, blob):
+        # The digest names the key; read-back verification rejects bytes that
+        # do not match it, so it is not recomputed here.
+        if (
+            not isinstance(digest, str)
+            or not _SHA256_HEX.fullmatch(digest)
+            or type(blob) is not bytes
+        ):
+            raise ValueError("invalid chunk part")
+        target = {
+            "kind": "managed_store",
+            "profile": profile,
+            "object_key": chunk_object_key(prefix, digest),
+            "sha256": digest,
+        }
+        return blob, target
 
     def status(self, operation_id):
         return self.store.get(operation_id, self.owner)
@@ -320,10 +458,19 @@ class ArtifactRuntime:
             pass
         try:
             await self.service.drain()
+            if self._chunk_tasks:
+                await asyncio.gather(
+                    *tuple(self._chunk_tasks.values()), return_exceptions=True
+                )
         finally:
             if self._authority_file is not None:
                 self._authority_file.close()
                 self._authority_file = None
+
+
+def chunk_object_key(chunk_prefix: str, sha256: str) -> str:
+    """Where a chunk with this digest is stored under a request's ``chunk_prefix``."""
+    return f"{chunk_prefix}/{sha256}"
 
 
 @cache

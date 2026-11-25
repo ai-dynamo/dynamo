@@ -338,24 +338,35 @@ impl PresignedHttpPutDestination {
 pub struct ManagedStoreDestination {
     pub profile: String,
     pub object_key: String,
+    /// Where the worker stores content-addressed chunks of a chunked artifact,
+    /// one object per chunk digest. Requests that share rows share chunks, so
+    /// the prefix is usually shared too. The worker authorizes it like
+    /// `object_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_prefix: Option<String>,
+}
+
+fn valid_object_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 1024
+        && !key.starts_with('/')
+        && !key.contains('\\')
+        && !key.contains('\0')
+        && !key.contains("://")
+        && !key.split('/').any(|part| matches!(part, "" | "." | ".."))
 }
 
 impl ManagedStoreDestination {
     fn validate(&self) -> Result<(), &'static str> {
         if !valid_name(&self.profile)
-            || self.object_key.is_empty()
-            || self.object_key.len() > 1024
-            || self.object_key.starts_with('/')
-            || self.object_key.contains('\\')
-            || self.object_key.contains('\0')
-            || self.object_key.contains("://")
+            || !valid_object_key(&self.object_key)
             || self
-                .object_key
-                .split('/')
-                .any(|part| matches!(part, "" | "." | ".."))
+                .chunk_prefix
+                .as_deref()
+                .is_some_and(|prefix| !valid_object_key(prefix))
         {
             return Err(
-                "managed store requires a profile and a relative object key without traversal",
+                "managed store requires a profile and relative object keys without traversal",
             );
         }
         Ok(())

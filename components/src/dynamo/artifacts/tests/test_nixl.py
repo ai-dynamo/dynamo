@@ -34,11 +34,18 @@ class _FakeMetadata:
         return {"token": self.token, "nixl_metadata": self.nixl_metadata}
 
 
+def _tensors(descriptors):
+    if isinstance(descriptors, list):
+        return [descriptor.tensor for descriptor in descriptors]
+    return [descriptors.tensor]
+
+
 class _FakeReadable:
     def __init__(self, fake, descriptor):
         self.fake = fake
         self.token = f"op-{len(fake.readables)}"
-        self.tensor = descriptor.tensor
+        self.tensors = _tensors(descriptor)
+        self.list_form = isinstance(descriptor, list)
         self.read = asyncio.Event()
         self.released = False
 
@@ -53,12 +60,14 @@ class _FakeReadable:
 
 
 class _FakeRead:
-    def __init__(self, source, target):
+    def __init__(self, source, targets):
+        assert len(targets) == len(source.tensors)
         self.source = source
-        self.target = target
+        self.targets = targets
 
     async def wait_for_completion(self):
-        self.target.copy_(self.source.tensor)
+        for target, tensor in zip(self.targets, self.source.tensors):
+            target.copy_(tensor)
         self.source.read.set()
 
     def __enter__(self):
@@ -98,7 +107,7 @@ class _FakeNixl:
                 return readable
 
             async def begin_read(self, metadata, descriptor):
-                return _FakeRead(fake.readables[metadata.token], descriptor.tensor)
+                return _FakeRead(fake.readables[metadata.token], _tensors(descriptor))
 
         class RdmaMetadata:
             @staticmethod
@@ -376,19 +385,73 @@ async def test_finalized_nixl_artifact_is_uncompressed_and_decodes():
     assert choice.sequence_token_ids.as_array().tolist() == [10, 11, 12]
 
 
+@pytest.mark.asyncio
+async def test_chunk_parts_are_held_and_read_in_one_operation():
+    fake = _FakeNixl()
+    server = _server(fake)
+    chunks = [b"a" * 100, b"b" * 50]
+    parts = {hashlib.sha256(chunk).hexdigest(): chunk for chunk in chunks}
+    receipt = await server.submit(b"object", ["hidden_states"], DEST, parts=parts)
+
+    assert receipt["byte_count"] == len(b"object")
+    assert receipt["parts"] == [
+        {"sha256": digest, "byte_count": len(chunk)} for digest, chunk in parts.items()
+    ]
+    assert server.held_bytes == 156
+    assert fake.readables["op-0"].list_form
+    json.dumps(receipt)
+
+    reader = NixlArtifactReader(nixl_connect=fake)
+    with pytest.raises(ValueError, match="read_parts"):
+        await reader.read(receipt)
+    artifact, read_parts = await reader.read_parts(receipt)
+    assert artifact.numpy().tobytes() == b"object"
+    assert {k: v.numpy().tobytes() for k, v in read_parts.items()} == parts
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert server.held_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_chunk_parts_count_toward_the_budget():
+    fake = _FakeNixl()
+    server = _server(fake, max_held_bytes=100)
+    parts = {hashlib.sha256(b"x" * 99).hexdigest(): b"x" * 99}
+    with pytest.raises(NixlArtifactCapacityError):
+        await server.submit(b"object", [], DEST, parts=parts)
+    assert server.held_bytes == 0
+    assert server.max_artifact_bytes == 100
+
+
+@pytest.mark.asyncio
+async def test_reader_rejects_a_part_that_differs_from_its_digest():
+    fake = _FakeNixl()
+    server = _server(fake)
+    receipt = await server.submit(b"object", [], DEST, parts={"0" * 64: b"rows"})
+    with pytest.raises(ValueError, match="digest"):
+        await NixlArtifactReader(nixl_connect=fake).read_parts(receipt)
+
+
 _REAL_TRANSFER = textwrap.dedent(
     """
-    import asyncio, json, sys
-    from dynamo.artifacts.nixl import NixlArtifactServer, read_nixl_artifact
+    import asyncio, hashlib, json, sys
+    from dynamo.artifacts.nixl import NixlArtifactReader, NixlArtifactServer
+
+    DATA = bytes(range(256)) * 4096
+    CHUNKS = [bytes([i]) * (3 << 20) for i in (1, 2)]
 
     async def serve(path):
         server = NixlArtifactServer(max_held_bytes=1 << 24)
-        data = bytes(range(256)) * 4096
-        receipt = await server.submit(
-            data, ["hidden_states"], {"kind": "nixl_read", "lease_seconds": 120}
+        destination = {"kind": "nixl_read", "lease_seconds": 120}
+        plain = await server.submit(DATA, ["hidden_states"], destination)
+        chunked = await server.submit(
+            DATA[:4096],
+            ["hidden_states"],
+            destination,
+            parts={hashlib.sha256(c).hexdigest(): c for c in CHUNKS},
         )
         with open(path + ".tmp", "w") as f:
-            json.dump(receipt, f)
+            json.dump([plain, chunked], f)
         import os; os.replace(path + ".tmp", path)
         while server.held_bytes:
             await asyncio.sleep(0.05)
@@ -397,9 +460,13 @@ _REAL_TRANSFER = textwrap.dedent(
         import os
         while not os.path.exists(path):
             await asyncio.sleep(0.05)
-        receipt = json.load(open(path))
-        tensor = await read_nixl_artifact(receipt, timeout_seconds=120)
-        assert tensor.numpy().tobytes() == bytes(range(256)) * 4096
+        plain, chunked = json.load(open(path))
+        reader = NixlArtifactReader()
+        tensor = await reader.read(plain, timeout_seconds=120)
+        assert tensor.numpy().tobytes() == DATA
+        artifact, parts = await reader.read_parts(chunked, timeout_seconds=120)
+        assert artifact.numpy().tobytes() == DATA[:4096]
+        assert [parts[hashlib.sha256(c).hexdigest()].numpy().tobytes() for c in CHUNKS] == CHUNKS
         print("READ_OK")
 
     role, path = sys.argv[1], sys.argv[2]

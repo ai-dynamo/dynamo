@@ -161,6 +161,41 @@ fn rejects_traversal_and_invalid_mooncake_retention() {
     assert!(serde_json::from_value::<MetadataUpload>(input).is_err());
 }
 
+#[test]
+fn managed_store_chunk_prefix_round_trips_and_rejects_traversal() {
+    let input = json!({
+        "kind": "generation_artifact", "contents": ["hidden_states"], "mode": "object_store",
+        "destination": {
+            "kind": "managed_store", "profile": "test", "object_key": "runs/r1/sample-7",
+            "chunk_prefix": "runs/r1/chunks"
+        },
+        "content_options": {"hidden_states": {"chunk_tokens": 256}}
+    });
+    let upload: MetadataUpload = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&upload).unwrap(), input);
+
+    for prefix in [
+        "",
+        "../chunks",
+        "/chunks",
+        "a//b",
+        "a/./b",
+        "s3://bucket/chunks",
+    ] {
+        let input = json!({
+            "kind": "generation_artifact", "contents": [], "mode": "object_store",
+            "destination": {
+                "kind": "managed_store", "profile": "test", "object_key": "a",
+                "chunk_prefix": prefix
+            }
+        });
+        assert!(
+            serde_json::from_value::<MetadataUpload>(input).is_err(),
+            "{prefix}"
+        );
+    }
+}
+
 fn inline_with_options(options: Value) -> Value {
     json!({
         "kind": "generation_artifact",

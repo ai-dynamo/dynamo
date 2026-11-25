@@ -18,6 +18,10 @@ artifact until the lease ends. Deliver receipts only to trusted consumers.
 Enable it on a worker with `DYNAMO_ARTIFACT_NIXL_BYTES` (the held-byte budget).
 `DYNAMO_ARTIFACT_NIXL_MAX_LEASE_SECONDS` caps the lease a request may ask for.
 
+An artifact with chunked hidden states (wire 1.2) is held as the object plus one
+buffer per distinct chunk, all in one readable operation. Its receipt lists the
+chunks under `parts`, in descriptor order; read it with `read_parts()`.
+
 Consumers read with `NixlArtifactReader`, or `read_nixl_artifact()`, which uses a
 shared one. A process's first NIXL agent takes about a second to start (UCX and CUDA
 initialization); later agents and reads are milliseconds. Call `warm()` at startup
@@ -65,7 +69,7 @@ async def _shared_connection(connector: Any) -> Any:
 @dataclass
 class _Held:
     operation: Any
-    buffer: Any
+    buffers: list[Any]
     nbytes: int
     task: asyncio.Task | None = field(default=None, repr=False)
 
@@ -96,6 +100,11 @@ class NixlArtifactServer:
     @property
     def held_bytes(self) -> int:
         return self._held_bytes
+
+    @property
+    def max_artifact_bytes(self) -> int:
+        """Largest artifact, object plus chunks, this server could ever hold."""
+        return self.max_held_bytes
 
     async def warm(self) -> None:
         """Start the NIXL agent now instead of on the first request."""
@@ -130,44 +139,59 @@ class NixlArtifactServer:
         destination: dict[str, Any],
         *,
         mode: str = MODE,
+        parts: dict[str, bytes] | None = None,
     ) -> dict[str, Any]:
-        """Hold `data` for one read and return the receipt the consumer needs."""
+        """Hold `data`, and any chunk `parts` by SHA-256, for one read.
+
+        Returns the receipt the consumer needs.
+        """
         self.validate(destination, mode)
         if not isinstance(data, bytes) or not data:
             raise ValueError("NIXL artifact requires nonempty bytes")
-        nbytes = len(data)
+        chunks = list((parts or {}).items())
+        # Digests come from the capture that hashed these bytes; the reader
+        # checks every buffer against them, so they are not recomputed here.
+        if any(not isinstance(blob, bytes) or not blob for _, blob in chunks):
+            raise ValueError("NIXL artifact chunks require nonempty bytes")
+        nbytes = len(data) + sum(len(blob) for _, blob in chunks)
         if self._held_bytes + nbytes > self.max_held_bytes:
             raise NixlArtifactCapacityError("NIXL artifact budget exhausted")
         self._held_bytes += nbytes
         try:
-            buffer = _host_buffer(data)
+            buffers = [_host_buffer(data), *(_host_buffer(blob) for _, blob in chunks)]
             if self._connector is None:
                 self._connector = self._nixl.Connector()
+            descriptors = [self._nixl.Descriptor(buffer) for buffer in buffers]
             operation = await self._connector.create_readable(
-                self._nixl.Descriptor(buffer)
+                descriptors if chunks else descriptors[0]
             )
             metadata = operation.metadata().model_dump(mode="json")
         except BaseException:
             self._held_bytes -= nbytes
             raise
         lease = destination["lease_seconds"]
-        held = _Held(operation, buffer, nbytes)
+        held = _Held(operation, buffers, nbytes)
         held_id = self._next_id
         self._next_id += 1
         self._held[held_id] = held
         held.task = asyncio.create_task(self._hold(held_id, held, lease))
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=lease)
-        return {
+        receipt = {
             "kind": "generation_artifact",
             "mode": MODE,
             "format": "generation_artifact_v1",
             "contents": list(contents),
             "state": "ready",
-            "byte_count": nbytes,
+            "byte_count": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
             "rdma_metadata": metadata,
             "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
         }
+        if chunks:
+            receipt["parts"] = [
+                {"sha256": digest, "byte_count": len(blob)} for digest, blob in chunks
+            ]
+        return receipt
 
     async def _hold(self, held_id: int, held: _Held, lease: int) -> None:
         started = time.monotonic()
@@ -199,7 +223,7 @@ class NixlArtifactServer:
             # Exiting the operation deregisters its memory from NIXL.
             held.operation.__exit__(None, None, None)
         finally:
-            held.buffer = None
+            held.buffers = []
             self._held_bytes -= held.nbytes
 
     async def close(self) -> None:
@@ -301,7 +325,30 @@ class NixlArtifactReader:
         """Pull one artifact into a uint8 tensor on `device`.
 
         On the CPU, the bytes are checked against the receipt's sha256. Decode them
-        with `dynamo.artifacts.vllm.format.decode_generation_artifact`.
+        with `dynamo.artifacts.vllm.format.decode_generation_artifact`. A receipt
+        with chunk `parts` needs `read_parts()`.
+        """
+        if receipt.get("parts") if isinstance(receipt, dict) else None:
+            raise ValueError("chunked nixl_read artifact: use read_parts()")
+        artifact, _ = await self.read_parts(
+            receipt, device=device, timeout_seconds=timeout_seconds
+        )
+        return artifact
+
+    async def read_parts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        device: Any = "cpu",
+        timeout_seconds: float = 60.0,
+    ):
+        """Pull an artifact and its chunks in one read.
+
+        Returns the object as a uint8 tensor and a dict of chunk tensors by
+        SHA-256, empty when the artifact has no chunks. On the CPU every buffer is
+        checked against its digest. Rebuild hidden states with
+        `dynamo.artifacts.vllm.format.assemble_hidden_states(component,
+        lambda digest: chunks[digest].numpy())`.
         """
         import torch
 
@@ -314,21 +361,39 @@ class NixlArtifactReader:
         nbytes = receipt.get("byte_count")
         if type(nbytes) is not int or nbytes <= 0:
             raise ValueError("invalid nixl_read byte count")
+        expected = [(receipt.get("sha256"), nbytes)]
+        parts = receipt.get("parts") or []
+        if not isinstance(parts, list):
+            raise ValueError("invalid nixl_read parts")
+        for part in parts:
+            if (
+                not isinstance(part, dict)
+                or not isinstance(part.get("sha256"), str)
+                or type(part.get("byte_count")) is not int
+                or part["byte_count"] <= 0
+            ):
+                raise ValueError("invalid nixl_read part")
+            expected.append((part["sha256"], part["byte_count"]))
         metadata = self._nixl.RdmaMetadata.model_validate(receipt["rdma_metadata"])
         nixl_metadata = getattr(metadata, "nixl_metadata", None)
         if isinstance(nixl_metadata, str) and nixl_metadata:
             await self._pin_remote(nixl_metadata)
-        target = torch.empty(nbytes, dtype=torch.uint8, device=device)
+        targets = [
+            torch.empty(size, dtype=torch.uint8, device=device) for _, size in expected
+        ]
+        descriptors = [self._nixl.Descriptor(target) for target in targets]
         operation = await self._connector.begin_read(
-            metadata, self._nixl.Descriptor(target)
+            metadata, descriptors if parts else descriptors[0]
         )
         with operation:
             await asyncio.wait_for(operation.wait_for_completion(), timeout_seconds)
-        if target.device.type == "cpu":
-            digest = hashlib.sha256(target.numpy().tobytes()).hexdigest()
-            if digest != receipt.get("sha256"):
-                raise ValueError("nixl_read artifact digest differs from receipt")
-        return target
+        if targets[0].device.type == "cpu":
+            for target, (digest, _) in zip(targets, expected):
+                if hashlib.sha256(target.numpy().tobytes()).hexdigest() != digest:
+                    raise ValueError("nixl_read artifact digest differs from receipt")
+        return targets[0], {
+            digest: target for target, (digest, _) in zip(targets[1:], expected[1:])
+        }
 
     def close(self) -> None:
         """Disconnect from every worker this reader has read from."""

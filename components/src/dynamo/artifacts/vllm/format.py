@@ -1,15 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded producer and strict reader for generation_artifact_v1 (wire 1.0 and 1.1).
+"""Bounded producer and strict reader for generation_artifact_v1 (wire 1.0 to 1.2).
 
 Logprob tensors allow finite values and -Inf (zero probability), but not NaN or +Inf.
 Hidden-state tensors allow finite values only.
 
-Minor version 1 adds the ``hidden_states`` component and changes nothing else. The
-writer emits 1.1 only for an object that carries hidden states, so objects without
-them stay readable by 1.0 readers. A later additive minor revision needs an
-explicit schema and capability update before this reader accepts it.
+Minor version 1 adds the ``hidden_states`` component and changes nothing else.
+Minor version 2 adds ``hidden_state_chunks``: the same rows, stored outside the
+object as content-addressed chunks the manifest lists by SHA-256. The writer emits
+the oldest minor version that can represent an object, so objects without these
+components stay readable by older readers. A later additive minor revision needs
+an explicit schema and capability update before this reader accepts it.
 """
 
 from __future__ import annotations
@@ -38,8 +40,12 @@ _MAX_TOPK = 1024
 _MAX_TENSORS = 4096
 _MAX_COMPONENTS = 4
 _MAX_HIDDEN_LAYERS = 256
-_MINOR_VERSIONS = (0, 1)
+_MINOR_VERSIONS = (0, 1, 2)
 _HIDDEN_STATES_MINOR = 1
+_HIDDEN_STATE_CHUNKS_MINOR = 2
+MAX_HIDDEN_STATE_CHUNKS = 4096
+MAX_CHUNK_BYTES = 64 << 20
+_SHA256_HEX = frozenset("0123456789abcdef")
 _DTYPES: dict[str, np.dtype[Any]] = {
     "u8": np.dtype("u1"),
     "u16": np.dtype("<u2"),
@@ -197,7 +203,41 @@ class HiddenStates:
     hidden_states: Tensor
 
 
-GenerationComponent = MoeRoutes | SelectedLogprobs | TopKLogprobs | HiddenStates
+@dataclass(frozen=True)
+class HiddenStateChunk:
+    """One stored chunk: ``rows`` rows of raw little-endian values, by SHA-256."""
+
+    rows: int
+    byte_count: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class HiddenStateChunks:
+    """Hidden states stored outside the object, as content-addressed chunks.
+
+    The rows are those of :class:`HiddenStates`. Chunk ``k`` holds sequence
+    positions ``[k * chunk_tokens, (k + 1) * chunk_tokens)``, clipped to
+    ``[token_start, extent)``. Chunks align to absolute positions, not to
+    ``token_start``, so requests that share a prompt produce identical chunks for
+    it, and a store keyed by digest keeps one copy.
+    """
+
+    token_start: int
+    layer_ids: tuple[int, ...]
+    hidden_size: int
+    dtype: str
+    chunk_tokens: int
+    chunks: tuple[HiddenStateChunk, ...]
+
+    @property
+    def row_bytes(self) -> int:
+        return len(self.layer_ids) * self.hidden_size * _DTYPES[self.dtype].itemsize
+
+
+GenerationComponent = (
+    MoeRoutes | SelectedLogprobs | TopKLogprobs | HiddenStates | HiddenStateChunks
+)
 
 
 @dataclass(frozen=True)
@@ -303,8 +343,8 @@ def _validate_routes(
     return replace(component, routers=tuple(routers))
 
 
-def _validate_hidden_states(component: HiddenStates, rows: int) -> HiddenStates:
-    layer_ids = component.layer_ids
+def _validate_hidden_geometry(layer_ids: Any, hidden_size: Any) -> int:
+    """Check layer IDs and hidden size; return the values per row."""
     _require(
         isinstance(layer_ids, tuple) and 0 < len(layer_ids) <= _MAX_HIDDEN_LAYERS,
         "invalid hidden-state layer count",
@@ -312,30 +352,169 @@ def _validate_hidden_states(component: HiddenStates, rows: int) -> HiddenStates:
     for layer_id in layer_ids:
         _integer(layer_id, 0, (1 << 31) - 1, "hidden-state layer ID")
     _require(len(set(layer_ids)) == len(layer_ids), "duplicate hidden-state layer ID")
-    hidden_size = _integer(component.hidden_size, 1, _MAX_DIMENSION, "hidden size")
+    return len(layer_ids) * _integer(hidden_size, 1, _MAX_DIMENSION, "hidden size")
+
+
+def _require_finite_hidden(dtype: str, values: np.ndarray) -> None:
+    if dtype == "bf16":
+        finite = (values & 0x7F80) != 0x7F80
+    else:
+        finite = np.isfinite(values)
+    _require(bool(np.all(finite)), "invalid hidden-state value")
+
+
+def _validate_hidden_states(component: HiddenStates, rows: int) -> HiddenStates:
+    width = _validate_hidden_geometry(component.layer_ids, component.hidden_size)
     tensor = component.hidden_states
     _require(
         tensor.dtype in _FLOAT_DTYPES and len(tensor.shape) == 2,
         "hidden states require floating [T,L*H]",
     )
-    _require(
-        tensor.shape == (rows, len(layer_ids) * hidden_size),
-        "hidden-state geometry mismatch",
-    )
-    values = tensor.as_array()
-    if tensor.dtype == "bf16":
-        finite = (values & 0x7F80) != 0x7F80
-    else:
-        finite = np.isfinite(values)
-    _require(bool(np.all(finite)), "invalid hidden-state value")
+    _require(tensor.shape == (rows, width), "hidden-state geometry mismatch")
+    _require_finite_hidden(tensor.dtype, tensor.as_array())
     return component
+
+
+def hidden_state_chunk_rows(
+    token_start: int, extent: int, chunk_tokens: int
+) -> list[int]:
+    """Rows in each chunk of ``[token_start, extent)``, aligned to absolute positions."""
+    _integer(chunk_tokens, 1, _MAX_DIMENSION, "chunk tokens")
+    _integer(extent, 0, _MAX_DIMENSION, "hidden-state extent")
+    _integer(token_start, 0, extent, "hidden-state start")
+    rows = []
+    position = token_start
+    while position < extent:
+        end = min(extent, (position // chunk_tokens + 1) * chunk_tokens)
+        rows.append(end - position)
+        position = end
+    return rows
+
+
+def _validate_hidden_state_chunks(
+    component: HiddenStateChunks, extent: int
+) -> HiddenStateChunks:
+    width = _validate_hidden_geometry(component.layer_ids, component.hidden_size)
+    _require(component.dtype in _FLOAT_DTYPES, "hidden states require floating dtype")
+    expected = hidden_state_chunk_rows(
+        component.token_start, extent, component.chunk_tokens
+    )
+    chunks = component.chunks
+    _require(
+        isinstance(chunks, tuple)
+        and len(chunks) == len(expected)
+        and len(chunks) <= MAX_HIDDEN_STATE_CHUNKS,
+        "hidden-state chunk count mismatch",
+    )
+    row_bytes = width * _DTYPES[component.dtype].itemsize
+    for chunk, rows in zip(chunks, expected):
+        _require(isinstance(chunk, HiddenStateChunk), "invalid hidden-state chunk")
+        _require(
+            type(chunk.rows) is int
+            and type(chunk.byte_count) is int
+            and chunk.rows == rows
+            and chunk.byte_count == rows * row_bytes,
+            "hidden-state chunk geometry mismatch",
+        )
+        _require(chunk.byte_count <= MAX_CHUNK_BYTES, "hidden-state chunk too large")
+        _require(
+            isinstance(chunk.sha256, str)
+            and len(chunk.sha256) == 64
+            and set(chunk.sha256) <= _SHA256_HEX,
+            "invalid hidden-state chunk digest",
+        )
+    return component
+
+
+def chunk_hidden_states(
+    *,
+    token_start: int,
+    layer_ids: tuple[int, ...],
+    hidden_size: int,
+    dtype: str,
+    data: bytes | memoryview,
+    chunk_tokens: int,
+) -> tuple[HiddenStateChunks, dict[str, bytes]]:
+    """Split rows ``[token_start, token_start + rows)`` into content-addressed chunks.
+
+    Returns the manifest component and the distinct chunk bytes by SHA-256. Each
+    chunk is checked for finite values before it is hashed.
+    """
+    width = _validate_hidden_geometry(layer_ids, hidden_size)
+    _require(dtype in _FLOAT_DTYPES, "hidden states require floating dtype")
+    row_bytes = width * _DTYPES[dtype].itemsize
+    source = memoryview(data).cast("B")
+    _require(source.nbytes % row_bytes == 0, "hidden-state bytes are not whole rows")
+    extent = token_start + source.nbytes // row_bytes
+    layout = hidden_state_chunk_rows(token_start, extent, chunk_tokens)
+    _require(len(layout) <= MAX_HIDDEN_STATE_CHUNKS, "too many hidden-state chunks")
+    _require(
+        min(chunk_tokens, extent - token_start) * row_bytes <= MAX_CHUNK_BYTES,
+        "hidden-state chunk too large",
+    )
+    chunks = []
+    blobs: dict[str, bytes] = {}
+    offset = 0
+    for rows in layout:
+        blob = bytes(source[offset : offset + rows * row_bytes])
+        offset += rows * row_bytes
+        _require_finite_hidden(dtype, np.frombuffer(blob, dtype=_DTYPES[dtype]))
+        digest = hashlib.sha256(blob).hexdigest()
+        blobs.setdefault(digest, blob)
+        chunks.append(HiddenStateChunk(rows, len(blob), digest))
+    component = HiddenStateChunks(
+        token_start, tuple(layer_ids), hidden_size, dtype, chunk_tokens, tuple(chunks)
+    )
+    return _validate_hidden_state_chunks(component, extent), blobs
+
+
+def assemble_hidden_states(
+    component: HiddenStateChunks,
+    fetch: Any,
+    *,
+    max_bytes: int = 16 << 30,
+) -> np.ndarray:
+    """Fetch, verify and concatenate a component's chunks into ``[T, L*H]``.
+
+    ``fetch(sha256)`` returns that chunk's bytes (for an object store, the object
+    at ``{chunk_prefix}/{sha256}``). Every chunk is checked against its digest,
+    size and the finite-value rule. bf16 is returned as raw uint16 bit patterns,
+    like :meth:`Tensor.as_array`.
+    """
+    _require(isinstance(component, HiddenStateChunks), "not a chunked hidden state")
+    row_bytes = component.row_bytes
+    total_rows = sum(chunk.rows for chunk in component.chunks)
+    _require(total_rows * row_bytes <= max_bytes, "hidden states exceed max_bytes")
+    native = _DTYPES[component.dtype]
+    width = row_bytes // native.itemsize
+    result = np.empty((total_rows, width), dtype=native)
+    verified: dict[str, np.ndarray] = {}
+    row = 0
+    for chunk in component.chunks:
+        values = verified.get(chunk.sha256)
+        if values is None:
+            blob = bytes(fetch(chunk.sha256))
+            _require(
+                len(blob) == chunk.byte_count
+                and hashlib.sha256(blob).hexdigest() == chunk.sha256,
+                "hidden-state chunk differs from its digest",
+            )
+            values = np.frombuffer(blob, dtype=native).reshape(chunk.rows, width)
+            _require_finite_hidden(component.dtype, values)
+            verified[chunk.sha256] = values
+        result[row : row + chunk.rows] = values
+        row += chunk.rows
+    return result
 
 
 def _validate_component(
     component: GenerationComponent, sequence: int, prompt: int, *, strict_dtype: bool
 ) -> GenerationComponent:
-    if isinstance(component, (MoeRoutes, HiddenStates)):
+    if isinstance(component, (MoeRoutes, HiddenStates, HiddenStateChunks)):
         extent = sequence - 1 if sequence > prompt else sequence
+        if isinstance(component, HiddenStateChunks):
+            _integer(component.token_start, 0, extent, "hidden-state start")
+            return _validate_hidden_state_chunks(component, extent)
         if isinstance(component, HiddenStates):
             start = _integer(component.token_start, 0, extent, "hidden-state start")
             return _validate_hidden_states(component, extent - start)
@@ -410,6 +589,14 @@ def _validated(
             len({type(item) for item in choice.components}) == len(choice.components),
             "duplicate component kind",
         )
+        _require(
+            sum(
+                isinstance(item, (HiddenStates, HiddenStateChunks))
+                for item in choice.components
+            )
+            <= 1,
+            "duplicate hidden-state component",
+        )
         components = tuple(
             _validate_component(item, sequence, prompt, strict_dtype=strict_dtype)
             for item in choice.components
@@ -442,7 +629,7 @@ def _capture_bounds(view: GenerationArtifactView) -> None:
                 tensors.extend((component.candidate_token_ids, component.logprobs))
             elif isinstance(component, HiddenStates):
                 tensors.append(component.hidden_states)
-            else:
+            elif not isinstance(component, HiddenStateChunks):
                 raise GenerationArtifactFormatError("unsupported component")
         payload_bytes += sum(len(tensor.data) for tensor in tensors)
         tensor_count += len(tensors)
@@ -499,6 +686,25 @@ def _manifest(view: GenerationArtifactView) -> tuple[bytes, tuple[Tensor, ...]]:
                         "logprobs": reference(component.logprobs),
                     }
                 )
+            elif isinstance(component, HiddenStateChunks):
+                components.append(
+                    {
+                        **base,
+                        "kind": "hidden_state_chunks",
+                        "layer_ids": list(component.layer_ids),
+                        "hidden_size": component.hidden_size,
+                        "dtype": component.dtype,
+                        "chunk_tokens": component.chunk_tokens,
+                        "chunks": [
+                            {
+                                "rows": chunk.rows,
+                                "byte_count": chunk.byte_count,
+                                "sha256": chunk.sha256,
+                            }
+                            for chunk in component.chunks
+                        ],
+                    }
+                )
             elif isinstance(component, HiddenStates):
                 components.append(
                     {
@@ -533,15 +739,12 @@ def _manifest(view: GenerationArtifactView) -> tuple[bytes, tuple[Tensor, ...]]:
 
 def _minor_version(view: GenerationArtifactView) -> int:
     """Emit the oldest minor version that can represent this object."""
-    return (
-        _HIDDEN_STATES_MINOR
-        if any(
-            isinstance(component, HiddenStates)
-            for choice in view.choices
-            for component in choice.components
-        )
-        else 0
-    )
+    kinds = {
+        type(component) for choice in view.choices for component in choice.components
+    }
+    if HiddenStateChunks in kinds:
+        return _HIDDEN_STATE_CHUNKS_MINOR
+    return _HIDDEN_STATES_MINOR if HiddenStates in kinds else 0
 
 
 def iter_generation_artifact(
@@ -678,6 +881,45 @@ def _parse_manifest(
                 tuple(layer_ids),
                 raw["hidden_size"],
                 tensor(raw["hidden_states"]),
+            )
+        if kind == "hidden_state_chunks":
+            _require(
+                minor >= _HIDDEN_STATE_CHUNKS_MINOR,
+                "hidden-state chunks require version 1.2",
+            )
+            _keys(
+                raw,
+                {
+                    "kind",
+                    "token_start",
+                    "layer_ids",
+                    "hidden_size",
+                    "dtype",
+                    "chunk_tokens",
+                    "chunks",
+                },
+                "hidden-state chunks",
+            )
+            layer_ids = _list(
+                raw["layer_ids"],
+                _MAX_HIDDEN_LAYERS,
+                "hidden-state layers",
+                nonempty=True,
+            )
+            chunks = []
+            for item in _list(raw["chunks"], MAX_HIDDEN_STATE_CHUNKS, "chunks"):
+                _keys(item, {"rows", "byte_count", "sha256"}, "hidden-state chunk")
+                chunks.append(
+                    HiddenStateChunk(item["rows"], item["byte_count"], item["sha256"])
+                )
+            _require(type(raw["dtype"]) is str, "invalid hidden-state dtype")
+            return HiddenStateChunks(
+                raw["token_start"],
+                tuple(layer_ids),
+                raw["hidden_size"],
+                raw["dtype"],
+                raw["chunk_tokens"],
+                tuple(chunks),
             )
         _require(kind == "topk_logprobs", "unsupported component kind")
         _keys(

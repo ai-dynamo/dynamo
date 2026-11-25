@@ -641,3 +641,170 @@ def test_configured_provider_errors_are_sanitized(
     with pytest.raises(ValueError, match="configuration is invalid") as error:
         configured_artifact_runtime()
     assert "SECRET_SENTINEL" not in str(error.value)
+
+
+@pytest.fixture
+def chunked(managed):
+    return {**managed, "chunk_prefix": "artifacts/chunks"}
+
+
+def _parts(*blobs):
+    return {hashlib.sha256(blob).hexdigest(): blob for blob in blobs}
+
+
+@pytest.mark.asyncio
+async def test_chunks_are_stored_by_digest_before_the_object(runtime, chunked):
+    parts = _parts(b"chunk one", b"chunk two")
+    result = await runtime.submit(b"object", ["hidden_states"], chunked, parts=parts)
+    await runtime.service.drain()
+    terminal = runtime.status(result["operation_id"])
+    assert terminal["state"] == "ready"
+    assert terminal["chunk_count"] == 2
+    assert terminal["chunk_bytes"] == 18
+    assert terminal["reused_chunk_bytes"] == 0
+    operator = runtime.profiles["approved"].operator
+    for digest, blob in parts.items():
+        assert await operator.read(f"artifacts/chunks/{digest}") == blob
+    assert await operator.read("artifacts/result") == b"object"
+
+
+@pytest.mark.asyncio
+async def test_a_stored_chunk_is_reused_not_rewritten(runtime, chunked):
+    parts = _parts(b"shared prompt rows")
+    first = await runtime.submit(b"one", [], chunked, parts=parts)
+    await runtime.service.drain()
+    assert runtime.status(first["operation_id"])["reused_chunk_bytes"] == 0
+
+    operator = runtime.profiles["approved"].operator
+    writes = []
+    reads = []
+    real_write, real_read = operator.write, operator.read
+
+    async def counting_write(key, data, **kwargs):
+        writes.append(key)
+        return await real_write(key, data, **kwargs)
+
+    async def counting_read(key, **kwargs):
+        reads.append(key)
+        return await real_read(key, **kwargs)
+
+    runtime.profiles["approved"] = ManagedProfile(
+        SimpleNamespace(
+            write=counting_write,
+            read=counting_read,
+            stat=operator.stat,
+            capability=operator.capability,
+        ),
+        ("artifacts",),
+    )
+    second = await runtime.submit(
+        b"two", [], {**chunked, "object_key": "artifacts/second"}, parts=parts
+    )
+    await runtime.service.drain()
+    terminal = runtime.status(second["operation_id"])
+    assert terminal["state"] == "ready"
+    assert terminal["reused_chunk_bytes"] == len(b"shared prompt rows")
+    # Only the object is written, and this process already verified the chunk.
+    assert writes == ["artifacts/second"]
+    assert reads == ["artifacts/second"]
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_stored_elsewhere_is_verified_before_reuse(runtime, chunked):
+    blob = b"rows another worker stored"
+    parts = _parts(blob)
+    (digest,) = parts
+    operator = runtime.profiles["approved"].operator
+    await operator.write(f"artifacts/chunks/{digest}", blob)
+    result = await runtime.submit(b"object", [], chunked, parts=parts)
+    await runtime.service.drain()
+    terminal = runtime.status(result["operation_id"])
+    assert terminal["state"] == "ready"
+    assert terminal["reused_chunk_bytes"] == len(blob)
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_object_at_a_chunk_key_fails_without_writing_the_object(
+    runtime, chunked
+):
+    blob = b"the real rows"
+    parts = _parts(blob)
+    (digest,) = parts
+    operator = runtime.profiles["approved"].operator
+    await operator.write(f"artifacts/chunks/{digest}", b"planted rows!")
+    result = await runtime.submit(b"object", [], chunked, parts=parts)
+    await runtime.service.drain()
+    terminal = runtime.status(result["operation_id"])
+    assert terminal["state"] == "failed"
+    assert terminal["error_code"] == "verification_failed"
+    with pytest.raises(opendal.exceptions.NotFound):
+        await operator.stat("artifacts/result")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_write_a_shared_chunk_once(runtime, chunked):
+    parts = _parts(b"rows every sibling shares")
+    operator = runtime.profiles["approved"].operator
+    writes = []
+    real_write = operator.write
+
+    async def slow_write(key, data, **kwargs):
+        writes.append(key)
+        await asyncio.sleep(0.05)
+        return await real_write(key, data, **kwargs)
+
+    runtime.profiles["approved"] = ManagedProfile(
+        SimpleNamespace(
+            write=slow_write,
+            read=operator.read,
+            stat=operator.stat,
+            capability=operator.capability,
+        ),
+        ("artifacts",),
+    )
+    results = await asyncio.gather(
+        *(
+            runtime.submit(
+                b"object", [], {**chunked, "object_key": f"artifacts/s{i}"}, parts=parts
+            )
+            for i in range(4)
+        )
+    )
+    await runtime.service.drain()
+    (digest,) = parts
+    assert writes.count(f"artifacts/chunks/{digest}") == 1
+    assert all(
+        runtime.status(result["operation_id"])["state"] == "ready" for result in results
+    )
+
+
+def test_chunk_prefix_must_be_authorized(runtime, chunked):
+    with pytest.raises(ArtifactStorageError):
+        runtime.validate(
+            {**chunked, "chunk_prefix": "elsewhere/chunks"}, "object_store"
+        )
+
+
+def test_presigned_destinations_cannot_chunk(runtime, delegated):
+    runtime.verifiers["verifier-42"] = {
+        "profile": "approved",
+        "object_key": "artifacts/delegated",
+        "put_url_sha256": hashlib.sha256(delegated["url"].encode()).hexdigest(),
+    }
+    with pytest.raises(ValueError, match="managed store"):
+        runtime.validate({**delegated, "chunk_prefix": "artifacts/c"}, "object_store")
+
+
+@pytest.mark.asyncio
+async def test_parts_without_a_chunk_prefix_are_rejected(runtime, managed):
+    with pytest.raises(ValueError, match="chunk_prefix"):
+        await runtime.submit(b"object", [], managed, parts=_parts(b"x"))
+
+
+@pytest.mark.asyncio
+async def test_chunks_count_toward_the_pending_byte_cap(runtime, chunked):
+    runtime.service.max_source_bytes = 16
+    with pytest.raises(ValueError, match="capacity"):
+        await runtime.submit(b"object", [], chunked, parts=_parts(b"x" * 16))
+    assert runtime.service.source_bytes == 0
+    assert runtime.max_artifact_bytes == 16

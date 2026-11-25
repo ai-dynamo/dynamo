@@ -163,12 +163,57 @@ The worker frees the buffer after one read or when the lease expires, whichever 
 The receipt's `rdma_metadata` is a capability: any NIXL agent that holds it can read the artifact until the lease ends. Deliver receipts only to trusted consumers on the same network as the workers.
 </Warning>
 
+### Store Long Captures as Chunks
+
+An artifact object is capped at 64 MiB. With three captured layers of a 4096-wide bfloat16 model, that is about 2,700 tokens of hidden states. For longer sequences, set `chunk_tokens` to store the rows outside the object as content-addressed chunks:
+
+```json
+{
+  "kind": "generation_artifact",
+  "contents": ["hidden_states"],
+  "mode": "object_store",
+  "destination": {
+    "kind": "managed_store",
+    "profile": "rollouts",
+    "object_key": "runs/r1/sample-7",
+    "chunk_prefix": "runs/r1/hidden-chunks"
+  },
+  "content_options": {"hidden_states": {"chunk_tokens": 256}}
+}
+```
+
+Chunk `k` holds sequence positions `k * chunk_tokens` up to `(k + 1) * chunk_tokens`, clipped to the captured rows, and each chunk is stored at `{chunk_prefix}/{sha256}`. Because chunks align to absolute positions, requests that share a prompt produce identical chunks for its full prompt chunks when vLLM serves those positions from its prefix cache, and the store keeps one copy. Use one `chunk_prefix` and one `chunk_tokens` across a GRPO group, or across a whole run, to share them. A worker checks whether each chunk already exists before writing it, verifies every chunk it writes or reuses, and writes the object only after all its chunks are stored. The ready receipt reports `chunk_count`, `chunk_bytes`, and `reused_chunk_bytes`.
+
+The artifact's `hidden_state_chunks` component lists each chunk's `rows`, `byte_count`, and `sha256`; such objects use artifact format version 1.2. Rebuild the rows with the helper, which checks every chunk against its digest:
+
+```python
+from dynamo.artifacts.vllm.format import assemble_hidden_states, decode_generation_artifact
+
+(component,) = decode_generation_artifact(object_bytes).choices[0].components
+rows = assemble_hidden_states(
+    component, lambda digest: store.read(f"runs/r1/hidden-chunks/{digest}")
+)
+```
+
+Chunking works with `managed_store` destinations, whose `chunk_prefix` the worker authorizes like `object_key`, and with `nixl_read`. A presigned destination grants a single object, so it cannot hold chunks. With `nixl_read`, the worker holds the object and its chunks in one readable operation and lists the chunks under `parts` in the receipt; read them together:
+
+```python
+from dynamo.artifacts.nixl import NixlArtifactReader
+
+artifact, chunks = await NixlArtifactReader().read_parts(receipt)
+(component,) = decode_generation_artifact(artifact.numpy().tobytes()).choices[0].components
+rows = assemble_hidden_states(component, lambda digest: chunks[digest].numpy())
+```
+
+A chunk must fit in 64 MiB (`chunk_tokens` times the row size), and an artifact may have at most 4,096 chunks. Chunked rows still count toward the worker's capture budget (`DYNAMO_ARTIFACT_CAPTURE_BYTES`) and the delivery's own limit: the artifact authority's `max_source_bytes` (256 MiB by default) or the NIXL byte budget. A request that cannot fit fails before inference.
+
 Limits of the current implementation:
 
 - `extract_hidden_states` takes the place of a drafter, so the worker does not speculate while it captures.
 - Capture requires aggregated serving with token prompts and one choice, like the other artifact contents.
-- An artifact payload is capped at 64 MiB, checked against the prompt length plus `max_tokens` before inference. With three captured layers of a 4096-wide bfloat16 model, that admits about 2,700 tokens.
+- Without chunking, an artifact payload is capped at 64 MiB, checked against the prompt length plus `max_tokens` before inference.
 - The connector writes each file to local disk before the worker reads, uploads, and deletes it.
+- Chunk reuse depends on bitwise-identical rows. A prompt prefilled concurrently by two requests, rather than served from the prefix cache, may differ in its last bits and is stored twice.
 
 ## Handle Streaming and Retries
 
