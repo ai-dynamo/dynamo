@@ -3541,6 +3541,7 @@ mod tests {
 
     struct BoundedChannelSubscriber {
         rx: mpsc::Receiver<ActiveSequenceEvent>,
+        drained: Arc<AtomicUsize>,
     }
 
     impl SequenceSubscriber for BoundedChannelSubscriber {
@@ -3553,6 +3554,10 @@ mod tests {
             cx: &mut Context<'_>,
         ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
             self.rx.poll_recv(cx).map(|event| event.map(Ok))
+        }
+
+        fn record_drain(&mut self, applied: usize) {
+            self.drained.fetch_add(applied, Ordering::SeqCst);
         }
     }
 
@@ -3603,9 +3608,17 @@ mod tests {
             })
         };
         held_rx.recv().unwrap();
+        let active_before = sequences.active_request_counts()[&worker];
         let (tx, rx) = mpsc::channel(CAPACITY);
+        let drained = Arc::new(AtomicUsize::new(0));
         let cancel_token = CancellationToken::new();
-        sequences.start_replica_sync(BoundedChannelSubscriber { rx }, cancel_token.clone());
+        sequences.start_replica_sync(
+            BoundedChannelSubscriber {
+                rx,
+                drained: Arc::clone(&drained),
+            },
+            cancel_token.clone(),
+        );
 
         // Flushing this event starts the due sweep.
         tx.try_send(replica_add("trigger", worker, vec![100]))
@@ -3638,10 +3651,16 @@ mod tests {
                 })
                 .count()
         };
+        // record_drain runs after a batch is applied and flushed, so this count covers the trigger and every event in full.
         if !stalled {
-            wait_until(Instant::now() + WATCHDOG, || applied() == EVENTS).await;
+            wait_until(Instant::now() + WATCHDOG, || {
+                drained.load(Ordering::SeqCst) == EVENTS + 1
+            })
+            .await;
         }
+        let drained_during_sweep = drained.load(Ordering::SeqCst);
         let applied_during_sweep = applied();
+        let active_during_sweep = sequences.active_request_counts()[&worker];
         let sweep_still_waiting = shared.is_locked_exclusive();
         release_tx.send(()).unwrap();
         holder.join().unwrap();
@@ -3650,7 +3669,10 @@ mod tests {
             !stalled && dropped == 0,
             "while the sweep ran, replica sync stalled={stalled} and dropped {dropped} of {EVENTS} events"
         );
+        assert_eq!(drained_during_sweep, EVENTS + 1);
         assert_eq!(applied_during_sweep, EVENTS);
+        // The worker load is the last state an AddRequest updates.
+        assert_eq!(active_during_sweep, active_before + 1 + EVENTS);
         assert!(sweep_still_waiting);
         assert!(
             wait_until(Instant::now() + WATCHDOG, || !shared.read().has_child(4)).await,
