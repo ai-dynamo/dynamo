@@ -4,6 +4,7 @@
 //! Native encoder service discovery and the Dynamo encode terminal.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
@@ -30,6 +31,10 @@ use crate::protocol;
 use crate::staged_media::{self, StagedMedia};
 
 type EncoderClient = pb::sglang_encoder_client::SglangEncoderClient<Channel>;
+
+/// How long a stopped or expired Stage call waits for a reply already in flight.
+/// Arbitrary; long enough for a local reply, short enough not to hold a cancelled request.
+const STAGE_REPLY_GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) enum NativeBackend {
     Language(Box<EngineInfo>),
@@ -609,19 +614,36 @@ impl Encoder {
         let native_model_type = self.capabilities.model_for(counts)?.to_owned();
         let media = self.media.clone();
         let stage_timeout = self.stage_timeout;
+        let mut stage_rpc = rpc.clone();
         Ok(Box::pin(async_stream::try_stream! {
+            let submitted = AtomicBool::new(false);
+            let stage = async {
+                staged_media::prepare(&mut message, media.as_deref()).await?;
+                let mut request = tonic::Request::new(message);
+                request.set_timeout(stage_timeout);
+                submitted.store(true, Ordering::Relaxed);
+                // E retires its own staging at the wire deadline, so the local
+                // deadline must fire second.
+                client::rpc_with_deadline("Stage", Instant::now() + stage_timeout + STAGE_REPLY_GRACE, stage_rpc.stage(request)).await
+            };
+            tokio::pin!(stage);
             let response = tokio::select! {
                 biased;
                 _ = stop.cancelled() => None,
                 _ = ctx.stopped() => None,
-                res = async {
-                    staged_media::prepare(&mut message, media.as_deref()).await?;
-                    let mut request = tonic::Request::new(message);
-                    request.set_timeout(stage_timeout);
-                    client::rpc_with_deadline("Stage", Instant::now() + stage_timeout, rpc.stage(request)).await
-                } => Some(res),
+                res = &mut stage => Some(res),
             };
             let Some(response) = response else {
+                // Only the Stage reply names the transfer. Dropping a reply that
+                // E already sent would hold its slot until the producer expiry.
+                if submitted.load(Ordering::Relaxed)
+                    && let Ok(Ok(reply)) = timeout(STAGE_REPLY_GRACE, &mut stage).await
+                    && let Some(transfer) = reply.into_inner().transfer
+                {
+                    let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
+                        transfer_id: transfer.transfer_id,
+                    })).await;
+                }
                 yield LLMEngineOutput::cancelled();
                 return;
             };
