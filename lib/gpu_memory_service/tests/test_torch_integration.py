@@ -457,6 +457,7 @@ def test_integration_helper_without_explicit_init_vmm(tmp_path):
     _reset_vmm_singleton()
 
 
+@pytest.mark.timeout(30)
 def test_materialize_meta_module_with_post_processed_weights(running_gms):
     """RO meta-model materialization accepts post-load reshaped/repacked weights."""
     socket_path = running_gms
