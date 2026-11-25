@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The scheduler queue: [`SchedulerQueue`] is the handle callers hold, and its actor admits
+//! their requests in order. The actor's loop is in `actor`, arrivals in `arrival`, dispatch in
+//! `dispatch` and `refresh`, admission in `admit`, caller-prepared work in `prepared`, and
+//! booking cleanup in `cleanup`.
+
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::marker::PhantomData;
