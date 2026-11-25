@@ -24,8 +24,6 @@ const CLEANUP_INTERVAL: Duration = Duration::from_millis(CLEANUP_INTERVAL_MS);
 new_key_type! {
     /// Generational handle to a [`LogicalNode`] in the arena.
     pub struct NodeId;
-
-    struct SessionHandle;
 }
 
 /// One block and its liveness links in the logical session forest.
@@ -61,7 +59,9 @@ struct IndexedNode {
     parent: Option<NodeId>,
     frontier_refs: u32,
     child_count: u32,
-    sessions: FxHashSet<SessionHandle>,
+    first_child: Option<NodeId>,
+    previous_sibling: Option<NodeId>,
+    next_sibling: Option<NodeId>,
 }
 
 impl From<&IndexedNode> for LogicalNode {
@@ -76,8 +76,7 @@ impl From<&IndexedNode> for LogicalNode {
 }
 
 const _: () = assert!(std::mem::size_of::<LogicalNode>() == 24);
-const _: () = assert!(std::mem::size_of::<IndexedNode>() == 56);
-const _: () = assert!(std::mem::size_of::<SessionHandle>() == 8);
+const _: () = assert!(std::mem::size_of::<IndexedNode>() == 48);
 
 /// Errors surfaced by [`SessionPrefixIndexer`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -137,7 +136,6 @@ type FrontierKey = (SessionResidencyOwner, StorageTier);
 
 #[derive(Debug, Default)]
 struct SessionEntry {
-    handle: SessionHandle,
     worker_frontiers: FxHashMap<FrontierKey, FxHashSet<NodeId>>,
     last_touch: Option<u64>,
 }
@@ -145,7 +143,6 @@ struct SessionEntry {
 #[derive(Debug)]
 struct IndexState {
     nodes: SlotMap<NodeId, IndexedNode>,
-    session_ids: SlotMap<SessionHandle, SessionId>,
     hash_to_node: FxHashMap<ExternalSequenceBlockHash, NodeId>,
     session_to_worker_frontiers: HashMap<SessionId, SessionEntry>,
     worker_frontier_to_sessions: FxHashMap<FrontierKey, FxHashMap<NodeId, HashSet<SessionId>>>,
@@ -155,14 +152,13 @@ struct IndexState {
     prune_candidates: FxHashSet<NodeId>,
     last_cleanup: Instant,
     #[cfg(test)]
-    removal_paths_examined: usize,
+    removal_nodes_visited: usize,
 }
 
 impl Default for IndexState {
     fn default() -> Self {
         Self {
             nodes: SlotMap::default(),
-            session_ids: SlotMap::default(),
             hash_to_node: FxHashMap::default(),
             session_to_worker_frontiers: HashMap::default(),
             worker_frontier_to_sessions: FxHashMap::default(),
@@ -172,7 +168,7 @@ impl Default for IndexState {
             prune_candidates: FxHashSet::default(),
             last_cleanup: Instant::now(),
             #[cfg(test)]
-            removal_paths_examined: 0,
+            removal_nodes_visited: 0,
         }
     }
 }
@@ -496,16 +492,30 @@ impl IndexState {
     ) -> NodeId {
         let node = self.nodes.insert(IndexedNode {
             block_hash,
-            parent,
+            parent: None,
             frontier_refs: 0,
             child_count: 0,
-            sessions: FxHashSet::default(),
+            first_child: None,
+            previous_sibling: None,
+            next_sibling: None,
         });
         self.hash_to_node.insert(block_hash, node);
         if let Some(parent) = parent {
-            self.nodes[parent].child_count += 1;
+            self.attach_child(node, parent);
         }
         node
+    }
+
+    fn attach_child(&mut self, node: NodeId, parent: NodeId) {
+        debug_assert!(self.nodes[node].parent.is_none());
+        let next = self.nodes[parent].first_child;
+        self.nodes[node].parent = Some(parent);
+        self.nodes[node].next_sibling = next;
+        if let Some(next) = next {
+            self.nodes[next].previous_sibling = Some(node);
+        }
+        self.nodes[parent].first_child = Some(node);
+        self.nodes[parent].child_count += 1;
     }
 
     fn recorded_parent_hash(
@@ -534,13 +544,7 @@ impl IndexState {
                 Some(existing) => {
                     // Graft nodes previously known only as roots.
                     if let (None, Some(expected)) = (self.nodes[existing].parent, parent) {
-                        self.nodes[existing].parent = Some(expected);
-                        self.nodes[expected].child_count += 1;
-                        let sessions: Vec<_> =
-                            self.nodes[existing].sessions.iter().copied().collect();
-                        for session in sessions {
-                            self.add_session_path(session, expected);
-                        }
+                        self.attach_child(existing, expected);
                     }
                     existing
                 }
@@ -658,12 +662,10 @@ impl IndexState {
         if let Some(last_touch) = entry.last_touch {
             self.lru.remove(&last_touch);
         }
-        self.session_ids.remove(entry.handle);
         for (key, frontiers) in entry.worker_frontiers {
             for node in frontiers {
                 self.nodes[node].frontier_refs -= 1;
                 self.remove_reverse_frontier(key, node, session_id);
-                self.remove_session_path(entry.handle, node);
                 self.queue_prune_candidate(node);
             }
         }
@@ -699,6 +701,16 @@ impl IndexState {
                 continue;
             }
 
+            let previous = self.nodes[node].previous_sibling;
+            let next = self.nodes[node].next_sibling;
+            if let Some(previous) = previous {
+                self.nodes[previous].next_sibling = next;
+            } else if let Some(parent) = entry.parent {
+                self.nodes[parent].first_child = next;
+            }
+            if let Some(next) = next {
+                self.nodes[next].previous_sibling = previous;
+            }
             self.nodes.remove(node);
             self.hash_to_node.remove(&entry.block_hash);
             removed += 1;
@@ -792,29 +804,28 @@ impl IndexState {
             })
             .unwrap_or_default();
 
-        // Keep common ancestors referenced while replacing a frontier.
+        for &frontier in &subsumed {
+            self.remove_frontier_binding(session_id, key, frontier);
+        }
         self.add_frontier_binding(session_id, key, node);
-        self.remove_frontier_bindings(session_id, key, &subsumed, true);
         self.touch_session(session_id);
         self.enforce_session_cap();
         true
     }
 
     fn add_frontier_binding(&mut self, session_id: &str, key: FrontierKey, node: NodeId) {
-        let entry = self
+        let inserted = self
             .session_to_worker_frontiers
             .entry(session_id.to_string())
-            .or_insert_with(|| SessionEntry {
-                handle: self.session_ids.insert(session_id.to_string()),
-                ..SessionEntry::default()
-            });
-        let handle = entry.handle;
-        let inserted = entry.worker_frontiers.entry(key).or_default().insert(node);
+            .or_default()
+            .worker_frontiers
+            .entry(key)
+            .or_default()
+            .insert(node);
         if !inserted {
             return;
         }
 
-        self.add_session_path(handle, node);
         self.nodes[node].frontier_refs += 1;
         self.worker_frontier_to_sessions
             .entry(key)
@@ -824,36 +835,25 @@ impl IndexState {
             .insert(session_id.to_string());
     }
 
-    fn remove_frontier_bindings(
+    fn remove_frontier_binding(
         &mut self,
         session_id: &str,
         key: FrontierKey,
-        nodes: &[NodeId],
-        path_is_covered: bool,
-    ) -> usize {
-        let Some(frontiers) = self
+        node: NodeId,
+    ) -> bool {
+        let removed = self
             .session_to_worker_frontiers
             .get_mut(session_id)
             .and_then(|entry| entry.worker_frontiers.get_mut(&key))
-        else {
-            return 0;
-        };
-        let removed: Vec<_> = nodes
-            .iter()
-            .copied()
-            .filter(|node| frontiers.remove(node))
-            .collect();
-        if removed.is_empty() {
-            return 0;
+            .is_some_and(|frontiers| frontiers.remove(&node));
+        if !removed {
+            return false;
         }
-        if !path_is_covered {
-            self.remove_session_paths(session_id, &removed);
-        }
-        for &node in &removed {
-            self.nodes[node].frontier_refs -= 1;
-            self.remove_reverse_frontier(key, node, session_id);
-            self.queue_prune_candidate(node);
-        }
+
+        self.nodes[node].frontier_refs -= 1;
+        self.remove_reverse_frontier(key, node, session_id);
+        self.queue_prune_candidate(node);
+
         let remove_key = self
             .session_to_worker_frontiers
             .get(session_id)
@@ -868,91 +868,11 @@ impl IndexState {
             .is_some_and(|entry| entry.worker_frontiers.is_empty());
         if remove_session_entry
             && let Some(entry) = self.session_to_worker_frontiers.remove(session_id)
+            && let Some(last_touch) = entry.last_touch
         {
-            self.session_ids.remove(entry.handle);
-            if let Some(last_touch) = entry.last_touch {
-                self.lru.remove(&last_touch);
-            }
+            self.lru.remove(&last_touch);
         }
-        removed.len()
-    }
-
-    fn add_session_path(&mut self, session: SessionHandle, tail: NodeId) {
-        let mut current = Some(tail);
-        for _ in 0..self.nodes.len() {
-            let Some(node) = current else { return };
-            // Membership implies membership in all ancestors, including after grafts.
-            if !self.nodes[node].sessions.insert(session) {
-                return;
-            }
-            current = self.nodes[node].parent;
-        }
-        debug_assert!(
-            current.is_none(),
-            "parent cycle in session prefix index forest"
-        );
-    }
-
-    fn remove_session_path(&mut self, session: SessionHandle, tail: NodeId) {
-        let mut current = Some(tail);
-        for _ in 0..self.nodes.len() {
-            let Some(node) = current else { return };
-            if !self.nodes[node].sessions.remove(&session) {
-                return;
-            }
-            current = self.nodes[node].parent;
-        }
-        debug_assert!(
-            current.is_none(),
-            "parent cycle in session prefix index forest"
-        );
-    }
-
-    fn remove_session_paths(&mut self, session_id: &str, tails: &[NodeId]) {
-        let entry = &self.session_to_worker_frontiers[session_id];
-        let handle = entry.handle;
-        if entry.worker_frontiers.values().all(FxHashSet::is_empty) {
-            for &tail in tails {
-                self.remove_session_path(handle, tail);
-            }
-            return;
-        }
-        if tails.len() == 1
-            && entry
-                .worker_frontiers
-                .values()
-                .any(|frontiers| frontiers.contains(&tails[0]))
-        {
-            return;
-        }
-        let mut removed = FxHashSet::default();
-        for &tail in tails {
-            let mut current = Some(tail);
-            for _ in 0..self.nodes.len() {
-                let Some(node) = current else { break };
-                if !removed.insert(node) {
-                    break;
-                }
-                current = self.nodes[node].parent;
-            }
-        }
-        // Subtract paths still covered by any owner, tier, or branch of this session.
-        for &frontier in entry.worker_frontiers.values().flatten() {
-            let mut current = Some(frontier);
-            let mut intersects = false;
-            for _ in 0..self.nodes.len() {
-                let Some(node) = current else { break };
-                if removed.remove(&node) {
-                    intersects = true;
-                } else if intersects {
-                    break;
-                }
-                current = self.nodes[node].parent;
-            }
-        }
-        for node in removed {
-            self.nodes[node].sessions.remove(&handle);
-        }
+        true
     }
 
     fn remove_reverse_frontier(&mut self, key: FrontierKey, node: NodeId, session_id: &str) {
@@ -989,61 +909,110 @@ impl IndexState {
             return 0;
         }
 
-        let frontiers = self.removal_candidates(key, &removed_nodes);
-        let mut affected: HashMap<SessionId, Vec<(NodeId, Option<NodeId>)>> = HashMap::new();
-        for frontier in frontiers {
-            #[cfg(test)]
-            {
-                self.removal_paths_examined += 1;
+        let Some(frontiers) = self.worker_frontier_to_sessions.get(&key) else {
+            return 0;
+        };
+        let mut affected = Vec::new();
+        let mut remaining_frontiers = frontiers.len();
+        'roots: for root in self.removed_subtree_roots(&removed_nodes) {
+            let replacement = self.nodes[root].parent;
+            let mut next = Some(root);
+            for _ in 0..self.nodes.len() {
+                let Some(node) = next else { break };
+                #[cfg(test)]
+                {
+                    self.removal_nodes_visited += 1;
+                }
+                // A frontier can be internal to the shared logical tree.
+                if self.nodes[node].frontier_refs > 0
+                    && let Some(sessions) = frontiers.get(&node)
+                {
+                    affected.extend(
+                        sessions
+                            .iter()
+                            .cloned()
+                            .map(|session| (session, node, replacement)),
+                    );
+                    remaining_frontiers -= 1;
+                    if remaining_frontiers == 0 {
+                        break 'roots;
+                    }
+                }
+                next = self.next_in_subtree(node, root);
             }
-            let path = self.path_to_root(frontier);
-            let Some(removed) = path.into_iter().find(|node| removed_nodes.contains(node)) else {
-                continue;
-            };
-            let replacement = self.nodes[removed].parent;
-            for session_id in &self.worker_frontier_to_sessions[&key][&frontier] {
-                affected
-                    .entry(session_id.clone())
-                    .or_default()
-                    .push((frontier, replacement));
+            if next.is_some() {
+                debug_assert!(false, "child cycle in session prefix index forest");
+                tracing::error!("session prefix index subtree walk exceeded the arena; truncating");
             }
         }
 
-        let mut updated = 0;
-        for (session_id, changes) in affected {
-            let old: Vec<_> = changes.iter().map(|&(node, _)| node).collect();
-            updated += self.remove_frontier_bindings(&session_id, key, &old, false);
-            for (_, replacement) in changes {
-                if let Some(replacement) = replacement {
-                    self.advance_frontier(&session_id, key, replacement);
-                }
+        for (session_id, old_frontier, replacement) in &affected {
+            self.remove_frontier_binding(session_id, key, *old_frontier);
+            if let Some(replacement) = *replacement {
+                self.advance_frontier(session_id, key, replacement);
             }
         }
-        updated
+        affected.len()
     }
 
-    fn removal_candidates(
-        &self,
-        key: FrontierKey,
-        removed: &FxHashSet<NodeId>,
-    ) -> FxHashSet<NodeId> {
-        let mut sessions = FxHashSet::default();
+    fn next_in_subtree(&self, mut node: NodeId, root: NodeId) -> Option<NodeId> {
+        if let Some(child) = self.nodes[node].first_child {
+            return Some(child);
+        }
+        for _ in 0..self.nodes.len() {
+            if node == root {
+                return None;
+            }
+            if let Some(next) = self.nodes[node].next_sibling {
+                return Some(next);
+            }
+            node = self.nodes[node].parent?;
+        }
+        debug_assert!(false, "parent cycle in session prefix index forest");
+        tracing::error!("session prefix index subtree ascent exceeded the arena; truncating");
+        None
+    }
+
+    fn removed_subtree_roots(&self, removed: &FxHashSet<NodeId>) -> Vec<NodeId> {
+        if removed.len() == 1 {
+            return removed.iter().copied().collect();
+        }
+        let mut roots = Vec::new();
+        let mut coverage = FxHashMap::default();
+        let mut path = Vec::new();
         for &node in removed {
-            sessions.extend(self.nodes[node].sessions.iter().copied());
-            if sessions.len() == self.session_ids.len() {
-                break;
+            path.clear();
+            let mut ancestor = self.nodes[node].parent;
+            let mut is_covered = false;
+            while let Some(parent) = ancestor {
+                if removed.contains(&parent) {
+                    is_covered = true;
+                    break;
+                }
+                if let Some(&cached) = coverage.get(&parent) {
+                    is_covered = cached;
+                    break;
+                }
+                if path.len() >= self.nodes.len() {
+                    debug_assert!(false, "parent cycle in session prefix index forest");
+                    tracing::error!(
+                        "session prefix index ancestor walk exceeded the arena; truncating"
+                    );
+                    break;
+                }
+                path.push(parent);
+                ancestor = self.nodes[parent].parent;
+            }
+            // The removed set is fixed for this batch; shared ancestor paths need
+            // classifying only once, even when all removed nodes are deep leaves.
+            for &ancestor in &path {
+                coverage.insert(ancestor, is_covered);
+            }
+            if !is_covered {
+                roots.push(node);
             }
         }
-        sessions
-            .into_iter()
-            .filter_map(|session| {
-                self.session_to_worker_frontiers[&self.session_ids[session]]
-                    .worker_frontiers
-                    .get(&key)
-            })
-            .flatten()
-            .copied()
-            .collect()
+        roots
     }
 
     fn inherit_stored_blocks(
@@ -1209,18 +1178,25 @@ impl IndexState {
     }
 
     fn clear_frontiers(&mut self, key: FrontierKey) -> usize {
-        let mut affected: HashMap<SessionId, Vec<NodeId>> = HashMap::new();
-        if let Some(frontiers) = self.worker_frontier_to_sessions.get(&key) {
-            for (&node, sessions) in frontiers {
-                for session in sessions {
-                    affected.entry(session.clone()).or_default().push(node);
-                }
-            }
+        let affected: Vec<(SessionId, NodeId)> = self
+            .worker_frontier_to_sessions
+            .get(&key)
+            .map(|frontiers| {
+                frontiers
+                    .iter()
+                    .flat_map(|(&node, sessions)| {
+                        sessions
+                            .iter()
+                            .cloned()
+                            .map(move |session_id| (session_id, node))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (session_id, node) in &affected {
+            self.remove_frontier_binding(session_id, key, *node);
         }
-        affected
-            .into_iter()
-            .map(|(session, nodes)| self.remove_frontier_bindings(&session, key, &nodes, false))
-            .sum()
+        affected.len()
     }
 
     fn clear_matching_frontiers(
@@ -2098,7 +2074,7 @@ mod tests {
                 .unwrap_or_default();
 
             for (session_id, old_frontier, replacement) in &affected {
-                self.remove_frontier_bindings(session_id, key, &[*old_frontier], false);
+                self.remove_frontier_binding(session_id, key, *old_frontier);
                 if let Some(replacement) = *replacement {
                     self.advance_frontier(session_id, key, replacement);
                 }
@@ -2107,39 +2083,61 @@ mod tests {
         }
     }
 
-    fn assert_session_references(state: &IndexState) {
-        let mut expected: FxHashMap<NodeId, FxHashSet<SessionHandle>> = FxHashMap::default();
-        let mut frontier_refs: FxHashMap<NodeId, u32> = FxHashMap::default();
-        assert_eq!(
-            state.session_ids.len(),
-            state.session_to_worker_frontiers.len()
-        );
-        for (session_id, entry) in &state.session_to_worker_frontiers {
-            assert_eq!(&state.session_ids[entry.handle], session_id);
+    fn assert_topology(state: &IndexState) {
+        assert_eq!(state.hash_to_node.len(), state.nodes.len());
+        let mut expected_children: FxHashMap<NodeId, FxHashSet<NodeId>> = FxHashMap::default();
+        for (node, entry) in &state.nodes {
+            assert_eq!(state.hash_to_node[&entry.block_hash], node);
+            if let Some(parent) = entry.parent {
+                assert!(state.nodes.contains_key(parent));
+                expected_children.entry(parent).or_default().insert(node);
+            } else {
+                assert!(entry.previous_sibling.is_none());
+                assert!(entry.next_sibling.is_none());
+            }
+        }
+        let mut refs: FxHashMap<NodeId, u32> = FxHashMap::default();
+        let mut reverse: FxHashMap<FrontierKey, FxHashMap<NodeId, HashSet<SessionId>>> =
+            FxHashMap::default();
+        for (session, entry) in &state.session_to_worker_frontiers {
             for (&key, frontiers) in &entry.worker_frontiers {
-                for &frontier in frontiers {
-                    *frontier_refs.entry(frontier).or_default() += 1;
-                    assert!(
-                        state.worker_frontier_to_sessions[&key][&frontier].contains(session_id)
-                    );
-                    for node in state.path_to_root(frontier) {
-                        expected.entry(node).or_default().insert(entry.handle);
-                    }
+                for &node in frontiers {
+                    assert!(state.nodes.contains_key(node));
+                    *refs.entry(node).or_default() += 1;
+                    reverse
+                        .entry(key)
+                        .or_default()
+                        .entry(node)
+                        .or_default()
+                        .insert(session.clone());
                 }
             }
         }
-        for (node, entry) in &state.nodes {
-            assert_eq!(entry.sessions, expected.remove(&node).unwrap_or_default());
+        assert_eq!(state.worker_frontier_to_sessions, reverse);
+        for (parent, entry) in &state.nodes {
+            let mut children = FxHashSet::default();
+            let mut previous = None;
+            let mut current = entry.first_child;
+            while let Some(child) = current {
+                assert!(children.insert(child), "sibling cycle");
+                let child_entry = &state.nodes[child];
+                assert_eq!(child_entry.parent, Some(parent));
+                assert_eq!(child_entry.previous_sibling, previous);
+                previous = Some(child);
+                current = child_entry.next_sibling;
+            }
             assert_eq!(
-                entry.frontier_refs,
-                frontier_refs.get(&node).copied().unwrap_or(0)
+                children,
+                expected_children.remove(&parent).unwrap_or_default()
             );
+            assert_eq!(entry.child_count as usize, children.len());
+            assert_eq!(entry.frontier_refs, refs.get(&parent).copied().unwrap_or(0));
         }
-        assert!(expected.is_empty());
+        assert!(expected_children.is_empty());
     }
 
     #[test]
-    fn node_references_follow_grafts_branches_owners_and_eviction() {
+    fn child_links_survive_grafts_eviction_and_sibling_reclamation() {
         let index = SessionPrefixIndexer::with_max_sessions(2);
         let a = ExternalSequenceBlockHash(1);
         let b = ExternalSequenceBlockHash(2);
@@ -2148,81 +2146,136 @@ mod tests {
         let mut state = index.state.write();
         let gpu = (owner(1), StorageTier::Device);
         let host = (owner(2), StorageTier::HostPinned);
-        // Two sessions first observe a subtree without its ancestors.
         state.store_chain("s1", gpu, None, &[b, c]).unwrap();
         state.store_chain("s2", gpu, None, &[b, c]).unwrap();
         state.store_chain("s1", host, None, &[a, b, c]).unwrap();
         state.store_chain("s1", gpu, Some(b), &[d]).unwrap();
-        assert_session_references(&state);
-        assert_eq!(state.nodes[state.hash_to_node[&a]].sessions.len(), 2);
-        assert_eq!(state.recede_removed_frontiers(gpu, &[c]), 2);
-        assert_session_references(&state);
-        assert_eq!(state.nodes[state.hash_to_node[&c]].sessions.len(), 1);
-        state.clear_owner_frontiers(owner(2));
-        assert_session_references(&state);
-        assert!(state.nodes[state.hash_to_node[&c]].sessions.is_empty());
+        assert_topology(&state);
         state.touch_session("s1");
         state.store_chain("s3", gpu, Some(b), &[d]).unwrap();
         assert!(!state.session_to_worker_frontiers.contains_key("s2"));
-        assert_session_references(&state);
+        assert_topology(&state);
         state.drop_session_bindings("s1");
-        state.store_chain("s1", gpu, Some(b), &[c]).unwrap();
-        assert_session_references(&state);
-        state.clear_owner_frontiers(owner(1));
         state.prune_stale_nodes();
-        assert_session_references(&state);
+        assert_topology(&state);
+        state.store_chain("s1", gpu, Some(b), &[c]).unwrap();
+        state.clear_owner_frontiers(owner(1));
+        state.clear_owner_frontiers(owner(2));
+        state.prune_stale_nodes();
+        assert_topology(&state);
         assert!(state.nodes.is_empty());
-        assert!(state.session_ids.is_empty());
+
+        let mut state = IndexState::default();
+        state.store_chain("root", host, None, &[a]).unwrap();
+        for (session, block) in [
+            ("first", b),
+            ("middle", c),
+            ("last", d),
+            ("head", ExternalSequenceBlockHash(5)),
+        ] {
+            state.store_chain(session, gpu, Some(a), &[block]).unwrap();
+        }
+        // Unlink middle, tail, head, and final siblings.
+        for session in ["middle", "first", "head", "last"] {
+            state.drop_session_bindings(session);
+            assert_eq!(state.prune_stale_nodes(), 1);
+            assert_topology(&state);
+        }
+        state.drop_session_bindings("root");
+        assert_eq!(state.prune_stale_nodes(), 1);
+        assert!(state.nodes.is_empty());
     }
 
     #[test]
-    fn removal_skips_unrelated_frontiers_and_deduplicates_shared_paths() {
+    fn batched_removal_merges_subtrees_and_checks_internal_frontiers() {
+        for reverse in [false, true] {
+            let mut state = IndexState::default();
+            let key = (owner(1), StorageTier::Device);
+            let witness = (owner(2), StorageTier::Device);
+            let target: Vec<_> = (1..65).map(ExternalSequenceBlockHash).collect();
+            let other = [
+                ExternalSequenceBlockHash(100),
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ];
+            let keep = [
+                target[0],
+                ExternalSequenceBlockHash(200),
+                ExternalSequenceBlockHash(201),
+            ];
+            state.store_chain("keep", key, None, &keep).unwrap();
+            state.store_chain("target", key, None, &target).unwrap();
+            state
+                .store_chain("fork", key, Some(target[0]), &other)
+                .unwrap();
+            state.store_chain("target", witness, None, &target).unwrap();
+            state
+                .store_chain("internal", key, None, &target[..32])
+                .unwrap();
+            for i in 0..32 {
+                state
+                    .store_chain(
+                        &format!("background-{i}"),
+                        key,
+                        None,
+                        &[ExternalSequenceBlockHash(1000 + i)],
+                    )
+                    .unwrap();
+            }
+            let mut removed = vec![target[40], other[1], target[1], target[20], target[1]];
+            if reverse {
+                removed.reverse();
+            }
+            assert_eq!(state.recede_removed_frontiers(key, &removed), 3);
+            assert_eq!(state.removal_nodes_visited, 65);
+            let root = state.hash_to_node[&target[0]];
+            for session in ["target", "internal"] {
+                assert_eq!(
+                    state.session_to_worker_frontiers[session].worker_frontiers[&key],
+                    FxHashSet::from_iter([root])
+                );
+            }
+            assert_eq!(
+                state.session_to_worker_frontiers["target"].worker_frontiers[&witness],
+                FxHashSet::from_iter([state.hash_to_node[&target[63]]])
+            );
+            assert_eq!(
+                state.session_to_worker_frontiers["fork"].worker_frontiers[&key],
+                FxHashSet::from_iter([state.hash_to_node[&other[0]]])
+            );
+            assert_eq!(
+                state.session_to_worker_frontiers["keep"].worker_frontiers[&key],
+                FxHashSet::from_iter([state.hash_to_node[&keep[2]]])
+            );
+            state.removal_nodes_visited = 0;
+            assert_eq!(state.recede_removed_frontiers(key, &removed), 0);
+            assert_eq!(state.removal_nodes_visited, 65);
+            state.removal_nodes_visited = 0;
+            assert_eq!(state.recede_removed_frontiers(key, &[]), 0);
+            assert_eq!(
+                state.recede_removed_frontiers(key, &[ExternalSequenceBlockHash(9999)]),
+                0
+            );
+            assert_eq!(state.removal_nodes_visited, 0);
+            assert_topology(&state);
+        }
         let mut state = IndexState::default();
         let key = (owner(1), StorageTier::Device);
-        let target: Vec<_> = (1..65).map(ExternalSequenceBlockHash).collect();
-        let other: Vec<_> = (101..165).map(ExternalSequenceBlockHash).collect();
-        for i in 0..32 {
-            let session = format!("shared-{i}");
-            state.store_chain(&session, key, None, &target).unwrap();
-            state
-                .store_chain(&session, (owner(2), StorageTier::Device), None, &target)
-                .unwrap();
-            state.store_chain(&session, key, None, &other).unwrap();
-        }
-        for i in 0..32 {
-            state
-                .store_chain(
-                    &format!("unrelated-{i}"),
-                    key,
-                    None,
-                    &[ExternalSequenceBlockHash(1000 + i)],
-                )
-                .unwrap();
-        }
-        assert_eq!(state.recede_removed_frontiers(key, &target[..1]), 32);
-        assert_eq!(state.removal_paths_examined, 2);
-        state.removal_paths_examined = 0;
-        assert_eq!(state.recede_removed_frontiers(key, &target[1..2]), 0);
-        // All candidate sessions now share only one unrelated frontier in this owner.
-        assert_eq!(state.removal_paths_examined, 1);
-        for i in 0..32 {
-            let session = format!("shared-{i}");
-            let frontier = state.hash_to_node[&other[other.len() - 1]];
-            state.remove_frontier_bindings(&session, key, &[frontier], false);
-        }
-        state.removal_paths_examined = 0;
-        assert_eq!(state.recede_removed_frontiers(key, &target[2..3]), 0);
-        assert_eq!(state.removal_paths_examined, 0);
-        assert_eq!(state.recede_removed_frontiers(key, &[]), 0);
-        assert_eq!(
-            state.recede_removed_frontiers(key, &[ExternalSequenceBlockHash(9999)]),
-            0
-        );
-        assert_session_references(&state);
+        let chain = hashes(vec![1, 2, 3, 4]);
+        state.store_chain("root", key, None, &chain[..1]).unwrap();
+        state
+            .store_chain("witness", (owner(2), StorageTier::Device), None, &chain)
+            .unwrap();
+        assert_eq!(state.recede_removed_frontiers(key, &chain[..1]), 1);
+        assert_eq!(state.removal_nodes_visited, 1);
+        state.removal_nodes_visited = 0;
+        assert_eq!(state.recede_removed_frontiers(key, &chain[1..2]), 0);
+        assert_eq!(state.removal_nodes_visited, 0);
+        assert_topology(&state);
     }
 
     #[test]
-    fn indexed_removal_matches_full_scan_through_random_lifecycles() {
+    fn subtree_removal_matches_full_scan_through_random_lifecycles() {
         for seed in 0..8 {
             let mut rng = fastrand::Rng::with_seed(seed);
             let mut indexed = IndexState {
@@ -2291,8 +2344,8 @@ mod tests {
                         assert_eq!(indexed.prune_stale_nodes(), reference.prune_stale_nodes());
                     }
                 }
-                assert_session_references(&indexed);
-                assert_session_references(&reference);
+                assert_topology(&indexed);
+                assert_topology(&reference);
                 let snapshot = |state: &IndexState| {
                     state
                         .session_to_worker_frontiers
@@ -2425,6 +2478,36 @@ mod session_microbench {
                 extend.as_secs_f64() * 1000.,
                 branch.as_secs_f64() * 1000.,
                 evict.as_secs_f64() * 1000.,
+                index.node_count()
+            );
+            return;
+        }
+        if mode == "other_owner" || mode == "root_frontier" {
+            assert!(store("target", owner(1), None, &target[..1]));
+            assert!(store("witness", owner(2), None, &target));
+            for n in 0..background {
+                let session = format!("background-{n}");
+                for branch in 0..branches {
+                    let blocks = chain(8192 + (n * branches + branch) as u64 * depth as u64, depth);
+                    assert!(store(&session, owner(2), Some(target[1]), &blocks));
+                }
+            }
+            let removed = if mode == "root_frontier" {
+                &target[..1]
+            } else {
+                &target[1..2]
+            };
+            let started = Instant::now();
+            let updated = black_box(index.update_session_from_removed_blocks_in_tier(
+                owner(1),
+                StorageTier::Device,
+                removed,
+            ));
+            let elapsed = started.elapsed();
+            assert_eq!(updated, usize::from(mode == "root_frontier"));
+            println!(
+                "mode={mode} background={background} branches={branches} remove_ms={:.6} nodes={}",
+                elapsed.as_secs_f64() * 1000.,
                 index.node_count()
             );
             return;
