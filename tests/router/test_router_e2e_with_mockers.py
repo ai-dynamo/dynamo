@@ -1975,7 +1975,6 @@ async def _send_velo_plane_requests(frontend_url: str, count: int) -> None:
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.e2e
 def test_mocker_velo_request_plane(
     request,
     predownload_tokenizers,
