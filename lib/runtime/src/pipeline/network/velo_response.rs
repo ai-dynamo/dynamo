@@ -2185,21 +2185,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reverse_request_pin_expires_but_keeps_active_responses() {
+    async fn reverse_request_pin_expires_at_idle_ttl() {
         let (frontend, worker) = request_pair().await;
         stub_request_handler(&worker, Bytes::new());
+        let before_contact = worker.peer_clock();
         establish_route(&frontend, &worker.velo.peer_info(), deadline())
             .await
             .unwrap();
+
+        // Pause after network setup. Bound the pin time by the two clock reads.
+        tokio::time::pause();
+        let after_contact = worker.peer_clock();
+        let ttl = PEER_IDLE_TTL.as_secs();
+        tokio::time::advance(Duration::from_secs(
+            before_contact + ttl - 1 - after_contact,
+        ))
+        .await;
+
         let id = frontend.velo.instance_id();
-        let response = worker
-            .prepare_peer(id, &frontend.peer_address)
-            .await
-            .unwrap();
-        assert_eq!(worker.evict_idle_peers(u64::MAX), 0);
+        assert_eq!(worker.evict_idle_peers(worker.peer_clock()), 0);
         assert!(worker.velo.primary_transport_key(id).is_some());
-        drop(response);
-        assert_eq!(worker.evict_idle_peers(u64::MAX), 1);
+
+        let lease = worker.reserve_peer(id);
+        tokio::time::advance(Duration::from_secs(
+            after_contact + ttl - worker.peer_clock(),
+        ))
+        .await;
+        assert_eq!(worker.evict_idle_peers(worker.peer_clock()), 0);
+
+        drop(lease);
+        assert_eq!(worker.evict_idle_peers(worker.peer_clock()), 1);
+        assert!(worker.peer(id).is_none());
         assert!(worker.velo.primary_transport_key(id).is_none());
     }
 
