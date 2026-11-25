@@ -1012,8 +1012,10 @@ that publishes none counts as 20. The request fields are 8-bit, so the frontend
 rejects a count above 255 when it parses the request, whatever the workers
 publish.
 
-The vLLM worker (`dynamo.vllm`) publishes the engine's `--max-logprobs`. Other
-workers publish no limit. To publish one from a custom backend, see
+The vLLM worker (`dynamo.vllm`) publishes the engine's `--max-logprobs`. With
+`--max-logprobs -1` (no cap) the frontend accepts up to 255 entries per token,
+and response size grows with the count. Other workers publish no limit. To
+publish one from a custom backend, see
 [Writing unified backends](../../developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md).
 
 ### Image API Compatibility

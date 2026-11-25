@@ -7,10 +7,13 @@ import json
 import logging
 from typing import Any
 
-from dynamo.common.constants import MAX_LOGPROBS_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 
 logger = logging.getLogger(__name__)
+
+# Must match `MAX_LOGPROBS_RUNTIME_KEY` in
+# `lib/llm/src/local_model/runtime_config.rs`.
+MAX_LOGPROBS_RUNTIME_KEY = "max_logprobs"
 
 
 def publish_vllm_max_logprobs(runtime_config: Any, model_config: Any) -> None:

@@ -3773,7 +3773,6 @@ mod tests {
 
         assert_eq!(mm.max_logprobs("llama"), 32);
         assert_eq!(mm.max_logprobs("llama-alias"), 32);
-        // A model that is not registered keeps the default.
         assert_eq!(mm.max_logprobs("other"), MAX_TOP_LOGPROBS);
     }
 

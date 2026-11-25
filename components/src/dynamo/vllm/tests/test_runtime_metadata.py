@@ -10,10 +10,10 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from dynamo.common.constants import MAX_LOGPROBS_RUNTIME_KEY
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.capacity import (
+    MAX_LOGPROBS_RUNTIME_KEY,
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     publish_vllm_max_logprobs,

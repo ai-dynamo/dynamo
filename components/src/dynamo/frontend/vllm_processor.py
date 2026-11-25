@@ -31,7 +31,6 @@ from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutp
 from vllm.v1.engine.parallel_sampling import ParentRequest
 
 from dynamo._internal import ModelDeploymentCard
-from dynamo.common.constants import MAX_LOGPROBS_RUNTIME_KEY
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsSender,
@@ -460,22 +459,6 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
-
-
-def _runtime_config_max_logprobs(mdc: ModelDeploymentCard) -> int | None:
-    """The log-probability limit the model's workers publish, if any."""
-    runtime_config = mdc.runtime_config()
-    if not isinstance(runtime_config, dict):
-        return None
-
-    runtime_data = runtime_config.get("runtime_data")
-    if not isinstance(runtime_data, dict):
-        return None
-
-    max_logprobs = runtime_data.get(MAX_LOGPROBS_RUNTIME_KEY)
-    if type(max_logprobs) is not int or max_logprobs < 0:
-        return None
-    return max_logprobs
 
 
 def _ensure_chat_template(
@@ -1774,6 +1757,10 @@ class EngineFactory:
             "tokenizer_mode": tokenizer_mode,
             "config_format": config_format,
             "trust_remote_code": trust_remote_code,
+            # No cap here (vLLM's -1). The Rust frontend has already checked
+            # the count against the serving model's limit, which follows
+            # worker membership; a cap fixed at build time would go stale.
+            "max_logprobs": -1,
         }
         context_length = _runtime_config_context_length(mdc)
         if context_length:
@@ -1784,11 +1771,6 @@ class EngineFactory:
                 "from runtime_config.context_length",
                 context_length,
             )
-        max_logprobs = _runtime_config_max_logprobs(mdc)
-        if max_logprobs is not None:
-            # vLLM checks requested logprob counts against this. Its default
-            # (20) would refuse counts the worker's engine accepts.
-            model_config_kwargs["max_logprobs"] = max_logprobs
         # Preserve vLLM defaults when optional frontend arguments are absent.
         for name in ("renderer_num_workers", "mm_processor_cache_gb"):
             value = getattr(self.flags, name, None)

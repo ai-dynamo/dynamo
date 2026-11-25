@@ -2818,6 +2818,56 @@ mod tests {
         runtime.shutdown();
     }
 
+    /// A replica joining or leaving a committed set refreshes the set's
+    /// log-probability limit, the smallest among its admitted workers.
+    #[tokio::test]
+    async fn max_logprobs_follows_replicas_joining_and_leaving() {
+        use crate::local_model::runtime_config::MAX_LOGPROBS_RUNTIME_KEY;
+        use dynamo_runtime::discovery::DiscoveryInstanceId;
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut unpublished = ModelDeploymentCard::with_name_only("logprobs-model");
+        unpublished.model_input = ModelInput::Text;
+        unpublished.model_type = ModelType::Chat;
+        unpublished.worker_type = Some(WorkerType::Aggregated);
+        let mut raised = unpublished.clone();
+        raised
+            .runtime_config
+            .runtime_data
+            .insert(MAX_LOGPROBS_RUNTIME_KEY.to_string(), 32.into());
+
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) =
+            watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
+        apply_discovery_event(&events, discovered_card("dgd-v1", 1, &raised)).await;
+        wait_for_model(&manager, "logprobs-model", |_| true).await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 32);
+
+        // A replica that publishes nothing counts as the default of 20.
+        apply_discovery_event(&events, discovered_card("dgd-v1", 2, &unpublished)).await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 20);
+
+        let left = ModelCardInstanceId {
+            namespace: "dgd-v1".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 2,
+            model_suffix: None,
+        };
+        apply_discovery_event(
+            &events,
+            DiscoveryEvent::Removed(DiscoveryInstanceId::Model(left)),
+        )
+        .await;
+        assert_eq!(manager.max_logprobs("logprobs-model"), 32);
+
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
+    }
+
     #[tokio::test]
     async fn versioned_namespaces_serve_different_configurations_concurrently() {
         let runtime = Runtime::from_current().unwrap();

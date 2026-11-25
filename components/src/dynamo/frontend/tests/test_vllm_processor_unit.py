@@ -1604,6 +1604,7 @@ async def test_chat_factory_forwards_renderer_and_mm_cache_options(
         tokenizer_mode="auto",
         config_format="auto",
         trust_remote_code=False,
+        max_logprobs=-1,
         **expected_options,
     )
 
@@ -5560,22 +5561,6 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
-
-
-@pytest.mark.parametrize(
-    ("runtime_config", "expected"),
-    [
-        ({"runtime_data": {"max_logprobs": 32}}, 32),
-        ({"runtime_data": {}}, None),
-        ({}, None),
-        ({"runtime_data": {"max_logprobs": -1}}, None),
-        ({"runtime_data": {"max_logprobs": "32"}}, None),
-    ],
-)
-def test_runtime_config_max_logprobs(vllm_processor_module, runtime_config, expected):
-    mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
-
-    assert vllm_processor_module._runtime_config_max_logprobs(mdc) == expected
 
 
 # Regression: MistralTokenizer (--tokenizer-mode mistral) has no chat_template
