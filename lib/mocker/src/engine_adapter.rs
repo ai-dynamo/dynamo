@@ -9,8 +9,10 @@ use aisim_core::engine::{
     EngineConfig, EngineFactory, FittedIterationTiming, TimingModel, TimingModelConfig, WorkerType,
 };
 use aisim_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
-use aisim_core::{EstimationMode, ForwardPassPerfModel, ForwardPassWorkerType};
-use anyhow::{Context, Result, ensure};
+use aisim_core::{
+    BackendKind, EstimationMode, ForwardPassRegressionWorkloadKind, ForwardPassWorkerType,
+};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde_json::Value;
 
 use crate::common::perf_model::PerfModel;
@@ -66,41 +68,62 @@ pub(crate) fn engine_components(
 }
 
 /// Engine components for one offline Replay role. A fitted AIS estimator
-/// (`fpm_regression` or `fpm_learned`) is priced by AISimulate's own iteration
-/// timing: one forward-pass query per pass, mixed passes and per-request
-/// detail included, as AISimulate's engine replay prices it. The callback
-/// would price a mixed pass as a prefill plus a separate decode pass, from
-/// per-request means.
+/// (`fpm_regression` or `fpm_learned`) whose stores can price every pass the
+/// role runs is priced by AISimulate's own iteration timing: one forward-pass
+/// query per pass, mixed passes and per-request detail included, as
+/// AISimulate's engine replay prices it. One that lacks a store the role
+/// needs, such as a model tuned from profiler points that never mix prefill
+/// and decode, keeps the callback, which prices a mixed pass as a prefill plus
+/// a separate decode pass.
 fn offline_replay_components(args: &MockerConfig) -> Result<EngineComponents> {
     let mut components = engine_components(args.clone(), false, false)?;
-    if let PerfModel::Ais { callback } = components.args.perf_model.as_ref()
-        && let Some(model) = callback
-            .forward_pass_model()
-            .filter(|model| has_fitted_estimator(model))
-    {
-        // `from_model` takes the role from the model's identity; AISimulate
-        // leaves checking it against the engine's role to the embedder.
-        let role = replay_role(components.args.worker_type);
-        let model_role = model
-            .provenance()
-            .map(|provenance| provenance.config.worker_type);
-        ensure!(
-            model_role == Some(role),
-            "the fitted AIS model is for the {} role, but this engine is {}",
-            model_role.map_or("unknown", role_name),
-            role_name(role),
-        );
-        let timing = FittedIterationTiming::from_model(model).with_context(|| {
-            format!("invalid fitted AIS timing for the {} role", role_name(role))
+    let PerfModel::Ais { callback } = components.args.perf_model.as_ref() else {
+        return Ok(components);
+    };
+    let Some(model) = callback.forward_pass_model() else {
+        return Ok(components);
+    };
+    let Some(provenance) = model.provenance().filter(|provenance| {
+        matches!(
+            provenance.selected_estimation_mode,
+            EstimationMode::FpmRegression | EstimationMode::FpmLearned
+        )
+    }) else {
+        return Ok(components);
+    };
+    // `from_model` takes the role from the model's identity; AISimulate
+    // leaves checking it against the engine's role to the embedder.
+    let role = replay_role(components.args.worker_type);
+    let model_role = provenance.config.worker_type;
+    ensure!(
+        model_role == role,
+        "the fitted AIS model is for the {} role, but this engine is {}",
+        role_name(model_role),
+        role_name(role),
+    );
+    let required = iteration_stores(role, &provenance.config.backend, components.args.dp_size);
+    let ready = model
+        .readiness_report()
+        .stores
+        .iter()
+        .all(|store| store.ready || !required.contains(&store.workload_kind));
+    if ready {
+        // The cause goes into the message itself: Python shows only the
+        // outermost error of a chain.
+        let timing = FittedIterationTiming::from_model(model).map_err(|error| {
+            anyhow!(
+                "invalid fitted AIS timing for the {} role: {error:#}",
+                role_name(role)
+            )
         })?;
         timing
             .require_replay_role(
                 components.args.dp_size,
                 components.args.decode_speedup_ratio,
             )
-            .with_context(|| {
-                format!(
-                    "fitted AIS timing cannot serve the {} role",
+            .map_err(|error| {
+                anyhow!(
+                    "fitted AIS timing cannot serve the {} role: {error:#}",
                     role_name(role)
                 )
             })?;
@@ -109,7 +132,33 @@ fn offline_replay_components(args: &MockerConfig) -> Result<EngineComponents> {
     Ok(components)
 }
 
-/// The forward-pass role of an engine with this worker type.
+/// The workload stores `FittedIterationTiming` requires to price every pass a
+/// `role` engine with `attention_dp` ranks runs, as AISimulate's
+/// `require_iteration_stores` lists them: the role's pure stores, and for an
+/// aggregated engine locally mixed passes unless the backend is SGLang, and
+/// cross-rank passes when attention DP is above one.
+fn iteration_stores(
+    role: ForwardPassWorkerType,
+    backend: &BackendKind,
+    attention_dp: u32,
+) -> Vec<ForwardPassRegressionWorkloadKind> {
+    use ForwardPassRegressionWorkloadKind::*;
+    match role {
+        ForwardPassWorkerType::Prefill => vec![PurePrefill],
+        ForwardPassWorkerType::Decode => vec![PureDecode],
+        ForwardPassWorkerType::Aggregated => {
+            let mut stores = vec![PurePrefill, PureDecode];
+            if !matches!(backend, BackendKind::Sglang) {
+                stores.push(ContainsLocallyMixed);
+            }
+            if attention_dp > 1 {
+                stores.push(CrossRankAggregated);
+            }
+            stores
+        }
+    }
+}
+
 fn replay_role(worker_type: WorkerType) -> ForwardPassWorkerType {
     match worker_type {
         WorkerType::Aggregated => ForwardPassWorkerType::Aggregated,
@@ -124,15 +173,6 @@ fn role_name(role: ForwardPassWorkerType) -> &'static str {
         ForwardPassWorkerType::Prefill => "prefill",
         ForwardPassWorkerType::Decode => "decode",
     }
-}
-
-fn has_fitted_estimator(model: &ForwardPassPerfModel) -> bool {
-    model.provenance().is_some_and(|provenance| {
-        matches!(
-            provenance.selected_estimation_mode,
-            EstimationMode::FpmRegression | EstimationMode::FpmLearned
-        )
-    })
 }
 
 pub(crate) fn engine_factory(
@@ -249,6 +289,7 @@ impl TimingModel for DynamoPerfTimingModel {
 mod tests {
     use std::num::NonZeroU32;
 
+    use aisim_core::ForwardPassPerfModel;
     use aisim_core::engine::generalized::EngineIdentity;
     use aisim_core::replay::WorkerStage;
     use ndarray_interp::InterpolateError;
@@ -475,22 +516,26 @@ mod tests {
     }
 
     /// Mocker arguments whose AIS callback carries an aggregated vLLM learned
-    /// model: pure prefill 10 ms, pure decode 5 ms, and a pass that computes
-    /// both 7 ms. The artifact lives in `dir`.
-    fn fitted_ais_args(dir: &std::path::Path) -> MockerConfig {
+    /// model: pure prefill 10 ms, pure decode 5 ms, and, when `mixed`, a pass
+    /// that computes both 7 ms. The callback prices every query at 1 ms. The
+    /// artifact lives in `dir`.
+    fn fitted_ais_args(dir: &std::path::Path, mixed: bool) -> MockerConfig {
         let artifact = dir.join("learned.json");
         let store = |ms: f64| serde_json::json!({"baseline": ms, "trees": []});
+        let mut stores = serde_json::json!({
+            "pure_prefill": store(10.0),
+            "pure_decode": store(5.0),
+        });
+        if mixed {
+            stores["contains_locally_mixed"] = store(7.0);
+        }
         std::fs::write(
             &artifact,
             serde_json::json!({
                 "schema": "aic_fpm_learned_forward_perf", "schema_version": 1,
                 "worker_type": "aggregated", "target": "ms",
                 "features": ["num_decode_requests"], "metadata": {},
-                "stores": {
-                    "pure_prefill": store(10.0),
-                    "pure_decode": store(5.0),
-                    "contains_locally_mixed": store(7.0),
-                },
+                "stores": stores,
             })
             .to_string(),
         )
@@ -520,7 +565,7 @@ mod tests {
     #[test]
     fn offline_replay_prices_a_fitted_ais_mixed_pass_as_one_query() {
         let dir = tempfile::tempdir().unwrap();
-        let args = fitted_ais_args(dir.path());
+        let args = fitted_ais_args(dir.path(), true);
 
         let (config, factory) = aggregated_replay_setup(&args).unwrap();
         let mut engine = factory
@@ -579,12 +624,15 @@ mod tests {
     #[test]
     fn offline_replay_refuses_a_fitted_ais_model_with_a_decode_speedup() {
         let dir = tempfile::tempdir().unwrap();
-        let mut args = fitted_ais_args(dir.path());
+        let mut args = fitted_ais_args(dir.path(), true);
         args.decode_speedup_ratio = 2.0;
 
-        let error = format!("{:#}", aggregated_replay_setup(&args).err().unwrap());
+        // `{}` shows only the outermost error, as the Python binding does, so
+        // the role and AISimulate's reason must both be in it.
+        let error = aggregated_replay_setup(&args).err().unwrap().to_string();
         assert!(
-            error.contains("fitted AIS timing cannot serve the aggregated role"),
+            error.contains("fitted AIS timing cannot serve the aggregated role: ")
+                && error.contains("decode_speedup_ratio"),
             "{error}"
         );
     }
@@ -598,7 +646,7 @@ mod tests {
         .unwrap();
         // The configured identity says decode, so the launch check passes,
         // but the callback's model was built for an aggregated engine.
-        let mut decode_args = fitted_ais_args(dir.path());
+        let mut decode_args = fitted_ais_args(dir.path(), true);
         decode_args.worker_type = WorkerType::Decode;
         let TimingModelConfig::External { config, .. } =
             &mut decode_args.engine.engine.timing_model
@@ -619,5 +667,38 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn offline_replay_keeps_the_callback_for_a_fitted_ais_model_without_mixed_passes() {
+        // Like a model tuned from profiler points: no locally mixed store, so
+        // AISimulate's iteration timing cannot price an aggregated vLLM pass.
+        let dir = tempfile::tempdir().unwrap();
+        let args = fitted_ais_args(dir.path(), false);
+
+        let (config, factory) = aggregated_replay_setup(&args).unwrap();
+        let mut engine = factory
+            .role_factory(&config, WorkerStage::Aggregated, false)
+            .unwrap()
+            .build(0)
+            .unwrap();
+        let request = Request {
+            request_id: uuid::Uuid::from_u128(1),
+            tokens: (0..40).collect(),
+            max_output_tokens: 4,
+            output_token_ids: None,
+            session_id: None,
+            cache_salt: None,
+            images: Vec::new(),
+            kv_hint: None,
+        };
+        engine
+            .apply_command_effects(SchedulerCommand::new(0, Command::Submit(request)), 0.0)
+            .unwrap();
+        let prefill = engine.execute_pass(0.0).unwrap().unwrap();
+
+        // The callback prices the prefill pass at 1 ms; the fitted store would
+        // price it at 10 ms.
+        assert_eq!(prefill.end_ms, 1.0);
     }
 }
