@@ -2352,6 +2352,7 @@ dependencies = [
  "dynamo-session-affinity",
  "dynamo-slot-tracker",
  "dynamo-tokens",
+ "dynamo-worker-selection",
  "futures-util",
  "ordered-float 4.6.0",
  "parking_lot",
@@ -2464,7 +2465,6 @@ name = "dynamo-custom-policy-example-disagg-filter-score-pick"
 version = "1.8.0"
 dependencies = [
  "dynamo-kv-router",
- "dynamo-scheduler",
  "serde",
 ]
 
@@ -2501,7 +2501,6 @@ name = "dynamo-custom-policy-example-soft-pin-repin"
 version = "1.8.0"
 dependencies = [
  "dynamo-kv-router",
- "dynamo-scheduler",
  "serde",
 ]
 
@@ -3343,8 +3342,10 @@ dependencies = [
  "async-trait",
  "criterion",
  "dynamo-kv-hints",
+ "dynamo-kv-indexer",
  "dynamo-kv-router",
  "dynamo-scheduler",
+ "dynamo-slot-tracker",
  "fastrand",
  "libc",
  "parking_lot",

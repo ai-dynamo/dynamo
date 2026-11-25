@@ -18,14 +18,15 @@ use dynamo_kv_indexer::host::{
     SessionPrefixIndexer,
 };
 use dynamo_kv_router::config::{KvRouterConfig, min_initial_workers_from_env};
-use dynamo_kv_router::plugins::check_role;
-use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
+use dynamo_kv_router::plugins::experimental::resident_blocks::RESIDENT_BLOCKS;
+use dynamo_kv_router::plugins::host::HintPolicyFactory;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::host::check_role;
 use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
-use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicyFactory,
+    WorkerInfo, WorkerInputs, WorkerSelectionPolicyContext, WorkerSelectionPolicyFactory,
 };
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
 use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionRef};
@@ -43,8 +44,8 @@ use dynamo_scheduler::host::{
     RejectThresholdsProvider, RouterConfigOverride, RoutingConstraints, Selected,
     SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome, SelectionRun,
     SessionBinding, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerAvailabilityProvider, WorkerConfigLike, cache_hit_estimates_from_tiered_matches,
-    effective_prefill_tokens,
+    WorkerAvailabilityProvider, WorkerConfigLike, WorkerInfoExt,
+    cache_hit_estimates_from_tiered_matches, effective_prefill_tokens,
 };
 use dynamo_slot_tracker::host::{PrefillLoadHint, SchedulerBookingDescriptor};
 use dynamo_worker_selection::host::SelectionConfig;
@@ -125,7 +126,7 @@ impl SelectionPolicySource {
             Self::Registry => plugins::router_plugin_registry()
                 .resolve_for_worker_type(config, worker_type)?
                 .ok_or_else(|| {
-                    dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::MissingDefault
+                    dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault
                         .into()
                 }),
         }
@@ -195,7 +196,11 @@ impl PreparedSelectionPolicy {
         model_name: Option<&str>,
     ) -> Result<Self> {
         let key = embedded::embedded_partition_key(model_name);
-        let policy = inner(&SelectionConfig::from(config), worker_type, key.as_ref());
+        let policy = inner(WorkerSelectionPolicyContext::new(
+            &SelectionConfig::from(config),
+            worker_type,
+            key.as_ref(),
+        ));
         let inputs =
             dynamo_scheduler::host::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
                 &policy,
@@ -208,16 +213,14 @@ impl PreparedSelectionPolicy {
             config,
         )?;
         let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
-        let factory: WorkerSelectionPolicyFactory = Arc::new(
-            move |config: &SelectionConfig, worker_type, partition: RoutingPartitionRef<'_>| {
-                if partition == key.as_ref()
-                    && let Some(policy) = slot.lock().take()
-                {
-                    return policy;
-                }
-                inner(config, worker_type, partition)
-            },
-        );
+        let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+            if context.partition() == key.as_ref()
+                && let Some(policy) = slot.lock().take()
+            {
+                return policy;
+            }
+            inner(context)
+        });
         Ok(Self {
             factory,
             inputs,
@@ -1658,7 +1661,7 @@ impl KvRouter {
                 let num_blocks = isl_tokens / self.block_size as usize;
                 if num_blocks > 0 {
                     m.shared_cache_hit_rate
-                        .observe(hits.total_hits as f64 / num_blocks as f64);
+                        .observe(hits.total_hits() as f64 / num_blocks as f64);
                 }
                 // What the scorer credits: the run past the worker's device, host and
                 // disk prefix. A multi-rank worker's snapshot holds its deepest rank.
@@ -2043,7 +2046,7 @@ mod tests {
     use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
     use dynamo_kv_router::plugins::worker_selection::{
         WorkerCandidate, WorkerCapacity, WorkerFilter, WorkerInputView, WorkerPicker,
-        WorkerSelectionContext, WorkerSelectionPolicyError,
+        WorkerSelectionPolicyError, WorkerSelectionRequest,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -2247,7 +2250,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             let row = input
@@ -2270,7 +2273,7 @@ mod tests {
     impl WorkerFilter for RejectAll {
         fn keep(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             Ok(false)
@@ -2286,7 +2289,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             unreachable!("capability construction test does not select a worker")
@@ -2302,7 +2305,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             unreachable!("capability construction test does not select a worker")
@@ -2313,9 +2316,8 @@ mod tests {
         expected_shared_blocks: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> SelectionPolicySource {
-        SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
+        SelectionPolicySource::Factory(Arc::new(move |_context| {
             WorkerSelectionPolicy::new(
-                config.clone(),
                 "decode",
                 Vec::new(),
                 Box::new(FixedPicker {
@@ -2329,8 +2331,8 @@ mod tests {
     fn picker_policy(
         picker: impl Fn() -> Box<dyn WorkerPicker> + Send + Sync + 'static,
     ) -> SelectionPolicySource {
-        SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
-            WorkerSelectionPolicy::new(config.clone(), "decode", Vec::new(), picker())
+        SelectionPolicySource::Factory(Arc::new(move |_context| {
+            WorkerSelectionPolicy::new("decode", Vec::new(), picker())
         }))
     }
 
@@ -3607,7 +3609,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             *self.picked_tag.lock() = Some(self.tag);
@@ -3629,9 +3631,9 @@ mod tests {
         let constructions = Arc::new(AtomicUsize::new(0));
         let counting: WorkerSelectionPolicyFactory = {
             let constructions = Arc::clone(&constructions);
-            Arc::new(move |config: &SelectionConfig, _, _| {
+            Arc::new(move |context| {
                 constructions.fetch_add(1, Ordering::SeqCst);
-                dynamo_router_policies::default_policy(config.clone(), "decode")
+                dynamo_router_policies::default_policy(context.selection_config().clone(), "decode")
             })
         };
         let config = KvRouterConfig::default();
@@ -3647,11 +3649,11 @@ mod tests {
 
         // The first call for the embedded key takes the parked instance.
         let key = embedded::embedded_partition_key(Some("named-model"));
-        let _served = (prepared.factory)(
+        let _served = (prepared.factory)(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Decode,
             key.as_ref(),
-        );
+        ));
         assert_eq!(
             constructions.load(Ordering::SeqCst),
             1,
@@ -3662,11 +3664,11 @@ mod tests {
             "other-model",
             DEFAULT_ROUTING_GROUP,
         );
-        let _other = (prepared.factory)(
+        let _other = (prepared.factory)(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Decode,
             other.as_ref(),
-        );
+        ));
         assert_eq!(constructions.load(Ordering::SeqCst), 2);
 
         // Preparing an already prepared source is a passthrough.
@@ -3688,10 +3690,9 @@ mod tests {
         let counting = {
             let constructions = Arc::clone(&constructions);
             let picked_tag = Arc::clone(&picked_tag);
-            SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
+            SelectionPolicySource::Factory(Arc::new(move |_context| {
                 let tag = constructions.fetch_add(1, Ordering::SeqCst) + 1;
                 WorkerSelectionPolicy::new(
-                    config.clone(),
                     "decode",
                     Vec::new(),
                     Box::new(TaggedPicker {
@@ -3804,9 +3805,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_best_match_maps_filtered_workers_to_unavailable() {
-        let policy = SelectionPolicySource::Factory(Arc::new(|config: &SelectionConfig, _, _| {
+        let policy = SelectionPolicySource::Factory(Arc::new(|_context| {
             WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
                 "decode",
                 vec![Box::new(RejectAll)],
                 Vec::new(),

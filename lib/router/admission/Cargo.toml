@@ -17,14 +17,13 @@ readme = "README.md"
 default = []
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
 testing = ["dynamo-router-protocol/testing"]
-# Test inputs for dependent crates' benchmarks.
-bench = []
 
 [dependencies]
 dynamo-router-protocol = { workspace = true }
 dynamo-session-affinity = { workspace = true }
 dynamo-slot-tracker = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-worker-selection = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 ordered-float = { workspace = true }

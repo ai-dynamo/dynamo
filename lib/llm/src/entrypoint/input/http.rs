@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::host::RouterPlugins;
 use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

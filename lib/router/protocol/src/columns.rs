@@ -36,10 +36,6 @@ impl WorkerInputs {
     /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it
     /// receive nothing.
     pub const ACTIVE_REQUESTS: Self = Self(1 << 5);
-    /// Previous name of [`Self::ACTIVE_REQUESTS`].
-    // TODO(v1.9): Remove this alias.
-    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::ACTIVE_REQUESTS`")]
-    pub const OCCUPANCY: Self = Self::ACTIVE_REQUESTS;
     /// Request each worker's KV copy offer: the prefix it could copy from another worker or
     /// cache owner.
     ///
@@ -54,10 +50,6 @@ impl WorkerInputs {
     /// A scorer that reads it commits the selected worker to its offer: the copy becomes the
     /// booking's committed copy, which the role's `Commitments::KV_COPY` hint policy sends.
     pub const KV_COPY: Self = Self(1 << 6);
-    /// Previous name of [`Self::KV_COPY`].
-    // TODO(v1.9): Remove this alias.
-    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::KV_COPY`")]
-    pub const KV_TRANSFER: Self = Self::KV_COPY;
 
     #[inline]
     pub const fn contains(self, other: Self) -> bool {
