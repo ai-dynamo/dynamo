@@ -20,6 +20,8 @@ pub(super) struct RequestBooking {
 struct BookingEntry {
     booking: RequestBooking,
     has_lora: bool,
+    /// The peer router this booking mirrors; `None` for a local booking.
+    replica_router_id: Option<u64>,
 }
 
 /// A booking removed from the index together with the LoRA name it carried.
@@ -41,6 +43,7 @@ impl RequestIndex {
         request_id: RequestId,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
+        replica_router_id: Option<u64>,
     ) -> Result<AttemptId, WorkerWithDpRank> {
         match self.request_to_booking.entry(request_id.clone()) {
             Entry::Occupied(entry) => Err(entry.get().booking.worker),
@@ -49,6 +52,7 @@ impl RequestIndex {
                 entry.insert(BookingEntry {
                     booking: RequestBooking { worker, attempt_id },
                     has_lora: lora_name.is_some(),
+                    replica_router_id,
                 });
                 if let Some(lora_name) = lora_name {
                     self.request_to_lora.insert(request_id, lora_name);
@@ -71,6 +75,7 @@ impl RequestIndex {
             BookingEntry {
                 booking: RequestBooking { worker, attempt_id },
                 has_lora: lora_name.is_some(),
+                replica_router_id: None,
             },
         );
         if let Some(lora_name) = lora_name {
@@ -88,6 +93,17 @@ impl RequestIndex {
         self.request_to_booking
             .get(request_id)
             .map(|entry| entry.booking)
+    }
+
+    /// The booking for `request_id` and the peer router it mirrors; the router is
+    /// `None` for a booking this router made.
+    pub(super) fn booking_and_replica_router(
+        &self,
+        request_id: &str,
+    ) -> Option<(RequestBooking, Option<u64>)> {
+        self.request_to_booking
+            .get(request_id)
+            .map(|entry| (entry.booking, entry.replica_router_id))
     }
 
     pub(super) fn lora_for(&self, request_id: &RequestId) -> Option<String> {
@@ -188,10 +204,15 @@ mod tests {
         let worker = WorkerWithDpRank::new(1, 0);
 
         index
-            .try_insert_request("req-1".to_string(), worker, Some("adapter".to_string()))
+            .try_insert_request(
+                "req-1".to_string(),
+                worker,
+                Some("adapter".to_string()),
+                None,
+            )
             .unwrap();
         assert_eq!(
-            index.try_insert_request("req-1".to_string(), WorkerWithDpRank::new(2, 0), None),
+            index.try_insert_request("req-1".to_string(), WorkerWithDpRank::new(2, 0), None, None),
             Err(worker)
         );
         assert_eq!(index.worker_for("req-1"), Some(worker));

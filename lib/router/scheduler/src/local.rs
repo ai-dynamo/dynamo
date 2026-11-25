@@ -718,6 +718,16 @@ where
         self.slots.publish_prefill_completed_if_booking(booking)
     }
 
+    /// A sender that re-publishes the prefill-completion event for a booking this
+    /// router made and that is past prefill, so peer routers keep their copy of it
+    /// alive. It does nothing for any other booking.
+    pub fn prefill_keepalive(
+        &self,
+    ) -> impl Fn(&SchedulerBookingDescriptor) + Send + Sync + 'static {
+        let slots = Arc::clone(&self.slots);
+        move |booking| slots.publish_prefill_keepalive_if_booking(booking)
+    }
+
     /// Wait for an admission recheck when a class queues on capacity or a dispatch gate is
     /// installed, and the actor is running. This does not wait for blocked requests to finish
     /// or for the queue to empty. Otherwise return immediately without an admission barrier.
@@ -874,6 +884,7 @@ mod tests {
     };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
+    use dynamo_slot_tracker::host::ActiveSequenceEventOrigin;
     use dynamo_slot_tracker::host::BusyThresholdsHostExt;
     use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
     use dynamo_worker_selection::WorkerCandidates;
@@ -1994,13 +2005,14 @@ mod tests {
 
         wait_for_pending_count(&scheduler, 1).await;
 
+        // The worker's mark: a peer router's mark applies only to that router's mirror.
         event_tx
             .send(ActiveSequenceEvent {
                 request_id: "req-1".to_string(),
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: 1,
-                origin: Default::default(),
+                origin: ActiveSequenceEventOrigin::Worker,
                 lora_name: None,
             })
             .unwrap();

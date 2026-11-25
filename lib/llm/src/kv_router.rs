@@ -1026,7 +1026,9 @@ impl KvRouter {
                 ingress,
                 scheduler_load,
                 endpoint: endpoint.clone(),
-                router_id: endpoint.drt().discovery().instance_id(),
+                // One process may host several routers for the same endpoint, and peers
+                // tell their mirrored bookings apart by this id, so it is per router.
+                router_id: rand::random(),
                 policy_factory,
                 hint_policies,
             },
@@ -1036,6 +1038,13 @@ impl KvRouter {
         )
         .await?;
         request_leases.set_scheduler(selection.scheduler().booking_cleanup());
+        // Peers count each keepalive as progress on their copy of the booking.
+        if kv_router_config.router_replica_sync {
+            request_leases.start_keepalives(
+                selection.scheduler().prefill_keepalive(),
+                cancellation_token.child_token(),
+            );
+        }
 
         // Inbound lifecycle events start only now that their consumer can
         // release bookings.
