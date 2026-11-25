@@ -27,7 +27,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     soft_demote_threshold: float
     soft_demote_priority_jump: float
     resume_priority_boost: float
-    resume_timeout_seconds: float
+    resume_timeout_seconds: float = 1800.0
     resume_hysteresis: float
     acting_token_weight: float
     acting_decay_tau_seconds: float
