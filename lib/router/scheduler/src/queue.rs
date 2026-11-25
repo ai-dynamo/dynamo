@@ -5149,7 +5149,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
-        use dynamo_admission::{ClassifierError, RequestClassifier};
+        use dynamo_admission::{RequestClassifier, RequestClassifierError};
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
@@ -5157,7 +5157,7 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 assert_eq!(request.sequence_hashes(), self.0.as_deref());
                 assert_eq!(request.info().pinned_worker(), Some(self.1));
                 Ok(request)

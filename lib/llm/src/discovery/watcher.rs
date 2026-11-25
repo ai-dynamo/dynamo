@@ -2909,7 +2909,7 @@ mod tests {
             return;
         }
         use dynamo_kv_router::plugins::request_classifier::{
-            ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
+            ClassifyEvent, ClassifyRequest, RequestClassifier, RequestClassifierError,
         };
         use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2925,7 +2925,7 @@ mod tests {
                 &mut self,
                 _request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))

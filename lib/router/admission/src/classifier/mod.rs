@@ -260,7 +260,7 @@ impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
 }
 
 /// Error returned by [`RequestClassifier::classify`].
-pub type ClassifierError = dyn Error + Send + Sync + 'static;
+pub type RequestClassifierError = dyn Error + Send + Sync + 'static;
 
 /// Cause delivered to the classifier when a request aborts. Produced by the
 /// router or the worker path, not by the classifier.
@@ -340,7 +340,7 @@ pub trait RequestClassifier: Send + 'static {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         Ok(request)
     }
 

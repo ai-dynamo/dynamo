@@ -62,7 +62,8 @@ use std::collections::HashMap;
 
 use dynamo_admission::host::ClassifyRequestHostExt;
 use dynamo_admission::{
-    ClassifierError, ClassifyRequest, RequestClassifier, RequestClassifierContext, RequestProgress,
+    ClassifyRequest, RequestClassifier, RequestClassifierContext, RequestClassifierError,
+    RequestProgress,
 };
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::TieredMatchDetails;
@@ -357,7 +358,7 @@ impl SelectionCase {
     pub fn classify<C: RequestClassifier + ?Sized>(
         &self,
         classifier: &mut C,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let eligibility = self.request.eligibility();
         let (request, rows) = classify_inputs(
             &self.workers,
@@ -487,7 +488,7 @@ pub fn request_progress(context_tokens: usize) -> RequestProgress {
 pub fn classify<C: RequestClassifier + ?Sized>(
     classifier: &mut C,
     request: ClassifyRequest,
-) -> Result<ClassifyRequest, Box<ClassifierError>> {
+) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
     WorkerInputRows::empty().read(|workers| classifier.classify(request, workers))
 }
 
@@ -574,7 +575,7 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 let info = request.info();
                 assert_eq!(info.request_id(), Some("r1"));
                 assert_eq!(info.isl_tokens(), 160);
@@ -664,7 +665,7 @@ mod tests {
             &mut self,
             mut request: ClassifyRequest,
             workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             self.rows_seen = workers.len();
             let mut loads = workers
                 .iter()
@@ -886,7 +887,7 @@ mod tests {
                 &mut self,
                 mut request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
-            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
                 request.set_policy_class(&self.0);
                 Ok(request)
             }

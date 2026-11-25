@@ -85,7 +85,7 @@ impl RequestClassifier for ContractClassifier {
         &mut self,
         request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let info: RequestInfo<'_> = request.info();
         let _: Option<&str> = info.request_id();
         let _: usize = info.isl_tokens();

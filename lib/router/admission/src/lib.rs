@@ -26,9 +26,9 @@ mod profile;
 mod queue;
 
 pub use classifier::{
-    AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
-    RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
+    AbortCause, ClassificationError, ClassificationOverrides, ClassifyEvent, ClassifyRequest,
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, RequestClassifier,
+    RequestClassifierContext, RequestClassifierError, RequestClassifierRuntime, RequestLifecycle,
     RequestProgress, RequestProgressUpdater,
 };
 pub use placement::LaneKey;

@@ -27,7 +27,7 @@ pub enum ClassificationError {
     Panicked(String),
 
     #[error("request classifier failed: {0}")]
-    Failed(Arc<ClassifierError>),
+    Failed(Arc<RequestClassifierError>),
 
     #[error("request classifier is already tracking request ID {0:?}")]
     DuplicateRequestId(String),
@@ -46,8 +46,8 @@ static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 use super::{
-    AbortCause, ClassificationOverrides, ClassifierError, ClassifyEvent, ClassifyRequest,
-    RequestClassifier, RequestProgress, RequestProgressUpdater,
+    AbortCause, ClassificationOverrides, ClassifyEvent, ClassifyRequest, RequestClassifier,
+    RequestClassifierError, RequestProgress, RequestProgressUpdater,
 };
 
 /// One live lifecycle's bookkeeping. `generation` fences `classify_with`
@@ -552,7 +552,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::classifier::ClassifierError;
+    use crate::classifier::RequestClassifierError;
     use crate::host::ClassifyRequestHostExt;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_worker_selection::WorkerCandidates;
@@ -570,7 +570,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 panic!("synchronous classifier panic");
             }
@@ -615,8 +615,8 @@ mod tests {
             &mut self,
             _request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-            Err(Box::new(TestClassifierError) as Box<ClassifierError>)
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
+            Err(Box::new(TestClassifierError) as Box<RequestClassifierError>)
         }
     }
 
@@ -643,7 +643,7 @@ mod tests {
             &mut self,
             _request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             Ok(ClassifyRequest::new(2, 0))
         }
     }
@@ -746,7 +746,7 @@ mod tests {
             &mut self,
             mut request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             request.set_scheduling_cost_tokens(7);
             request.set_worker_selection_target(WorkerWithDpRank::new(9, 1));
@@ -796,7 +796,7 @@ mod tests {
             &mut self,
             mut request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             request.set_backend_priority(-250);
             Ok(request)
         }
@@ -1146,7 +1146,7 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             _workers: WorkerCandidates<'_>,
-        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
             let _ = self.observed.send(format!(
                 "classify:{}",
                 request.info().request_id().unwrap_or("")

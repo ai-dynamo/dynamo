@@ -75,7 +75,7 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    RequestClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
@@ -89,7 +89,7 @@ impl RequestClassifier for QueueBudget {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         let deadline = request.ingress_at() + self.budget;
         if Instant::now() >= deadline {
             return Err(Box::new(
@@ -98,7 +98,7 @@ impl RequestClassifier for QueueBudget {
                     .diagnostic("admission wait budget exhausted")
                     .public_message("Admission wait budget exhausted; retry later")
                     .build(),
-            ) as Box<ClassifierError>);
+            ) as Box<RequestClassifierError>);
         }
         request.set_due_at(deadline);
         Ok(request)
@@ -243,7 +243,7 @@ A classifier reads workers through `WorkerCandidates`, the view a [worker-select
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
+    RequestClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 use dynamo_kv_router::plugins::WorkerInputs;
 
@@ -260,7 +260,7 @@ impl RequestClassifier for LoadAwareClass {
         &mut self,
         mut request: ClassifyRequest,
         workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         // Count only observed loads, and require at least one.
         let mut loads = workers
             .iter()
@@ -322,7 +322,7 @@ impl RequestClassifier for SessionClassifier {
         &mut self,
         mut request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    ) -> Result<ClassifyRequest, Box<RequestClassifierError>> {
         // One lane per session: a held turn waits behind its own session only.
         if let Some(session) = request.info().session_context().map(|s| s.session_id().to_owned()) {
             request.set_lane_key(&session);
