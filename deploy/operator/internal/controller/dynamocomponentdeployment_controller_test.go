@@ -3657,6 +3657,7 @@ func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
 func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		directDGD  bool
 		origin     string
 		owners     []metav1.OwnerReference
 		authored   *corev1.Volume
@@ -3682,6 +3683,12 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 			name:       "native sidecar DGD child repoints its authored shared Secret",
 			owners:     []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "graph", UID: "uid-graph", Controller: new(true)}},
 			authored:   &corev1.Volume{Name: "mpi-run-ssh-secret", Secret: &corev1.SecretVolumeSource{SecretName: "mpi-run-ssh-secret", DefaultMode: new(int32(0o644))}},
+			secretName: "mpi-ssh-uid-graph",
+			mode:       0o644,
+		},
+		{
+			name:       "DGD component renders both roles directly",
+			directDGD:  true,
 			secretName: "mpi-ssh-uid-graph",
 			mode:       0o644,
 		},
@@ -3732,8 +3739,14 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 					{Name: v1beta1.ComponentRoleWorker, PodTemplate: worker},
 				}
 			}
+			t.Log("Provide the graph's public key for eligible rendered volumes")
+			identity := &corev1.Secret{
+				Name: "mpi-ssh-uid-graph", Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "graph", UID: "uid-graph", Controller: new(true)}},
+				Data:            map[string][]byte{"private.key.pub": []byte("public-key")},
+			}
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
+				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd, identity).Build(),
 				Config: &configv1alpha1.OperatorConfiguration{
 					MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "mpi-run-ssh-secret", SSHSecretNamespace: "dynamo-system"},
 				},
@@ -3745,6 +3758,12 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 
 			t.Log("Render both LWS roles")
 			leader, worker, err := reconciler.workloadRenderer().renderMultinodePodTemplateSpecs(t.Context(), dcd)
+			if tc.directDGD {
+				dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", UID: "uid-graph", Annotations: dcd.Annotations}
+				leader, worker, err = reconciler.workloadRenderer().renderMultinodePodTemplateSpecsForDGDComponent(
+					t.Context(), dgd, &dcd.Spec.DynamoComponentDeploymentSharedSpec, "worker", "graph-worker", "default", dynamo.BackendFrameworkTRTLLM, nil,
+				)
+			}
 			require.NoError(t, err)
 
 			t.Log("Both roles mount the expected MPI SSH Secret with the expected mode")
@@ -3758,6 +3777,13 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 				require.NotNil(t, volume)
 				require.Equal(t, tc.secretName, volume.Secret.SecretName)
 				require.Equal(t, tc.mode, *volume.Secret.DefaultMode)
+				if tc.secretName == identity.Name {
+					marker, err := dynamo.ResolveMPISSHKeyMarker(t.Context(), reconciler.Client, identity.Namespace, "uid-graph")
+					require.NoError(t, err)
+					require.Equal(t, marker, template.Annotations[dynamo.MPISSHKeyAnnotation])
+				} else {
+					require.NotContains(t, template.Annotations, dynamo.MPISSHKeyAnnotation)
+				}
 			}
 		})
 	}

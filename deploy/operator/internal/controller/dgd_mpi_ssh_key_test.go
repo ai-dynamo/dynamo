@@ -5,6 +5,8 @@ package controller
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -159,6 +161,27 @@ func TestDGDReconcileGivesEachTRTLLMMultinodeDGDItsOwnMPISSHKey(t *testing.T) {
 		require.True(t, metav1.IsControlledBy(mounted, dgd), "Secret %s is not controlled by the DGD", mounted.Name)
 		require.NotEmpty(t, mounted.Data["private.key"])
 		require.NotEmpty(t, mounted.Data["private.key.pub"])
+		require.True(t, apierrors.IsNotFound(reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: mpiSSHTestSecretName}, &corev1.Secret{})))
+
+		t.Log("The serving cliques identify the current public key")
+		before := &grovev1alpha1.PodCliqueSet{}
+		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.PCSNameForDGD(dgd, nil)}, before))
+		marker := fmt.Sprintf("%s/%x", mounted.Name, sha256.Sum256(mounted.Data["private.key.pub"]))
+		for _, clique := range before.Spec.Template.Cliques {
+			require.Equal(t, marker, clique.Annotations[dynamo.MPISSHKeyAnnotation])
+		}
+
+		t.Log("Recreate the Secret and reconcile to update both templates together")
+		require.NoError(t, reconciler.Delete(t.Context(), mounted))
+		reconcileMPISSHTestDGD(t, reconciler, dgd)
+		after := &grovev1alpha1.PodCliqueSet{}
+		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(before), after))
+		newKey := mountedMPISSHSecret(t, reconciler.Client, dgd)
+		newMarker := fmt.Sprintf("%s/%x", newKey.Name, sha256.Sum256(newKey.Data["private.key.pub"]))
+		require.NotEqual(t, marker, newMarker)
+		for _, clique := range after.Spec.Template.Cliques {
+			require.Equal(t, newMarker, clique.Annotations[dynamo.MPISSHKeyAnnotation])
+		}
 	})
 
 	t.Run("recreated_dgd_gets_a_new_key_pair", func(t *testing.T) {
@@ -243,6 +266,8 @@ func TestDGDReconcileGivesEachTRTLLMMultinodeDGDItsOwnMPISSHKey(t *testing.T) {
 			require.NoError(t, sshKeys.Reconcile(t.Context(), dgd))
 			err := reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.MPISSHSecretName(dgd.UID)}, &corev1.Secret{})
 			require.True(t, apierrors.IsNotFound(err))
+			err = reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: mpiSSHTestSecretName}, &corev1.Secret{})
+			require.True(t, apierrors.IsNotFound(err))
 		})
 	}
 }
@@ -251,16 +276,31 @@ func TestDGDMPISSHSecretForAuthoredVolume(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		secretName string
+		origin     string
+		checkpoint *v1beta1.ComponentCheckpointConfig
 		wantSecret bool
+		wantShared bool
 	}{
-		{name: "authored shared reference", secretName: mpiSSHTestSecretName, wantSecret: true},
-		{name: "authored custom reference", secretName: "custom-ssh"},
+		{name: "authored shared reference", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, wantSecret: true},
+		{name: "legacy authored shared reference", secretName: mpiSSHTestSecretName, origin: "1.7.0", wantShared: true},
+		{name: "authored custom reference", secretName: "custom-ssh", origin: mpiSSHTestOriginVersion},
+		{name: "automatic snapshot retains shared reference", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, checkpoint: &v1beta1.ComponentCheckpointConfig{}, wantSecret: true, wantShared: true},
+		{name: "explicit snapshot uses no authored capture volume", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, checkpoint: &v1beta1.ComponentCheckpointConfig{CheckpointRef: new("existing")}, wantSecret: true},
+		{
+			name: "snapshot override needs shared reference", secretName: "custom-ssh", origin: mpiSSHTestOriginVersion, wantShared: true,
+			checkpoint: &v1beta1.ComponentCheckpointConfig{Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "ssh", Secret: &corev1.SecretVolumeSource{SecretName: mpiSSHTestSecretName}}}}}}},
+		},
+		{
+			name: "snapshot override replaces shared reference", secretName: mpiSSHTestSecretName, origin: mpiSSHTestOriginVersion, wantSecret: true,
+			checkpoint: &v1beta1.ComponentCheckpointConfig{Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "ssh", Secret: &corev1.SecretVolumeSource{SecretName: "custom-ssh"}}}}}}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Create a single-node graph with an authored projected SSH volume")
-			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", mpiSSHTestOriginVersion)
+			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", tc.origin)
 			component := &dgd.Spec.Components[0]
 			component.Multinode = nil
+			component.Checkpoint = tc.checkpoint
 			component.PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "ssh", Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{Name: tc.secretName}}}}}}
 			reconciler := newMPISSHTestReconciler(t, dgd)
 
@@ -274,6 +314,12 @@ func TestDGDMPISSHSecretForAuthoredVolume(t *testing.T) {
 			if tc.wantSecret {
 				require.NoError(t, err)
 				require.True(t, metav1.IsControlledBy(mounted, dgd))
+			} else {
+				require.True(t, apierrors.IsNotFound(err))
+			}
+			err = reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: mpiSSHTestSecretName}, &corev1.Secret{})
+			if tc.wantShared {
+				require.NoError(t, err)
 			} else {
 				require.True(t, apierrors.IsNotFound(err))
 			}

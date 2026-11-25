@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -58,22 +59,17 @@ func (r *dgdSSHKeysReconciler) Reconcile(
 		return nil
 	}
 
-	// Preserve the shared replica for legacy multinode workloads.
-	if dgd.HasAnyMultinodeComponent() {
+	// Authored volumes and injected backend volumes determine which keys are needed.
+	graphKey, sharedKey, err := r.requiredSecrets(dgd)
+	if err != nil {
+		return err
+	}
+	if sharedKey {
 		if err := r.manager.EnsureAndReplicate(ctx, dgd.Namespace); err != nil {
 			return fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
 		}
 	}
-	if !compatibility.TRTLLMPerDGDMPISSHKey.Enabled(dgd.Annotations) {
-		return nil
-	}
-
-	// Authored volumes can require a graph key even when the backend does not inject one.
-	needed, err := r.needsDGDSecret(dgd)
-	if err != nil {
-		return err
-	}
-	if !needed {
+	if !graphKey {
 		return nil
 	}
 	if err := r.ensureDGDSecret(ctx, dgd); err != nil {
@@ -83,8 +79,9 @@ func (r *dgdSSHKeysReconciler) Reconcile(
 	return nil
 }
 
-// needsDGDSecret follows the injected TRT-LLM volume and authored Secret references.
-func (r *dgdSSHKeysReconciler) needsDGDSecret(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (bool, error) {
+// requiredSecrets follows serving volumes and the authored volumes retained by automatic snapshots.
+func (r *dgdSSHKeysReconciler) requiredSecrets(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (graphKey, sharedKey bool, err error) {
+	gated := compatibility.TRTLLMPerDGDMPISSHKey.Enabled(dgd.Annotations)
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		if component.ManagedByExternalController() {
@@ -92,19 +89,56 @@ func (r *dgdSSHKeysReconciler) needsDGDSecret(dgd *nvidiacomv1beta1.DynamoGraphD
 		}
 		backend, err := dynamo.BackendFrameworkForComponent(component, dgd)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
+
+		// Generated TRT-LLM volumes use the shared key only when the gate leaves them alone.
 		if backend == dynamo.BackendFrameworkTRTLLM && component.GetNumberOfNodes() > 1 && dynamo.GetComponentDynamoSidecar(component) == nil {
-			return true, nil
+			graphKey = graphKey || gated
+			sharedKey = sharedKey || !gated
 		}
+
+		// Repoint a copy so legacy authored references still request the shared replica.
 		for _, template := range dynamo.ComponentPodTemplates(component) {
 			pod := template.Spec.DeepCopy()
-			if dynamo.RepointMPISSHSecret(pod, dgd.UID, dgd.Annotations, r.sharedName) {
-				return true, nil
+			graphKey = dynamo.RepointMPISSHSecret(pod, dgd.UID, dgd.Annotations, r.sharedName) || graphKey
+			sharedKey = podReferencesMPISSHSecret(pod, r.sharedName) || sharedKey
+		}
+
+		// Automatic snapshots retain the leader/common template's authored Secret names.
+		if checkpoint := dynamo.GetCheckpoint(component); checkpoint != nil && (checkpoint.CheckpointRef == nil || strings.TrimSpace(*checkpoint.CheckpointRef) == "") {
+			effective, err := dynamo.EffectiveComponentForRole(component, dynamo.RoleLeader)
+			if err != nil {
+				return false, false, err
+			}
+			pod := &corev1.PodSpec{}
+			if effective.PodTemplate != nil {
+				pod = effective.PodTemplate.Spec.DeepCopy()
+			}
+			if checkpoint.Job != nil && checkpoint.Job.PodTemplate != nil {
+				pod.Volumes = mergeNamedSlice(pod.Volumes, checkpoint.Job.PodTemplate.Spec.Volumes, func(v corev1.Volume) string { return v.Name })
+			}
+			sharedKey = podReferencesMPISSHSecret(pod, r.sharedName) || sharedKey
+		}
+	}
+	return graphKey, sharedKey, nil
+}
+
+// podReferencesMPISSHSecret also finds references inside projected volumes.
+func podReferencesMPISSHSecret(pod *corev1.PodSpec, name string) bool {
+	for _, volume := range pod.Volumes {
+		if volume.Secret != nil && volume.Secret.SecretName == name {
+			return true
+		}
+		if volume.Projected != nil {
+			for _, source := range volume.Projected.Sources {
+				if source.Secret != nil && source.Secret.Name == name {
+					return true
+				}
 			}
 		}
 	}
-	return false, nil
+	return false
 }
 
 // ensureDGDSecret creates the DGD's immutable key once and never adopts another owner's Secret.

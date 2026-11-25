@@ -1,6 +1,8 @@
 package dynamo
 
 import (
+	"context"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,10 +11,31 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const MPISSHKeyAnnotation = "nvidia.com/mpi-ssh-key"
+
+// ResolveMPISSHKeyMarker reads the public key so recreating a Secret changes every serving template.
+// reader must be non-nil and observe the DGD's namespace.
+func ResolveMPISSHKeyMarker(ctx context.Context, reader client.Reader, namespace string, dgdUID types.UID) (string, error) {
+	name := MPISSHSecretName(dgdUID)
+	identity := &corev1.Secret{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, identity); err != nil {
+		return "", fmt.Errorf("read MPI SSH Secret %s/%s: %w", namespace, name, err)
+	}
+
+	// Only a public key controlled by this graph may identify its rendered workloads.
+	owner := metav1.GetControllerOf(identity)
+	if owner == nil || owner.Kind != "DynamoGraphDeployment" || owner.UID != dgdUID || len(identity.Data["private.key.pub"]) == 0 {
+		return "", fmt.Errorf("MPI SSH Secret %s/%s has no DGD-owned public key", namespace, name)
+	}
+	return fmt.Sprintf("%s/%x", name, sha256.Sum256(identity.Data["private.key.pub"])), nil
+}
 
 type TRTLLMBackend struct {
 	MpiRunSecretName    string

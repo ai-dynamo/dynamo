@@ -182,7 +182,16 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
 		}
 		// Rewrite after rendering so authored and injected volumes follow the same Secret.
-		dynamo.RepointMPISSHSecret(&template.Spec, dgd.UID, dgd.Annotations, r.config.MPI.SSHSecretName)
+		if dynamo.RepointMPISSHSecret(&template.Spec, dgd.UID, dgd.Annotations, r.config.MPI.SSHSecretName) {
+			marker, err := dynamo.ResolveMPISSHKeyMarker(ctx, r.reader, dgd.Namespace, dgd.UID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if template.Annotations == nil {
+				template.Annotations = make(map[string]string)
+			}
+			template.Annotations[dynamo.MPISSHKeyAnnotation] = marker
+		}
 		templates[role] = template
 	}
 	return templates[dynamo.RoleLeader], templates[dynamo.RoleWorker], nil
@@ -375,7 +384,16 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 
 	// Standalone DCDs have no parent UID and retain the shared Secret.
 	if uid, managed := managedDGDUIDForDCD(dcd); managed {
-		dynamo.RepointMPISSHSecret(&template.Spec, uid, dynamo.GetPodTemplateAnnotations(component), r.config.MPI.SSHSecretName)
+		if dynamo.RepointMPISSHSecret(&template.Spec, uid, dynamo.GetPodTemplateAnnotations(component), r.config.MPI.SSHSecretName) {
+			marker, err := dynamo.ResolveMPISSHKeyMarker(ctx, r.reader, dcd.Namespace, uid)
+			if err != nil {
+				return nil, err
+			}
+			if template.Annotations == nil {
+				template.Annotations = make(map[string]string)
+			}
+			template.Annotations[dynamo.MPISSHKeyAnnotation] = marker
+		}
 	}
 	return template, nil
 }

@@ -2837,7 +2837,16 @@ func GenerateGrovePodCliqueSet(
 				return nil, err
 			}
 			// Select the graph's key after rendering both authored and operator-injected volumes.
-			RepointMPISSHSecret(&clique.Spec.PodSpec, dynamoDeployment.UID, dynamoDeployment.Annotations, operatorConfig.MPI.SSHSecretName)
+			if RepointMPISSHSecret(&clique.Spec.PodSpec, dynamoDeployment.UID, dynamoDeployment.Annotations, operatorConfig.MPI.SSHSecretName) {
+				marker, err := ResolveMPISSHKeyMarker(ctx, reader, dynamoDeployment.Namespace, dynamoDeployment.UID)
+				if err != nil {
+					return nil, err
+				}
+				if clique.Annotations == nil {
+					clique.Annotations = make(map[string]string)
+				}
+				clique.Annotations[MPISSHKeyAnnotation] = marker
+			}
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}
