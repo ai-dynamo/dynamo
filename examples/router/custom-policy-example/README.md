@@ -158,7 +158,7 @@ The provider and factory have different lifetimes:
 3. Dynamo calls the factory once for each model and routing-group partition.
 4. Each factory call creates a new filter, scorer, and picker set for that partition.
 
-The factory receives one `WorkerSelectionPolicyContext`. `context.worker_type()` is the typed `WorkerType` role: hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use `context.partition()` when models or routing groups need separate policy state. `context.selection_config()` holds the scoring and sampling settings of the model that partition serves.
+The factory receives one `WorkerSelectionPolicyContext`. `context.worker_type()` is the typed `WorkerType` role: hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use `context.partition()` when models or routing groups need separate policy state. `context.selection_config()` holds the scoring and sampling settings of the model that partition serves. Read a setting with the accessor of its name, as in `context.selection_config().router_temperature()`.
 
 ## 4. Register the Policy Type
 

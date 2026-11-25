@@ -21,6 +21,7 @@ use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 use dynamo_worker_selection::experimental::resident_blocks::{
     CacheOwnerCapacity, RESIDENT_BLOCKS, ResidentBlocksByRow,
 };
+use dynamo_worker_selection::host::SelectionConfigHostExt;
 use dynamo_worker_selection::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
@@ -644,8 +645,10 @@ async fn the_default_policy_gives_copies_no_credit() {
     for multiplier in [0.0, 0.5] {
         let expected_worker = 1;
         let mut config = test_config(true);
-        config.selection.shared_cache_multiplier = Some(multiplier);
-        config.selection.overlap_score_credit_decay = 0.0;
+        config.selection = config
+            .selection
+            .with_shared_cache_multiplier(Some(multiplier))
+            .with_overlap_score_credit_decay(0.0);
         let (core, _entry, tokens) = hint_fixture_with(config, 32, hint_capable).await;
         // Busy worker 1 (12 prefill tokens, 3 decode blocks) costs 3 + 11 = 14.
         // Worker 2 costs 8 + 8 = 16; copy credit would have lowered it to 12.
@@ -1881,7 +1884,7 @@ async fn queued_selection_errors_on_shutdown() {
 async fn uncached_selection_stays_uncached_after_queue_refresh_deadline() {
     let shared_queries = SharedCacheCalls::default();
     let mut config = test_router_config(false, Some(0.0));
-    config.selection.shared_cache_multiplier = Some(0.0);
+    config.selection = config.selection.with_shared_cache_multiplier(Some(0.0));
     let mut host = SelectionHost::default();
     host.cache.shared = Some(Arc::new(RecordingSharedCache {
         calls: Arc::clone(&shared_queries),

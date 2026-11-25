@@ -280,7 +280,7 @@ Dynamo calls the returned factory once per routing partition and passes it one `
 |---|---|
 | `worker_type()` | The typed role of the worker pool: `WorkerType::Aggregated`, `WorkerType::Prefill`, `WorkerType::Decode`, or `WorkerType::Encode`. Branch on it when worker pools need different components |
 | `partition()` | The model and routing group the policy is built for. Use it for distinct model or routing-group state |
-| `selection_config()` | The scoring and sampling settings of the model that partition serves. They can differ per model, because a worker's model card can replace the frontend's settings |
+| `selection_config()` | The scoring and sampling settings of the model that partition serves. They can differ per model, because a worker's model card can replace the frontend's settings. Read a setting with the accessor of its name, as in `context.selection_config().router_temperature()` |
 
 The context describes the partition, not a request. Filters, scorers, and pickers read each request through `WorkerSelectionRequest`.
 

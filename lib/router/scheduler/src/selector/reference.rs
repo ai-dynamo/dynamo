@@ -130,15 +130,15 @@ fn selection_weights(
             .router_config_override
             .as_ref()
             .and_then(|config| config.overlap_score_credit)
-            .unwrap_or(kv_router_config.overlap_score_credit),
-        overlap_score_credit_decay: kv_router_config.overlap_score_credit_decay,
+            .unwrap_or(kv_router_config.overlap_score_credit()),
+        overlap_score_credit_decay: kv_router_config.overlap_score_credit_decay(),
         prefill_load_scale: request
             .router_config_override
             .as_ref()
             .and_then(|config| config.prefill_load_scale)
-            .unwrap_or(kv_router_config.prefill_load_scale),
-        shared_cache_multiplier: kv_router_config.shared_cache_multiplier.unwrap_or(
-            match kv_router_config.shared_cache_type {
+            .unwrap_or(kv_router_config.prefill_load_scale()),
+        shared_cache_multiplier: kv_router_config.shared_cache_multiplier().unwrap_or(
+            match kv_router_config.shared_cache_type() {
                 dynamo_worker_selection::SharedCacheType::None => 0.0,
                 dynamo_worker_selection::SharedCacheType::Hicache => 0.5,
             },
@@ -247,12 +247,12 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
         let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
-            + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
-            + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
+            + kv_router_config.host_cache_hit_weight() * cache.host_overlap_blocks
+            + kv_router_config.disk_cache_hit_weight() * cache.disk_overlap_blocks
             + shared_overlap_blocks;
         let decode_cost_blocks = load.decode_cost_blocks();
         let active_request_cost_blocks =
-            kv_router_config.decode_active_request_weight * load.active_requests() as f64;
+            kv_router_config.decode_active_request_weight() * load.active_requests() as f64;
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
@@ -392,7 +392,7 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
 
     let temperature = selection_request
         .router_temperature_override()
-        .unwrap_or(scorer.kv_router_config.router_temperature);
+        .unwrap_or(scorer.kv_router_config.router_temperature());
     let get_score = |worker, config: &C| {
         let preferred_taint_multiplier = request
             .routing_constraints
@@ -466,6 +466,7 @@ mod tests {
     use crate::config::RouterConfigOverride;
     use crate::{OverlapSignals, ScheduleMode};
     use dynamo_worker_selection::SharedCacheHits;
+    use dynamo_worker_selection::host::SelectionConfigHostExt;
 
     fn worker_logit(
         selector: &DefaultWorkerSelector,
@@ -565,11 +566,11 @@ mod tests {
 
         for overlap_score_credit_decay in [0.0, 1.0] {
             let selector = DefaultWorkerSelector::new(
-                Some(SelectionConfig {
-                    router_temperature: 0.0,
-                    overlap_score_credit_decay,
-                    ..Default::default()
-                }),
+                Some(
+                    SelectionConfig::default()
+                        .with_router_temperature(0.0)
+                        .with_overlap_score_credit_decay(overlap_score_credit_decay),
+                ),
                 "test",
             );
             let result = selector
@@ -591,10 +592,7 @@ mod tests {
     fn test_default_selector_randomizes_zero_temperature_ties() {
         use crate::test_utils::SimpleWorkerConfig;
 
-        let config = SelectionConfig {
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default().with_router_temperature(0.0);
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let workers = HashMap::from([
             (10, SimpleWorkerConfig::default()),
@@ -675,19 +673,13 @@ mod tests {
                 ],
             ),
         ] {
-            let config = SelectionConfig {
-                router_temperature: temperature,
-                ..Default::default()
-            };
+            let config = SelectionConfig::default().with_router_temperature(temperature);
             let mut first = DefaultWorkerSelector::new_seeded(
-                Some(SelectionConfig {
-                    router_temperature: 0.0,
-                    ..Default::default()
-                }),
+                Some(SelectionConfig::default().with_router_temperature(0.0)),
                 "test",
                 42,
             );
-            first.kv_router_config.router_temperature = temperature;
+            first.kv_router_config = first.kv_router_config.with_router_temperature(temperature);
             let second = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
             let first_workers = HashMap::from([
                 (30, SimpleWorkerConfig::default()),
@@ -771,13 +763,11 @@ mod tests {
         let shared_cache_hits = SharedCacheHits::from_ranges(vec![0..4]);
         request.shared_cache_hits = Some(shared_cache_hits);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            prefill_load_scale: 1.0,
-            shared_cache_multiplier: Some(0.0),
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_prefill_load_scale(1.0)
+            .with_shared_cache_multiplier(Some(0.0))
+            .with_router_temperature(0.0);
         let select = |request: &SchedulingRequest| {
             DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42)
                 .select_worker(WorkerSelectionInput::configured(
@@ -825,11 +815,11 @@ mod tests {
         use crate::test_utils::SimpleWorkerConfig;
 
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit: 1.0,
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(
+                SelectionConfig::default()
+                    .with_overlap_score_credit(1.0)
+                    .with_router_temperature(0.0),
+            ),
             "test",
         );
         let workers = HashMap::from([
@@ -863,10 +853,7 @@ mod tests {
         use crate::test_utils::SimpleWorkerConfig;
 
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit_decay: 1.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit_decay(1.0)),
             "test",
         );
         let workers = HashMap::from([
@@ -895,10 +882,7 @@ mod tests {
         use dynamo_session_affinity::WorkerAffinityTarget;
 
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_router_temperature(0.0)),
             "test",
         );
         let worker0 = WorkerWithDpRank::from_worker_id(0);
@@ -1189,10 +1173,7 @@ mod tests {
     #[test]
     fn test_preferred_taints_prefer_matching_worker() {
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_router_temperature(0.0)),
             "test",
         );
         let workers = HashMap::from([
@@ -1261,10 +1242,7 @@ mod tests {
     #[test]
     fn test_negative_preferred_taints_avoid_matching_worker() {
         let selector = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_router_temperature(0.0)),
             "test",
         );
         let workers = HashMap::from([
@@ -1360,12 +1338,10 @@ mod tests {
         #[allow(clippy::single_range_in_vec_init)]
         let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            shared_cache_multiplier: Some(0.5),
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_shared_cache_multiplier(Some(0.5))
+            .with_router_temperature(0.0);
 
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let mut workers = HashMap::new();
@@ -1435,12 +1411,10 @@ mod tests {
         let mut tier_overlap_blocks = crate::TierOverlapBlocks::default();
         tier_overlap_blocks.device.insert(worker0, 2);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            prefill_load_scale: 2.0,
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_prefill_load_scale(2.0)
+            .with_router_temperature(0.0);
 
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let mut workers = HashMap::new();
@@ -1529,17 +1503,11 @@ mod tests {
         );
 
         let normal_credit = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit: 1.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit(1.0)),
             "test",
         );
         let amplified_credit = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit: 1.5,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit(1.5)),
             "test",
         );
 
@@ -1618,10 +1586,7 @@ mod tests {
         };
         let default = DefaultWorkerSelector::new(Some(SelectionConfig::default()), "test");
         let weighted = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                decode_active_request_weight: 32.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_decode_active_request_weight(32.0)),
             "test",
         );
 
@@ -1687,17 +1652,11 @@ mod tests {
         );
 
         let no_decay = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit_decay: 0.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit_decay(0.0)),
             "test",
         );
         let with_decay = DefaultWorkerSelector::new(
-            Some(SelectionConfig {
-                overlap_score_credit_decay: 1.0,
-                ..Default::default()
-            }),
+            Some(SelectionConfig::default().with_overlap_score_credit_decay(1.0)),
             "test",
         );
 
@@ -1739,11 +1698,9 @@ mod tests {
         let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 4.0);
 
-        let config = SelectionConfig {
-            overlap_score_credit: 1.0,
-            router_temperature: 0.0,
-            ..Default::default()
-        };
+        let config = SelectionConfig::default()
+            .with_overlap_score_credit(1.0)
+            .with_router_temperature(0.0);
 
         let selector = DefaultWorkerSelector::new(Some(config), "test");
         let mut workers = HashMap::new();

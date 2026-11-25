@@ -597,8 +597,8 @@ mod tests {
         let weights = SelectionConfig::default();
         let row = |device_blocks: f64, host_blocks: f64, disk_blocks: f64| {
             let blocks = device_blocks
-                + host_blocks * weights.host_cache_hit_weight
-                + disk_blocks * weights.disk_cache_hit_weight;
+                + host_blocks * weights.host_cache_hit_weight()
+                + disk_blocks * weights.disk_cache_hit_weight();
             CacheRow {
                 device_blocks,
                 host_blocks,

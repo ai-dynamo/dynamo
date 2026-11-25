@@ -4,8 +4,8 @@
 //! What an in-tree host names from the worker-selection stage beyond the plugin contract it
 //! reaches through `dynamo_kv_router::plugins::worker_selection`: the configuration slices, the
 //! conditional-disaggregation decision inputs, the LoRA filter, the trace types it renders, and
-//! the host half of the plugin contract types: how the kernel builds the request view and the
-//! candidate rows a policy reads, and how it runs a policy. Those are extension traits and
+//! the host half of the plugin contract types: how the kernel builds the request view, the
+//! selection config, and the candidate rows a policy reads, and how it runs a policy. Those are extension traits and
 //! functions here, not methods on the contract types, so a plugin, which does not name this
 //! module, cannot call them. This list is the host contract.
 
@@ -49,6 +49,7 @@ mod sealed {
 
 impl sealed::Sealed for WorkerSelectionRequest<'_> {}
 impl sealed::Sealed for WorkerSelectionPolicy {}
+impl sealed::Sealed for SelectionConfig {}
 
 /// How the kernel builds the request view a policy reads. A plugin only reads a
 /// [`WorkerSelectionRequest`]; its tests get one through `dynamo_kv_router::plugins::testing`.
@@ -127,6 +128,31 @@ pub trait WorkerSelectionPolicyHostExt: sealed::Sealed + Sized {
     /// a fresh one. Pins and session affinity are applied by the host before selection, so
     /// [`WorkerSelectionPolicy::with_exclusive_affinity`] has no effect there.
     fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self>;
+}
+
+/// How a host sets the values a policy reads from a [`SelectionConfig`], starting from
+/// `SelectionConfig::default()`. Each builder sets the value the accessor of the same name
+/// returns. A plugin only reads a [`SelectionConfig`].
+pub trait SelectionConfigHostExt: sealed::Sealed + Sized {
+    fn with_overlap_score_credit(self, overlap_score_credit: f64) -> Self;
+
+    fn with_overlap_score_credit_decay(self, overlap_score_credit_decay: f64) -> Self;
+
+    fn with_prefill_load_scale(self, prefill_load_scale: f64) -> Self;
+
+    fn with_decode_active_request_weight(self, decode_active_request_weight: f64) -> Self;
+
+    fn with_host_cache_hit_weight(self, host_cache_hit_weight: f64) -> Self;
+
+    fn with_disk_cache_hit_weight(self, disk_cache_hit_weight: f64) -> Self;
+
+    fn with_router_temperature(self, router_temperature: f64) -> Self;
+
+    fn with_shared_cache_multiplier(self, shared_cache_multiplier: Option<f64>) -> Self;
+
+    fn with_shared_cache_type(self, shared_cache_type: SharedCacheType) -> Self;
+
+    fn with_conditional_disagg_enabled(self, conditional_disagg_enabled: bool) -> Self;
 }
 
 /// The facts about a request that every stage reads. It takes every value, so a place that

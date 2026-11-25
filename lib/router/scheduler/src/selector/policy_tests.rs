@@ -8,6 +8,7 @@ use crate::types::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::WorkerInputView;
+use dynamo_worker_selection::host::SelectionConfigHostExt;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -50,10 +51,7 @@ fn default_policy_matches_default_selector() {
     let mut request = base_request(16);
     request.worker_loads =
         worker_loads_with_active_decode(FxHashMap::from_iter([(worker0, 8), (worker1, 1)]));
-    let config = SelectionConfig {
-        router_temperature: 0.0,
-        ..Default::default()
-    };
+    let config = SelectionConfig::default().with_router_temperature(0.0);
 
     let expected = DefaultWorkerSelector::new(Some(config.clone()), "test")
         .select_worker(WorkerSelectionInput::configured(

@@ -29,6 +29,7 @@ use dynamo_scheduler::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelect
 use dynamo_scheduler::{RoutingConstraints, WorkerConfigLike};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
+use dynamo_worker_selection::host::SelectionConfigHostExt;
 use dynamo_worker_selection::{
     SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
     WorkerPicker, WorkerScorer, WorkerSelectionPolicy, WorkerSelectionPolicyError,
@@ -306,11 +307,11 @@ fn worker_selection(c: &mut Criterion) {
             for worker_count in [2, 32, 1_024, 2_048, 10_000] {
                 let (workers, request) = fixture(worker_count);
                 let selector = DefaultWorkerSelector::new(
-                    Some(SelectionConfig {
-                        router_temperature: temperature,
-                        overlap_score_credit_decay,
-                        ..Default::default()
-                    }),
+                    Some(
+                        SelectionConfig::default()
+                            .with_router_temperature(temperature)
+                            .with_overlap_score_credit_decay(overlap_score_credit_decay),
+                    ),
                     "prefill",
                 );
                 group.throughput(Throughput::Elements(worker_count as u64));
@@ -602,10 +603,7 @@ fn resident_blocks_write(c: &mut Criterion) {
 }
 
 fn default_policy_wrapper(c: &mut Criterion) {
-    let config = SelectionConfig {
-        router_temperature: 0.0,
-        ..Default::default()
-    };
+    let config = SelectionConfig::default().with_router_temperature(0.0);
     let mut group = c.benchmark_group("default_policy_wrapper");
     group.warm_up_time(Duration::from_secs(2));
     group.measurement_time(Duration::from_secs(5));
