@@ -371,7 +371,6 @@ pub struct KvIndexer {
     approximate_lru: Option<ApproximateLruClient>,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
-    /// Cancels the token when the last clone drops.
     _cancel_on_last_drop: Arc<DropGuard>,
 }
 
