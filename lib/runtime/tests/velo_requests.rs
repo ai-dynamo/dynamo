@@ -154,6 +154,11 @@ async fn wait_for_instance(client: &Client, id: u64, present: bool) {
         while updates.borrow_and_update().iter().any(|i| i.id() == id) != present {
             updates.changed().await.unwrap();
         }
+        // The routing snapshot is reconciled from discovery separately. Wait for
+        // it too, so a later eligibility check is about the request, not a lag.
+        while client.instance_ids_avail().contains(&id) != present {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     })
     .await
     .expect("discovery did not publish the expected endpoint set");
