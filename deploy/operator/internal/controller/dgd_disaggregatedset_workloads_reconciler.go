@@ -124,6 +124,20 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, err
 	}
 	dsReady := readiness.Ready && !dsModified && !checkpointGated
+
+	// Publish the namespace used by the completed revision, retaining it during rollout.
+	for componentName := range selection.ComponentToRole {
+		componentStatus := readiness.ComponentStatuses[componentName]
+		componentStatus.RuntimeNamespace = dgd.Status.Components[componentName].RuntimeNamespace
+		if dsReady {
+			component := normalizedComponents[componentName]
+			componentStatus.RuntimeNamespace = dynamo.ComponentRuntimeNamespace(
+				dynamo.GetDynamoNamespace(dgd, component), string(component.ComponentType), rollingUpdateCtx.NewWorkerHash,
+			)
+		}
+		readiness.ComponentStatuses[componentName] = componentStatus
+	}
+
 	targetRevision, err := disaggregatedSetTargetRevision(syncedDS)
 	if err != nil {
 		return ReconcileResult{}, err
