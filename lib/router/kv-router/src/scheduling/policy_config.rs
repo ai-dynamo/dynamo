@@ -10,14 +10,16 @@ use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::plugins::request_classifier::RawRequestClassifierConfig;
-use crate::plugins::request_classifier::RequestClassifierConfig;
-use crate::plugins::worker_selection::{
-    RawWorkerSelectionConfig, WorkerCapacity, WorkerCapacityExt, WorkerSelectionConfig,
+use crate::plugins::request_classifier::config::{
+    RawRequestClassifierConfig, RequestClassifierConfig,
 };
+use crate::plugins::worker_selection::config::{RawWorkerSelectionConfig, WorkerSelectionConfig};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::WorkerCapacityExt;
 use dynamo_scheduler::WorkerConfigLike;
 use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_slot_tracker::host::BusyThresholdsHostExt;
+use dynamo_worker_selection::WorkerCapacity;
 
 #[derive(Debug, Error)]
 pub enum RouterPolicyConfigError {
@@ -396,11 +398,10 @@ fn resolve_policy_class(
         quantum: raw.quantum,
         slo_ttft_ms,
         controlled_delay: raw.controlled_delay,
-        busy_thresholds: BusyThresholds {
-            prefill_busy_threshold: raw.prefill_busy_threshold,
-            prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
-            decode_busy_threshold_frac: raw.decode_busy_threshold_frac,
-        },
+        busy_thresholds: BusyThresholds::default()
+            .with_prefill_busy_threshold(raw.prefill_busy_threshold)
+            .with_prefill_busy_threshold_frac(raw.prefill_busy_threshold_frac)
+            .with_decode_busy_threshold_frac(raw.decode_busy_threshold_frac),
         request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
         raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
         cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -432,11 +433,12 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
-    use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
+    use crate::plugins::worker_selection::config::WorkerSelectionPolicySelection;
     use dynamo_admission::UnknownPolicyClassError;
     use dynamo_scheduler::KvSchedulerError;
+    use dynamo_scheduler::WorkerLoadInputExt;
     use dynamo_slot_tracker::WorkerLoadProjection;
+    use dynamo_worker_selection::WorkerLoadInput;
 
     fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
         WorkerLoadInput::from_projection(WorkerLoadProjection {
@@ -678,7 +680,7 @@ models:
             exact
                 .default_class()
                 .busy_thresholds
-                .prefill_busy_threshold_frac,
+                .prefill_busy_threshold_frac(),
             None
         );
         assert!(!exact.default_class().queueing_enabled());
@@ -710,14 +712,14 @@ models:
             unmatched
                 .default_class()
                 .busy_thresholds
-                .prefill_busy_threshold,
+                .prefill_busy_threshold(),
             Some(100)
         );
         assert_eq!(
             unmatched
                 .default_class()
                 .busy_thresholds
-                .prefill_busy_threshold_frac,
+                .prefill_busy_threshold_frac(),
             None
         );
     }
@@ -729,7 +731,7 @@ models:
         assert!(limits.has_room(&prefill_load(usize::MAX), WorkerCapacity::default()));
 
         // An unreported budget is taken as DEFAULT_MAX_BATCHED_TOKENS.
-        limits.prefill_busy_threshold_frac = Some(0.5);
+        limits = limits.with_prefill_busy_threshold_frac(Some(0.5));
         let half_default =
             (dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS / 2) as usize;
         assert!(limits.has_room(&prefill_load(half_default), WorkerCapacity::default()));
@@ -810,7 +812,7 @@ models:
             fallback
                 .default_class()
                 .busy_thresholds
-                .prefill_busy_threshold_frac,
+                .prefill_busy_threshold_frac(),
             Some(7.0)
         );
         assert_eq!(
@@ -1293,10 +1295,7 @@ models:
 
     #[test]
     fn worker_is_full_only_when_every_rank_is_full() {
-        let limits = BusyThresholds {
-            prefill_busy_threshold: Some(10),
-            ..Default::default()
-        };
+        let limits = BusyThresholds::default().with_prefill_busy_threshold(Some(10));
         let config = crate::test_utils::SimpleWorkerConfig {
             data_parallel_start_rank: 2,
             data_parallel_size: 2,
@@ -1333,10 +1332,7 @@ models:
 
         // vLLM under the Ray data-parallel backend registers `total_kv_blocks = 0` as a
         // placeholder; the decode limit skips such a rank instead of calling it full.
-        let limits = BusyThresholds {
-            decode_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        };
+        let limits = BusyThresholds::default().with_decode_busy_threshold_frac(Some(0.5));
         let held = WorkerLoadInput::from_projection(WorkerLoadProjection {
             active_decode_blocks: 1_000,
             ..Default::default()
@@ -1345,10 +1341,7 @@ models:
         assert!(!limits.has_room(&held, WorkerCapacity::new(None, Some(1_000))));
 
         // A zero prefill budget falls back to the default budget instead of being full at once.
-        let limits = BusyThresholds {
-            prefill_busy_threshold_frac: Some(0.5),
-            ..Default::default()
-        };
+        let limits = BusyThresholds::default().with_prefill_busy_threshold_frac(Some(0.5));
         assert!(limits.has_room(&prefill_load(1), WorkerCapacity::new(Some(0), None)));
     }
 }

@@ -3,7 +3,7 @@
 
 //! Minimum-cost selection, tie-breaking, and temperature sampling of scored candidates.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use parking_lot::Mutex;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -92,14 +92,14 @@ impl DefaultPicker {
 impl WorkerPicker for DefaultPicker {
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
         if candidates.is_empty() {
             return Err(WorkerSelectionPolicyError::failed("no eligible worker"));
         }
-        if context.pinned_worker().is_some() {
+        if request.info().pinned_worker().is_some() {
             return Ok(0);
         }
         if self.temperature == 0.0 && self.rng.is_none() {

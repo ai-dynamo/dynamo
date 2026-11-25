@@ -3,10 +3,11 @@
 
 //! Synchronous adapter for direct selection and deterministic replay.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::default_policy_with_rng;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike, WorkerSelectionResult};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -67,7 +68,9 @@ impl DefaultWorkerSelector {
     ) -> Self {
         let partition = RoutingPartitionRef::new("replay", "default");
         Self {
-            policy: Arc::new(Mutex::new(factory(&config, role, partition))),
+            policy: Arc::new(Mutex::new(factory(WorkerSelectionPolicyContext::new(
+                &config, role, partition,
+            )))),
             kv_router_config: config,
             worker_type,
             rng: None,
