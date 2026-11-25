@@ -19,8 +19,10 @@ import pytest
 
 from dynamo.duru_router import scoring, transport
 from dynamo.duru_router.events import open_feed
-from dynamo.duru_router.scoring import EventStreamReader, Reader
+from dynamo.duru_router.scoring import EventStreamReader, LiveU, Reader, run
+from dynamo.duru_router.tests.helpers import arrival_record, configuration, event_feeds
 from dynamo.duru_router.tests.helpers import memory_mode as memory_mode
+from dynamo.duru_router.tests.helpers import replay_accounting, work_step
 from dynamo.duru_router.transport import (
     MAX_FRAME,
     InProcessChannel,
@@ -44,6 +46,7 @@ def test_local_ingress_needs_no_socket_thread_or_directory(tmp_path, monkeypatch
     monkeypatch.setattr(Path, "mkdir", unexpected)
     path = tmp_path / "unused"
     ingress = scoring.Ingress(path, in_process=True)
+    owner = scoring.RouterAccounting("unused", ingress=ingress)
     reader = scoring.EventStreamReader(path, receiver=ingress.journal)
     try:
         ingress.emit(
@@ -69,6 +72,7 @@ def test_local_ingress_needs_no_socket_thread_or_directory(tmp_path, monkeypatch
         assert not path.exists()
     finally:
         reader.close()
+        owner.close()
 
 
 @pytest.mark.pre_merge
@@ -237,6 +241,162 @@ def test_memory_sequence_gap_fails_closed(tmp_path):
     finally:
         feed.close()
         tail.close()
+
+
+def run_memory(path, *, ingress_source=None):
+    stop = threading.Event()
+    timer = threading.Timer(0.3, stop.set)
+    timer.start()
+    try:
+        run(path, stop, ingress_source=ingress_source)
+    finally:
+        timer.cancel()
+        timer.join()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_root_cleanup_retains_tool_gap_then_releases_all_history():
+    book = LiveU(2, {})
+    book.cost = lambda *args: 0.01
+    for i in range(1000):
+        root, agent = f"root-{i}", f"agent-{i}"
+        t = i * 10
+        book.submit("request", root, agent, 10, t)
+        book.accepted(work_step(p=1, d=10, root=root, agent=agent, phase="decode"))
+        with pytest.raises(ValueError, match="outstanding requests"):
+            book.finish_root(root, t)
+        book.finish("request", t + 1)
+        book.advance(t + 5)
+        assert book.measured(root) == 100
+        book.submit("return", root, agent, 11, t + 5)
+        book.finish("return", t + 6)
+        assert book.measured(root) == 200
+        book.finish_root(root, t + 7)
+        assert not any(
+            (
+                book.active,
+                book.agent_root,
+                book.agent_active_requests,
+                book.root_active,
+                book.work,
+                book.entitlement,
+                book.invalid,
+            )
+        )
+    assert book.output_tokens == book.accepted_steps == 1000
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("in_process", [False, True])
+def test_identical_events_have_identical_u_in_ipc_and_recorded_replay(
+    tmp_path, monkeypatch, completed, in_process
+):
+    path, cfg = configuration(tmp_path)
+    monkeypatch.setenv("DURU_RECORD_EVENTS", "1")
+    ingress = [
+        arrival_record(100, "q", "p", root="r", agent="a"),
+        dict(event="request_completed", time=101, request_id="q"),
+        # Callback at 102 arrives after ingress completion at 101.
+        arrival_record(103, "q2", "p", root="r", agent="a"),
+        arrival_record(103, "child", "pb", root="r", agent="b"),
+        dict(event="request_completed", time=104, request_id="q2"),
+        dict(event="request_completed", time=105, request_id="child"),
+    ]
+    if completed:
+        ingress += [
+            dict(event="agent_end", time=106, program_id="p"),
+            dict(event="agent_group_end", time=107, root="r"),
+        ]
+    ingress.append(dict(event="footer", time=108))
+    step = work_step(
+        p=8, root="r", agent="a", client_request_id="q", scheduled_at=100.5, end=102
+    )
+    worker = [
+        dict(event="accepted_output", time=102, steps=[step]),
+        dict(event="footer", time=109),
+    ]
+    if completed:
+        ingress.insert(1, dict(event="request_dispatched", time=100.1, request_id="q"))
+        # Final ingress can precede an engine callback. Keep the root until
+        # its worker acknowledgement, including across replay.
+        worker[-1:-1] = [
+            dict(event="accepted_output", time=107.2, steps=[dict(step, end=107.2)]),
+            dict(
+                event="worker_request_finished",
+                time=107.3,
+                requests=[dict(client_request_id="q", root="r", agent="a")],
+            ),
+        ]
+    snapshots = []
+    stop = threading.Event()
+    stop.set()
+    for mode in ("memory", "journal"):
+        monkeypatch.setenv("DURU_ACCOUNTING_TRANSPORT", mode)
+        if mode == "memory":
+            with event_feeds(cfg, ingress, worker, in_process=in_process) as local:
+                run_memory(path, ingress_source=local.journal if local else None)
+        else:
+            replay_accounting(path, stop)
+        footer = json.loads(
+            (Path(cfg["audit_dir"]) / "duru-control.jsonl").read_text().splitlines()[-1]
+        )
+        assert footer["complete"]
+        snapshots.append(footer["last_snapshot"])
+    for key in (
+        "roots",
+        "programs",
+        "requests",
+        "accounting_state",
+        "accepted_steps",
+        "output_tokens",
+    ):
+        assert snapshots[0][key] == snapshots[1][key]
+    if completed:
+        assert snapshots[0]["accepted_steps"] == 2
+        assert not snapshots[0]["roots"]
+        assert not any(snapshots[0]["accounting_state"].values())
+    else:
+        assert snapshots[0]["roots"]["r"]["U"] == pytest.approx(300)
+        assert snapshots[0]["programs"]["p"]["kind"] == "idle_measured_only"
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.parametrize("producer", ["ingress", "local_ingress", "worker"])
+def test_pending_limit_applies_with_missing_peer_watermark(
+    tmp_path, monkeypatch, producer
+):
+    path, cfg = configuration(tmp_path)
+    monkeypatch.setattr(scoring, "MAX_PENDING_EVENTS", 2)
+    logical = Path(cfg["ingress"] if producer != "worker" else cfg["ledgers"][0])
+    if producer == "local_ingress":
+        feed = scoring.Ingress(logical.parent, in_process=True).journal
+    else:
+        feed = open_feed(logical.parent, name=logical.stem)
+    try:
+        for sequence in range(1, 4):
+            row = (
+                dict(
+                    event="request_arrived",
+                    request_id=str(sequence),
+                    program_id="p",
+                    root="r",
+                    agent="a",
+                    prompt_tokens=8,
+                )
+                if producer != "worker"
+                else dict(event="accepted_output", steps=[dict(end=1)])
+            )
+            feed.submit("record", dict(sequence=sequence, time=1, **row))
+        with pytest.raises(RuntimeError, match="pending-event limit"):
+            run_memory(
+                path, ingress_source=feed if producer == "local_ingress" else None
+            )
+    finally:
+        feed.close()
 
 
 @pytest.fixture

@@ -1,23 +1,53 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Observe accepted work without changing native vLLM queue order."""
+"""Highest-U waiting queues and accepted-work accounting for native vLLM."""
 
 import os
 import time
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.core.sched.request_queue import FCFSRequestQueue
 
+from dynamo.duru_router.admission import priority_key
 from dynamo.duru_router.events import CompactFeed
+from dynamo.duru_router.scoring import Reader
+
+
+class Queue(FCFSRequestQueue):
+    def __init__(self, old, owner):
+        super().__init__(old)
+        self.owner = owner
+        self._peeked = None
+
+    def peek_request(self):
+        if not self:
+            raise IndexError("empty Highest-U queue")
+        self._peeked = min(
+            enumerate(self), key=lambda pair: self.owner.key(pair[1], pair[0])
+        )[1]
+        return self._peeked
+
+    def pop_request(self):
+        # Allocation uses the peeked identity, even if scores subsequently change.
+        request = self._peeked
+        if request is None or not any(item is request for item in self):
+            request = self.peek_request()
+        self._peeked = None
+        self.remove_request(request)
+        return request
 
 
 class DuruScheduler(AsyncScheduler):
     """Preserve native scheduling while recording only work accepted by the engine."""
 
     def __init__(self, *args, **kwargs):
+        self.u_reader = Reader()
         super().__init__(*args, **kwargs)
         if self.num_spec_tokens or self.num_sampled_tokens_per_step != 1:
             raise ValueError("Duru requires non-speculative autoregressive generation")
+        self.waiting = Queue(self.waiting, self)
+        self.kv_holding_waiting = Queue(self.kv_holding_waiting, self)
         self._pending_work = {}
         self.compact_feed = CompactFeed(os.environ["DURU_WORK_DIR"])
 
@@ -35,6 +65,42 @@ class DuruScheduler(AsyncScheduler):
         if request.sampling_params is None or request.resumable:
             raise ValueError("Duru requires non-resumable generation requests")
         return super().add_request(request, *args, **kwargs)
+
+    def key(self, request, index):
+        snapshot = self.u_reader.refresh()
+        row = snapshot.get("requests", {}).get(
+            self.identity(request)["client_request_id"], {}
+        )
+        score = (
+            row.get("score")
+            if request.status.name in ("WAITING", "PREEMPTED")
+            else None
+        )
+        return priority_key(score, request.arrival_time, index)
+
+    def schedule(self, *args, **kwargs):
+        snapshot = self.u_reader.refresh()
+        held = []
+        try:
+            for queue in (self.waiting, self.kv_holding_waiting):
+                queue._peeked = None
+                deferred = [
+                    request
+                    for request in queue
+                    if snapshot.get("requests", {}).get(
+                        self.identity(request)["client_request_id"]
+                    )
+                    is None
+                ]
+                held.append((queue, deferred))
+                if deferred:
+                    queue.remove_requests(deferred)
+            with self.u_reader.pin(snapshot):
+                return super().schedule(*args, **kwargs)
+        finally:
+            for queue, deferred in held:
+                if deferred:
+                    queue.prepend_requests(deferred)
 
     def _update_after_schedule(self, scheduler_output):
         if scheduler_output.scheduled_spec_decode_tokens:
@@ -129,4 +195,7 @@ class DuruScheduler(AsyncScheduler):
         try:
             return super().shutdown()
         finally:
-            self.compact_feed.close()
+            try:
+                self.compact_feed.close()
+            finally:
+                self.u_reader.close()

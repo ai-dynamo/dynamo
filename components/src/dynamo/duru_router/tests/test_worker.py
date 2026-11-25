@@ -7,6 +7,7 @@ import importlib.util
 import sys
 import threading
 from collections import deque
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -166,6 +167,55 @@ def batch(scheduler):
     result = scheduled()
     scheduler._update_after_schedule(result)
     return result
+
+
+def test_queue_order_and_allocated_identity(worker):
+    requests = [Request(str(i)) for i in range(3)]
+    for request, rank in zip(requests, [(-1, 1), (-3, 3), (-3, 2)]):
+        request.rank = rank
+    queue = worker.Queue(requests, SimpleNamespace(key=lambda r, i: (*r.rank, i)))
+    assert queue.peek_request() is requests[2]
+    requests[0].rank = (-10, 1)
+    # Keep the identity whose KV was allocated.
+    assert queue.pop_request() is requests[2]
+    assert [queue.pop_request() for _ in range(2)] == [requests[0], requests[1]]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_native_queues_and_missing_scores_restored(scheduler, monkeypatch, fail):
+    ready, missing, holder = [Request(name) for name in ("ready", "missing", "holder")]
+    scheduler.waiting.extend([ready, missing])
+    scheduler.kv_holding_waiting.append(holder)
+    snapshot = {"requests": {"ready": {"score": 3}, "holder": {"score": 1}}}
+    monkeypatch.setattr(scheduler.u_reader, "refresh", lambda **kw: snapshot)
+    scheduler.failure = RuntimeError("native failure") if fail else None
+    with pytest.raises(RuntimeError, match="native failure") if fail else nullcontext():
+        scheduler.schedule()
+    assert scheduler.selected_queues == ([ready], [holder])
+    assert list(scheduler.waiting) == [missing, ready]
+    assert list(scheduler.kv_holding_waiting) == [holder]
+    assert scheduler.u_reader.pinned is None
+
+
+def test_identity_and_priority_exclude_running_requests(scheduler, monkeypatch):
+    high = Request("native")
+    assert scheduler.identity(high) == dict(
+        client_request_id="native", root="native", agent="native"
+    )
+    high.sampling_params.extra_args = dict(
+        duru_request_id="client", duru_root_id="root", duru_agent_id="child"
+    )
+    assert scheduler.identity(high) == dict(
+        client_request_id="client", root="root", agent="child"
+    )
+    low = Request("low")
+    scheduler.waiting.extend([low, high])
+    snapshot = {"requests": {"client": {"score": 4}, "low": {"score": 1}}}
+    monkeypatch.setattr(scheduler.u_reader, "refresh", lambda: snapshot)
+    assert scheduler.waiting.pop_request() is high
+    high.status.name = "RUNNING"
+    scheduler.waiting.append(high)
+    assert scheduler.waiting.pop_request() is low
 
 
 @pytest.mark.parametrize(

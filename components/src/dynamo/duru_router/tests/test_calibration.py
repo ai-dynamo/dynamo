@@ -11,6 +11,7 @@ import pytest
 from dynamo.duru_router.calibration.measure import load, measure
 from dynamo.duru_router.calibration.plan import METRIC, design
 from dynamo.duru_router.calibration.predict import predict, predict_prefill_table
+from dynamo.duru_router.scoring import LiveU
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -62,6 +63,19 @@ def test_live_outer_edge_extrapolation_preserved():
     assert outside
     with pytest.raises(ValueError):
         predict_prefill_table(table, 3, 2)
+
+
+def test_lookahead_uses_calibrated_chunk_budget():
+    book = LiveU(1, {"max_prefill": 4})
+    coordinates = []
+
+    def cost(phase, p, d, k):
+        coordinates.append((phase, p, d, k))
+        return 1.0
+
+    book.cost = cost
+    assert book.next_five(10) == 5.0
+    assert [row[1] for row in coordinates] == [4, 4, 2, 1, 1]
 
 
 def test_measure_resume_and_load_without_accuracy_gate(tmp_path):
