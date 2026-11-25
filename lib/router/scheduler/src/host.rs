@@ -11,6 +11,10 @@ pub use crate::config::{RouterConfig, RouterConfigOverride, Validated};
 pub use crate::kv_hints::{WorkerKvTransferKeysCache, WorkerKvTransferKeysExt};
 pub use crate::local::LocalScheduler;
 pub use crate::overlap::{OverlapAnalysis, OverlapScoresResponse, OverlapSignals};
+pub use crate::overlap_refresh::{
+    OverlapScoresRefresh, RefreshedOverlap, TieredOverlapRefresher, read_overlap_refresh_after,
+    should_refresh_overlap,
+};
 pub use crate::overlap_summary::MooncakeOverlapSummary;
 pub use crate::prefill_load::PrefillLoadEstimator;
 pub use crate::protocols::{

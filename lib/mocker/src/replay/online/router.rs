@@ -13,9 +13,9 @@ use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_indexer::host::{
-    ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
+    ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
     LowerTierIndexers, LowerTierQueryOptions, MatchDetails, ThreadPoolIndexer, TieredMatchDetails,
-    query_lower_tiers_with_options,
+    TieredMatchProvider, query_lower_tiers_with_options,
 };
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
@@ -24,7 +24,8 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::host::{
     CacheHitWeights, OverlapAnalysis, RoutingConstraints, ScheduleMode, ScheduleRequest,
-    TrackingHashContext, TrackingHashScope,
+    TieredOverlapRefresher, TrackingHashContext, TrackingHashScope, WorkerSelector,
+    read_overlap_refresh_after,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +36,7 @@ use crate::common::protocols::{
 };
 use crate::loadgen::local_block_hashes;
 use crate::replay::router_shared::{
-    ReplayScheduler, replay_router_config, replay_selector, replay_slots,
+    ReplayScheduler, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
     replay_workers_with_configs, request_cache_salt, salted_request_hashes,
 };
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
@@ -82,14 +83,14 @@ impl ReplayIndexer {
                 ..Default::default()
             },
         );
-        self.find_matches_for_hashes(sequence).await
+        Ok(self.find_matches_for_hashes(sequence).await?)
     }
 
     /// Look up block hashes the caller already derived.
     async fn find_matches_for_hashes(
         &self,
         sequence: Vec<LocalBlockHash>,
-    ) -> Result<TieredMatchDetails> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         // Until lower-tier residency arrives, the cheaper score-only lookup
         // gives the same device overlap.
         if self.lower_tier.all().is_empty() {
@@ -111,9 +112,11 @@ impl ReplayIndexer {
     async fn find_tiered_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
-    ) -> Result<TieredMatchDetails> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         let device = match &self.primary {
-            PrimaryIndexer::Single(indexer) => indexer.find_match_details(sequence.clone()).await?,
+            PrimaryIndexer::Single(indexer) => {
+                indexer.find_match_details(sequence.to_vec()).await?
+            }
             PrimaryIndexer::Concurrent(indexer) => indexer
                 .backend()
                 .find_match_details_impl_with_options(&sequence, false, false),
@@ -134,6 +137,16 @@ impl ReplayIndexer {
                 KvIndexerInterface::flush(indexer.as_ref()).await
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl TieredMatchProvider for ReplayIndexer {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_for_hashes(sequence.to_vec()).await
     }
 }
 
@@ -252,7 +265,8 @@ pub(crate) struct ReplayPlacement {
 pub(crate) struct KvReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
-    scheduler: Arc<ReplayScheduler>,
+    scheduler: Arc<ReplayScheduler<TieredOverlapRefresher<ReplayIndexer>>>,
+    refresh_overlap: bool,
     scheduler_cancel: CancellationToken,
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -288,6 +302,22 @@ impl KvReplayRouter {
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
+        let refresh_overlap =
+            WorkerSelector::<ReplayWorkerConfig>::required_worker_inputs(&selector)
+                .reads_kv_index()
+                && !config.use_remote_indexer
+                && profile
+                    .classes()
+                    .iter()
+                    .any(|class| class.queueing_enabled())
+                && read_overlap_refresh_after().is_some();
+        let refresher = refresh_overlap.then(|| {
+            Arc::new(TieredOverlapRefresher::new(
+                indexer.clone(),
+                CacheHitWeights::from(&config),
+                args.block_size as u32,
+            ))
+        });
         let scheduler_cancel = CancellationToken::new();
         let scheduler = Arc::new(dynamo_scheduler::host::LocalScheduler::new(
             slots,
@@ -296,7 +326,7 @@ impl KvReplayRouter {
             args.block_size as u32,
             selector,
             prefill_load_estimator,
-            None,
+            refresher,
             None,
             None,
             None,
@@ -319,6 +349,7 @@ impl KvReplayRouter {
             config,
             block_size: args.block_size as u32,
             scheduler,
+            refresh_overlap,
             scheduler_cancel,
             event_tx: Mutex::new(Some(event_tx)),
             event_task: Mutex::new(Some(event_task)),
@@ -350,14 +381,28 @@ impl KvReplayRouter {
     async fn request_identities(
         &self,
         request: &DirectRequest,
-    ) -> Result<(TieredMatchDetails, Option<Vec<u64>>)> {
+    ) -> Result<(
+        TieredMatchDetails,
+        Option<Vec<u64>>,
+        Option<Vec<LocalBlockHash>>,
+    )> {
         let cache_salt = request_cache_salt(request);
-        let salted_hashes = cache_salt.map(|cache_salt| {
-            local_block_hashes(
-                salted_request_hashes(&request.tokens, self.block_size, cache_salt)
-                    .local_block_hashes,
-            )
-        });
+        let salted_hashes = if let Some(cache_salt) = cache_salt {
+            Some({
+                local_block_hashes(
+                    salted_request_hashes(&request.tokens, self.block_size, cache_salt)
+                        .local_block_hashes,
+                )
+            })
+        } else if self.refresh_overlap {
+            Some(compute_block_hash_for_seq(
+                &request.tokens,
+                self.block_size,
+                BlockHashOptions::default(),
+            ))
+        } else {
+            None
+        };
         // Public tracking chains the salted block hashes, as the engine does.
         // Keyed identities never meet engine hashes; their namespace only
         // keeps one salt's active blocks apart from another's.
@@ -375,6 +420,10 @@ impl KvReplayRouter {
             },
             salted_hashes.as_deref(),
         );
+        let block_hashes = self
+            .refresh_overlap
+            .then(|| salted_hashes.clone())
+            .flatten();
         let tiered = match salted_hashes {
             Some(hashes) => self.indexer.find_matches_for_hashes(hashes).await?,
             None => {
@@ -383,14 +432,25 @@ impl KvReplayRouter {
                     .await?
             }
         };
-        Ok((tiered, token_seq))
+        Ok((tiered, token_seq, block_hashes))
     }
 
     async fn select_worker(&self, request: &DirectRequest) -> Result<ReplayPlacement> {
+        let request = self.prepare_schedule_request(request).await?;
+        let response = self.scheduler.schedule_request(request).await?;
+        Ok(ReplayPlacement {
+            worker_idx: usize::try_from(response.best_worker.worker_id)
+                .map_err(|_| anyhow!("selected worker id does not fit into usize"))?,
+            dp_rank: usize::try_from(response.best_worker.dp_rank)
+                .map_err(|_| anyhow!("selected DP rank does not fit into usize"))?,
+        })
+    }
+
+    async fn prepare_schedule_request(&self, request: &DirectRequest) -> Result<ScheduleRequest> {
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("online replay requires requests to have stable UUIDs"))?;
-        let (tiered, token_seq) = self.request_identities(request).await?;
+        let (tiered, token_seq, block_hashes) = self.request_identities(request).await?;
         let overlap = OverlapAnalysis::new(
             &CacheHitWeights::from(&self.config),
             self.block_size,
@@ -398,45 +458,36 @@ impl KvReplayRouter {
         )
         .signals();
         let (priority_jump, strict_priority) = request.router_priorities();
-        let response = self
-            .scheduler
-            .schedule_request(ScheduleRequest {
-                accounting_attribution: Default::default(),
-                mode: ScheduleMode::Tracked {
-                    request_id: uuid.to_string(),
-                },
-                token_seq,
-                block_hashes: None,
-                isl_tokens: request.tokens.len(),
-                overlap,
-                kv_transfer_candidates: None,
-                retain_kv_transfer_chain: false,
-                routing_constraints: RoutingConstraints::default(),
-                router_config_override: None,
-                lora_name: None,
-                priority_jump,
-                strict_priority,
-                policy_class: request.policy_class.clone(),
-                session_context: request
-                    .replay_context
-                    .as_ref()
-                    .and_then(|context| context.session_id())
-                    .map(|id| SessionContext::new(id.to_owned(), None, None, None)),
-                expected_output_tokens: Some(
-                    u32::try_from(request.max_output_tokens)
-                        .context("max_output_tokens does not fit into u32")?,
-                ),
-                affinity_target: None,
-                pinned_worker: None,
-                allowed_worker_ids: None,
-                shared_cache_hits: None,
-            })
-            .await?;
-        Ok(ReplayPlacement {
-            worker_idx: usize::try_from(response.best_worker.worker_id)
-                .map_err(|_| anyhow!("selected worker id does not fit into usize"))?,
-            dp_rank: usize::try_from(response.best_worker.dp_rank)
-                .map_err(|_| anyhow!("selected DP rank does not fit into usize"))?,
+        Ok(ScheduleRequest {
+            accounting_attribution: Default::default(),
+            mode: ScheduleMode::Tracked {
+                request_id: uuid.to_string(),
+            },
+            token_seq,
+            block_hashes,
+            isl_tokens: request.tokens.len(),
+            overlap,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
+            routing_constraints: RoutingConstraints::default(),
+            router_config_override: None,
+            lora_name: None,
+            priority_jump,
+            strict_priority,
+            policy_class: request.policy_class.clone(),
+            session_context: request
+                .replay_context
+                .as_ref()
+                .and_then(|context| context.session_id())
+                .map(|id| SessionContext::new(id.to_owned(), None, None, None)),
+            expected_output_tokens: Some(
+                u32::try_from(request.max_output_tokens)
+                    .context("max_output_tokens does not fit into u32")?,
+            ),
+            affinity_target: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            shared_cache_hits: None,
         })
     }
 
@@ -797,6 +848,323 @@ mod tests {
 
         router.on_complete(request.uuid.unwrap()).await.unwrap();
         router.shutdown().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::single(1)]
+    #[case::concurrent(2)]
+    #[tokio::test(start_paused = true)]
+    async fn online_queued_overlap_refresh_moves_worker(#[case] threads: u32) {
+        queued_worker_case(threads, Duration::from_secs(10), true).await;
+    }
+
+    async fn queued_worker_case(threads: u32, wait: Duration, refreshes: bool) {
+        use dynamo_scheduler::host::TrackingHashAlgorithm;
+        use std::io::Write;
+
+        let clock_guard = PausedIndexerClock::new();
+        let mut key = tempfile::NamedTempFile::new().unwrap();
+        key.write_all(&[0x39; 32]).unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {"block_size": 64, "max_num_batched_tokens": 64}
+        }))
+        .unwrap();
+        let router = Arc::new(
+            KvReplayRouter::new(
+                &args,
+                Some(KvRouterConfig {
+                    router_event_threads: threads,
+                    router_queue_threshold: Some(0.5),
+                    router_temperature: 0.0,
+                    overlap_score_credit: 100.0,
+                    router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+                    router_tracking_key_file: Some(key.path().to_path_buf()),
+                    router_tracking_key_id: Some("online-refresh".into()),
+                    ..Default::default()
+                }),
+                None,
+                2,
+            )
+            .unwrap(),
+        );
+        let first = router
+            .select_worker(&priority_request(1, 0, 0))
+            .await
+            .unwrap();
+        let second = router
+            .select_worker(&priority_request(2, 0, 0))
+            .await
+            .unwrap();
+        assert_ne!(first.worker_idx, second.worker_idx);
+        let request = priority_request(3, 0, 0);
+        let hash = compute_block_hash_for_seq(&request.tokens, 64, BlockHashOptions::default())[0];
+        router
+            .indexer
+            .apply_event(store_event(
+                first.worker_idx as u64,
+                1,
+                0,
+                hash,
+                StorageTier::Device,
+            ))
+            .await;
+        router.indexer.flush().await;
+        let request = router.prepare_schedule_request(&request).await.unwrap();
+        let queued = router.scheduler.schedule_request(request);
+        tokio::pin!(queued);
+        assert!(futures::poll!(queued.as_mut()).is_pending());
+        router.scheduler.admission_barrier().await.unwrap();
+        assert_eq!(router.scheduler.pending_count(), 1);
+        router
+            .indexer
+            .apply_event(remove_event(first.worker_idx as u64, 2, 1))
+            .await;
+        router
+            .indexer
+            .apply_event(store_event(
+                second.worker_idx as u64,
+                3,
+                0,
+                hash,
+                StorageTier::Device,
+            ))
+            .await;
+        router.indexer.flush().await;
+        tokio::time::advance(wait).await;
+        router.free(Uuid::from_u128(1)).await.unwrap();
+        router.free(Uuid::from_u128(2)).await.unwrap();
+        let selected = queued.await.unwrap().best_worker.worker_id as usize;
+        assert_eq!(
+            selected,
+            if refreshes {
+                second.worker_idx
+            } else {
+                first.worker_idx
+            }
+        );
+        router.free(Uuid::from_u128(3)).await.unwrap();
+        router.shutdown().await.unwrap();
+        clock_guard.release().await;
+    }
+
+    #[rstest::rstest]
+    #[case::before_threshold(false, false, 1)]
+    #[case::at_threshold(true, false, 1)]
+    #[case::host_single(true, true, 1)]
+    #[case::host_concurrent(true, true, 2)]
+    #[tokio::test(start_paused = true)]
+    async fn online_queued_overlap_refresh_updates_load(
+        #[case] at_threshold: bool,
+        #[case] host: bool,
+        #[case] threads: u32,
+    ) {
+        queued_load_case(
+            threads,
+            host,
+            if at_threshold {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_secs(5)
+            },
+            if at_threshold {
+                if host { 32 } else { 64 }
+            } else {
+                0
+            },
+        )
+        .await;
+    }
+
+    async fn queued_load_case(threads: u32, host: bool, wait: Duration, expected: usize) {
+        let clock_guard = PausedIndexerClock::new();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {"block_size": 64, "max_num_batched_tokens": 64}
+        }))
+        .unwrap();
+        let router = Arc::new(
+            KvReplayRouter::new(
+                &args,
+                Some(KvRouterConfig {
+                    router_queue_threshold: Some(0.5),
+                    router_track_prefill_tokens: true,
+                    router_event_threads: threads,
+                    host_cache_hit_weight: 0.5,
+                    ..Default::default()
+                }),
+                None,
+                1,
+            )
+            .unwrap(),
+        );
+        router
+            .select_worker(&priority_request(1, 0, 0))
+            .await
+            .unwrap();
+        let request = priority_request(2, 0, 0);
+        let hash = compute_block_hash_for_seq(&request.tokens, 64, BlockHashOptions::default())[0];
+        router
+            .indexer
+            .apply_event(store_event(0, 1, 0, hash, StorageTier::Device))
+            .await;
+        router.indexer.flush().await;
+        let request = router.prepare_schedule_request(&request).await.unwrap();
+        let queued = router.scheduler.schedule_request(request);
+        tokio::pin!(queued);
+        assert!(futures::poll!(queued.as_mut()).is_pending());
+        router.scheduler.admission_barrier().await.unwrap();
+        assert_eq!(router.scheduler.pending_count(), 1);
+        router.indexer.apply_event(remove_event(0, 2, 1)).await;
+        if host {
+            router
+                .indexer
+                .apply_event(store_event(0, 3, 0, hash, StorageTier::HostPinned))
+                .await;
+        }
+        router.indexer.flush().await;
+        tokio::time::advance(wait).await;
+        router.free(Uuid::from_u128(1)).await.unwrap();
+        queued.await.unwrap();
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            expected
+        );
+        router.free(Uuid::from_u128(2)).await.unwrap();
+        router.shutdown().await.unwrap();
+        clock_guard.release().await;
+    }
+
+    #[rstest::rstest]
+    #[case::queue_disabled(false, false, true)]
+    #[case::remote_indexer(true, true, true)]
+    #[case::no_index_reads(true, false, false)]
+    #[tokio::test]
+    async fn online_queued_overlap_refresh_exclusions(
+        #[case] queue: bool,
+        #[case] remote: bool,
+        #[case] reads_index: bool,
+    ) {
+        let args = MockerConfig::default();
+        let router = KvReplayRouter::new(
+            &args,
+            Some(KvRouterConfig {
+                router_queue_threshold: queue.then_some(0.5),
+                use_remote_indexer: remote,
+                overlap_score_credit: if reads_index { 1.0 } else { 0.0 },
+                host_cache_hit_weight: 0.0,
+                disk_cache_hit_weight: 0.0,
+                ..Default::default()
+            }),
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(!router.refresh_overlap);
+        router.shutdown().await.unwrap();
+    }
+
+    struct PausedIndexerClock {
+        release: Option<tokio::sync::oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+        _watchdog: std::sync::mpsc::Sender<()>,
+    }
+
+    impl PausedIndexerClock {
+        fn new() -> Self {
+            let (watchdog, expiry) = std::sync::mpsc::channel::<()>();
+            // A coarse hang limit; routing assertions use only the explicitly advanced clock.
+            std::thread::spawn(move || {
+                if matches!(
+                    expiry.recv_timeout(Duration::from_secs(120)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    eprintln!("online refresh test exceeded its hang watchdog");
+                    std::process::exit(2);
+                }
+            });
+            let (release, wait) = tokio::sync::oneshot::channel();
+            // Tokio inhibits paused-clock auto-advance while a blocking task exists.
+            // Wait without spinning while indexer threads process their commands.
+            let task = tokio::task::spawn_blocking(move || {
+                let _ = wait.blocking_recv();
+            });
+            Self {
+                release: Some(release),
+                task,
+                _watchdog: watchdog,
+            }
+        }
+
+        async fn release(mut self) {
+            self.release.take();
+            (&mut self.task).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn queued_overlap_refresh_environment_controls() {
+        for (case, value) in [
+            ("default", None),
+            ("disabled", Some("0")),
+            ("custom", Some("0.01")),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "replay::online::router::tests::queued_refresh_environment_child",
+                    "--ignored",
+                ])
+                .env("DYNAMO_REPLAY_REFRESH_TEST_CASE", case)
+                .env_remove("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS");
+            if let Some(value) = value {
+                command.env("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS", value);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "run in isolated processes by queued_overlap_refresh_environment_controls"]
+    async fn queued_refresh_environment_child() {
+        match std::env::var("DYNAMO_REPLAY_REFRESH_TEST_CASE")
+            .unwrap()
+            .as_str()
+        {
+            "default" => {
+                queued_worker_case(1, Duration::from_secs(10), true).await;
+                queued_load_case(1, false, Duration::from_secs(5), 0).await;
+                queued_load_case(1, false, Duration::from_secs(10), 64).await;
+            }
+            "disabled" => {
+                queued_worker_case(1, Duration::from_secs(20), false).await;
+                queued_load_case(1, false, Duration::from_secs(20), 0).await;
+            }
+            "custom" => {
+                queued_load_case(1, false, Duration::from_millis(5), 0).await;
+                queued_load_case(1, false, Duration::from_millis(10), 64).await;
+                queued_worker_case(2, Duration::from_millis(10), true).await;
+            }
+            case => panic!("unknown test case {case}"),
+        }
+    }
+
+    fn remove_event(worker_id: WorkerId, event_id: u64, block_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(dynamo_kv_events::event::KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(block_id)],
+                }),
+                dp_rank: 0,
+            },
+        )
     }
 
     #[tokio::test]
@@ -1229,7 +1597,7 @@ policy_classes:
     /// Device overlap in blocks, per worker, that routing sees for the prompt
     /// in one cache namespace.
     async fn routed_overlap(router: &KvReplayRouter, cache_salt: Option<&str>) -> Vec<(u64, u32)> {
-        let (tiered, _) = router
+        let (tiered, _, _) = router
             .request_identities(&cache_salt_request(0, cache_salt))
             .await
             .unwrap();
@@ -1363,7 +1731,7 @@ policy_classes:
 
         let worker = WorkerWithDpRank::new(1, 0);
         for (cache_salt, host_blocks) in [(Some("a"), Some(1)), (Some("b"), None), (None, None)] {
-            let (tiered, _) = kv_router
+            let (tiered, _, _) = kv_router
                 .request_identities(&cache_salt_request(0, cache_salt))
                 .await
                 .unwrap();
@@ -1411,7 +1779,7 @@ policy_classes:
         // Public tracking identities are the engine's sequence hashes.
         for cache_salt in [None, Some(""), Some("a"), Some("b")] {
             let request = cache_salt_request(0, cache_salt);
-            let (_, token_seq) = kv_router.request_identities(&request).await.unwrap();
+            let (_, token_seq, _) = kv_router.request_identities(&request).await.unwrap();
             assert_eq!(
                 token_seq,
                 Some(
@@ -1458,7 +1826,7 @@ policy_classes:
         };
         let mut identities = Vec::new();
         for cache_salt in [None, Some(""), Some("a"), Some("a"), Some("b")] {
-            let (_, token_seq) = kv_router
+            let (_, token_seq, _) = kv_router
                 .request_identities(&cache_salt_request(0, cache_salt))
                 .await
                 .unwrap();

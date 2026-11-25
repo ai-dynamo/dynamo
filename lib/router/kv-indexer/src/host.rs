@@ -21,7 +21,8 @@ pub use crate::kv_indexer::{KvIndexer, apply_prune_removes, apply_routing_decisi
 pub use crate::local::LocalKvIndexer;
 pub use crate::lower_tier::LowerTierMatchDetails;
 pub use crate::lower_tier_indexers::{
-    LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails, query_lower_tiers_with_options,
+    LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails, TieredMatchProvider,
+    query_lower_tiers_with_options,
 };
 #[cfg(feature = "export")]
 pub use crate::metrics::{

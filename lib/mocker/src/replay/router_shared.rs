@@ -131,8 +131,8 @@ impl WorkerConfigLike for ReplayWorkerConfig {
     }
 }
 
-pub(super) type ReplayScheduler =
-    LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
+pub(super) type ReplayScheduler<RF> =
+    LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector, RF>;
 
 pub(in crate::replay) fn replay_worker_config(args: &MockerConfig) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
