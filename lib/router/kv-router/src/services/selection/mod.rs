@@ -16,6 +16,8 @@
 ))]
 mod server;
 mod service;
+#[cfg(feature = "replica-sync-zmq")]
+mod worker_publisher;
 #[cfg(feature = "ingest-zmq")]
 mod zmq_ingress;
 
@@ -50,6 +52,8 @@ pub use service::{
     SelectionService, SelectionServiceBuilder, SessionBindingUpdates, local_selection_core,
     local_selection_core_with_host, warn_for_unserved_worker_selection_policies,
 };
+#[cfg(feature = "replica-sync-zmq")]
+pub use worker_publisher::WorkerSequenceEventPublisher;
 #[cfg(feature = "ingest-zmq")]
 pub use zmq_ingress::ZmqDirectIngress;
 

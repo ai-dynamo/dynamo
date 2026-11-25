@@ -24,8 +24,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::{
     decision_lifecycle::{self, run_until_killed, spawn_blocking_with_permit},
-    disconnect::create_connection_monitor,
-    metrics::{CancellationLabels, Endpoint, Metrics, SystemOnePhase},
     service_v2,
 };
 use crate::{
@@ -43,6 +41,10 @@ use crate::{
             parse_candidate_scores,
         },
     },
+};
+use dynamo_http_server::{
+    disconnect::create_connection_monitor,
+    metrics::{CancellationLabels, Endpoint, Metrics, SystemOnePhase},
 };
 
 #[path = "systemone/abort.rs"]
@@ -184,7 +186,7 @@ fn acquire_admission(
             ),
             decision_lifecycle::AdmissionError::CapacityExhausted => response::capacity_error(
                 dialect,
-                super::error::overload_status_code(),
+                dynamo_error::http::overload_status_code(),
                 "System One request capacity is exhausted",
             ),
         };
@@ -295,7 +297,7 @@ async fn handle_request(
         Err(_) => {
             return response::capacity_error(
                 dialect,
-                super::error::overload_status_code(),
+                dynamo_error::http::overload_status_code(),
                 "System One preprocessing capacity is exhausted",
             );
         }
@@ -452,7 +454,7 @@ fn prepare_branches(
                     cause.downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
                 {
                     incompatible.0
-                } else if super::error::find_canonical_error_in_chain(cause.as_ref())
+                } else if dynamo_error::http::find_canonical_error_in_chain(cause.as_ref())
                     .is_some_and(|error| {
                         error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest
                     })

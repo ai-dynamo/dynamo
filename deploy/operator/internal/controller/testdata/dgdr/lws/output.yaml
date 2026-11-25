@@ -38,7 +38,7 @@ spec:
                 - --disaggregation-mode
                 - decode
                 - --ais-perf-model
-                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
+                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.32.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
                 - --engine-type
                 - vllm
               command:
@@ -68,7 +68,7 @@ spec:
                 - --disaggregation-mode
                 - prefill
                 - --ais-perf-model
-                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
+                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.32.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
                 - --engine-type
                 - vllm
               command:
@@ -114,7 +114,7 @@ spec:
             - --disaggregation-mode
             - decode
             - --ais-perf-model
-            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.32.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:
@@ -281,7 +281,7 @@ spec:
               - --disaggregation-mode
               - decode
               - --ais-perf-model
-              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
+              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.32.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
               - --engine-type
               - vllm
             command:
@@ -404,7 +404,7 @@ spec:
               - --disaggregation-mode
               - decode
               - --ais-perf-model
-              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
+              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.32.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
               - --engine-type
               - vllm
             command:
@@ -553,7 +553,7 @@ spec:
             - --disaggregation-mode
             - prefill
             - --ais-perf-model
-            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.32.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:
@@ -718,7 +718,7 @@ spec:
             - --disaggregation-mode
             - prefill
             - --ais-perf-model
-            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.32.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:

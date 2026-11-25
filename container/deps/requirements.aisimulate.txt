@@ -3,4 +3,4 @@
 
 # Published AISimulate wheel staged into planner and framework runtime wheelhouses.
 # Keep in sync with the aisim-core pins in Cargo.toml and lib/bindings/python/Cargo.toml.
-aisim==0.15.0.dev202611130000000104
+aisim==0.15.0.dev202611230000000114

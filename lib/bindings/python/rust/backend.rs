@@ -106,7 +106,7 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
-    py.allow_threads(move || dynamo_sglang_sidecar::run(cli_argv))
+    py.detach(move || dynamo_sglang_sidecar::run(cli_argv))
         .map_err(sidecar_run_to_pyerr)
 }
 
@@ -131,7 +131,7 @@ fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> 
     let bootstrap = dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+    py.detach(move || dynamo_sidecar_common::run(bootstrap))
         .map_err(sidecar_run_to_pyerr)
 }
 
@@ -153,7 +153,7 @@ fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
-    py.allow_threads(move || dynamo_trtllm_sidecar::run(cli_argv))
+    py.detach(move || dynamo_trtllm_sidecar::run(cli_argv))
         .map_err(
             |err| match err.downcast::<dynamo_sidecar_common::SidecarStartupError>() {
                 Ok(startup) => sidecar_startup_to_pyerr(startup),
@@ -174,7 +174,8 @@ fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()
     module = "dynamo._core.backend",
     name = "DisaggregationMode",
     eq,
-    eq_int
+    eq_int,
+    from_py_object
 )]
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub enum DisaggregationMode {
@@ -208,7 +209,11 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
 // opt in.
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "dynamo._core.backend", name = "LlmRegistration")]
+#[pyclass(
+    module = "dynamo._core.backend",
+    name = "LlmRegistration",
+    from_py_object
+)]
 #[derive(Clone, Default)]
 pub struct LlmRegistration {
     inner: RsLlmRegistration,
@@ -311,7 +316,7 @@ impl LlmRegistration {
     }
 }
 
-#[pyclass(module = "dynamo._core.backend", name = "EngineConfig")]
+#[pyclass(module = "dynamo._core.backend", name = "EngineConfig", from_py_object)]
 #[derive(Clone, Default)]
 pub struct EngineConfig {
     inner: RsEngineConfig,
@@ -365,7 +370,7 @@ impl EngineConfig {
             .map(|inner| LlmRegistration { inner })
     }
     #[getter]
-    fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn runtime_data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pythonize(py, &self.inner.runtime_data)
             .map(|value| value.unbind())
             .map_err(to_pyerr)
@@ -376,7 +381,11 @@ impl EngineConfig {
 // RuntimeConfig
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "dynamo._core.backend", name = "RuntimeConfig")]
+#[pyclass(
+    module = "dynamo._core.backend",
+    name = "RuntimeConfig",
+    from_py_object
+)]
 #[derive(Clone, Default)]
 pub struct RuntimeConfig {
     inner: RsRuntimeConfig,
@@ -407,7 +416,7 @@ impl RuntimeConfig {
 // WorkerConfig
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "dynamo._core.backend", name = "WorkerConfig")]
+#[pyclass(module = "dynamo._core.backend", name = "WorkerConfig", from_py_object)]
 #[derive(Clone)]
 pub struct WorkerConfig {
     inner: RsWorkerConfig,
@@ -460,7 +469,7 @@ impl WorkerConfig {
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
-        health_check_payload: Option<PyObject>,
+        health_check_payload: Option<Py<PyAny>>,
         structural_tag: Option<&Bound<'_, PyDict>>,
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
@@ -547,8 +556,8 @@ impl WorkerConfig {
 
 #[pyclass(module = "dynamo._core.backend", name = "Worker")]
 pub struct Worker {
-    engine: Arc<PyObject>,
-    event_loop: Arc<PyObject>,
+    engine: Arc<Py<PyAny>>,
+    event_loop: Arc<Py<PyAny>>,
     config: RsWorkerConfig,
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
@@ -570,9 +579,9 @@ impl Worker {
     #[new]
     #[pyo3(signature = (engine, config, event_loop, raw = false))]
     fn new(
-        engine: PyObject,
+        engine: Py<PyAny>,
         config: WorkerConfig,
-        event_loop: PyObject,
+        event_loop: Py<PyAny>,
         raw: bool,
     ) -> PyResult<Self> {
         // Fetching may already have initialized Tokio. Transport options belong
@@ -687,11 +696,11 @@ impl Worker {
 
 struct PyEngineCore {
     // Wrapped in `Arc` so we can clone refcount-style without acquiring
-    // the GIL — `PyObject::clone` would otherwise need to bump Python's
+    // the GIL — `Py<PyAny>::clone` would otherwise need to bump Python's
     // own refcount, which requires the GIL. Same pattern as
     // `PythonAsyncEngine` in `engine.rs`.
-    engine: Arc<PyObject>,
-    event_loop: Arc<PyObject>,
+    engine: Arc<Py<PyAny>>,
+    event_loop: Arc<Py<PyAny>>,
     trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
     request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
     /// The admission gate of the `Worker` driving this engine, handed to the
@@ -701,8 +710,8 @@ struct PyEngineCore {
 
 impl PyEngineCore {
     fn new(
-        engine: Arc<PyObject>,
-        event_loop: Arc<PyObject>,
+        engine: Arc<Py<PyAny>>,
+        event_loop: Arc<Py<PyAny>>,
         admission_gate: WorkerAdmissionGate,
     ) -> Self {
         Self {
@@ -716,7 +725,7 @@ impl PyEngineCore {
 
     /// Call a no-arg async method on `self.engine` and await it on
     /// `self.event_loop`. Used for `start`, `drain`, `cleanup`.
-    async fn call_method0_async(&self, method: &'static str) -> Result<PyObject, PyErr> {
+    async fn call_method0_async(&self, method: &'static str) -> Result<Py<PyAny>, PyErr> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
 
@@ -724,7 +733,7 @@ impl PyEngineCore {
         // worker; spawn_blocking matches the existing `PythonAsyncEngine`
         // pattern in `engine.rs`.
         let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<_> {
+            Python::attach(|py| -> PyResult<_> {
                 let bound = engine.bind(py);
                 let coroutine = bound.call_method0(method)?;
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
@@ -744,7 +753,7 @@ impl PyEngineCore {
     /// `Serialize` — `PreprocessedRequest` or `serde_json::Value`), calls
     /// Python `generate(request, context=ctx)`, and returns the resulting
     /// stream of Python chunk objects + the state guard. The caller maps each
-    /// `PyObject` to its output type.
+    /// `Py<PyAny>` to its output type.
     ///
     /// Invariant: must be awaited within the `engine.generate` span (both
     /// adapters `.instrument()` it) so the span capture below sees the right
@@ -753,7 +762,7 @@ impl PyEngineCore {
         &self,
         request: T,
         ctx: dynamo_backend_common::GenerateContext,
-    ) -> Result<(BoxStream<'static, PyResult<PyObject>>, RequestStateGuard), DynamoError> {
+    ) -> Result<(BoxStream<'static, PyResult<Py<PyAny>>>, RequestStateGuard), DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let trace_context = get_distributed_tracing_context();
@@ -799,7 +808,7 @@ impl PyEngineCore {
         // Pythonize the request, call generate(request, context=ctx), and
         // turn the resulting Python async generator into a Rust stream.
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let py_request = pythonize(py, &request)?;
                 let py_ctx = Py::new(
                     py,
@@ -862,7 +871,7 @@ impl PyEngineCore {
         // Forward worker_id to Python `start(worker_id)`. spawn_blocking
         // around the GIL section matches `call_method0_async`.
         let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<_> {
+            Python::attach(|py| -> PyResult<_> {
                 let bound = engine.bind(py);
                 let coroutine = bound.call_method1("start", (worker_id,))?;
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
@@ -880,7 +889,7 @@ impl PyEngineCore {
 
         let result = py_future.await.map_err(py_err_to_dynamo)?;
 
-        Python::with_gil(|py| -> PyResult<RsEngineConfig> {
+        Python::attach(|py| -> PyResult<RsEngineConfig> {
             let bound = result.bind(py);
             // Accept either the Rust EngineConfig pyclass or any Python
             // object exposing the canonical attribute names (e.g. the
@@ -947,7 +956,7 @@ impl PyEngineCore {
 
         let res: Result<(), PyErr> = async move {
             let py_future = tokio::task::spawn_blocking(move || {
-                Python::with_gil(|py| -> PyResult<_> {
+                Python::attach(|py| -> PyResult<_> {
                     let bound = engine.bind(py);
                     let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None, metadata))?;
                     let coroutine = bound.call_method1("abort", (py_ctx,))?;
@@ -976,7 +985,7 @@ impl PyEngineCore {
             .call_method0_async("is_quiescent")
             .await
             .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Option<bool>> {
+        Python::attach(|py| -> PyResult<Option<bool>> {
             let bound = py_obj.bind(py);
             // Python `None` maps to `Ok(None)`; a bool to `Some(bool)`.
             if bound.is_none() {
@@ -999,7 +1008,7 @@ impl PyEngineCore {
             .call_method0_async("health_check_payload")
             .await
             .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Option<serde_json::Value>> {
+        Python::attach(|py| -> PyResult<Option<serde_json::Value>> {
             let bound = py_obj.bind(py);
             if bound.is_none() {
                 return Ok(None);
@@ -1042,7 +1051,7 @@ impl PyEngineCore {
         let engine = self.engine.clone();
         let on_publisher_ready: dynamo_backend_common::OnSnapshotPublisherReady =
             Box::new(move |publisher: Arc<RsSnapshotPublisher>| {
-                Python::with_gil(|py| -> PyResult<()> {
+                Python::attach(|py| -> PyResult<()> {
                     let py_pub = Py::new(py, PySnapshotPublisher { inner: publisher })?;
                     engine
                         .bind(py)
@@ -1061,7 +1070,7 @@ impl PyEngineCore {
     async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
         let engine = self.engine.clone();
         let join = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<Vec<String>> {
+            Python::attach(|py| -> PyResult<Vec<String>> {
                 let result = engine.bind(py).call_method0("supported_controls")?;
                 let mut controls = Vec::new();
                 for item in result.try_iter()? {
@@ -1092,7 +1101,7 @@ impl PyEngineCore {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let py_body = pythonize(py, &body).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Failed to convert engine control request body to Python: {e}"
@@ -1117,7 +1126,7 @@ impl PyEngineCore {
         let py_result = py_future.await.map_err(py_err_to_dynamo)?;
 
         tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Failed to serialize engine control response: {e}"
@@ -1138,7 +1147,7 @@ impl PyEngineCore {
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
         let engine = self.engine.clone();
         let join = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<Vec<String>> {
+            Python::attach(|py| -> PyResult<Vec<String>> {
                 let result = engine.bind(py).call_method0("supported_updates")?;
                 let mut updates = Vec::new();
                 for item in result.try_iter()? {
@@ -1169,7 +1178,7 @@ impl PyEngineCore {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let py_body = pythonize(py, &body).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Failed to convert engine update request body to Python: {e}"
@@ -1194,7 +1203,7 @@ impl PyEngineCore {
         let py_result = py_future.await.map_err(py_err_to_dynamo)?;
 
         tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Failed to serialize engine update response: {e}"
@@ -1223,7 +1232,7 @@ impl PyEngineCore {
         let admission_gate = self.admission_gate.clone();
 
         let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<_> {
+            Python::attach(|py| -> PyResult<_> {
                 let py_endpoint = Py::new(
                     py,
                     crate::Endpoint {
@@ -1263,7 +1272,7 @@ impl PyEngineCore {
         let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(metrics);
 
         let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<_> {
+            Python::attach(|py| -> PyResult<_> {
                 let bound = engine.bind(py);
                 let py_metrics = Py::new(py, py_metrics_state)?;
                 let coroutine = bound.call_method1("register_prometheus", (py_metrics,))?;
@@ -1289,9 +1298,9 @@ impl PyEngineCore {
     async fn read_dp_ranks(&self) -> Result<Vec<u32>, DynamoError> {
         let engine = self.engine.clone();
         let join = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<Vec<u32>> {
+            Python::attach(|py| -> PyResult<Vec<u32>> {
                 let result = engine.bind(py).call_method0("component_metrics_dp_ranks")?;
-                let list = result.downcast::<pyo3::types::PyList>()?;
+                let list = result.cast::<pyo3::types::PyList>()?;
                 list.iter().map(|item| item.extract::<u32>()).collect()
             })
         })
@@ -1320,8 +1329,8 @@ struct PyLLMEngine {
 
 impl PyLLMEngine {
     fn new(
-        engine: Arc<PyObject>,
-        event_loop: Arc<PyObject>,
+        engine: Arc<Py<PyAny>>,
+        event_loop: Arc<Py<PyAny>>,
         admission_gate: WorkerAdmissionGate,
     ) -> Self {
         Self {
@@ -1358,7 +1367,7 @@ impl LLMEngine for PyLLMEngine {
                 // Depythonize the chunk dict on a blocking thread — same
                 // GIL-contention rationale as the request side.
                 let parsed = tokio::task::spawn_blocking(move || {
-                    Python::with_gil(|py| -> PyResult<LLMEngineOutput> {
+                    Python::attach(|py| -> PyResult<LLMEngineOutput> {
                         let bound = py_obj.into_bound(py);
                         let mut out: LLMEngineOutput = depythonize(&bound).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -1420,9 +1429,9 @@ impl LLMEngine for PyLLMEngine {
             .call_method0_async("kv_event_sources")
             .await
             .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Vec<RsKvEventSource>> {
+        Python::attach(|py| -> PyResult<Vec<RsKvEventSource>> {
             let bound = py_list.bind(py);
-            let list = bound.downcast::<pyo3::types::PyList>()?;
+            let list = bound.cast::<pyo3::types::PyList>()?;
             let mut sources = Vec::with_capacity(list.len());
             for item in list.iter() {
                 sources.push(depythonize_kv_source(&item)?);
@@ -1480,8 +1489,8 @@ struct PyRawEngine {
 
 impl PyRawEngine {
     fn new(
-        engine: Arc<PyObject>,
-        event_loop: Arc<PyObject>,
+        engine: Arc<Py<PyAny>>,
+        event_loop: Arc<Py<PyAny>>,
         admission_gate: WorkerAdmissionGate,
     ) -> Self {
         Self {
@@ -1520,7 +1529,7 @@ impl RawEngine for PyRawEngine {
                 // No `LLMEngineOutput` shaping: the media response body
                 // flows through verbatim.
                 let parsed = tokio::task::spawn_blocking(move || {
-                    Python::with_gil(|py| -> PyResult<serde_json::Value> {
+                    Python::attach(|py| -> PyResult<serde_json::Value> {
                         let bound = py_obj.into_bound(py);
                         depythonize(&bound).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -1606,7 +1615,7 @@ impl PySnapshotPublisher {
             dp_rank,
         };
         let inner = self.inner.clone();
-        py.allow_threads(move || inner.publish(dp_rank, snap));
+        py.detach(move || inner.publish(dp_rank, snap));
         Ok(())
     }
 }
@@ -1637,7 +1646,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             idempotent_stores: false,
         }),
         "PushSource" => {
-            // Capture the Python callable as a `PyObject` and wrap in a
+            // Capture the Python callable as a `Py<PyAny>` and wrap in a
             // Rust closure. The closure runs once when Worker has the
             // publisher ready: it acquires the GIL, wraps the Rust
             // `Arc<KvEventPublisher>` as the existing Python pyclass, and
@@ -1645,9 +1654,9 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             // declared sync on the Python side (see `PushSource.on_ready`
             // in `dynamo.common.backend.publisher`), so no asyncio
             // round-trip is needed here.
-            let on_ready_obj: PyObject = item.getattr("on_ready")?.into();
+            let on_ready_obj: Py<PyAny> = item.getattr("on_ready")?.into();
             let on_ready: OnPublisherReady = Box::new(move |publisher| {
-                Python::with_gil(|py| -> PyResult<()> {
+                Python::attach(|py| -> PyResult<()> {
                     let py_pub = Py::new(py, PyKvEventPublisher::from_arc(publisher, dp_rank))?;
                     on_ready_obj.call1(py, (py_pub,))?;
                     Ok(())
@@ -1677,7 +1686,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
 ///     rather than silently dropping them.
 fn opt_attr<T>(bound: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<T>>
 where
-    T: for<'py> FromPyObject<'py>,
+    T: for<'py> FromPyObjectOwned<'py>,
 {
     let attr = match bound.getattr(name) {
         Ok(v) => v,
@@ -1689,14 +1698,14 @@ where
     if attr.is_none() {
         return Ok(None);
     }
-    Ok(Some(attr.extract()?))
+    Ok(Some(attr.extract::<T>().map_err(Into::into)?))
 }
 
 /// Map a Python exception to a `BackendError` variant. `DynamoException`
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
             let mut builder = DynamoError::builder()
                 .error_type(ErrorType::Backend(backend))

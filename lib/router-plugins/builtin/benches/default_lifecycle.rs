@@ -3,7 +3,8 @@
 
 //! Includes load projection, selection, booking, and release in the shared core.
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_kv_router::services::selection::local_selection_core;
 use dynamo_router_policies::default_factory;
 use dynamo_scheduler::host::{
@@ -25,8 +26,11 @@ fn bench(c: &mut Criterion) {
         .sample_size(30)
         .nresamples(1_000);
     for count in [8, 64, 512] {
-        let reference: WorkerSelectionPolicyFactory = Arc::new(|config, role, _| {
-            WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+        let reference: WorkerSelectionPolicyFactory = Arc::new(|context| {
+            WorkerSelectionPolicy::reference(
+                context.selection_config().clone(),
+                context.worker_type().default_selector_label(),
+            )
         });
         for (label, factory) in [("reference", reference), ("plugin", default_factory())] {
             let core = local_selection_core(

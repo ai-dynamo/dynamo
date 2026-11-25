@@ -37,6 +37,7 @@ import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.exceptions import VLLMClientError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -46,7 +47,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 
 from dynamo._core import Context
@@ -116,6 +117,7 @@ from .engine_generate import (
     publish_json_multimodal_capability,
 )
 from .engine_monitor import VllmEngineMonitor
+from .errors import uuid_image_cache_miss_error, vllm_client_error_to_http_error
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
@@ -976,17 +978,18 @@ ResponseT = TypeVar("ResponseT")
 
 async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
+    request: dict[str, Any],
 ) -> AsyncIterator[ResponseT]:
     """Keep request-side vLLM errors client-visible on worker endpoints."""
-    from vllm.exceptions import VLLMClientError
-
-    from .errors import vllm_client_error_to_http_error
-
     try:
         async for chunk in generator:
             yield chunk
     except VLLMClientError as exc:
         raise vllm_client_error_to_http_error(exc) from exc
+    except (ValueError, EngineGenerateError) as exc:
+        if error := uuid_image_cache_miss_error(exc, request):
+            raise error from exc
+        raise
 
 
 def _as_exact_int(value: object) -> Optional[int]:
@@ -3561,7 +3564,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in _translate_vllm_client_errors(generator):
+            async for chunk in _translate_vllm_client_errors(generator, request):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
@@ -4214,7 +4217,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
             generator = self._generate_token_mode(request, context, request_id)
-            async for chunk in _translate_vllm_client_errors(generator):
+            async for chunk in _translate_vllm_client_errors(generator, request):
                 yield chunk
 
     def _prefill_kv_protocol(
@@ -4796,7 +4799,7 @@ class EmbeddingWorkerHandler:
                 # Input vLLM rejects here (e.g. a conversation that renders
                 # to an empty prompt) is a client error, as with ``vllm serve``.
                 async for out in _translate_vllm_client_errors(
-                    self.engine_client.encode(**encode_kwargs)
+                    self.engine_client.encode(**encode_kwargs), request
                 ):
                     final_output = out
             if final_output is None:
