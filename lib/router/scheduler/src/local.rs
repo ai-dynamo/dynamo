@@ -884,6 +884,7 @@ mod tests {
     };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
+    use dynamo_slot_tracker::host::ActiveSequenceEventOrigin;
     use dynamo_slot_tracker::host::BusyThresholdsHostExt;
     use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
     use dynamo_worker_selection::WorkerCandidates;
@@ -2004,13 +2005,14 @@ mod tests {
 
         wait_for_pending_count(&scheduler, 1).await;
 
+        // The worker's mark: a peer router's mark applies only to that router's mirror.
         event_tx
             .send(ActiveSequenceEvent {
                 request_id: "req-1".to_string(),
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: 1,
-                origin: Default::default(),
+                origin: ActiveSequenceEventOrigin::Worker,
                 lora_name: None,
             })
             .unwrap();

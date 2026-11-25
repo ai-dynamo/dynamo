@@ -253,10 +253,7 @@ impl RequestLeaseManager {
         debug_assert!(installed, "request lease manager scheduler set twice");
     }
 
-    /// Start offering every lease to `keepalive` twice per scan interval. With
-    /// replica sync on, `keepalive` re-sends the prefill-completed event for each
-    /// booking this router made that is past prefill, and peer routers count it
-    /// as progress on their mirrored lease.
+    /// Offer every lease to `keepalive` twice per scan interval until `cancellation`.
     pub(crate) fn start_keepalives(
         &self,
         keepalive: impl Fn(&SchedulerBookingDescriptor) + Send + 'static,
