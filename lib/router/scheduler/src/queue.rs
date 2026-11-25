@@ -514,6 +514,41 @@ struct SelectedWorkerForRequest {
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
 }
 
+impl SelectedWorkerForRequest {
+    /// The response for this selection, which takes the request's fetch candidates with
+    /// it, then the selected worker's load and the non-max-overlap observation.
+    fn into_response(
+        self,
+        request: &mut SchedulingRequest,
+    ) -> (
+        SchedulingResponse,
+        AdvisoryWorkerLoad,
+        Option<NonMaxOverlapSelection>,
+    ) {
+        let Self {
+            selection,
+            selection_trace,
+            selected_worker_tiers,
+            selected_worker_load,
+            non_max_overlap_selection,
+        } = self;
+        let response = SchedulingResponse {
+            best_worker: selection.worker,
+            effective_overlap_blocks: selection.effective_overlap_blocks,
+            cached_tokens: selection.cached_tokens,
+            max_raw_cached_tokens: selection.max_raw_cached_tokens,
+            selected_raw_cached_tokens: selection.selected_raw_cached_tokens,
+            selected_worker_tiers,
+            kv_copy_source: request.kv_copy_source(selection.worker, selection.kv_transfer_source),
+            kv_transfer_candidates: request.kv_transfer_candidates.take(),
+            potential_decode_blocks: selection.potential_decode_blocks,
+            selection_trace,
+            log_fields: selection.log_fields,
+        };
+        (response, selected_worker_load, non_max_overlap_selection)
+    }
+}
+
 #[derive(Clone)]
 struct QueueEligibility {
     overloaded: Option<OverloadedWorkerProvider>,
@@ -2957,23 +2992,18 @@ impl<
                 break;
             };
             let snapshot = candidate.snapshot();
-            let current_pending_count = self.pending_count.load(AtomicOrdering::Relaxed);
+            let class_index = candidate.class_index();
             debug_assert!(
-                current_pending_count > 0,
+                self.pending_count.load(AtomicOrdering::Relaxed) > 0,
                 "pending_count underflow on queue drain"
             );
-            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
-            let current_pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
             debug_assert!(
-                current_pending_isl_tokens >= snapshot.raw_isl_tokens,
+                self.pending_isl_tokens.load(AtomicOrdering::Relaxed) >= snapshot.raw_isl_tokens,
                 "pending_isl_tokens underflow: pending={} request_isl_tokens={}",
-                current_pending_isl_tokens,
+                self.pending_isl_tokens.load(AtomicOrdering::Relaxed),
                 snapshot.raw_isl_tokens
             );
-            self.pending_isl_tokens
-                .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-            let class_index = candidate.class_index();
-            self.subtract_class_counters(class_index, snapshot);
+            self.subtract_pending_counters(class_index, snapshot);
             let queued = candidate.payload_mut();
             let mut refreshed = false;
             let mut released = false;
@@ -3425,25 +3455,10 @@ impl<
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.with_projected_loads(request, decay_now, None, |actor, request, _| {
             let selected = actor.select_worker_for_request(request, false, None)?;
-
+            let (response, selected_worker_load, _) = selected.into_response(request);
             Ok(AdvisorySchedulingResponse {
-                selected_worker_load: selected.selected_worker_load,
-                response: SchedulingResponse {
-                    best_worker: selected.selection.worker,
-                    effective_overlap_blocks: selected.selection.effective_overlap_blocks,
-                    cached_tokens: selected.selection.cached_tokens,
-                    max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
-                    selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
-                    selected_worker_tiers: selected.selected_worker_tiers,
-                    kv_copy_source: request.kv_copy_source(
-                        selected.selection.worker,
-                        selected.selection.kv_transfer_source,
-                    ),
-                    kv_transfer_candidates: request.kv_transfer_candidates.take(),
-                    potential_decode_blocks: selected.selection.potential_decode_blocks,
-                    selection_trace: selected.selection_trace,
-                    log_fields: selected.selection.log_fields,
-                },
+                selected_worker_load,
+                response,
             })
         })
     }
@@ -3500,23 +3515,7 @@ impl<
             }
         };
 
-        let response = SchedulingResponse {
-            best_worker: selected.selection.worker,
-            effective_overlap_blocks: selected.selection.effective_overlap_blocks,
-            cached_tokens: selected.selection.cached_tokens,
-            max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
-            selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
-            selected_worker_tiers: selected.selected_worker_tiers,
-            kv_copy_source: request.kv_copy_source(
-                selected.selection.worker,
-                selected.selection.kv_transfer_source,
-            ),
-            kv_transfer_candidates: request.kv_transfer_candidates.take(),
-            potential_decode_blocks: selected.selection.potential_decode_blocks,
-            selection_trace: selected.selection_trace,
-            log_fields: selected.selection.log_fields,
-        };
-        let non_max_overlap_selection = selected.non_max_overlap_selection;
+        let (response, _, non_max_overlap_selection) = selected.into_response(request);
 
         if !request.mode.is_tracked() {
             if context
@@ -3541,7 +3540,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selected.selection.cached_tokens,
+            response.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -3551,7 +3550,7 @@ impl<
             track_prefill_tokens: request.track_prefill_tokens,
             expected_output_tokens: request.expected_output_tokens,
             prefill_load_hint,
-            worker: selected.selection.worker,
+            worker: response.best_worker,
             lora_name: request
                 .accounting_attribution
                 .accounting_name(request.lora_name.take()),
