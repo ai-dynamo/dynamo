@@ -58,7 +58,7 @@ impl KvStateAgentHost {
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
         crate::future_into_py(py, async move {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize::pythonize(py, inner.status().as_ref())
                     .map(|value| value.unbind())
                     .map_err(to_pyerr)

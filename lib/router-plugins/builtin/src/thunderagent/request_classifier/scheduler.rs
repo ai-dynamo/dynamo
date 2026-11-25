@@ -13,7 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::experimental::dispatch_gate::DispatchDecision;
+use dynamo_kv_router::plugins::request_classifier::*;
 use tokio::time::Instant;
 
 use super::super::ThunderAgentConfig;
@@ -1156,6 +1157,8 @@ fn reserve_capacity(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::plugins::testing::request_progress;
+
     use super::*;
 
     fn config() -> ThunderAgentConfig {
@@ -1200,7 +1203,7 @@ mod tests {
                     request_id.into(),
                     session_id.into(),
                     tokens,
-                    RequestProgress::new(tokens).0,
+                    request_progress(tokens),
                     false,
                 ),
                 now,
@@ -1381,13 +1384,7 @@ mod tests {
         );
         state
             .register(
-                RequestRegistration::new(
-                    "a3".into(),
-                    "a".into(),
-                    1,
-                    RequestProgress::new(1).0,
-                    true,
-                ),
+                RequestRegistration::new("a3".into(), "a".into(), 1, request_progress(1), true),
                 now,
             )
             .unwrap();
@@ -1424,13 +1421,7 @@ mod tests {
         // b finishes its session: room returns and a resumes in the same reconcile.
         state
             .register(
-                RequestRegistration::new(
-                    "b2".into(),
-                    "b".into(),
-                    1,
-                    RequestProgress::new(1).0,
-                    true,
-                ),
+                RequestRegistration::new("b2".into(), "b".into(), 1, request_progress(1), true),
                 now,
             )
             .unwrap();
@@ -1508,7 +1499,7 @@ mod tests {
                     "a2".into(),
                     "a".into(),
                     200,
-                    RequestProgress::new(200).0,
+                    request_progress(200),
                     false,
                 )
                 .with_pinned_worker(Some(worker(2))),
@@ -1562,13 +1553,7 @@ mod tests {
         // The request limit is enforced at registration, before any program state is touched.
         assert!(matches!(
             state.register(
-                RequestRegistration::new(
-                    "d1".into(),
-                    "d".into(),
-                    1,
-                    RequestProgress::new(1).0,
-                    false
-                ),
+                RequestRegistration::new("d1".into(), "d".into(), 1, request_progress(1), false),
                 now
             ),
             Err(ThunderAgentError::RequestLimitExceeded { limit: 2 })

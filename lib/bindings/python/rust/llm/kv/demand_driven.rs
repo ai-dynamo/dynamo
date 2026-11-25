@@ -33,7 +33,7 @@ impl KvDemandStream {
     fn process_response(
         &mut self,
         mut response: RsAnnotated<LLMEngineOutput>,
-    ) -> RsAnnotated<PyObject> {
+    ) -> RsAnnotated<Py<PyAny>> {
         if self.first_item {
             self.first_item = false;
             if let (Some(tracker), Some(data)) = (&self.tracker, &mut response.data) {
@@ -50,7 +50,7 @@ impl KvDemandStream {
             inject_timing_from_tracker(data, tracker);
         }
         let response = response.map_data(|data| {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 pythonize(py, &data)
                     .map(|obj| obj.unbind())
                     .map_err(|error| error.to_string())
@@ -67,7 +67,7 @@ impl KvDemandStream {
 }
 
 impl Stream for KvDemandStream {
-    type Item = RsAnnotated<PyObject>;
+    type Item = RsAnnotated<Py<PyAny>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.finished {
@@ -155,11 +155,11 @@ impl<T: 'static> Drop for DemandDrivenOwner<T> {
 
 #[pyclass]
 struct DemandDrivenResponseStream {
-    source: DemandDrivenOwner<RsAnnotated<PyObject>>,
+    source: DemandDrivenOwner<RsAnnotated<Py<PyAny>>>,
 }
 
 impl DemandDrivenResponseStream {
-    fn new(stream: Pin<Box<dyn Stream<Item = RsAnnotated<PyObject>> + Send>>) -> Self {
+    fn new(stream: Pin<Box<dyn Stream<Item = RsAnnotated<Py<PyAny>>> + Send>>) -> Self {
         Self {
             source: DemandDrivenOwner::new(stream),
         }

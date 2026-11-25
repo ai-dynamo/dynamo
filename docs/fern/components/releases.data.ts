@@ -76,10 +76,10 @@ export const CURRENT_WHEEL = "1.7.0";
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.23",
   trtllm: "1.4.0rc4",
-  vllm: "0.33.0",
+  vllm: "0.34.0",
   nixlSglang: "1.5.2",
   nixlTrtllm: "1.5.2",
-  nixlVllm: "1.5.0",
+  nixlVllm: "1.5.2",
 };
 
 const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
