@@ -1093,6 +1093,10 @@ shared:
   owners:
   - frontend
   - observability
+- glob: lib/http-server/src/scrape.rs
+  owners:
+  - frontend
+  - observability
 - glob: lib/llm/src/kv_router/README.md
   owners:
   - router
