@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 mod support;
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::{default_policy, default_policy_with_rng, default_registry};
+use dynamo_scheduler::host::WorkerIdSet;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
 use parking_lot::Mutex;
@@ -21,7 +24,7 @@ fn seeded(config: &KvRouterConfig, worker_label: &'static str, seed: u64) -> Wor
 
 #[test]
 fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     use serde_json::json;
 
     let (workers, mut request) = fixture(2, 160);
@@ -115,7 +118,7 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
 
 #[test]
 fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     for (config, role) in [
         (
             KvRouterConfig {
@@ -138,11 +141,12 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
         ),
         (KvRouterConfig::default(), WorkerType::Decode),
     ] {
-        let mut policy = dynamo_router_policies::default_factory()(
-            &SelectionConfig::from(&config),
-            role,
-            RoutingPartitionRef::new("model", "default"),
-        );
+        let mut policy =
+            dynamo_router_policies::default_factory()(WorkerSelectionPolicyContext::new(
+                &SelectionConfig::from(&config),
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            ));
         assert!(
             !<WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(&policy)
                 .contains(WorkerInputs::CACHE)
@@ -172,7 +176,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
 
 #[test]
 fn runtime_cache_tier_weights_change_selection_without_device_credit() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
 
     for role in [WorkerType::Prefill, WorkerType::Decode] {
         for name in [
@@ -212,11 +216,9 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                 }
             }
             if name == "shared_cache_multiplier" {
-                request.shared_cache_hits = Some(
-                    dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(
-                        std::iter::once(0..10).collect(),
-                    ),
-                );
+                request.shared_cache_hits = Some(SharedCacheHits::from_ranges(
+                    std::iter::once(0..10).collect(),
+                ));
             }
             // A nonzero multiplier also reads fetch inputs, which updates cannot add, so the
             // shared case starts with a credit too small to change the choice.
@@ -232,11 +234,12 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                 }),
                 ..Default::default()
             };
-            let mut policy = dynamo_router_policies::default_factory()(
-                &SelectionConfig::from(&config),
-                role,
-                RoutingPartitionRef::new("model", "default"),
-            );
+            let mut policy =
+                dynamo_router_policies::default_factory()(WorkerSelectionPolicyContext::new(
+                    &SelectionConfig::from(&config),
+                    role,
+                    RoutingPartitionRef::new("model", "default"),
+                ));
             let select = |policy: &WorkerSelectionPolicy| {
                 policy
                     .select_worker(selection_input(&workers, &request, 16))
@@ -423,12 +426,8 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     ..Default::default()
                 };
                 if mode % 8 >= 4 {
-                    request.shared_cache_hits = Some(
-                        dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(vec![
-                            1..3,
-                            5..12,
-                        ]),
-                    );
+                    request.shared_cache_hits =
+                        Some(SharedCacheHits::from_ranges(vec![1..3, 5..12]));
                 }
                 match mode % 4 {
                     1 => request.overlap.tier_overlap_blocks = Default::default(),
@@ -535,7 +534,7 @@ fn empty_prompt_routes_by_load() {
     request.overlap = Default::default();
     for (worker, load) in &mut request.worker_loads {
         let unloaded = worker.worker_id == 2;
-        *load = dynamo_kv_router::plugins::prelude::WorkerLoadProjection {
+        *load = dynamo_slot_tracker::WorkerLoadProjection {
             active_prefill_tokens: if unloaded { 1616 } else { 1600 },
             active_decode_blocks: if unloaded { 0 } else { 50 },
             ..Default::default()
@@ -694,11 +693,11 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
         }
         fn pick(
             &self,
-            context: &WorkerSelectionContext<'_>,
+            request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            assert_eq!(context.isl_tokens(), 17);
-            assert_eq!(context.request_blocks(), 2);
+            assert_eq!(request.info().isl_tokens(), 17);
+            assert_eq!(request.request_blocks(), 2);
             assert!(input.load().unwrap().iter().all(|load| load.is_available()));
             for cache in input.cache().unwrap().iter() {
                 assert!(cache.has_tier_matches());
@@ -716,14 +715,9 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
         .tier_overlap_blocks
         .disk
         .insert(WorkerWithDpRank::from_worker_id(999), 1);
-    WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        vec![],
-        Box::new(Inspect),
-    )
-    .select_worker(support::selection_input(&workers, &request, 16))
-    .unwrap();
+    WorkerSelectionPolicy::new("test", vec![], Box::new(Inspect))
+        .select_worker(support::selection_input(&workers, &request, 16))
+        .unwrap();
 }
 
 #[test]
@@ -744,11 +738,11 @@ fn configured_default_resolves_for_every_role_and_uses_exclusive_affinity() {
                 .resolve_for_worker_type(&config, role)
                 .unwrap()
                 .unwrap();
-            let policy = factory(
+            let policy = factory(WorkerSelectionPolicyContext::new(
                 &SelectionConfig::from(&config),
                 role,
                 RoutingPartitionRef::new("model", "default"),
-            );
+            ));
             let inputs =
                 <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(
                     &policy,
@@ -899,11 +893,11 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
             ..Default::default()
         };
         let factory = registry.resolve(&config).unwrap().unwrap();
-        let policy = factory(
+        let policy = factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Aggregated,
             RoutingPartitionRef::new("model", "default"),
-        );
+        ));
         assert_eq!(
             <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(&policy)
                 .contains(WorkerInputs::CACHE),
@@ -932,7 +926,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
             .insert(*worker, if worker.worker_id == 0 { 3 } else { 0 });
     }
     #[allow(clippy::single_range_in_vec_init)]
-    let hits = dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(vec![0..4]);
+    let hits = SharedCacheHits::from_ranges(vec![0..4]);
     request.shared_cache_hits = Some(hits);
 
     let mut registry = default_registry();
@@ -956,11 +950,11 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
         };
         config.apply_policy_config().unwrap();
         let factory = registry.resolve(&config).unwrap().unwrap();
-        let policy = factory(
+        let policy = factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Aggregated,
             RoutingPartitionRef::new("model", "default"),
-        );
+        ));
         let select = |policy: WorkerSelectionPolicy| {
             policy
                 .select_worker(support::selection_input(&workers, &request, 16))
@@ -988,8 +982,6 @@ fn patch(parameters: serde_json::Value) -> serde_json::Map<String, serde_json::V
 
 #[test]
 fn selector_runtime_update_keeps_the_seeded_random_stream() {
-    use dynamo_kv_router::plugins::prelude::*;
-
     let (workers, request) = fixture(16, 2048);
     let config = KvRouterConfig {
         router_temperature: 0.7,
@@ -1051,11 +1043,12 @@ fn startup_policy_parameters_match_the_default_factory_for_every_role() {
                 WorkerType::Prefill,
                 WorkerType::Decode,
             ] {
-                let policy = dynamo_router_policies::default_factory()(
-                    &SelectionConfig::from(&config),
-                    role,
-                    RoutingPartitionRef::new("model", "default"),
-                );
+                let policy =
+                    dynamo_router_policies::default_factory()(WorkerSelectionPolicyContext::new(
+                        &SelectionConfig::from(&config),
+                        role,
+                        RoutingPartitionRef::new("model", "default"),
+                    ));
                 let expected = policy.runtime_config().unwrap();
                 let startup = startup_policy_parameters(&SelectionConfig::from(&config), role);
                 assert_eq!(

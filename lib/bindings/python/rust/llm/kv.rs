@@ -31,7 +31,8 @@ use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
-use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::host::RouterPlugins;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyContext;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -2291,15 +2292,15 @@ async fn create_kv_router_from_endpoint(
         let policy_worker_role = policy_worker_role
             .expect("a configured worker-selection policy waits for a typed model card above");
         let policy_model_name = policy_model_name.unwrap_or_default();
-        plugins.with_worker_selection(Arc::new(move |config, _worker_type, _partition| {
-            factory(
-                config,
+        plugins.with_worker_selection(Arc::new(move |context| {
+            factory(WorkerSelectionPolicyContext::new(
+                context.selection_config(),
                 policy_worker_role,
                 dynamo_router_protocol::identity::RoutingPartitionRef::new(
                     &policy_model_name,
                     dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP,
                 ),
-            )
+            ))
         }))
     } else {
         plugins

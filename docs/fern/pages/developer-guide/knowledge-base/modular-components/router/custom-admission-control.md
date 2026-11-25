@@ -75,7 +75,7 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
@@ -88,7 +88,7 @@ impl RequestClassifier for QueueBudget {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let deadline = request.ingress_at() + self.budget;
         if Instant::now() >= deadline {
@@ -196,16 +196,22 @@ The policy class enables queueing when every eligible worker's active prefill to
 
 ### Request Inputs
 
-`classify` receives a `ClassifyRequest` with these accessors:
+`classify` receives a `ClassifyRequest`. Its `info()` returns a `RequestInfo`, the request facts every stage reads. A [worker-selection](custom-worker-selection.mdx#request) policy reads the same `RequestInfo` from its request, and a dispatch gate from its `DispatchHead`:
 
-| Accessor | Meaning |
+| `RequestInfo` accessor | Meaning |
 |---|---|
 | `request_id()` | Optional request ID, also used in lifecycle events |
 | `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/session-ids.mdx#agent-headers) |
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
+| `pinned_worker()` | Exact worker and rank the caller requires, if any. A classifier's soft selection target cannot override it |
+
+What exists only while a request is classified is on the `ClassifyRequest` itself:
+
+| Accessor | Meaning |
+|---|---|
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
-| `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains |
+| `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains. The value does not expose its limits: `is_configured()` says whether any limit is set, and `has_room()` checks one rank |
 | `ingress_at()` | Original router ingress time |
 | `due_at()` | Queue deadline set by the classifier, if any |
 | `progress().context_tokens()` | Live context high-water mark from input and generated tokens; this measures logical context, not physical KV occupancy |
@@ -230,13 +236,13 @@ Each entry returned by `workers()` is the same `WorkerInfo` that [worker-selecti
 
 ### Worker Inputs
 
-A classifier can read the per-worker cache and load data that [worker-selection plugins](custom-worker-selection.mdx) receive. Declare the groups in `required_worker_inputs`; `classify` receives them as `workers`:
+A classifier reads workers through `WorkerCandidates`, the view a [worker-selection](custom-worker-selection.mdx) filter or scorer reads: one `WorkerCandidate` per eligible worker rank, with the same accessors. Declare the groups in `required_worker_inputs`; `classify` receives them as `workers`:
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
-use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_kv_router::plugins::WorkerInputs;
 
 struct LoadAwareClass {
     max_active_requests: usize,
@@ -250,15 +256,16 @@ impl RequestClassifier for LoadAwareClass {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        workers: &dyn WorkerView,
+        workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // Count only observed loads, and require at least one.
-        let mut loads = (0..workers.len())
-            .filter_map(|row| workers.load(row))
-            .filter(|load| load.available)
+        let mut loads = workers
+            .iter()
+            .filter_map(|worker| worker.load())
+            .filter(|load| load.is_available())
             .peekable();
         let saturated = loads.peek().is_some()
-            && loads.all(|load| load.active_requests >= self.max_active_requests);
+            && loads.all(|load| load.active_requests() >= self.max_active_requests);
         if saturated {
             request.set_policy_class("batch");
         }
@@ -267,13 +274,15 @@ impl RequestClassifier for LoadAwareClass {
 }
 ```
 
-Dynamo builds these rows with the same code that worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` have the same meaning in both plugins. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `workers` is empty.
+The rows and their accessors are the ones worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` mean the same thing in both plugins, and a value added to a group is readable in both. See [Optional Worker Inputs](custom-worker-selection.mdx#optional-worker-inputs) for each accessor. A group that only a selection supplies, such as `KV_COPY`, reads as `None` in a classifier. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `workers` is empty.
 
 - Rows cover each worker rank that is eligible for the request, including overloaded workers. Row order is unspecified.
 - `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns. Do not treat a copy as current load when the request dispatches later.
 - Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 
-Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the thresholds with the row's `load()` and `info().capacity()`. This is a rank-level check on one row, the same one the router runs: `reject_thresholds().has_room(...)` says whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
+Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the request's `reject_thresholds()` with the row's `load()` and `info().capacity()`. This is a rank-level check on one row, the same one the router runs: `reject_thresholds().has_room(...)` says whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
+
+To test a classifier, use `dynamo_kv_router::plugins::testing` from the classifier crate's test module. `SelectionCase::classify` runs the classifier on a case a test describes: it builds the request and the worker rows from the case, as the Router builds both from one request, so the request's ID, session, pinned worker, and cached tokens agree with the workers the classifier reads. For a classifier that reads no workers, `plugins::testing::classify_request` builds a request from its input length, request ID, session, and pinned worker, and `plugins::testing::classify` runs the classifier on it with no worker rows. For a registration test, `plugins::testing::registered_classifier` builds the classifier a registry holds under a type name from parameters written as a policy file writes them, in YAML, so a test can check that the provider accepts good parameters and rejects bad ones.
 
 ### Admission Decisions
 
@@ -295,12 +304,12 @@ Use a class name from the [router policy configuration](configuration-and-tuning
 ### Hold Queued Requests With a Dispatch Gate
 
 > [!NOTE]
-> The dispatch gate is experimental. `DispatchGate`, `DispatchDecision`, and `DispatchHead` may change in a minor release while ThunderAgent is their only in-tree user. Classifying requests without a gate is stable.
+> The dispatch gate is experimental. `DispatchGate`, `DispatchDecision`, `DispatchHead`, and `DispatchRecheck` are in `plugins::experimental::dispatch_gate` and may change or be removed in any release while ThunderAgent is their only in-tree user. Classifying requests without a gate uses only `plugins::request_classifier`.
 
 Implement `DispatchGate` and return it from `dispatch_gate`. In `classify`, give every request the gate may hold a lane key, so a hold blocks only that lane. Dynamo queues every request at once and asks the gate about each queue head before it dispatches:
 
 ```rust
-use dynamo_kv_router::plugins::request_classifier::{
+use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
 use tokio::time::Instant;
@@ -309,10 +318,10 @@ impl RequestClassifier for SessionClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // One lane per session: a held turn waits behind its own session only.
-        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+        if let Some(session) = request.info().session_context().map(|s| s.session_id().to_owned()) {
             request.set_lane_key(&session);
         }
         Ok(request)
@@ -325,7 +334,8 @@ impl RequestClassifier for SessionClassifier {
 
 impl DispatchGate for SessionGate {
     fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
-        match self.room_for(head.session_context(), head.isl_tokens()) {
+        let info = head.info();
+        match self.room_for(info.session_context(), info.isl_tokens()) {
             Some(worker) => DispatchDecision::Go { target: Some(worker) },
             // Held long enough: let it go and leave placement to the selector.
             None if Instant::now() >= head.queued_at() + self.max_hold => {
@@ -336,7 +346,7 @@ impl DispatchGate for SessionGate {
     }
 
     fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
-        self.reserve(head.request_id(), target);
+        self.reserve(head.info().request_id(), target);
     }
 
     fn attach(&self, recheck: DispatchRecheck) {

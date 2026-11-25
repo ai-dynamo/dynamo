@@ -14,6 +14,7 @@
 
 mod adapter;
 pub mod args;
+pub mod direct;
 pub mod disagg;
 pub mod engine;
 pub mod error;
