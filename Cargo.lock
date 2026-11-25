@@ -2371,6 +2371,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "clap",
+ "dynamo-http-server",
  "dynamo-kv-hints",
  "dynamo-llm",
  "dynamo-protocols 10.0.1",
@@ -2381,6 +2382,7 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "reqwest 0.12.28",
+ "rmp-serde",
  "serde",
  "serde_json",
  "serial_test",
@@ -2391,6 +2393,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "zmq",
 ]
 
 [[package]]
