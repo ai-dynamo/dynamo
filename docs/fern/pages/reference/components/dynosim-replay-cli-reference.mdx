@@ -507,8 +507,10 @@ hardware offload recipe.
   in `router.policy_config`. The default policy sends none, and the workers then pull nothing.
   Replay sends a hint for every copy source the router books; it does not apply the
   `min_additional_blocks` parameter of `kv_fetch`.
-  `round_robin` sends no hints, and neither does `router.overlap_score_credit: 0`, which reads no KV
-  index; the router then logs one warning. Replay treats all workers as one transfer island.
+  `round_robin` sends no hints. Replay checks the role as the production router does at startup
+  and fails with the same error: a role that lists `kv_fetch` needs an index that keeps the
+  request's block chain, which `router.use_kv_events: false` does not, and a `kvcr` selection needs
+  a hint policy that sends its copies. Replay treats all workers as one transfer island.
 - With KVCR-owned memory (`engine.workers.<role>.kv_cache.kvcr.local_g2`), the router names a peer
   as a production router with a KV state agent does: each worker has one cache owner per rank, and
   a rank is named only for the prefix its KVCR-owned memory holds. A prefix that a peer holds only

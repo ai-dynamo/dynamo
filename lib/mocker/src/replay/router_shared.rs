@@ -282,20 +282,17 @@ fn replay_plugins(
     })
 }
 
-/// Whether the router of one replay worker pool computes KV copy sources, by the live
-/// router's rule: the role's worker selection (`selection_inputs`) or one of its hint policies
-/// reads `WorkerInputs::KV_COPY`. `kv_fetch` reads it. It is on by default only under the `kvcr`
-/// worker-selection policy; any other policy runs it when its `worker_selection` entry lists it
-/// in `hints`.
-pub(super) fn replay_sends_kv_fetch_hints(
+/// The worker inputs whose resources the router of one replay worker pool starts, checked as
+/// the live router checks a role: the worker selection's inputs plus those of the role's
+/// configured hint policies. A role computes KV copy sources, and so sends `kv.fetch` hints,
+/// when these contain `WorkerInputs::KV_COPY`; they keep the KV index when
+/// `WorkerInputs::reads_kv_index` holds.
+pub(super) fn replay_role_inputs(
     config: &KvRouterConfig,
     worker_type: WorkerType,
     router_plugins: Option<&RouterPluginRegistry>,
-    selection_inputs: WorkerInputs,
-) -> anyhow::Result<bool> {
-    if selection_inputs.contains(WorkerInputs::KV_COPY) {
-        return Ok(true);
-    }
+    selector: &DefaultWorkerSelector,
+) -> anyhow::Result<WorkerInputs> {
     let hint_policies = replay_plugins(router_plugins)?
         .resolve_hint_policies(config)?
         .instances(
@@ -303,11 +300,7 @@ pub(super) fn replay_sends_kv_fetch_hints(
             worker_type,
             RoutingPartitionRef::new("replay", "default"),
         );
-    Ok(hint_policies.policies().iter().any(|(_, policy)| {
-        policy
-            .required_worker_inputs()
-            .contains(WorkerInputs::KV_COPY)
-    }))
+    Ok(selector.check_role(worker_type, hint_policies, config)?)
 }
 
 pub(crate) fn replay_router_config(
