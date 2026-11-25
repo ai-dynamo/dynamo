@@ -21,7 +21,10 @@ use velo::{Handler, InstanceId, PeerInfo, Velo, WorkerAddress, WorkerId};
 use super::{PEER_HANDLER, REQUEST_HANDLER, STAGED_WINDOW, decode_identity, decode_worker_address};
 use crate::{
     error::{DynamoError, ErrorType},
-    pipeline::network::{ACK_UNAVAILABLE_PREFIX, velo_response::VeloResponseService},
+    pipeline::network::{
+        ACK_UNAVAILABLE_PREFIX,
+        velo_response::{PEER_IDLE_TTL, VeloResponseService},
+    },
 };
 
 // Keep this below Velo's 30-second hello timeout.
@@ -34,6 +37,8 @@ pub(in crate::pipeline::network) struct PeerState {
     pub(in crate::pipeline::network) active: AtomicUsize,
     pub(in crate::pipeline::network) last_used: AtomicU64,
     pub(in crate::pipeline::network) pinned: AtomicBool,
+    pub(in crate::pipeline::network) reverse_pin_until: AtomicU64,
+    confirmed_until: AtomicU64,
     pub(in crate::pipeline::network) route: RouteState,
     pub(in crate::pipeline::network) retired: AtomicBool,
     pub(in crate::pipeline::network) registered_address: parking_lot::Mutex<Option<WorkerAddress>>,
@@ -48,6 +53,8 @@ impl Default for PeerState {
             active: AtomicUsize::new(0),
             last_used: AtomicU64::new(0),
             pinned: AtomicBool::new(false),
+            reverse_pin_until: AtomicU64::new(0),
+            confirmed_until: AtomicU64::new(0),
             route: RouteState::default(),
             retired: AtomicBool::new(false),
             registered_address: parking_lot::Mutex::new(None),
@@ -57,14 +64,21 @@ impl Default for PeerState {
 }
 
 impl PeerState {
+    pub(in crate::pipeline::network) fn confirmed_route(&self, now: u64) -> Option<u64> {
+        self.route
+            .confirmed_epoch()
+            .filter(|_| self.confirmed_until.load(Ordering::Acquire) > now)
+    }
+
     pub(in crate::pipeline::network) fn register(
         &self,
         velo: &Velo,
         target: PeerInfo,
+        request: bool,
     ) -> Result<()> {
         let mut recorded = self.registered_address.lock();
         anyhow::ensure!(
-            !self.retired.load(Ordering::Acquire),
+            !request || !self.retired.load(Ordering::Acquire),
             "Velo request peer has departed"
         );
         let address = target.worker_address().clone();
@@ -130,7 +144,7 @@ pub(in crate::pipeline::network) fn register_peer_handler(
                 );
 
                 // The shard also orders this pin against the sweep's unregister.
-                let Some(was_pinned) = service.pin_current(id, &peer)? else {
+                let Some(previous_pin) = service.pin_reverse_current(id, &peer) else {
                     continue;
                 };
                 if known.is_none() {
@@ -142,9 +156,7 @@ pub(in crate::pipeline::network) fn register_peer_handler(
                         .velo
                         .register_peer(PeerInfo::new(id, address.clone()))
                     {
-                        if !was_pinned {
-                            service.rollback_pin(id, &peer);
-                        }
+                        service.restore_reverse_pin(id, &peer, previous_pin);
                         return Err(error);
                     }
                     *recorded = Some(address);
@@ -179,13 +191,17 @@ pub(in crate::pipeline::network) async fn establish_route(
         return Ok(route);
     }
 
-    let lease = service.reserve_peer(id);
+    let lease = service.reserve_request_peer(id)?;
     let peer = &lease.peer;
     let epoch = {
         let mut recent = by_deadline(deadline, peer.route.first_contact.lock()).await?;
-        if let Some(epoch) = peer.route.confirmed_epoch() {
+        let now = service.peer_clock();
+        if let Some(epoch) = peer.confirmed_route(now) {
             epoch
         } else {
+            if let Some(epoch) = peer.route.confirmed_epoch() {
+                peer.route.invalidate(epoch);
+            }
             if let Some((failed_at, cause)) = recent.as_ref()
                 && failed_at.elapsed() < FAILURE_TTL
             {
@@ -213,6 +229,9 @@ pub(in crate::pipeline::network) async fn establish_route(
                         "Velo request peer has departed",
                     )
                 })?;
+            // Renew well before the worker's reverse pin can expire.
+            peer.confirmed_until
+                .store(now + PEER_IDLE_TTL.as_secs() / 2, Ordering::Release);
             peer.route.confirm()
         }
     };
@@ -243,8 +262,17 @@ async fn contact(
             format!("invalid Velo worker address: {err}"),
         )
     })?;
-    peer.register(&service.velo, PeerInfo::new(id, address))
-        .map_err(transport_error)?;
+    peer.register(&service.velo, PeerInfo::new(id, address), true)
+        .map_err(|source| {
+            if peer.retired.load(Ordering::Acquire) {
+                error(
+                    ErrorType::WorkerUnavailable,
+                    "Velo request peer has departed",
+                )
+            } else {
+                transport_error(source)
+            }
+        })?;
     let ack = by_deadline(deadline.min(Instant::now() + hello_cap), async {
         service
             .velo
@@ -286,12 +314,12 @@ pub(in crate::pipeline::network) async fn by_deadline<T>(
 ) -> Result<T, DynamoError> {
     tokio::select! {
         biased;
-        _ = tokio::time::sleep_until(deadline) => Err(error(ErrorType::ConnectionTimeout, "Velo first contact timed out")),
+        _ = tokio::time::sleep_until(deadline) => Err(error(ErrorType::ConnectionTimeout, "Velo request timed out")),
         result = future => Ok(result),
     }
 }
 
-fn transport_error(source: anyhow::Error) -> DynamoError {
+pub(super) fn transport_error(source: anyhow::Error) -> DynamoError {
     let kind = if source.is::<velo::RequestTimeout>() {
         ErrorType::ConnectionTimeout
     } else {
@@ -300,7 +328,7 @@ fn transport_error(source: anyhow::Error) -> DynamoError {
     error(kind, source.to_string())
 }
 
-fn error(kind: ErrorType, message: impl Into<String>) -> DynamoError {
+pub(super) fn error(kind: ErrorType, message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
         .error_type(kind)
         .message(message)

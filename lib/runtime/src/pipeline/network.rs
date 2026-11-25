@@ -16,6 +16,7 @@ pub mod quic_response;
 pub mod tcp;
 mod tombstones;
 mod velo_request;
+pub(crate) use velo_request::request_endpoint_address;
 pub mod velo_response;
 
 use crate::SystemHealth;

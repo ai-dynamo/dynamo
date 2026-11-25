@@ -16,6 +16,7 @@ use crate::{
     pipeline::network::{
         PushWorkHandler, RequestPlanePayloadCodec, ResponsePlaneMode,
         ingress::{push_endpoint::PushEndpoint, unified_server::RequestPlaneServer},
+        request_endpoint_address,
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
@@ -336,16 +337,18 @@ async fn withdraw_endpoint(
 /// All transport modes use consistent addressing:
 /// - TCP: Includes instance ID, namespace, component, and endpoint name in the request path
 /// - NATS: Uses subject-based addressing (unique per endpoint)
+/// - Velo: Appends the request path to the advertised Velo address.
 ///
 /// # Errors
 /// Returns an error if TCP mode is used but the TCP server hasn't been started yet.
-fn build_transport_type_inner(
-    mode: RequestPlaneMode,
+async fn build_transport_type_inner(
+    endpoint: &Endpoint,
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> Result<TransportType> {
-    match mode {
+    match endpoint.drt().request_plane() {
         RequestPlaneMode::Tcp => {
+            endpoint.drt().request_plane_server().await?;
             let address = crate::pipeline::network::manager::get_actual_tcp_rpc_address()?;
             Ok(tcp_transport_type(address, endpoint_id, connection_id))
         }
@@ -353,6 +356,14 @@ fn build_transport_type_inner(
             endpoint_id,
             connection_id,
         ))),
+        RequestPlaneMode::Velo => {
+            let server = endpoint.drt().request_plane_server().await?;
+            Ok(TransportType::Velo(request_endpoint_address(
+                &server.address(),
+                endpoint_id,
+                connection_id,
+            )?))
+        }
     }
 }
 
@@ -378,13 +389,7 @@ pub async fn build_transport_type(
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> Result<TransportType> {
-    let mode = endpoint.drt().request_plane();
-
-    if mode == RequestPlaneMode::Tcp {
-        let _ = endpoint.drt().request_plane_server().await?;
-    }
-
-    build_transport_type_inner(mode, endpoint_id, connection_id)
+    build_transport_type_inner(endpoint, endpoint_id, connection_id).await
 }
 
 impl Endpoint {

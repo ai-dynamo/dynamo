@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(dead_code)]
-
 pub(super) mod admission;
+pub(super) mod client;
+pub(super) mod discovery;
 pub(super) mod peers;
 pub(super) mod server;
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use velo::{InstanceId, PeerInfo, WorkerAddress};
 
-use crate::protocols::EndpointId;
+use crate::{pipeline::network::VELO_SCHEME, protocols::EndpointId};
 
 pub(super) const REQUEST_HANDLER: &str = "dynamo_request";
 // A system name lets Velo send the bootstrap without first doing a hello.
@@ -22,7 +22,6 @@ pub(super) const PEER_HANDLER: &str = "_dynamo_request_peer";
 pub(super) const ACK_SLOTS: usize = 16_384;
 const STAGED_WINDOW: usize = 4;
 
-const ADDRESS_PREFIX: &str = "velo://";
 const MAX_WORKER_ADDRESS: usize = 8 * 1024;
 const MAX_ENDPOINT_PATH: usize = 1024;
 const MAX_PEER_IDENTITY: usize = MAX_WORKER_ADDRESS + 128;
@@ -34,23 +33,30 @@ pub(super) struct RequestAddress<'a> {
     pub(super) path: &'a str,
 }
 
+#[cfg(test)]
 pub(super) fn encode_address(peer: &PeerInfo, endpoint: &EndpointId, id: u64) -> Result<String> {
+    let address = encode_worker_address(peer.worker_address())
+        .with_context(|| format!("invalid Velo address for endpoint {endpoint}"))?;
+    let prefix = format!("{VELO_SCHEME}{}/{address}", peer.instance_id());
+    request_endpoint_address(&prefix, endpoint, id)
+}
+
+pub(crate) fn request_endpoint_address(
+    prefix: &str,
+    endpoint: &EndpointId,
+    id: u64,
+) -> Result<String> {
     let path = crate::transports::tcp::instance_path(endpoint, id);
     ensure!(
         path.len() <= MAX_ENDPOINT_PATH,
         "Velo request path for endpoint {endpoint} exceeds {MAX_ENDPOINT_PATH} bytes"
     );
-    let address = encode_worker_address(peer.worker_address())
-        .with_context(|| format!("invalid Velo address for endpoint {endpoint}"))?;
-    Ok(format!(
-        "{ADDRESS_PREFIX}{}/{address}/{path}",
-        peer.instance_id()
-    ))
+    Ok(format!("{prefix}/{path}"))
 }
 
 pub(super) fn decode_address(address: &str) -> Result<RequestAddress<'_>> {
     let mut fields = address
-        .strip_prefix(ADDRESS_PREFIX)
+        .strip_prefix(VELO_SCHEME)
         .context("expected a velo:// request address")?
         .splitn(3, '/');
     let id = fields.next().context("missing Velo instance ID")?;

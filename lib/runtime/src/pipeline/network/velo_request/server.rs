@@ -21,7 +21,7 @@ use velo::Handler;
 use crate::{
     SystemHealth,
     pipeline::network::{
-        ACK_UNAVAILABLE_PREFIX, PushWorkHandler, get_tcp_max_message_size,
+        ACK_UNAVAILABLE_PREFIX, PushWorkHandler, VELO_SCHEME, get_tcp_max_message_size,
         ingress::unified_server::RequestPlaneServer,
         velo_response::{RuntimeService, VeloResponseService},
     },
@@ -63,7 +63,7 @@ impl RequestSlot {
         }
         let info = service.velo.peer_info();
         let address = format!(
-            "velo://{}/{}",
+            "{VELO_SCHEME}{}/{}",
             info.instance_id(),
             encode_worker_address(info.worker_address())?,
         );
@@ -72,15 +72,8 @@ impl RequestSlot {
             let slot = self.clone();
             service.velo.register_handler(
                 Handler::unary_handler(REQUEST_HANDLER, move |ctx| {
-                    let server = slot.state.read().server.upgrade();
-                    match server {
-                        Some(server) => server
-                            .handle_request(ctx.payload, ctx.headers.unwrap_or_default())
-                            .map(Some),
-                        None => Ok(Some(Bytes::from_static(
-                            b"Server unavailable: worker pool closed",
-                        ))),
-                    }
+                    slot.handle_local(ctx.payload, ctx.headers.unwrap_or_default())
+                        .map(Some)
                 })
                 .build(),
             )?;
@@ -94,6 +87,20 @@ impl RequestSlot {
         });
         state.server = Arc::downgrade(&server);
         Ok(server)
+    }
+
+    pub(super) fn handle_local(
+        &self,
+        payload: Bytes,
+        headers: HashMap<String, String>,
+    ) -> Result<Bytes> {
+        let server = self.state.read().server.upgrade();
+        match server {
+            Some(server) => server.handle_request(payload, headers),
+            None => Ok(Bytes::from_static(
+                b"Server unavailable: worker pool closed",
+            )),
+        }
     }
 
     pub(in crate::pipeline::network) async fn shutdown(&self, headroom: Duration) {
@@ -180,14 +187,6 @@ impl VeloRequestServer {
         ensure!(!work.is_closed(), "Velo request owner is shut down");
         let shared = service.request_slot.clone().attach(service, pool, queue)?;
         Ok(Self { shared, work })
-    }
-
-    pub(in crate::pipeline::network) fn handle_local(
-        &self,
-        payload: Bytes,
-        headers: HashMap<String, String>,
-    ) -> Result<Bytes> {
-        self.shared.handle_request(payload, headers)
     }
 }
 
@@ -889,7 +888,11 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap();
-            caller.block_on(async { server.handle_local(Bytes::new(), headers(&endpoint)) })
+            caller.block_on(async {
+                server
+                    .shared
+                    .handle_request(Bytes::new(), headers(&endpoint))
+            })
         }))
         .await
         .unwrap()

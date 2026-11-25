@@ -89,7 +89,7 @@ const RESPONSE_TCP_LANES: u16 = 4;
 
 /// A restarted frontend returns with a new instance ID, so a worker forgets a
 /// frontend that has had no open stream for this long.
-const PEER_IDLE_TTL: Duration = Duration::from_secs(600);
+pub(super) const PEER_IDLE_TTL: Duration = Duration::from_secs(600);
 const PEER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const JOIN_GRACE: Duration = Duration::from_secs(2);
 
@@ -189,7 +189,7 @@ fn tcp_transport(address: SocketAddr) -> Result<velo::transports::tcp::TcpTransp
 }
 
 impl ResponseTransport {
-    fn configured() -> Result<Self> {
+    pub(crate) fn configured() -> Result<Self> {
         env_setting(
             crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_TRANSPORT,
             Self::Tcp,
@@ -200,6 +200,14 @@ impl ResponseTransport {
                 _ => None,
             },
         )
+    }
+
+    pub(crate) fn check_request_plane(self, enabled: bool) -> Result<()> {
+        ensure!(
+            self != Self::Ucx || !enabled,
+            "DYN_REQUEST_PLANE=velo cannot be combined with DYN_VELO_RESPONSE_TRANSPORT=ucx: the Velo request plane supports only Velo's TCP transport until Velo exposes its per-device header cap"
+        );
+        Ok(())
     }
 }
 
@@ -220,6 +228,7 @@ struct Registration {
     controller: StreamController,
     done: CancellationToken,
     instance: Option<EndpointInstanceId>,
+    request_peer: Option<PeerLease>,
 }
 
 impl Registration {
@@ -363,7 +372,6 @@ impl RuntimeService {
         Ok(())
     }
 
-    #[allow(dead_code)] // Runtime configuration sets this before acquiring the service.
     pub(crate) fn set_options(&self, options: VeloServiceOptions) -> Result<()> {
         self.options.get_or_init(|| options).check(options)
     }
@@ -543,6 +551,7 @@ pub struct VeloResponseService {
     pub(super) ack_slots: Semaphore,
     pub(super) request_identity: Option<Bytes>,
     pub(super) request_slot: Arc<RequestSlot>,
+    pub(super) discovered_request_peers: Mutex<super::velo_request::discovery::DiscoveryPeers>,
     options: VeloServiceOptions,
     #[cfg(test)]
     sweep_hook: Mutex<Option<SweepHook>>,
@@ -589,10 +598,7 @@ impl VeloResponseService {
         address: SocketAddr,
         options: VeloServiceOptions,
     ) -> Result<Arc<Self>> {
-        ensure!(
-            transport != ResponseTransport::Ucx || !options.request_plane_enabled,
-            "DYN_REQUEST_PLANE=velo cannot be combined with DYN_VELO_RESPONSE_TRANSPORT=ucx: the Velo request plane supports only Velo's TCP transport until Velo exposes its per-device header cap"
-        );
+        transport.check_request_plane(options.request_plane_enabled)?;
         let heartbeat = response_heartbeat()?;
         let mut builder = Velo::builder()
             .metrics(PROCESS_METRICS.1.clone())
@@ -630,6 +636,7 @@ impl VeloResponseService {
             ack_slots: Semaphore::new(ACK_SLOTS),
             request_identity,
             request_slot: Arc::new(RequestSlot::default()),
+            discovered_request_peers: Mutex::default(),
             options,
             #[cfg(test)]
             sweep_hook: Mutex::new(None),
@@ -668,21 +675,25 @@ impl VeloResponseService {
         Ok(service)
     }
 
-    /// Forget frontends with no open sender that have been idle for
-    /// [`PEER_IDLE_TTL`], or whose preparation failed. `now` is in seconds
-    /// since the service started.
+    pub(super) fn peer_clock(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Sweep expired routes with no active request or response.
     fn evict_idle_peers(&self, now: u64) -> usize {
+        self.discovered_request_peers.lock().prune(now);
         let own = self.velo.instance_id();
         let mut evicted = 0;
         #[cfg(test)]
         let hook = self.sweep_hook.lock().clone();
         self.peers.retain(|peer_id, peer| {
             let idle = *peer_id != own
-                && !peer.pinned.load(Ordering::Acquire)
                 && peer.active.load(Ordering::Acquire) == 0
-                && (!peer.ready.initialized()
+                && peer.reverse_pin_until.load(Ordering::Acquire) <= now
+                && (peer.retired.load(Ordering::Acquire)
                     || now.saturating_sub(peer.last_used.load(Ordering::Relaxed))
-                        >= PEER_IDLE_TTL.as_secs());
+                        >= PEER_IDLE_TTL.as_secs()
+                    || (!peer.pinned.load(Ordering::Acquire) && !peer.ready.initialized()));
             if idle {
                 // Under the shard lock, so no request can prepare this peer
                 // again until Velo has forgotten it.
@@ -703,7 +714,25 @@ impl VeloResponseService {
     }
 
     pub(super) fn reserve_peer(&self, peer_id: InstanceId) -> PeerLease {
+        if let Some(peer) = self.peers.get(&peer_id) {
+            return PeerLease::new(&peer, self.started);
+        }
         PeerLease::new(&self.peers.entry(peer_id).or_default(), self.started)
+    }
+
+    pub(super) fn reserve_request_peer(&self, id: InstanceId) -> Result<PeerLease, DynamoError> {
+        // Order cold contact against discovery deletes, including deletes that
+        // arrive before the first client looks up the peer.
+        let discovery = self.discovered_request_peers.lock();
+        (!discovery.recently_departed(id, self.peer_clock()))
+            .then(|| self.reserve_peer(id))
+            .filter(|lease| !lease.peer.retired.load(Ordering::Acquire))
+            .ok_or_else(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::WorkerUnavailable)
+                    .message("Velo request peer has departed")
+                    .build()
+            })
     }
 
     pub(super) fn pin_current(
@@ -724,17 +753,51 @@ impl VeloResponseService {
         Ok(Some(peer.pinned.swap(true, Ordering::AcqRel)))
     }
 
-    pub(super) fn rollback_pin(&self, id: InstanceId, expected: &Arc<PeerState>) {
+    pub(super) fn pin_reverse_current(
+        &self,
+        id: InstanceId,
+        expected: &Arc<PeerState>,
+    ) -> Option<u64> {
+        let peer = self.peers.get_mut(&id)?;
+        Arc::ptr_eq(&peer, expected).then(|| {
+            peer.reverse_pin_until.swap(
+                self.peer_clock() + PEER_IDLE_TTL.as_secs(),
+                Ordering::AcqRel,
+            )
+        })
+    }
+
+    pub(super) fn restore_reverse_pin(
+        &self,
+        id: InstanceId,
+        expected: &Arc<PeerState>,
+        expiry: u64,
+    ) {
         if let Some(peer) = self.peers.get_mut(&id)
             && Arc::ptr_eq(&peer, expected)
-            && peer.route.confirmed_epoch().is_none()
         {
-            peer.pinned.store(false, Ordering::Release);
+            peer.reverse_pin_until.store(expiry, Ordering::Release);
         }
     }
 
-    #[allow(dead_code)] // Used by the request client's discovery removal path.
-    pub(crate) fn unregister_request_peer(&self, id: InstanceId) {
+    pub(crate) async fn watch_request_peers(
+        self: &Arc<Self>,
+        discovery: Arc<dyn crate::discovery::Discovery>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        super::velo_request::discovery::start(self, discovery, cancel).await
+    }
+
+    pub(super) fn rediscover_request_peer(&self, id: InstanceId) {
+        if let Some(peer) = self.peers.get_mut(&id) {
+            peer.retired.store(false, Ordering::Release);
+        }
+    }
+
+    pub(super) fn unregister_request_peer(&self, id: InstanceId) {
+        if id == self.velo.instance_id() {
+            return;
+        }
         let Some(expected) = self.peers.get(&id).map(|peer| Arc::clone(&peer)) else {
             return;
         };
@@ -751,7 +814,9 @@ impl VeloResponseService {
             peer.route.invalidate(epoch);
         }
         peer.pinned.store(false, Ordering::Release);
-        if peer.active.load(Ordering::Acquire) == 0 {
+        if peer.active.load(Ordering::Acquire) == 0
+            && peer.reverse_pin_until.load(Ordering::Acquire) <= self.peer_clock()
+        {
             self.velo.unregister_peer(id);
             entry.remove();
         }
@@ -769,7 +834,7 @@ impl VeloResponseService {
 
     pub(super) fn confirmed_peer(&self, peer_id: InstanceId) -> Option<(Arc<PeerState>, u64)> {
         let peer = self.peers.get(&peer_id)?;
-        let epoch = peer.route.confirmed_epoch()?;
+        let epoch = peer.confirmed_route(self.peer_clock())?;
         Some((Arc::clone(&peer), epoch))
     }
 
@@ -848,6 +913,7 @@ impl VeloResponseService {
                 controller: controller.clone(),
                 done: done.clone(),
                 instance: None,
+                request_peer: None,
             },
         );
         drop(registrations);
@@ -952,6 +1018,17 @@ impl VeloResponseService {
             .with_cleanup(move || service.remove(id)))
     }
 
+    pub(super) fn hold_request_peer(&self, registration_id: Uuid, address: &str) {
+        let Ok(target) = super::velo_request::decode_address(address) else {
+            return;
+        };
+        if target.instance_id != self.velo.instance_id()
+            && let Some(request) = self.registrations.lock().requests.get_mut(&registration_id)
+        {
+            request.request_peer = Some(self.reserve_peer(target.instance_id));
+        }
+    }
+
     fn remove(&self, id: Uuid) {
         let registration = self.registrations.lock().take(id);
         if let Some(registration) = registration {
@@ -986,7 +1063,7 @@ impl VeloResponseService {
                 let address = WorkerAddress::from_encoded(BASE64.decode(address)?);
                 lease
                     .peer
-                    .register(&self.velo, PeerInfo::new(peer_id, address))?;
+                    .register(&self.velo, PeerInfo::new(peer_id, address), false)?;
                 if peer_id != self.velo.instance_id() {
                     // The hello also installs the reverse UCX address.
                     tokio::time::timeout(
@@ -1651,7 +1728,7 @@ mod tests {
             .unwrap();
         *worker.sweep_hook.lock() = Some(Arc::new(move |id| assert_eq!(id, unpinned_id)));
 
-        assert_eq!(worker.evict_idle_peers(u64::MAX), 1);
+        assert_eq!(worker.evict_idle_peers(worker.peer_clock()), 1);
         assert!(worker.peer(unpinned_id).is_none());
         assert_eq!(
             worker.velo.primary_transport_key(frontend_id).as_deref(),
@@ -1786,13 +1863,26 @@ mod tests {
         *worker.before_request_peer_register.lock() = Some(Arc::new(move |claimed| {
             assert_eq!(claimed, id);
             witness.store(true, Ordering::Release);
-            assert_eq!(weak.upgrade().unwrap().evict_idle_peers(u64::MAX), 0);
+            assert_eq!(
+                {
+                    let worker = weak.upgrade().unwrap();
+                    worker.evict_idle_peers(worker.peer_clock())
+                },
+                0
+            );
         }));
         establish_route(&frontend, &worker.velo.peer_info(), deadline())
             .await
             .unwrap();
         assert!(called.load(Ordering::Acquire));
-        assert!(worker.peer(id).unwrap().pinned.load(Ordering::Acquire));
+        assert!(
+            worker
+                .peer(id)
+                .unwrap()
+                .reverse_pin_until
+                .load(Ordering::Acquire)
+                > worker.peer_clock()
+        );
     }
 
     #[tokio::test]
@@ -1873,6 +1963,149 @@ mod tests {
         drop(lease);
         assert_eq!(frontend.evict_idle_peers(u64::MAX), 1);
         assert_eq!(frontend.velo.primary_transport_key(id), None);
+    }
+
+    #[tokio::test]
+    async fn last_discovery_delete_retires_request_route_after_response_drains() {
+        use super::super::velo_request::encode_address;
+        use crate::{
+            component::TransportType,
+            discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
+            protocols::EndpointId,
+        };
+
+        let (frontend, worker) = request_pair().await;
+        stub_request_handler(&worker, Bytes::new());
+        let discovery = Arc::new(MockDiscovery::new(None, SharedMockRegistry::new()));
+        let cancel = CancellationToken::new();
+        let _watch = cancel.clone().drop_guard();
+        frontend
+            .watch_request_peers(discovery.clone(), cancel)
+            .await
+            .unwrap();
+
+        let mut endpoints = Vec::new();
+        let peer = worker.velo.peer_info();
+        let id = peer.instance_id();
+        for name in ["generate", "tokenize"] {
+            let endpoint = EndpointId {
+                namespace: "test".into(),
+                component: "worker".into(),
+                name: name.into(),
+            };
+            let address = encode_address(&peer, &endpoint, discovery.instance_id()).unwrap();
+            endpoints.push(
+                discovery
+                    .register(DiscoverySpec::Endpoint {
+                        namespace: endpoint.namespace,
+                        component: endpoint.component,
+                        endpoint: endpoint.name,
+                        transport: TransportType::Velo(address),
+                        device_type: None,
+                        request_plane_codec: None,
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let frontend_ref = &frontend;
+        let wait_for_count = |expected| async move {
+            by_deadline(deadline(), async {
+                while frontend_ref.discovered_request_peers.lock().count(id) != expected {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        };
+
+        wait_for_count(2).await;
+        establish_route(&frontend, &peer, deadline()).await.unwrap();
+        let registered = frontend
+            .register_response(EngineContext::new(()).context(), false)
+            .unwrap();
+        let path = encode_address(
+            &peer,
+            &EndpointId {
+                namespace: "test".into(),
+                component: "worker".into(),
+                name: "generate".into(),
+            },
+            discovery.instance_id(),
+        )
+        .unwrap();
+        frontend.hold_request_peer(registered.registration_id().unwrap(), &path);
+        let mut sender = worker
+            .sender(
+                EngineContext::new(()).context(),
+                registered.connection_info.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        sender.send_prologue(None).await.unwrap();
+        let mut receiver = by_deadline(deadline(), registered.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        discovery.unregister(endpoints.remove(0)).await.unwrap();
+        wait_for_count(1).await;
+        assert!(frontend.confirmed_peer(id).is_some());
+
+        discovery.unregister(endpoints.remove(0)).await.unwrap();
+        wait_for_count(0).await;
+        assert!(frontend.confirmed_peer(id).is_none());
+        assert!(frontend.velo.primary_transport_key(id).is_some());
+        let result = establish_route(&frontend, &peer, deadline()).await;
+        assert_eq!(
+            result.err().unwrap().error_type(),
+            ErrorType::WorkerUnavailable
+        );
+        assert_eq!(frontend.evict_idle_peers(frontend.peer_clock()), 0);
+
+        sender
+            .send(Bytes::from_static(b"after discovery delete"))
+            .await
+            .unwrap();
+        sender.finish().await.unwrap();
+        assert_eq!(
+            by_deadline(deadline(), receiver.rx.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            b"after discovery delete"[..]
+        );
+        assert!(
+            by_deadline(deadline(), receiver.rx.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(frontend.evict_idle_peers(frontend.peer_clock()), 1);
+        assert!(frontend.velo.primary_transport_key(id).is_none());
+    }
+
+    #[tokio::test]
+    async fn reverse_request_pin_expires_but_keeps_active_responses() {
+        let (frontend, worker) = request_pair().await;
+        stub_request_handler(&worker, Bytes::new());
+        establish_route(&frontend, &worker.velo.peer_info(), deadline())
+            .await
+            .unwrap();
+        let id = frontend.velo.instance_id();
+        let response = worker
+            .prepare_peer(id, &frontend.peer_address)
+            .await
+            .unwrap();
+        assert_eq!(worker.evict_idle_peers(u64::MAX), 0);
+        assert!(worker.velo.primary_transport_key(id).is_some());
+        drop(response);
+        assert_eq!(worker.evict_idle_peers(u64::MAX), 1);
+        assert!(worker.velo.primary_transport_key(id).is_none());
     }
 
     #[tokio::test]
@@ -2038,11 +2271,12 @@ mod tests {
             "Server unavailable: identity already registered"
         );
         assert!(
-            !worker
+            worker
                 .peer(frontend_id)
                 .unwrap()
-                .pinned
+                .reverse_pin_until
                 .load(Ordering::Acquire)
+                == 0
         );
         assert!(send(&frontend.velo.peer_info()).await.unwrap().is_empty());
     }
@@ -2080,8 +2314,9 @@ mod tests {
             worker
                 .peer(frontend_id)
                 .unwrap()
-                .pinned
+                .reverse_pin_until
                 .load(Ordering::Acquire)
+                > worker.peer_clock()
         );
         assert!(
             worker
@@ -2313,7 +2548,7 @@ mod tests {
             Bytes::from_static(b"before sweep"),
         );
 
-        assert_eq!(frontend.evict_idle_peers(u64::MAX), 0);
+        assert_eq!(frontend.evict_idle_peers(frontend.peer_clock()), 0);
         assert_eq!(worker.evict_idle_peers(u64::MAX), 0);
         drop(cancel_receiver);
         let result = tokio::time::timeout(Duration::from_secs(3), async {
@@ -2387,10 +2622,11 @@ mod tests {
                     self.worker
                         .peer(self.frontend_id)
                         .unwrap()
-                        .pinned
+                        .reverse_pin_until
                         .load(Ordering::Acquire)
+                        > self.worker.peer_clock()
                 );
-                self.worker.evict_idle_peers(u64::MAX);
+                self.worker.evict_idle_peers(self.worker.peer_clock());
                 self.triggered.store(true, Ordering::Release);
             }
         }

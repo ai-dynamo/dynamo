@@ -662,6 +662,26 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    fn check_transport(&self, instance: &Instance) -> Result<(), Error> {
+        use crate::{component::TransportType, distributed::RequestPlaneMode};
+
+        let mode = self.drt.request_plane();
+        let foreign = match (mode, &instance.transport) {
+            (RequestPlaneMode::Velo, TransportType::Tcp(_)) => "tcp",
+            (RequestPlaneMode::Velo, TransportType::Nats(_)) => "nats",
+            (RequestPlaneMode::Velo, TransportType::Direct(_)) => "direct",
+            (RequestPlaneMode::Tcp | RequestPlaneMode::Nats, TransportType::Velo(_)) => "velo",
+            _ => return Ok(()),
+        };
+        Err(DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message(format!(
+                "request plane '{mode}' cannot route to transport '{foreign}': mixed request planes are unsupported"
+            ))
+            .build()
+            .into())
+    }
+
     /// A missing registration is a process misconfiguration, not a worker
     /// fault: `Internal` fails the request without reporting the worker down.
     fn direct(&self, instance_id: u64) -> Result<&Arc<dyn StreamingDispatch<T, U>>, Error> {
@@ -694,7 +714,11 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
-        match request.instance().filter(|instance| is_direct(instance)) {
+        let instance = request.instance();
+        if let Some(instance) = instance {
+            self.check_transport(instance)?;
+        }
+        match instance.filter(|instance| is_direct(instance)) {
             Some(instance) => self.direct(instance.id())?.generate(request).await,
             // Call what the request plane's own `StreamingDispatch` impl
             // forwards to, here and in `generate_bidirectional`: going through
@@ -715,6 +739,7 @@ where
         address: String,
         input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error> {
+        self.check_transport(&instance)?;
         if is_direct(&instance) {
             self.direct(instance.id())?
                 .generate_bidirectional(instance, address, input)

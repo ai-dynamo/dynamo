@@ -686,6 +686,7 @@ pub struct AddressedPushRouter {
 
     request_callbacks: Arc<tcp::server::TcpStreamServer>,
     responses: ResponseServer,
+    velo_request_service: Option<Arc<super::super::velo_response::VeloResponseService>>,
 }
 
 #[derive(Clone)]
@@ -708,6 +709,7 @@ impl AddressedPushRouter {
             req_client,
             request_callbacks: responses.clone(),
             responses: ResponseServer::Tcp(responses),
+            velo_request_service: None,
         }))
     }
 
@@ -720,6 +722,7 @@ impl AddressedPushRouter {
             req_client,
             request_callbacks,
             responses: ResponseServer::Registered(responses),
+            velo_request_service: None,
         })
     }
 
@@ -739,10 +742,14 @@ impl AddressedPushRouter {
             ResponsePlaneMode::Tcp => Self::new(req_client, request_callbacks),
             ResponsePlaneMode::Velo => {
                 let responses = provider.drt().velo_response_service().await?;
+                let velo_request_service = (manager.mode()
+                    == crate::distributed::RequestPlaneMode::Velo)
+                    .then(|| responses.clone());
                 Ok(Arc::new(Self {
                     req_client,
                     request_callbacks,
                     responses: ResponseServer::Registered(responses),
+                    velo_request_service,
                 }))
             }
             ResponsePlaneMode::Quic => {
@@ -909,6 +916,12 @@ impl AddressedPushRouter {
                         .build()
                 ));
             }
+        }
+
+        if let (Some(service), Some(registration)) =
+            (&self.velo_request_service, response_registration)
+        {
+            service.hold_request_peer(registration, &address);
         }
 
         let buffer = build_request_envelope(
@@ -1766,6 +1779,7 @@ mod tests {
                                 req_client: client,
                                 request_callbacks: server,
                                 responses: super::ResponseServer::Registered(service.clone()),
+                                velo_request_service: None,
                             })
                         } else {
                             AddressedPushRouter::new(client, server).unwrap()
