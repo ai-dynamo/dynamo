@@ -3,22 +3,12 @@
 
 //! Metrics registry trait and implementation for Prometheus metrics
 //!
-//! This module provides a trait-based interface for creating and managing Prometheus metrics
+//! This crate provides a trait-based interface for creating and managing Prometheus metrics
 //! with automatic label injection and hierarchical naming support.
 
 pub mod frontend_perf;
-pub mod otlp_export;
 pub mod prom_typed;
 pub mod prometheus_names;
-pub mod quic_response;
-pub mod request_plane;
-pub mod tokio_perf;
-pub mod transport_metrics;
-pub mod work_handler_perf;
-pub mod work_handler_pool;
-
-#[cfg(test)]
-mod tests;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -1211,7 +1201,7 @@ pub(crate) static MERGE_CONFLICTS_TOTAL: Lazy<prometheus::IntCounter> = Lazy::ne
 
 /// Register [`MERGE_CONFLICTS_TOTAL`] on a DistributedRuntime's root registry,
 /// so it is exported wherever that tree is: `/metrics` and OTLP.
-pub(crate) fn register_merge_conflicts_counter(registry: &MetricsRegistry) {
+pub fn register_merge_conflicts_counter(registry: &MetricsRegistry) {
     registry.add_metric_or_warn(
         Box::new(MERGE_CONFLICTS_TOTAL.clone()),
         prometheus_names::metrics_merge::CONFLICTS_TOTAL,

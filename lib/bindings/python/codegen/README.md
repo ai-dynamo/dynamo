@@ -4,7 +4,7 @@ Python code generator for Dynamo Python bindings.
 
 ## gen-python-prometheus-names
 
-Generates `prometheus_names.py` from Rust source `lib/runtime/src/metrics/prometheus_names.rs`.
+Generates `prometheus_names.py` from Rust source `lib/metrics/src/prometheus_names.rs`.
 
 ### Usage
 
@@ -14,7 +14,7 @@ cargo run -p dynamo-codegen --bin gen-python-prometheus-names
 
 ### What it does
 
-- Parses Rust AST from `lib/runtime/src/metrics/prometheus_names.rs`
+- Parses Rust AST from `lib/metrics/src/prometheus_names.rs`
 - Generates Python classes with constants at `lib/bindings/python/src/dynamo/prometheus_names.py`
 - Mirrors nested `pub mod` as nested Python classes, so a Rust path and a Python path read the same
 
@@ -57,7 +57,7 @@ Only `pub mod` is exported; a private nested module stays out of the generated f
 
 ### When to run
 
-Run after modifying `lib/runtime/src/metrics/prometheus_names.rs`:
+Run after modifying `lib/metrics/src/prometheus_names.rs`:
 
 ```bash
 cargo run -p dynamo-codegen --bin gen-python-prometheus-names

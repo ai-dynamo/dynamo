@@ -110,7 +110,7 @@ pub mod name_prefix {
 /// Automatically inserted Prometheus label names used across the metrics system
 ///
 /// These labels are auto-injected into metrics by the hierarchy system:
-/// - Rust: lib/runtime/src/metrics.rs create_metric() function
+/// - Rust: lib/metrics/src/lib.rs create_metric() function
 /// - Python: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback()
 ///
 /// Python codegen: These constants are exported to lib/bindings/python/src/dynamo/prometheus_names.py
@@ -1023,7 +1023,7 @@ pub(crate) fn build_metric_name(prefix: &str, metric_name: &str) -> String {
 ///
 /// # Examples
 /// ```
-/// use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+/// use dynamo_metrics::prometheus_names::clamp_u64_to_i64;
 ///
 /// assert_eq!(clamp_u64_to_i64(100), 100);
 /// assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);

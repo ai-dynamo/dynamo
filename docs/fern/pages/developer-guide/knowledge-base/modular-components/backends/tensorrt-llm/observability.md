@@ -168,7 +168,7 @@ TensorRT-LLM provides Prometheus metrics through the `MetricsCollector` class (s
 
 Dynamo adds the following operational metrics for TensorRT-LLM workers. These complement the engine's native metrics above with request-level observability that the engine does not provide. All metrics use the `trtllm_` prefix. Enable their required iteration statistics with `--publish-metrics`.
 
-Metric name constants are defined in `lib/runtime/src/metrics/prometheus_names.rs` (`trtllm_additional` module).
+Metric name constants are defined in `lib/metrics/src/prometheus_names.rs` (`trtllm_additional` module).
 
 #### Request Type Tracking
 
@@ -255,6 +255,6 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 - [Metrics Catalog](../../../../../reference/observability/metrics-catalog.mdx) - Dynamo runtime metric definitions
 - [Metrics and Dashboards](../../../../../cli/operations/observability.mdx#view-metrics-and-dashboards) - Visualization walkthrough
 - Dynamo runtime metrics (prefixed with `dynamo_*`) are available at the same `/metrics` endpoint alongside TensorRT-LLM metrics
-  - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
-  - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)
+  - Implementation: `lib/metrics/src/lib.rs` (Rust runtime metrics)
+  - Metric names: `lib/metrics/src/prometheus_names.rs` (metric name constants)
   - Integration code: `components/src/dynamo/common/utils/prometheus.py` - Prometheus utilities and callback registration

@@ -17,7 +17,7 @@ rule violation is a contract defect, not a style preference.
 ## Find the telemetry
 
 1. Look for metric definitions and changes:
-   - Rust: new `pub const` names in `lib/runtime/src/metrics/prometheus_names.rs`;
+   - Rust: new `pub const` names in `lib/metrics/src/prometheus_names.rs`;
      `.metrics().create_*` and `create_metric_with_options` calls; `prometheus` crate
      constructors such as `IntCounterVec::new`; custom `Collector` implementations.
    - Python: `prometheus_client` `Counter`, `Gauge`, `Histogram`, `Info`, and `Enum`; registry

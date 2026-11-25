@@ -23,7 +23,7 @@ Each label is tagged with the scope in which it appears:
 
 ## Runtime-injected labels
 
-Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric registered through the namespace/component/endpoint hierarchy.
+Added by `create_metric()` in `lib/metrics/src/lib.rs` for every metric registered through the namespace/component/endpoint hierarchy.
 
 <ParamField path="dynamo_namespace" type="string">
   `[Shared]` The Dynamo runtime namespace — the logical scope shared by every component (router / prefill / decode / encode) in one deployment. **Not** the Kubernetes namespace. Example: `dynamo_cloud_vllm_v1_disagg_router_071de157`.
@@ -200,7 +200,7 @@ Values you will see in the `dynamo_component` label on `dynamo_component_*` seri
 Internal subsystems (e.g. `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
 
 <Note>
-  The name `backend` for the decode worker is historical. The runtime has a TODO to introduce a `decode` constant and migrate to it (see `lib/runtime/src/metrics/prometheus_names.rs::component_names`).
+  The name `backend` for the decode worker is historical. The runtime has a TODO to introduce a `decode` constant and migrate to it (see `lib/metrics/src/prometheus_names.rs::component_names`).
 </Note>
 
 ### Endpoint names

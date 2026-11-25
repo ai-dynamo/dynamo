@@ -35,8 +35,8 @@ if TYPE_CHECKING:
 # Auto-label injection: always injects dynamo_namespace, dynamo_component, dynamo_endpoint labels
 # into engine metrics based on the endpoint hierarchy.
 #
-# Rust counterpart: lib/runtime/src/metrics.rs create_metric() function
-# Label constants defined in: lib/runtime/src/metrics/prometheus_names.rs labels module
+# Rust counterpart: lib/metrics/src/lib.rs create_metric() function
+# Label constants defined in: lib/metrics/src/prometheus_names.rs labels module
 
 
 # Single source of truth for embedding cache metric names.
@@ -179,11 +179,11 @@ def register_engine_metrics_callback(
 
     if namespace_name and component_name:
         # Extract hierarchy information
-        # Mirrors Rust auto-label injection in lib/runtime/src/metrics.rs create_metric()
+        # Mirrors Rust auto-label injection in lib/metrics/src/lib.rs create_metric()
         endpoint_name_final = endpoint_name or "generate"
 
         # Add auto-labels using constants from prometheus_names.labels
-        # These align with Rust auto-labels defined in lib/runtime/src/metrics/prometheus_names.rs
+        # These align with Rust auto-labels defined in lib/metrics/src/prometheus_names.rs
         auto_labels = {
             labels.NAMESPACE: namespace_name,  # "dynamo_namespace"
             labels.COMPONENT: component_name,  # "dynamo_component"

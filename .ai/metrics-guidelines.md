@@ -183,7 +183,7 @@ not make it visible: pre-create its children as well (**L6**).
 
 **R2.** Do not add a metric that no production code updates.
 
-**R3.** When you add, rename, or remove a name in `lib/runtime/src/metrics/prometheus_names.rs`,
+**R3.** When you add, rename, or remove a name in `lib/metrics/src/prometheus_names.rs`,
 regenerate its Python mirror in the same pull request with
 `cargo run -p dynamo-codegen --bin gen-python-prometheus-names`. Never edit the mirror by hand.
 

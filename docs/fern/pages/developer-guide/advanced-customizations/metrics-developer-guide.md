@@ -24,7 +24,7 @@ Prometheus Exposition Format text metrics will be available at: `http://localhos
 
 ## Metric Name Constants
 
-The [prometheus_names.rs](https://github.com/ai-dynamo/dynamo/tree/main/lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
+The [prometheus_names.rs](https://github.com/ai-dynamo/dynamo/tree/main/lib/metrics/src/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
 
 ---
 
