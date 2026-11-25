@@ -2097,7 +2097,7 @@ impl<
                 command = self.commands.next() => command,
                 _ = affinity_recheck.tick(), if has_affinity_backlog => {
                     self.pending.recheck_affinity_lanes();
-                    self.handle_enqueued(None).await;
+                    self.handle_update(None, None).await;
                     continue;
                 }
                 _ = capacity_updates.notified() => {
@@ -2150,7 +2150,7 @@ impl<
                     reply.send();
                 }
             }
-            Drain::Enqueued => self.handle_enqueued(reply).await,
+            Drain::Enqueued => self.handle_update(reply, None).await,
             Drain::Full => self.handle_update(reply, Some(RecheckScope::All)).await,
         }
     }
@@ -2620,20 +2620,11 @@ impl<
         self.drain_ready(None).await;
     }
 
-    /// Rechecks every blocked lane, then drains as [`Self::drain_ready`] does.
     /// Drains after a change that may free blocked lanes: `recheck` names the lanes to ask
     /// again beyond what the recorded capacity changes call for.
     async fn handle_update(&mut self, reply: Option<CommandReply>, recheck: Option<RecheckScope>) {
         self.expire_due_classes(Instant::now());
         self.recheck_capacity_updates(recheck);
-        self.drain_ready(reply).await;
-    }
-
-    /// Recheck recorded capacity changes before an enqueue drains the queue, so
-    /// an older blocked session lane competes with later shared arrivals.
-    async fn handle_enqueued(&mut self, reply: Option<CommandReply>) {
-        self.expire_due_classes(Instant::now());
-        self.recheck_capacity_updates(None);
         self.drain_ready(reply).await;
     }
 
@@ -4822,7 +4813,7 @@ mod tests {
             assert!(enqueue_request_into_actor(
                 &queue, &mut actor, active, None, None
             ));
-            actor.handle_enqueued(None).await;
+            actor.handle_update(None, None).await;
             assert_eq!(active_rx.try_recv().unwrap().unwrap().best_worker, b);
 
             let (mut soft, mut soft_rx) = make_request("soft-b", 48);
@@ -4836,7 +4827,7 @@ mod tests {
                 assert!(enqueue_request_into_actor(
                     &queue, &mut actor, request, None, None
                 ));
-                actor.handle_enqueued(None).await;
+                actor.handle_update(None, None).await;
             }
             for rx in [&mut soft_rx, &mut hard_rx, &mut ordinary_rx] {
                 assert!(matches!(
@@ -4926,7 +4917,7 @@ mod tests {
             assert!(enqueue_request_into_actor(
                 &queue, &mut actor, active, None, None
             ));
-            actor.handle_enqueued(None).await;
+            actor.handle_update(None, None).await;
             assert_eq!(active_rx.try_recv().unwrap().unwrap().best_worker, worker);
         }
 
@@ -4935,7 +4926,7 @@ mod tests {
         assert!(enqueue_request_into_actor(
             &queue, &mut actor, older, None, None
         ));
-        actor.handle_enqueued(None).await;
+        actor.handle_update(None, None).await;
         assert!(matches!(
             older_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -4944,7 +4935,7 @@ mod tests {
         // A timer observes fallback eligibility while every fallback worker is still full.
         overloaded.store(true, Ordering::Relaxed);
         actor.pending.recheck_affinity_lanes();
-        actor.handle_enqueued(None).await;
+        actor.handle_update(None, None).await;
         assert!(matches!(
             older_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -4968,7 +4959,7 @@ mod tests {
         assert!(enqueue_request_into_actor(
             &queue, &mut actor, plain, None, None
         ));
-        actor.handle_enqueued(None).await;
+        actor.handle_update(None, None).await;
         assert!(matches!(
             plain_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -6022,7 +6013,7 @@ mod tests {
                 .default_queue_metadata(&active, Instant::now())
                 .unwrap();
             assert!(actor.handle_enqueue(active, None, None, None, None, metadata));
-            actor.handle_enqueued(None).await;
+            actor.handle_update(None, None).await;
             assert_eq!(active_rx.try_recv().unwrap().unwrap().best_worker, worker);
 
             let (mut older, mut older_rx) = make_request("older-pinned", 64);
@@ -6031,7 +6022,7 @@ mod tests {
                 .default_queue_metadata(&older, Instant::now())
                 .unwrap();
             assert!(actor.handle_enqueue(older, None, None, None, None, metadata));
-            actor.handle_enqueued(None).await;
+            actor.handle_update(None, None).await;
             assert!(older_rx.try_recv().is_err());
 
             slots.free(&"active".to_owned(), Instant::now()).unwrap();
@@ -6044,7 +6035,7 @@ mod tests {
                 .unwrap();
             assert!(actor.handle_enqueue(later, None, None, None, None, metadata));
             // Force enqueue processing before the capacity select branch.
-            actor.handle_enqueued(None).await;
+            actor.handle_update(None, None).await;
             assert_eq!(older_rx.try_recv().unwrap().unwrap().best_worker, worker);
             assert!(later_rx.try_recv().is_err());
             assert_eq!(queue.pending_count(), 1);
