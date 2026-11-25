@@ -379,10 +379,12 @@ fn reconcile_recurrent_layouts(indexer: &Indexer, workers: &HashMap<WorkerId, Mo
         let Ok(ranks) = config.data_parallel_rank_range() else {
             continue;
         };
+        // The worker joins its recurrent groups and publishes one event per
+        // complete checkpoint, so the group list only says whether it has any.
         for rank in ranks {
             indexer.declare_recurrent_layout(
                 WorkerWithDpRank::new(worker_id, rank),
-                &groups,
+                !groups.is_empty(),
                 layout
                     .get("alignment_blocks")
                     .and_then(serde_json::Value::as_u64)

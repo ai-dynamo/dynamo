@@ -6,8 +6,8 @@
 //! A hybrid model keeps recurrent state next to its attention KV cache. A worker can resume a
 //! cached prefix only at a block where it holds a state checkpoint for every recurrent group, so
 //! the router caps each hybrid worker's match at its deepest checkpoint. In this mode every
-//! worker declares a layout of [`RECURRENT_GROUPS`] and publishes each checkpoint as vLLM does:
-//! one tagged event per group.
+//! worker declares itself hybrid and publishes each checkpoint as a Dynamo worker does: one
+//! tagged event per complete checkpoint, the engine's groups already joined.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,9 +17,6 @@ use dynamo_kv_events::event::{
 use dynamo_kv_events::residency::{KvCacheGroupKind, KvCacheGroupTag, StorageTier};
 
 use super::mooncake_shared::{WorkerTrace, WorkerTraceEntry};
-
-/// A worker's recurrent cache groups. Qwen3.5 has three.
-pub(crate) const RECURRENT_GROUPS: [u32; 3] = [0, 1, 2];
 
 /// Which blocks of a worker's stores carry a checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -32,18 +29,16 @@ pub enum CheckpointPolicy {
     EveryBlock,
 }
 
-pub(crate) fn group_tag(group: u32) -> KvCacheGroupTag {
+pub(crate) fn checkpoint_tag() -> KvCacheGroupTag {
     KvCacheGroupTag {
-        group_idx: group,
-        kind: KvCacheGroupKind::Mamba,
-        expected_group_count: Some(RECURRENT_GROUPS.len() as u32),
+        kind: KvCacheGroupKind::RecurrentCheckpoint,
         alignment_blocks: Some(1),
     }
 }
 
 /// Adds the checkpoint layer to one worker's timeline. After each store the worker owns, on any
-/// tier, the blocks `policy` picks become checkpoints on that tier: one `Stored` per group. A
-/// removal takes its blocks' checkpoints with it: one `Removed` per group. KVCR cache owners
+/// tier, the blocks `policy` picks become checkpoints on that tier: one tagged `Stored`. A
+/// removal takes its blocks' checkpoints with it: one tagged `Removed`. KVCR cache owners
 /// publish no checkpoint.
 pub(crate) fn derive_checkpoint_layer(
     timeline: Vec<WorkerTrace>,
@@ -108,21 +103,18 @@ pub(crate) fn derive_checkpoint_layer(
         let Some((data, storage_tier, dp_rank)) = derived else {
             continue;
         };
-        for group in RECURRENT_GROUPS {
-            out.push(WorkerTrace {
-                timestamp_us,
-                entry: WorkerTraceEntry::Checkpoint {
-                    event: KvCacheEvent {
-                        event_id,
-                        data: data.clone(),
-                        dp_rank,
-                    },
-                    storage_tier,
-                    group,
+        out.push(WorkerTrace {
+            timestamp_us,
+            entry: WorkerTraceEntry::Checkpoint {
+                event: KvCacheEvent {
+                    event_id,
+                    data,
+                    dp_rank,
                 },
-            });
-            event_id += 1;
-        }
+                storage_tier,
+            },
+        });
+        event_id += 1;
     }
     out
 }

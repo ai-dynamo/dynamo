@@ -437,10 +437,11 @@ impl Indexer {
         Ok(())
     }
 
+    /// See [`crate::KvCacheGroupResidency::declare_layout`].
     pub fn declare_recurrent_layout(
         &self,
         worker: WorkerWithDpRank,
-        groups: &[u32],
+        recurrent: bool,
         alignment_blocks: u32,
     ) {
         let residency = match self {
@@ -454,7 +455,7 @@ impl Indexer {
         };
         residency.declare_layout(
             crate::prelude::ResidencyOwner::worker(worker),
-            groups,
+            recurrent,
             alignment_blocks,
         );
     }
@@ -1184,7 +1185,7 @@ mod tests {
 
         let worker = WorkerWithDpRank::new(9, 0);
         let owner = ResidencyOwner::worker(worker);
-        let tagged = |event_id: u64, group_idx: u32, hashes: &[u64]| {
+        let tagged = |event_id: u64, hashes: &[u64]| {
             RouterEvent::with_storage_tier(
                 worker.worker_id,
                 KvCacheEvent {
@@ -1206,9 +1207,7 @@ mod tests {
                 StorageTier::Device,
             )
             .with_kv_cache_group(KvCacheGroupTag {
-                group_idx,
-                kind: KvCacheGroupKind::Mamba,
-                expected_group_count: Some(2),
+                kind: KvCacheGroupKind::RecurrentCheckpoint,
                 alignment_blocks: Some(1),
             })
         };
@@ -1223,17 +1222,13 @@ mod tests {
         };
 
         let source = create_indexer(4, 1);
-        for event in [tagged(1, 0, &[77]), tagged(2, 1, &[77, 88])] {
-            source.try_apply_event(event).await.unwrap();
-        }
+        source.try_apply_event(tagged(1, &[77])).await.unwrap();
         assert!(has_checkpoint(&source, 77));
         assert!(!has_checkpoint(&source, 88));
         let dump = source.dump_events().await.unwrap();
 
         let target = create_indexer(4, 1);
-        for event in [tagged(1, 0, &[99]), tagged(2, 1, &[99])] {
-            target.try_apply_event(event).await.unwrap();
-        }
+        target.try_apply_event(tagged(1, &[99])).await.unwrap();
         assert!(has_checkpoint(&target, 99));
 
         target
@@ -1277,9 +1272,7 @@ mod tests {
             StorageTier::Device,
         )
         .with_kv_cache_group(KvCacheGroupTag {
-            group_idx: 2,
-            kind: KvCacheGroupKind::Mamba,
-            expected_group_count: Some(1),
+            kind: KvCacheGroupKind::RecurrentCheckpoint,
             alignment_blocks: Some(1),
         });
         indexer.try_apply_event(tagged).await.unwrap();
@@ -1376,9 +1369,7 @@ mod tests {
             StorageTier::Device,
         )
         .with_kv_cache_group(KvCacheGroupTag {
-            group_idx: 1,
-            kind: KvCacheGroupKind::Mamba,
-            expected_group_count: Some(1),
+            kind: KvCacheGroupKind::RecurrentCheckpoint,
             alignment_blocks: Some(1),
         });
         indexer.apply_event_routed(mamba).await.unwrap();
@@ -1979,7 +1970,7 @@ mod tests {
         let flat = indexer.find_matches(sequence).await.unwrap();
         assert_eq!(flat.scores.get(&confirmed).copied(), Some(2));
         assert_eq!(flat.scores.get(&predicted).copied(), Some(1));
-        indexer.declare_recurrent_layout(predicted, &[0], 1);
+        indexer.declare_recurrent_layout(predicted, true, 1);
         let capped = indexer
             .find_tiered_matches(vec![
                 LocalBlockHash(11),

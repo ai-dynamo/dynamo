@@ -211,11 +211,10 @@ pub(crate) enum WorkerTraceEntry {
         /// Published by the worker's KVCR cache owner rather than the worker itself.
         cache_owner: bool,
     },
-    /// One recurrent group's part of a hybrid worker's checkpoints.
+    /// A change to a hybrid worker's complete checkpoints.
     Checkpoint {
         event: KvCacheEvent,
         storage_tier: StorageTier,
-        group: u32,
     },
 }
 
@@ -269,7 +268,7 @@ pub(crate) struct MooncakeTraceTotals {
     pub(crate) cpu_tier: HostTierTotals,
     /// KVCR's DRAM tier, owned by the worker's KVCR cache owner.
     pub(crate) kvcr: HostTierTotals,
-    /// A hybrid worker's checkpoint stream, on every tier: one event per recurrent group. The
+    /// A hybrid worker's checkpoint stream, on every tier: one event per checkpoint change. The
     /// live memberships are the checkpoints on device at the end.
     pub(crate) checkpoints: HostTierTotals,
 }
@@ -509,10 +508,8 @@ pub(crate) fn prepare_scaled_benchmark(
                 WorkerTraceEntry::Checkpoint {
                     event,
                     storage_tier,
-                    group,
                 } => {
-                    // Every group carries the same blocks, so one group counts the checkpoints.
-                    let counted = *group == 0 && storage_tier.is_gpu();
+                    let counted = storage_tier.is_gpu();
                     match &event.data {
                         KvCacheEventData::Stored(store) => {
                             totals.checkpoints.stored_events += 1;

@@ -281,11 +281,12 @@ hybrid worker can resume a cached prefix only at a block where it holds a state
 checkpoint for every recurrent group, so the router caps its match at its
 deepest checkpoint. The flag implies `--router-lookup`.
 
-- Each worker declares a layout of three recurrent groups before the run.
+- Each worker declares itself hybrid before the run.
 - After each store a worker owns, on any tier, the blocks the policy picks
-  become checkpoints on that tier. A checkpoint is published as vLLM publishes
-  it: one tagged `Stored` per group. A removal takes its blocks' checkpoints
-  with it, one tagged `Removed` per group. KVCR cache owners publish none.
+  become checkpoints on that tier. A checkpoint is published as a Dynamo
+  worker publishes it: one tagged `Stored`, the engine's recurrent groups
+  already joined. A removal takes its blocks' checkpoints with it, one tagged
+  `Removed`. KVCR cache owners publish none.
 - The router's checkpoint table applies a tagged event on the thread that
   admits it, so the issuer threads apply them here, as the event subscriber does
   in the router. They have no per-event completions and count toward
@@ -310,7 +311,7 @@ cargo bench --package dynamo-bench --bench mooncake_bench \
 ```
 
 `router_lookup.checkpoints` in the result reports the checkpoint stream: its
-events and blocks, one per group, and the checkpoints live on device at the
+events and blocks, one event per checkpoint change, and the checkpoints live on device at the
 end. The `total_*` fields and throughputs stay attention-only. For the cost of
 the checkpoint logic, compare against a `--router-lookup` run of the same
 trace without the flag.

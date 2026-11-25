@@ -22,7 +22,7 @@ const BLOCKS: usize = 1024;
 const CHECKPOINT: usize = 512;
 const KV_BLOCK_SIZE: u32 = 576;
 
-fn store(worker: u64, event_id: u64, positions: &[usize], group: Option<u32>) -> RouterEvent {
+fn store(worker: u64, event_id: u64, positions: &[usize], checkpoint: bool) -> RouterEvent {
     let event = RouterEvent::with_storage_tier(
         worker,
         KvCacheEvent {
@@ -43,14 +43,13 @@ fn store(worker: u64, event_id: u64, positions: &[usize], group: Option<u32>) ->
         },
         StorageTier::Device,
     );
-    match group {
-        None => event,
-        Some(group_idx) => event.with_kv_cache_group(KvCacheGroupTag {
-            group_idx,
-            kind: KvCacheGroupKind::Mamba,
-            expected_group_count: Some(3),
+    if checkpoint {
+        event.with_kv_cache_group(KvCacheGroupTag {
+            kind: KvCacheGroupKind::RecurrentCheckpoint,
             alignment_blocks: Some(1),
-        }),
+        })
+    } else {
+        event
     }
 }
 
@@ -93,28 +92,22 @@ fn main() {
         let positions: Vec<_> = (1..=BLOCKS).collect();
         for worker in 0..WORKERS {
             indexer
-                .apply_event_routed(store(worker as u64, 1, &positions, None))
+                .apply_event_routed(store(worker as u64, 1, &positions, false))
                 .await
                 .unwrap();
             if case != "dense" {
-                indexer.declare_recurrent_layout(
-                    WorkerWithDpRank::new(worker as u64, 0),
-                    &[0, 1, 2],
-                    1,
-                );
-                for group in 0..if case == "incomplete" { 2 } else { 3 } {
+                indexer.declare_recurrent_layout(WorkerWithDpRank::new(worker as u64, 0), true, 1);
+                // A worker joins its engine's recurrent groups and publishes a
+                // checkpoint only once every group holds its state, so an
+                // incomplete checkpoint reaches the router as no event at all.
+                if case != "incomplete" {
                     let checkpoints = if case == "populated_short" {
                         positions.as_slice()
                     } else {
                         &[CHECKPOINT]
                     };
                     indexer
-                        .apply_event_routed(store(
-                            worker as u64,
-                            2 + group as u64,
-                            checkpoints,
-                            Some(group),
-                        ))
+                        .apply_event_routed(store(worker as u64, 2, checkpoints, true))
                         .await
                         .unwrap();
                 }

@@ -1416,15 +1416,19 @@ mod tests_startup_helpers {
         // Build synthetic 3-frame message: [topic, seq(8B), payload]
         let seq: u64 = 77;
 
-        let events = vec![
-            MapKvEvent::BlockStored {
+        // The engine reports each of the three recurrent groups on its own.
+        let mut events: Vec<_> = [0, 1, 2]
+            .into_iter()
+            .map(|group_idx| MapKvEvent::BlockStored {
                 block_hashes: vec![41],
                 parent_block_hash: None,
                 token_ids: vec![0, 1, 2, 3],
                 block_size: 4,
-                group_idx: Some(1),
+                group_idx: Some(group_idx),
                 kv_cache_spec_kind: Some("mamba"),
-            },
+            })
+            .collect();
+        events.extend([
             MapKvEvent::BlockStored {
                 block_hashes: vec![42],
                 parent_block_hash: None,
@@ -1436,7 +1440,7 @@ mod tests_startup_helpers {
             MapKvEvent::BlockRemoved {
                 block_hashes: vec![42],
             },
-        ];
+        ]);
 
         let batch = (0.0, events, Some(0_i32));
 
@@ -1476,15 +1480,14 @@ mod tests_startup_helpers {
             3,
             "one native payload must produce one input containing all accepted events"
         );
-        // The recurrent-group store is kept and tagged, not filtered.
+        // The three group stores are joined into one tagged checkpoint store.
+        // The two that did not complete it are filtered and take no event id.
         let mamba = &event_batch[0];
         assert_eq!(mamba.event.event_id, 0);
         assert_eq!(
             mamba.placement.kv_cache_group,
             Some(dynamo_kv_events::residency::KvCacheGroupTag {
-                group_idx: 1,
-                kind: dynamo_kv_events::residency::KvCacheGroupKind::Mamba,
-                expected_group_count: Some(3),
+                kind: dynamo_kv_events::residency::KvCacheGroupKind::RecurrentCheckpoint,
                 alignment_blocks: Some(1),
             })
         );
@@ -1554,25 +1557,29 @@ mod tests_startup_helpers {
             .expect("timed out waiting for gap recovery")
             .expect("listener channel closed")
             .into_events();
-        // The replayed payload carries the same three events: the tagged
-        // Mamba store, the attention store and the removal.
-        let offset = usize::from(heartbeat_source);
-        assert_eq!(recovery.len(), 3 + offset);
-        if heartbeat_source {
+        // The replayed payload carries the same events. A heartbeat-aware
+        // source cleared first, so the group stores complete the checkpoint
+        // again and it is published again. On a legacy stream the checkpoint
+        // is still complete: the group stores change nothing and are filtered.
+        let attention = if heartbeat_source {
             assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
-        }
-        assert!(recovery[offset].placement.kv_cache_group.is_some());
+            assert!(recovery[1].placement.kv_cache_group.is_some());
+            assert!(matches!(
+                recovery[1].event.data,
+                KvCacheEventData::Stored(_)
+            ));
+            2
+        } else {
+            0
+        };
+        assert_eq!(recovery.len(), attention + 2);
+        assert_eq!(recovery[attention].placement.kv_cache_group, None);
         assert!(matches!(
-            recovery[offset].event.data,
+            recovery[attention].event.data,
             KvCacheEventData::Stored(_)
         ));
-        assert_eq!(recovery[offset + 1].placement.kv_cache_group, None);
         assert!(matches!(
-            recovery[offset + 1].event.data,
-            KvCacheEventData::Stored(_)
-        ));
-        assert!(matches!(
-            recovery[offset + 2].event.data,
+            recovery[attention + 1].event.data,
             KvCacheEventData::Removed(_)
         ));
         let first_id = recovery[0].event.event_id;
@@ -1784,7 +1791,7 @@ mod tests_startup_helpers {
         assert_eq!(data.block_hashes, vec![ExternalSequenceBlockHash(40)]);
 
         // A windowed-attention group is still filtered at ingress (recurrent
-        // groups are kept and tagged since kv_cache_group).
+        // groups are kept and joined into tagged checkpoint events).
         let filtered_batch = (
             0.0,
             vec![FilterTestEvent::BlockStored {

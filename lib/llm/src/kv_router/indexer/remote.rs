@@ -606,7 +606,10 @@ mod tests {
             .apply_event_routed(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
             .await
             .unwrap();
-        let tag: KvCacheGroupTag = serde_json::from_value(serde_json::json!({"group_idx":0, "kind":"mamba", "expected_group_count":1, "alignment_blocks":1})).unwrap();
+        let tag: KvCacheGroupTag = serde_json::from_value(
+            serde_json::json!({"kind":"recurrent_checkpoint", "alignment_blocks":1}),
+        )
+        .unwrap();
         indexer
             .apply_event_routed(
                 RouterEvent::new(

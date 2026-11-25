@@ -155,6 +155,19 @@ def test_unsupported_group_kinds_fail_closed(kind):
         recurrent_kv_layout(config, enabled=True)
 
 
+def test_more_recurrent_groups_than_the_publisher_can_join_are_rejected():
+    config = _config()
+    groups = config.additional_config[DYNAMO_KV_CACHE_GROUPS_KEY]
+    groups.extend(
+        {"group_idx": group_idx, "kind": "mamba", "block_size": 576}
+        for group_idx in range(3, 33)
+    )
+    assert len(recurrent_kv_layout(config, enabled=True).recurrent_groups) == 32
+    groups.append({"group_idx": 33, "kind": "mamba", "block_size": 576})
+    with pytest.raises(ValueError, match="at most 32 recurrent cache groups"):
+        recurrent_kv_layout(config, enabled=True)
+
+
 @pytest.mark.parametrize("size", [0, -1, True, "576"])
 def test_invalid_physical_group_size_is_rejected(size):
     config = _config()

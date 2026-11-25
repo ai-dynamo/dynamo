@@ -93,6 +93,22 @@ pub struct ZmqEventNormalizer {
     full_block_workers: FxHashSet<WorkerWithDpRank>,
     recurrent_groups: Option<Vec<u32>>,
     recurrent_alignment_blocks: u32,
+    /// Which recurrent groups hold their state at a checkpoint hash: one bit
+    /// per group of `recurrent_groups`, per storage tier. The engine reports
+    /// each group on its own; a checkpoint is published only while every
+    /// group is resident in one tier. See [`Self::join_recurrent_groups`].
+    recurrent_presence: FxHashMap<(WorkerWithDpRank, u64), [u32; STORAGE_TIERS]>,
+}
+
+const STORAGE_TIERS: usize = 4;
+
+fn tier_slot(tier: StorageTier) -> usize {
+    match tier {
+        StorageTier::Device => 0,
+        StorageTier::HostPinned => 1,
+        StorageTier::Disk => 2,
+        StorageTier::External => 3,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +136,10 @@ pub enum ZmqEventFilterReason {
     NonMainAttentionGroup,
     UnlearnedGroupIdx,
     PartialBlock,
+    /// A recurrent group's store or removal that neither completed a
+    /// checkpoint nor broke a complete one. This is the normal fate of all but
+    /// one group's event per checkpoint, not a fault.
+    CheckpointUnchanged,
 }
 
 impl ZmqEventFilterReason {
@@ -136,6 +156,7 @@ impl ZmqEventFilterReason {
             Self::NonMainAttentionGroup => "non_main_attention_group",
             Self::UnlearnedGroupIdx => "unlearned_group_idx",
             Self::PartialBlock => "partial_block",
+            Self::CheckpointUnchanged => "checkpoint_unchanged",
         }
     }
 }
@@ -153,6 +174,7 @@ impl ZmqEventNormalizer {
             full_block_workers: FxHashSet::default(),
             recurrent_groups: None,
             recurrent_alignment_blocks: 1,
+            recurrent_presence: FxHashMap::default(),
         }
     }
 
@@ -168,13 +190,21 @@ impl ZmqEventNormalizer {
             full_block_workers: FxHashSet::default(),
             recurrent_groups: None,
             recurrent_alignment_blocks: 1,
+            recurrent_presence: FxHashMap::default(),
         }
     }
 
     /// Opt in only when every downstream consumer supports recurrent checkpoints.
-    /// The complete group list also classifies removals received before stores.
+    /// The list must name every recurrent group of the engine: a checkpoint is
+    /// published once all of them are resident, and the list also classifies
+    /// removals received before stores.
     pub fn with_recurrent_groups(mut self, groups: Option<Vec<u32>>) -> Self {
-        self.recurrent_groups = groups;
+        self.recurrent_groups = groups.map(|mut groups| {
+            groups.sort_unstable();
+            groups.dedup();
+            groups
+        });
+        self.recurrent_presence.clear();
         self
     }
 
@@ -319,9 +349,9 @@ impl ZmqEventNormalizer {
         // payload of a publisher without self-describing offload events
         // (vLLM before vllm-project/vllm#62613): it is dropped as before the
         // tag existed. Its group is still learned above, so a later removal
-        // is tagged and lands in the presence table as a no-op.
+        // is recognised as recurrent and changes no checkpoint.
         if let RawKvEvent::BlockStored { block_size: 0, .. } = &raw
-            && self.kv_cache_group_tag(metadata, worker.dp_rank).is_some()
+            && self.recurrent_group(metadata, worker.dp_rank).is_some()
         {
             return Err(ZmqEventFilterReason::NonMainAttentionKind);
         }
@@ -338,10 +368,14 @@ impl ZmqEventNormalizer {
             }
             RawKvEvent::AllBlocksCleared { .. } => {
                 self.full_block_workers.remove(&worker);
+                // The clear is published untagged and drops the worker's
+                // checkpoints downstream too; the groups start over here.
+                self.recurrent_presence
+                    .retain(|(known_worker, _), _| *known_worker != worker);
             }
             _ => {}
         }
-        if self.kv_cache_group_tag(metadata, worker.dp_rank).is_some() {
+        if let Some(group_idx) = self.recurrent_group(metadata, worker.dp_rank) {
             // Recurrent-group events share positional hashes with the
             // attention group but are not part of its namespace chain: a
             // Mamba store or removal must not mark or delete attention
@@ -353,7 +387,14 @@ impl ZmqEventNormalizer {
             {
                 *cache_namespace = None;
             }
-            return Ok(raw);
+            // Decided here, before the caller takes an event id: all but one
+            // group's event per checkpoint is filtered, and a filtered event
+            // must not leave an id gap.
+            return if self.join_recurrent_groups(&mut raw, group_idx, worker) {
+                Ok(raw)
+            } else {
+                Err(ZmqEventFilterReason::CheckpointUnchanged)
+            };
         }
         if !is_lower_tier {
             self.propagate_cache_namespace(&mut raw, worker)?;
@@ -367,8 +408,9 @@ impl ZmqEventNormalizer {
         event_id: u64,
         worker: WorkerWithDpRank,
     ) -> Option<PlacementEvent> {
-        // Tag before conversion consumes the raw event: a recurrent group's
-        // event is routed to the per-group presence table, not the attention
+        // Tag before conversion consumes the raw event: what is left of a
+        // recurrent group's event after the join names complete checkpoints
+        // and is routed to the checkpoint presence table, not the attention
         // tree, whatever shape conversion gives it.
         let kv_cache_group = self.kv_cache_group_tag(raw.metadata(), worker.dp_rank);
         let mut event = if kv_cache_group.is_some() {
@@ -631,23 +673,101 @@ impl ZmqEventNormalizer {
             })
     }
 
-    /// Tag for events that are kept but belong to a non-main-attention group.
-    /// Only recurrent state groups are kept today; see [`Self::filter_reason`].
+    /// Group index of an event that belongs to a recurrent state group. Only
+    /// these non-main-attention groups are kept; see [`Self::filter_reason`].
+    fn recurrent_group(&self, metadata: KvCacheEventMetadata, dp_rank: DpRank) -> Option<u32> {
+        match self.resolved_kind(metadata, dp_rank)? {
+            (group_idx, KvCacheSpecKind::Mamba) => group_idx,
+            _ => None,
+        }
+    }
+
+    /// Tag for the event that is left of a recurrent group's event after
+    /// [`Self::join_recurrent_groups`]: it names complete checkpoints.
     pub(crate) fn kv_cache_group_tag(
         &self,
         metadata: KvCacheEventMetadata,
         dp_rank: DpRank,
     ) -> Option<KvCacheGroupTag> {
-        let (group_idx, kind) = self.resolved_kind(metadata, dp_rank)?;
-        (kind == KvCacheSpecKind::Mamba).then_some(KvCacheGroupTag {
-            group_idx: group_idx?,
-            kind: KvCacheGroupKind::Mamba,
-            expected_group_count: self
-                .recurrent_groups
-                .as_ref()
-                .map(|groups| groups.len() as u32),
-            alignment_blocks: Some(self.recurrent_alignment_blocks),
-        })
+        self.recurrent_group(metadata, dp_rank)
+            .map(|_| KvCacheGroupTag {
+                kind: KvCacheGroupKind::RecurrentCheckpoint,
+                alignment_blocks: Some(self.recurrent_alignment_blocks),
+            })
+    }
+
+    /// Fold one recurrent group's store or removal into the worker's
+    /// checkpoint presence, and keep in `raw` only the hashes whose checkpoint
+    /// changed: on a store, those where this was the last group missing in
+    /// the event's tier; on a removal, those that were complete until now.
+    /// Returns false when no checkpoint changed.
+    ///
+    /// An engine can resume only where every recurrent group holds its state,
+    /// and it reports each group on its own. Joining them here means one
+    /// event per checkpoint on the event plane instead of one per group, and
+    /// consumers keep no per-group state. Presence is set-like per group and
+    /// tier: a repeated store or removal changes nothing.
+    fn join_recurrent_groups(
+        &mut self,
+        raw: &mut RawKvEvent,
+        group_idx: u32,
+        worker: WorkerWithDpRank,
+    ) -> bool {
+        let (Some(tier), Some(groups)) = (storage_tier_of(raw), self.recurrent_groups.as_ref())
+        else {
+            return false;
+        };
+        // A group outside the list, or more groups than bits, can never be
+        // shown complete: publish nothing rather than guess.
+        let (Some(position), true) = (
+            groups.iter().position(|&group| group == group_idx),
+            groups.len() <= u32::BITS as usize,
+        ) else {
+            return false;
+        };
+        let slot = tier_slot(tier);
+        let bit = 1u32 << position;
+        let complete = u32::MAX >> (u32::BITS as usize - groups.len());
+        let presence = &mut self.recurrent_presence;
+        match raw {
+            RawKvEvent::BlockStored {
+                block_hashes,
+                parent_block_hash,
+                ..
+            } => {
+                // A store that repeats a hash is malformed. Conversion turns
+                // it into a no-op that keeps its event id; do not remember
+                // its group as resident either.
+                if convert::has_duplicate_block_hashes(block_hashes.as_slice(), *parent_block_hash)
+                {
+                    return true;
+                }
+                block_hashes.retain(|hash| {
+                    let resident =
+                        &mut presence.entry((worker, (*hash).into_u64())).or_default()[slot];
+                    let was_complete = *resident == complete;
+                    *resident |= bit;
+                    !was_complete && *resident == complete
+                });
+                !block_hashes.is_empty()
+            }
+            RawKvEvent::BlockRemoved { block_hashes, .. } => {
+                block_hashes.retain(|hash| {
+                    let key = (worker, (*hash).into_u64());
+                    let Some(tiers) = presence.get_mut(&key) else {
+                        return false;
+                    };
+                    let was_complete = tiers[slot] == complete;
+                    tiers[slot] &= !bit;
+                    if tiers.iter().all(|resident| *resident == 0) {
+                        presence.remove(&key);
+                    }
+                    was_complete
+                });
+                !block_hashes.is_empty()
+            }
+            RawKvEvent::AllBlocksCleared { .. } | RawKvEvent::Ignored => true,
+        }
     }
 
     fn filter_reason(

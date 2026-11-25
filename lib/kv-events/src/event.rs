@@ -155,7 +155,8 @@ pub struct RouterEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Non-main-attention KV cache group this event belongs to. Absent on the
+    /// Set when the event describes recurrent state rather than attention
+    /// blocks: its hashes name complete recurrent checkpoints. Absent on the
     /// legacy wire and for attention-group events. Named MessagePack only, as
     /// for `state_source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,10 +205,10 @@ impl RouterEvent {
         }
     }
 
-    /// Tag the event as belonging to a non-main-attention KV cache group. The
-    /// wire residency domain becomes `<domain>+kv_cache_group`, so consumers
-    /// that do not know the tag drop the event instead of indexing it as
-    /// attention residency.
+    /// Tag the event as describing recurrent checkpoints instead of attention
+    /// blocks. The wire residency domain becomes `<domain>+kv_cache_group`, so
+    /// consumers that do not know the tag drop the event instead of indexing
+    /// it as attention residency.
     pub fn with_kv_cache_group(mut self, kv_cache_group: KvCacheGroupTag) -> Self {
         self.kv_cache_group = Some(kv_cache_group);
         self.residency_domain = std::mem::take(&mut self.residency_domain).tagged();
@@ -362,12 +363,14 @@ mod tests {
                 },
             );
             let tagged = dense.clone().with_kv_cache_group(KvCacheGroupTag {
-                group_idx: 0,
-                kind: KvCacheGroupKind::Mamba,
-                expected_group_count: Some(1),
+                kind: KvCacheGroupKind::RecurrentCheckpoint,
                 alignment_blocks: Some(1),
             });
             let mut wire = serde_json::to_value(vec![tagged, dense]).unwrap();
+            assert_eq!(
+                wire[0]["kv_cache_group"]["kind"],
+                serde_json::json!("recurrent_checkpoint")
+            );
             wire[0]["kv_cache_group"]["kind"] = serde_json::json!("future_recurrent_kind");
             let decoded: Vec<RouterEvent> = serde_json::from_value(wire).unwrap();
             assert_eq!(decoded.len(), 2);
@@ -382,13 +385,39 @@ mod tests {
             assert!(malformed.targets_primary().is_err());
         }
 
+        /// A publisher that predates the worker-side join tags one event per
+        /// recurrent group with kind `mamba`. One group's state is not a
+        /// checkpoint, so that kind must not decode as one.
+        #[test]
+        fn per_group_tag_of_an_older_publisher_is_not_a_checkpoint() {
+            let tagged = RouterEvent::with_storage_tier(7, stored(1), StorageTier::Device)
+                .with_kv_cache_group(KvCacheGroupTag {
+                    kind: KvCacheGroupKind::RecurrentCheckpoint,
+                    alignment_blocks: Some(1),
+                });
+            let mut wire = serde_json::to_value(tagged).unwrap();
+            wire["kv_cache_group"] = serde_json::json!({
+                "group_idx": 2,
+                "kind": "mamba",
+                "expected_group_count": 3,
+                "alignment_blocks": 1
+            });
+            let decoded: RouterEvent = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                decoded.kv_cache_group,
+                Some(KvCacheGroupTag {
+                    kind: KvCacheGroupKind::Unknown,
+                    alignment_blocks: Some(1),
+                })
+            );
+            assert!(!decoded.targets_primary().unwrap());
+        }
+
         #[test]
         fn tagged_events_are_unsupported_for_pre_tag_consumers_and_parsed_by_new_ones() {
             let tagged = RouterEvent::with_storage_tier(7, stored(1), StorageTier::HostPinned)
                 .with_kv_cache_group(KvCacheGroupTag {
-                    group_idx: 1,
-                    kind: KvCacheGroupKind::Mamba,
-                    expected_group_count: Some(1),
+                    kind: KvCacheGroupKind::RecurrentCheckpoint,
                     alignment_blocks: Some(1),
                 });
             let bytes = rmp_serde::to_vec_named(&tagged).unwrap();

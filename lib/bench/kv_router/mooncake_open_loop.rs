@@ -27,7 +27,7 @@ use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_curre
 use super::mooncake_lower_tier::{
     Allocator, Footprint, LowerTierRun, cache_owner, footprint, routing_snapshot,
 };
-use super::mooncake_recurrent::{RECURRENT_GROUPS, group_tag};
+use super::mooncake_recurrent::checkpoint_tag;
 use super::mooncake_shared::{
     HostTierTotals, MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry,
 };
@@ -292,11 +292,10 @@ pub(crate) fn prepare_mooncake_corpus(
                     WorkerTraceEntry::Checkpoint {
                         event,
                         storage_tier,
-                        group,
                     } => (
                         MooncakeOperationPayload::Event(
                             RouterEvent::with_storage_tier(worker_id, event.clone(), *storage_tier)
-                                .with_kv_cache_group(group_tag(*group)),
+                                .with_kv_cache_group(checkpoint_tag()),
                         ),
                         QuerySpec::default(),
                     ),
@@ -1024,8 +1023,8 @@ pub struct RouterLookupResult {
     pub device_hit_queries: usize,
     /// Device blocks credited, summed over workers and lookups.
     pub device_blocks: u64,
-    /// A hybrid run's checkpoint stream: its events and blocks, one per recurrent group, and
-    /// the checkpoints live on device at its end.
+    /// A hybrid run's checkpoint stream: its events and blocks, one event per checkpoint
+    /// change, and the checkpoints live on device at its end.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoints: Option<HostTierTotals>,
 }
@@ -1188,11 +1187,9 @@ pub async fn run_open_loop<T: SyncIndexer>(
     }
     if let Some(router) = hybrid {
         for &(worker, _) in &trial.expected_events_by_worker {
-            router.indexer.declare_recurrent_layout(
-                WorkerWithDpRank::new(worker, 0),
-                &RECURRENT_GROUPS,
-                1,
-            );
+            router
+                .indexer
+                .declare_recurrent_layout(WorkerWithDpRank::new(worker, 0), true, 1);
         }
     }
     if let Some(lower) = &lower_tier

@@ -448,50 +448,46 @@ impl KvEventPublisher {
                 } => *recurrent_alignment_blocks,
             })
             .unwrap_or(1);
-        let recurrent_groups = source_config.as_ref().and_then(|config| match config {
-            KvEventSourceConfig::Zmq {
-                recurrent_groups, ..
-            } => recurrent_groups.clone(),
-        });
-        if let Some(groups) = recurrent_groups.as_ref() {
+        // The source's normalizer joins the engine's recurrent groups; here it
+        // only matters whether the source publishes checkpoints at all.
+        let recurrent_events_enabled = matches!(
+            &source_config,
+            Some(KvEventSourceConfig::Zmq {
+                recurrent_groups: Some(_),
+                ..
+            })
+        );
+        if recurrent_events_enabled {
             anyhow::ensure!(
                 enable_local_indexer,
                 "Recurrent KV events require the local recovery indexer"
             );
-            let bootstrap = groups
-                .iter()
-                .map(|&group_idx| {
-                    let mut event = PlacementEvent::new(
-                        Placement::local_gpu(worker_id, dp_rank),
-                        KvCacheEvent {
-                            event_id: next_event_id.fetch_add(1, Ordering::SeqCst),
-                            dp_rank,
-                            data: KvCacheEventData::Stored(KvCacheStoreData {
-                                parent_hash: None,
-                                start_position: None,
-                                blocks: Vec::new(),
-                            }),
-                        },
-                    );
-                    event.placement.kv_cache_group = Some(KvCacheGroupTag {
-                        group_idx,
-                        kind: KvCacheGroupKind::Mamba,
-                        expected_group_count: Some(groups.len() as u32),
-                        alignment_blocks: Some(recurrent_alignment_blocks),
-                    });
-                    event
-                })
-                .collect();
-            tx.send(PublisherInput::Events(bootstrap))
+            // Announce the worker as hybrid before it holds any checkpoint: a
+            // tagged store that names none. Until then a router would credit
+            // its attention blocks as if no checkpoint were needed.
+            let mut announce = PlacementEvent::new(
+                Placement::local_gpu(worker_id, dp_rank),
+                KvCacheEvent {
+                    event_id: next_event_id.fetch_add(1, Ordering::SeqCst),
+                    dp_rank,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        start_position: None,
+                        blocks: Vec::new(),
+                    }),
+                },
+            );
+            announce.placement.kv_cache_group = Some(KvCacheGroupTag {
+                kind: KvCacheGroupKind::RecurrentCheckpoint,
+                alignment_blocks: Some(recurrent_alignment_blocks),
+            });
+            tx.send(PublisherInput::Events(vec![announce]))
                 .map_err(|_| anyhow::anyhow!("publisher startup channel closed"))?;
-        }
-        // Flush declarations even when event batching has a nonzero timeout.
-        if recurrent_groups.is_some() {
+            // Flush the announcement even when event batching has a nonzero timeout.
             let (reply, _receipt) = oneshot::channel();
             tx.send(PublisherInput::Barrier(reply))
                 .map_err(|_| anyhow::anyhow!("publisher startup channel closed"))?;
         }
-        let recurrent_events_enabled = recurrent_groups.is_some();
         let worker_dedup_policy = if matches!(
             source_config,
             Some(KvEventSourceConfig::Zmq {
@@ -529,10 +525,10 @@ impl KvEventPublisher {
         };
 
         let cancellation_token_clone = cancellation_token.clone();
-        if let (Some(indexer), Some(groups)) = (&local_indexer, recurrent_groups) {
+        if let (Some(indexer), true) = (&local_indexer, recurrent_events_enabled) {
             indexer.declare_recurrent_layout(
                 WorkerWithDpRank::new(worker_id, dp_rank),
-                &groups,
+                true,
                 recurrent_alignment_blocks,
             );
         }

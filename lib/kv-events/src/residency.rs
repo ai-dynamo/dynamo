@@ -73,31 +73,37 @@ pub enum ResetScope {
     Domain(ResidencyDomain),
 }
 
-/// Kind of a non-main-attention KV cache group. Only recurrent state groups
-/// are indexed today; windowed attention groups are still dropped at ingress.
+/// What a tagged residency event describes instead of a main-attention block.
+/// Only recurrent checkpoints are indexed today; windowed attention groups are
+/// still dropped at ingress.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum KvCacheGroupKind {
-    /// Mamba / GDN / linear-attention state (`kv_cache_spec_kind = "mamba"`).
-    Mamba,
+    /// A complete recurrent-state checkpoint: every recurrent (Mamba / GDN /
+    /// linear-attention) cache group of the engine holds its state at the
+    /// event's hashes, in the event's storage tier.
+    RecurrentCheckpoint,
+    /// Any other value, including the per-group `mamba` events of publishers
+    /// that predate the worker-side join. Consumers drop these: one group's
+    /// state is not a checkpoint.
     #[serde(other)]
     Unknown,
 }
 
-/// Which KV cache group a residency event describes when it is not the
-/// main-attention group.
+/// Marks a residency event that describes recurrent state rather than a
+/// main-attention block.
 ///
-/// vLLM publishes one `BlockStored` per group at the same positional block
-/// hash. A recurrent group's event announces the state checkpoint at that
-/// hash, not a reusable token range, so these events are kept out of the
-/// attention radix tree and recorded as per-group presence instead
-/// (see `KvCacheGroupResidency` in `dynamo-kv-indexer`).
+/// An engine such as vLLM publishes one store and one removal per recurrent
+/// cache group at the same positional block hash. The worker's event
+/// normalizer joins them: it publishes one `Stored` when the last group
+/// arrives, so the checkpoint at that hash can be resumed, and one `Removed`
+/// when the first group leaves. The hash names a state checkpoint, not a
+/// reusable token range, so these events are kept out of the attention radix
+/// tree and recorded as checkpoint presence instead (see
+/// `KvCacheGroupResidency` in `dynamo-kv-indexer`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct KvCacheGroupTag {
-    pub group_idx: u32,
     pub kind: KvCacheGroupKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_group_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment_blocks: Option<u32>,
 }

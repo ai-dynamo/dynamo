@@ -743,7 +743,7 @@ mod tests {
             let workers = [WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)];
             // Declare every layout before storing the common checkpoint.
             for worker in workers {
-                indexer.declare_recurrent_layout(worker, &[0, 1], 1);
+                indexer.declare_recurrent_layout(worker, true, 1);
             }
             for worker in workers {
                 indexer
@@ -757,22 +757,15 @@ mod tests {
                     ))
                     .await
                     .unwrap();
-                for group in [0, 1] {
-                    indexer
-                        .try_apply_event(checkpoint(
-                            worker,
-                            StorageTier::Device,
-                            if missing && worker == workers[1] {
-                                chain[1]
-                            } else {
-                                chain[2]
-                            },
-                            group,
-                            2,
-                        ))
-                        .await
-                        .unwrap();
-                }
+                let hash = if missing && worker == workers[1] {
+                    chain[1]
+                } else {
+                    chain[2]
+                };
+                indexer
+                    .try_apply_event(checkpoint(worker, StorageTier::Device, hash))
+                    .await
+                    .unwrap();
             }
             flush_indexer(&indexer).await;
             let Indexer::Concurrent {
@@ -833,7 +826,7 @@ mod tests {
             let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
             let chain = compute_seq_hash_for_block(&sequence);
             for id in [1, 2] {
-                indexer.declare_recurrent_layout(WorkerWithDpRank::new(id, 0), &[0], 1);
+                indexer.declare_recurrent_layout(WorkerWithDpRank::new(id, 0), true, 1);
             }
             for id in 1..=if with_dense_worker { 3 } else { 2 } {
                 indexer
@@ -854,8 +847,6 @@ mod tests {
                                 WorkerWithDpRank::new(id, 0),
                                 StorageTier::Device,
                                 hash,
-                                0,
-                                1,
                             ))
                             .await
                             .unwrap();
@@ -927,7 +918,7 @@ mod tests {
                 } else {
                     make_test_indexer()
                 };
-                indexer.declare_recurrent_layout(worker, &[0], 1);
+                indexer.declare_recurrent_layout(worker, true, 1);
                 indexer
                     .try_apply_event(store_event(
                         7,
@@ -940,7 +931,7 @@ mod tests {
                     .await
                     .unwrap();
                 indexer
-                    .try_apply_event(checkpoint(worker, StorageTier::Device, chain[1], 0, 1))
+                    .try_apply_event(checkpoint(worker, StorageTier::Device, chain[1]))
                     .await
                     .unwrap();
                 if allocated {
@@ -1040,8 +1031,6 @@ mod tests {
                         } else {
                             chain[pos]
                         },
-                        0,
-                        1,
                     ))
                     .await
                     .unwrap();
@@ -1101,14 +1090,12 @@ mod tests {
                 .await
                 .unwrap();
         }
-        indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1);
-        for group in [0, 1, 2] {
-            for hash in [chain[1], chain[2]] {
-                indexer
-                    .try_apply_event(checkpoint(worker, StorageTier::HostPinned, hash, group, 3))
-                    .await
-                    .unwrap();
-            }
+        indexer.declare_recurrent_layout(worker, true, 1);
+        for hash in [chain[1], chain[2]] {
+            indexer
+                .try_apply_event(checkpoint(worker, StorageTier::HostPinned, hash))
+                .await
+                .unwrap();
         }
         flush_indexer(&indexer).await;
         let uncapped = indexer.find_tiered_matches(sequence.clone()).await.unwrap();
@@ -1556,7 +1543,7 @@ mod tests {
         let block_hashes: Vec<LocalBlockHash> = local.iter().copied().map(LocalBlockHash).collect();
         let chain = compute_seq_hash_for_block(&block_hashes);
         indexer
-            .try_apply_event(checkpoint(hybrid, StorageTier::Device, chain[0], 1, 1))
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, chain[0]))
             .await
             .unwrap();
         indexer
@@ -1615,7 +1602,7 @@ mod tests {
             .await
             .unwrap();
         indexer
-            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef))
             .await
             .unwrap();
         let block_hashes: Vec<LocalBlockHash> = local.iter().copied().map(LocalBlockHash).collect();
@@ -1691,7 +1678,7 @@ mod tests {
         let dense = WorkerWithDpRank::new(20, 0);
         // An off-prefix checkpoint makes the worker a known hybrid worker.
         indexer
-            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef))
             .await
             .unwrap();
         let routed = blocks(&[11, 12, 13]);
@@ -1748,7 +1735,7 @@ mod tests {
             .await
             .unwrap();
         indexer
-            .try_apply_event(checkpoint(hybrid, StorageTier::Device, chain[0], 1, 1))
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, chain[0]))
             .await
             .unwrap();
         flush_indexer(&indexer).await;
@@ -1777,7 +1764,7 @@ mod tests {
 
         let (indexer, side) = predicting_indexer(Duration::from_millis(40));
         indexer
-            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef))
             .await
             .unwrap();
         indexer
@@ -1797,7 +1784,7 @@ mod tests {
 
         let (indexer, side) = predicting_indexer(Duration::from_secs(60));
         indexer
-            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef))
             .await
             .unwrap();
         indexer
@@ -1844,7 +1831,7 @@ mod tests {
                 .collect();
             let chain = compute_seq_hash_for_block(&sequence);
             indexer
-                .try_apply_event(checkpoint(worker, StorageTier::Device, chain[1], 1, 1))
+                .try_apply_event(checkpoint(worker, StorageTier::Device, chain[1]))
                 .await
                 .unwrap();
             flush_indexer(&indexer).await;

@@ -365,12 +365,11 @@ pub fn assert_overlap_scores_eq(left: &OverlapScores, right: &OverlapScores, ctx
     );
 }
 
+/// The tagged store a worker publishes for one complete recurrent checkpoint.
 pub fn recurrent_store(
     worker: WorkerWithDpRank,
     tier: crate::prelude::StorageTier,
     hash: u64,
-    group: u32,
-    count: u32,
 ) -> RouterEvent {
     use crate::prelude::{KvCacheGroupKind, KvCacheGroupTag};
     RouterEvent::with_storage_tier(
@@ -391,9 +390,7 @@ pub fn recurrent_store(
         tier,
     )
     .with_kv_cache_group(KvCacheGroupTag {
-        group_idx: group,
-        kind: KvCacheGroupKind::Mamba,
-        expected_group_count: Some(count),
+        kind: KvCacheGroupKind::RecurrentCheckpoint,
         alignment_blocks: Some(1),
     })
 }

@@ -12,6 +12,13 @@ publication through the direct KV event publisher. Enable it only after all
 routers, indexers, and event consumers have been upgraded to support
 `kv_cache_group` events. The default remains attention-only publication.
 
+vLLM reports each recurrent cache group on its own, at the same block hash. The
+worker joins them and publishes one event per checkpoint: a store when the last
+group's state arrives in a storage tier, and a removal when the first group's
+state leaves it. A router therefore sees only checkpoints the engine can
+resume from, and keeps no per-group state. A model with three recurrent groups
+publishes one store and one removal per checkpoint instead of three of each.
+
 This mode requires engine cache-group metadata and an enabled local indexer
 (`enable_local_indexer=True`, the default for Dynamo vLLM workers).
 The supported resume contract is deliberately limited to full-attention and
@@ -41,9 +48,10 @@ is not advertised. State-agent publication does not yet negotiate this capabilit
 and rejects the option explicitly.
 
 The upstream vLLM checkpoint payload stays small: one checkpoint hash and no
-copied token range. Dynamo adds the expected recurrent-group count and block
-alignment to its internal event tag. GPU reuse requires GPU checkpoints; offload
-reuse requires all recurrent groups at a common checkpoint in the restoring tier.
+copied token range. Dynamo adds the block alignment to its internal event tag.
+GPU reuse requires GPU checkpoints; offload reuse requires a checkpoint in the
+restoring tier, which the worker publishes only once all recurrent groups hold
+their state there.
 Only published checkpoint events create presence: reaching an attention boundary
 does not imply an SSM checkpoint was retained, including during decode under
 sparse checkpoint-retention policies.
@@ -55,7 +63,7 @@ block of the prompt it was routed, for that TTL. A repeat or a continuation of
 that prompt is then credited up to that block. A request that shares only a
 shorter prefix is not, and neither is a query answered by a remote indexer.
 
-The router maintains complete-group membership when events arrive. During an
+The router records checkpoint membership when events arrive. During an
 attention lookup it checks those memberships at each matched logical block; it
 does not scan backward through every boundary for each worker. The original
 attention matches remain available while a feasible GPU checkpoint seeds the

@@ -531,7 +531,7 @@ mod tests {
     fn checkpoints_are_read_at_emission_with_current_state_semantics() {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(1, 0);
-        table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        table.declare_layout(ResidencyOwner::worker(worker), true, 1);
         store_device_checkpoint(&table, worker, 1);
         let raw = raw_device([(worker, 1)].into_iter());
         let mut observer = ForwardDeviceEvaluator::new(&table, None);
@@ -557,13 +557,13 @@ mod tests {
         let table = KvCacheGroupResidency::new();
         let known = WorkerWithDpRank::new(1, 0);
         let unknown = WorkerWithDpRank::new(2, 0);
-        table.declare_layout(ResidencyOwner::worker(known), &[0], 1);
+        table.declare_layout(ResidencyOwner::worker(known), true, 1);
         store_device_checkpoint(&table, known, 1);
         let mut raw = raw_device([(known, 1), (unknown, 1)].into_iter());
         let mut observer = ForwardDeviceEvaluator::new(&table, None);
         begin_forward(&mut observer, &raw, 1);
         observer.observe_block(1, ExternalSequenceBlockHash(1));
-        table.declare_layout(ResidencyOwner::worker(unknown), &[0], 1);
+        table.declare_layout(ResidencyOwner::worker(unknown), true, 1);
         store_device_checkpoint(&table, unknown, 1);
         observer.finish(&mut raw);
         assert_eq!(raw.hybrid_resume_caps.get(&known), Some(&1));
@@ -577,7 +577,7 @@ mod tests {
         let first = WorkerWithDpRank::new(1, 0);
         let second = WorkerWithDpRank::new(1, 1);
         for worker in [first, second] {
-            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            table.declare_layout(ResidencyOwner::worker(worker), true, 1);
         }
         store_device_checkpoint(&table, first, 1);
         store_device_checkpoint(&table, first, 2);
@@ -605,7 +605,7 @@ mod tests {
             let mut raw = MatchDetails::default();
             for id in 1u64..=24 {
                 let worker = WorkerWithDpRank::new(id, (id % 3) as u32);
-                table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+                table.declare_layout(ResidencyOwner::worker(worker), true, 1);
                 let bound = 1 + ((id * 7 + seed * 3) % 32) as u32;
                 raw.overlap_scores.scores.insert(worker, bound);
                 raw.last_matched_hashes
@@ -663,8 +663,6 @@ mod tests {
             worker,
             StorageTier::Device,
             position,
-            0,
-            1,
         ));
     }
 
@@ -741,7 +739,7 @@ mod tests {
         for missing in [1, 32, 63, 64] {
             let residency = KvCacheGroupResidency::new();
             for (index, &worker) in workers.iter().enumerate() {
-                residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+                residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
                 if index >= workers.len() - missing {
                     store_device_checkpoint(&residency, worker, 999);
                 } else {
@@ -773,7 +771,7 @@ mod tests {
         let first = WorkerWithDpRank::new(1, 0);
         let second = WorkerWithDpRank::new(1, 1);
         for worker in [first, second] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
         }
         for position in [2, 6] {
             store_device_checkpoint(&residency, first, position);
@@ -791,7 +789,7 @@ mod tests {
 
         let worker_set = KvCacheGroupResidency::new();
         for worker in [first, second] {
-            worker_set.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            worker_set.declare_layout(ResidencyOwner::worker(worker), true, 1);
             for position in [4, 8] {
                 store_device_checkpoint(&worker_set, worker, position);
             }
@@ -809,7 +807,7 @@ mod tests {
         let short = WorkerWithDpRank::new(1, 0);
         let long = WorkerWithDpRank::new(2, 0);
         for worker in [short, long] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             for position in [4, 8] {
                 store_device_checkpoint(&residency, worker, position);
             }
@@ -834,7 +832,7 @@ mod tests {
         let last_workers = FxHashSet::from_iter([surviving]);
         let cutoffs = FxHashMap::default();
         for worker in [dropped, surviving] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             store_device_checkpoint(&residency, worker, 8);
         }
         let mut evaluator = ForwardDeviceEvaluator::new(&residency, None);
@@ -868,7 +866,7 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let workers: Vec<_> = (1..=64).map(|id| WorkerWithDpRank::new(id, 0)).collect();
         for &worker in &workers {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             for position in 1..=64 {
                 store_device_checkpoint(&residency, worker, position);
             }
@@ -895,7 +893,7 @@ mod tests {
         let dropped = WorkerWithDpRank::new(1, 0);
         let surviving = WorkerWithDpRank::new(2, 0);
         for worker in [dropped, surviving] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             for position in [4, 8] {
                 store_device_checkpoint(&residency, worker, position);
             }
@@ -944,7 +942,7 @@ mod tests {
         let shared = WorkerWithDpRank::new(2, 0);
         let other = WorkerWithDpRank::new(3, 0);
         for worker in [short, shared, other] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
         }
         for position in [4, 8] {
             for worker in [short, shared] {
@@ -967,7 +965,7 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let workers: Vec<_> = (1..=64).map(|id| WorkerWithDpRank::new(id, 0)).collect();
         for &worker in &workers {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             store_device_checkpoint(&residency, worker, 999);
         }
         for position in 1..=8 {
@@ -993,7 +991,7 @@ mod tests {
     fn forward_device_gives_no_credit_for_an_unsupported_alignment() {
         let residency = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(1, 0);
-        let mut event = crate::testing::recurrent_store(worker, StorageTier::Device, 2, 0, 1);
+        let mut event = crate::testing::recurrent_store(worker, StorageTier::Device, 2);
         event.kv_cache_group.as_mut().unwrap().alignment_blocks = Some(2);
         residency.apply(&event);
         let raw = raw_device([(worker, 3)].into_iter());
@@ -1009,7 +1007,7 @@ mod tests {
         let second = WorkerWithDpRank::new(2, 0);
         let wrong = WorkerWithDpRank::new(3, 0);
         for worker in [first, second, wrong] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
         }
         for worker in [first, wrong] {
             store_device_checkpoint(&residency, worker, 3);
@@ -1066,7 +1064,7 @@ mod tests {
         let unknown_full = WorkerWithDpRank::new(3, 0);
         let unknown_partial = WorkerWithDpRank::new(4, 0);
         for worker in [partial, full] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             for position in [4, 8] {
                 store_device_checkpoint(&residency, worker, position);
             }
@@ -1144,7 +1142,7 @@ mod tests {
 
         let worker = WorkerWithDpRank::new(7, 0);
         let residency = KvCacheGroupResidency::new();
-        residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
         store_device_checkpoint(&residency, worker, 3);
         let primary = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 4);
         primary

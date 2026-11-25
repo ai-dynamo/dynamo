@@ -741,8 +741,6 @@ mod tests {
             worker,
             StorageTier::Device,
             position,
-            0,
-            1,
         ));
     }
 
@@ -759,7 +757,7 @@ mod tests {
             let others: Vec<_> = (1..=63).map(|id| WorkerWithDpRank::new(id, 0)).collect();
             let residency = KvCacheGroupResidency::new();
             for &worker in &others {
-                residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+                residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
                 for position in 1..=8 {
                     store_device_checkpoint(&residency, worker, position);
                 }
@@ -769,7 +767,7 @@ mod tests {
             } else {
                 1
             };
-            residency.declare_layout(ResidencyOwner::worker(target), &[0], alignment);
+            residency.declare_layout(ResidencyOwner::worker(target), true, alignment);
             let positions: &[u64] = match case {
                 "bound" => &[8, 3],
                 "bound_missing" => &[8, 7],
@@ -781,7 +779,7 @@ mod tests {
             }
             let wrong_dp = WorkerWithDpRank::new(64, 0);
             if case == "dp" {
-                residency.declare_layout(ResidencyOwner::worker(wrong_dp), &[0], 1);
+                residency.declare_layout(ResidencyOwner::worker(wrong_dp), true, 1);
                 for position in 1..=8 {
                     store_device_checkpoint(&residency, wrong_dp, position);
                 }
@@ -890,7 +888,7 @@ mod tests {
         let hybrid = WorkerWithDpRank::new(7, 0);
         let dense = WorkerWithDpRank::new(8, 0);
         let residency = KvCacheGroupResidency::new();
-        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1);
+        residency.declare_layout(ResidencyOwner::worker(hybrid), true, 1);
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.prepare_device(&MatchDetails::default());
 
@@ -922,7 +920,7 @@ mod tests {
         let foreign = WorkerWithDpRank::new(10, 0);
         let residency = KvCacheGroupResidency::new();
         for worker in [hybrid, unmatched] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
         }
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         for worker in [hybrid, unmatched, dense] {
@@ -953,9 +951,9 @@ mod tests {
         let owner = ResidencyOwner::worker(worker);
         for legacy_first in [false, true] {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_layout(owner, &[0], 1);
-            let gpu = crate::testing::recurrent_store(worker, StorageTier::Device, 2, 0, 1);
-            let host = crate::testing::recurrent_store(worker, StorageTier::HostPinned, 2, 0, 1);
+            residency.declare_layout(owner, true, 1);
+            let gpu = crate::testing::recurrent_store(worker, StorageTier::Device, 2);
+            let host = crate::testing::recurrent_store(worker, StorageTier::HostPinned, 2);
             residency.apply(&gpu);
             residency.apply(&host);
             let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
@@ -1009,15 +1007,13 @@ mod tests {
             [(&[3, 4][..], 2), (&[3][..], 1), (&[2][..], 0), (&[][..], 0)]
         {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             store_device_checkpoint(&residency, worker, 2);
             for &position in host_checkpoints {
                 residency.apply(&crate::testing::recurrent_store(
                     worker,
                     StorageTier::HostPinned,
                     position,
-                    0,
-                    1,
                 ));
             }
             let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
@@ -1071,13 +1067,11 @@ mod tests {
         let walks = [(first, 21), (second, 22)];
         let residency = KvCacheGroupResidency::new();
         for (worker, at_two) in walks {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             residency.apply(&crate::testing::recurrent_store(
                 worker,
                 StorageTier::HostPinned,
                 at_two,
-                0,
-                1,
             ));
         }
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
@@ -1120,13 +1114,11 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.observe_worker(worker);
-        residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
         residency.apply(&crate::testing::recurrent_store(
             worker,
             StorageTier::HostPinned,
             2,
-            0,
-            1,
         ));
         let mut raw = MatchDetails::default();
         raw.overlap_scores.scores.insert(worker, 3);
@@ -1158,9 +1150,9 @@ mod tests {
         let other = WorkerWithDpRank::new(8, 0);
         for stale in [false, true] {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
             let source = if stale { worker } else { other };
-            let event = crate::testing::recurrent_store(source, StorageTier::Device, 2, 0, 1);
+            let event = crate::testing::recurrent_store(source, StorageTier::Device, 2);
             residency.apply(&event);
             let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
             evaluator.observe_worker(worker);
@@ -1230,15 +1222,13 @@ mod tests {
             for mutation in ["unchanged", "add_owner", "remove", "remove_readd"] {
                 let residency = KvCacheGroupResidency::new();
                 for worker in [first, second] {
-                    residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+                    residency.declare_layout(ResidencyOwner::worker(worker), true, 1);
                 }
                 let checkpoint = |worker, position: usize| {
                     crate::testing::recurrent_store(
                         worker,
                         StorageTier::Device,
                         hashes[position - 1].0,
-                        0,
-                        1,
                     )
                 };
                 residency.apply(&checkpoint(first, 1));
@@ -1399,7 +1389,7 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let hybrid = WorkerWithDpRank::new(7, 0);
         let dense = WorkerWithDpRank::new(8, 0);
-        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1);
+        residency.declare_layout(ResidencyOwner::worker(hybrid), true, 1);
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.observe_worker(hybrid);
         let details = LowerTierMatchDetails {
@@ -1476,7 +1466,7 @@ mod tests {
                 .into_iter()
                 .map(ExternalSequenceBlockHash)
                 .collect();
-            indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1);
+            indexer.declare_recurrent_layout(worker, true, 1);
             let stored = RouterEvent::new(
                 27,
                 KvCacheEvent {
@@ -1508,7 +1498,7 @@ mod tests {
                     .scores
                     .is_empty()
             );
-            let checkpoint = |hash, group, tier| {
+            let checkpoint = |hash, tier| {
                 RouterEvent::with_storage_tier(
                     27,
                     KvCacheEvent {
@@ -1527,37 +1517,25 @@ mod tests {
                     tier,
                 )
                 .with_kv_cache_group(KvCacheGroupTag {
-                    group_idx: group,
-                    kind: KvCacheGroupKind::Mamba,
-                    expected_group_count: Some(3),
+                    kind: KvCacheGroupKind::RecurrentCheckpoint,
                     alignment_blocks: Some(1),
                 })
             };
             // A state outside the matched attention path never proves reuse.
-            for group in 0..3 {
-                indexer
-                    .try_apply_event(checkpoint(
-                        ExternalSequenceBlockHash(999),
-                        group,
-                        StorageTier::Device,
-                    ))
-                    .await
-                    .unwrap();
-            }
-            for group in 0..3 {
-                indexer
-                    .try_apply_event(checkpoint(
-                        hashes[1],
-                        group,
-                        if group == 2 {
-                            StorageTier::HostPinned
-                        } else {
-                            StorageTier::Device
-                        },
-                    ))
-                    .await
-                    .unwrap();
-            }
+            indexer
+                .try_apply_event(checkpoint(
+                    ExternalSequenceBlockHash(999),
+                    StorageTier::Device,
+                ))
+                .await
+                .unwrap();
+            // A checkpoint in host memory is not one on the device. Groups that
+            // are split across tiers never get this far: the worker publishes a
+            // checkpoint only once every group is resident in one tier.
+            indexer
+                .try_apply_event(checkpoint(hashes[1], StorageTier::HostPinned))
+                .await
+                .unwrap();
             assert!(
                 indexer
                     .find_primary_match_details(locals.clone())
@@ -1566,18 +1544,16 @@ mod tests {
                     .overlap_scores
                     .scores
                     .is_empty(),
-                "vLLM cannot assemble a GPU state from groups split across physical tiers"
+                "vLLM cannot resume on the GPU from a state held in host memory"
             );
             indexer
-                .try_apply_event(checkpoint(hashes[1], 2, StorageTier::Device))
+                .try_apply_event(checkpoint(hashes[1], StorageTier::Device))
                 .await
                 .unwrap();
-            for group in 0..3 {
-                indexer
-                    .try_apply_event(checkpoint(hashes[5], group, StorageTier::Device))
-                    .await
-                    .unwrap();
-            }
+            indexer
+                .try_apply_event(checkpoint(hashes[5], StorageTier::Device))
+                .await
+                .unwrap();
             for (limit, expected) in [(None, 6), (Some(5), 2), (Some(0), 0)] {
                 let result = indexer
                     .find_primary_match_details_with_limit(locals.clone(), limit)

@@ -1306,7 +1306,7 @@ fn checkpoint_layer_follows_store_ends_and_removals() -> anyhow::Result<()> {
         .with_checkpoint_layer(CheckpointPolicy::StoreEnd);
     let prepared = prepare_scaled_benchmark(merged, 1_000);
 
-    let checkpoints: Vec<(u32, u64, bool)> = prepared
+    let checkpoints: Vec<(u64, bool)> = prepared
         .worker_traces
         .iter()
         .next()
@@ -1316,23 +1316,16 @@ fn checkpoint_layer_follows_store_ends_and_removals() -> anyhow::Result<()> {
             WorkerTraceEntry::Checkpoint {
                 event,
                 storage_tier,
-                group,
             } if storage_tier.is_gpu() => Some(match &event.data {
-                KvCacheEventData::Stored(store) => (*group, store.blocks[0].block_hash.0, true),
-                KvCacheEventData::Removed(remove) => (*group, remove.block_hashes[0].0, false),
+                KvCacheEventData::Stored(store) => (store.blocks[0].block_hash.0, true),
+                KvCacheEventData::Removed(remove) => (remove.block_hashes[0].0, false),
                 KvCacheEventData::Cleared => unreachable!(),
             }),
             _ => None,
         })
         .collect();
-    let per_group = |hash: u64, stored: bool| (0..3).map(move |group| (group, hash, stored));
-    assert_eq!(
-        checkpoints,
-        per_group(3, true)
-            .chain(per_group(4, true))
-            .chain(per_group(3, false))
-            .collect::<Vec<_>>()
-    );
+    // One event per checkpoint change, as a worker publishes them.
+    assert_eq!(checkpoints, vec![(3, true), (4, true), (3, false)]);
     let totals = prepared.totals.checkpoints;
     assert_eq!(
         (
@@ -1340,7 +1333,7 @@ fn checkpoint_layer_follows_store_ends_and_removals() -> anyhow::Result<()> {
             totals.removed_events,
             totals.live_memberships
         ),
-        (6, 3, 1)
+        (2, 1, 1)
     );
     assert_eq!(
         prepared.totals.events(),

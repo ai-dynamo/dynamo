@@ -303,9 +303,7 @@ mod tests {
         let mut coalescer = PlacementEventCoalescer::new(128);
         let mut recurrent = stored(None, 1);
         recurrent.placement.kv_cache_group = Some(KvCacheGroupTag {
-            group_idx: 0,
-            kind: KvCacheGroupKind::Mamba,
-            expected_group_count: Some(1),
+            kind: KvCacheGroupKind::RecurrentCheckpoint,
             alignment_blocks: Some(1),
         });
         let mut output = Vec::new();
