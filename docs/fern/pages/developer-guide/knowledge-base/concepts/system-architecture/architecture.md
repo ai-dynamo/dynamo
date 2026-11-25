@@ -114,7 +114,7 @@ its own:
 | `DYN_TCP_REQUEST_TIMEOUT` | Bounds the send and the worker's acknowledgment, including first contact with a worker. |
 | `DYN_TCP_WORKER_POOL_SIZE` | Maximum requests a worker runs at once. |
 | `DYN_TCP_WORK_QUEUE_SIZE` | Maximum requests a worker queues beyond the pool. A request beyond both is refused as overloaded. |
-| `DYN_TCP_MAX_MESSAGE_SIZE` | Maximum request size, and maximum size of one response item. |
+| `DYN_TCP_MAX_MESSAGE_SIZE` | Maximum request size. Also limits one response item above 256 KiB, counted with its small frame header. |
 | `DYN_TCP_RESPONSE_STREAM_HOST` | Host the Velo listener binds and advertises for both planes. `DYN_TCP_RPC_HOST` and `DYN_TCP_RPC_PORT` are not used. |
 
 - Set the same `DYN_TCP_MAX_MESSAGE_SIZE` on every frontend and worker in the
@@ -159,9 +159,11 @@ To move a pool from `tcp` to `velo`:
    curl -s "http://<frontend-host>:<port>/health?instances=true"
    ```
 
-   Every instance in a namespace that the frontend selects must advertise the
-   frontend's request plane. The key of each instance's `transport` field names
-   it: `tcp`, `nats_tcp`, or `velo`.
+   The key of each instance's `transport` field names its transport: `tcp`,
+   `nats_tcp`, `velo`, or `direct`. Every instance in a namespace that the
+   frontend selects must advertise the frontend's request plane or `direct`.
+   A `direct` instance is reached through the frontend's registered direct
+   dispatch, on any request plane.
 
 4. Shift traffic from the `tcp` frontend to the `velo` frontend.
 5. Keep the `tcp` pool running until the `velo` pool has proven itself, then
