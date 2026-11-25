@@ -932,6 +932,261 @@ async fn test_responses_non_streaming_observes_metrics_before_backend_error_pref
     .await;
 }
 
+/// Family names declared by `# TYPE` lines, in order, duplicates kept.
+fn declared_families(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("# TYPE "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+type Names = std::collections::BTreeSet<String>;
+
+fn family_names(families: &[prometheus::proto::MetricFamily]) -> Names {
+    families
+        .iter()
+        .map(|family| family.name().to_string())
+        .collect()
+}
+
+/// What the DRT's OTLP exporter sends: `otlp_export::run` exports exactly
+/// `metric_families_combined()` of the DRT registry.
+fn otlp_export_families(drt_metrics: &dynamo_runtime::metrics::MetricsRegistry) -> Names {
+    family_names(&drt_metrics.metric_families_combined().families)
+}
+
+/// A DistributedRuntime with no external services, for the OTLP export tests.
+async fn process_local_drt() -> dynamo_runtime::DistributedRuntime {
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    DistributedRuntime::new(
+        Runtime::from_current().unwrap(),
+        DistributedConfig::process_local(),
+    )
+    .await
+    .unwrap()
+}
+
+/// Assert that every family in a service's own `registry` is in the DRT's OTLP
+/// export -- checked against that registry directly, not only against
+/// `/metrics`, which reads the same merged tree as the export. Returns the
+/// registry's family names.
+fn assert_registry_is_exported(
+    registry: &prometheus::Registry,
+    drt_metrics: &dynamo_runtime::metrics::MetricsRegistry,
+) -> Names {
+    let own = family_names(&registry.gather());
+    let exported = otlp_export_families(drt_metrics);
+    let not_exported: Vec<_> = own.difference(&exported).collect();
+    assert!(
+        not_exported.is_empty(),
+        "in the service's registry but not exported: {not_exported:?}"
+    );
+    own
+}
+
+fn spawn_service(
+    service: HttpService,
+    listener: tokio::net::TcpListener,
+) -> (
+    CancellationToken,
+    tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+) {
+    let token = CancellationToken::new();
+    let task_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(task_token, listener).await });
+    (token, task)
+}
+
+async fn chat_once(port: u16, model: &str) {
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": model,
+            "stream": true,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{response:?}");
+    let _ = response.bytes().await.unwrap();
+}
+
+async fn scrape(port: u16) -> String {
+    reqwest::get(format!("http://localhost:{port}/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+/// A frontend wired to a DistributedRuntime exports over OTLP whatever the
+/// DRT's `metric_families_combined()` returns. That must include every family
+/// in the HTTP service's own registry, and `/metrics` must declare each family
+/// once.
+///
+/// Then the service is shut down and a second one is built on the same DRT:
+/// the first one's registry must leave the tree with it, so the second
+/// serves and exports only its own values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_frontend_metrics_reach_the_otlp_export_path() {
+    use dynamo_runtime::metrics::MetricsHierarchy;
+
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let drt = process_local_drt().await;
+        let drt_metrics = drt.get_metrics_registry().clone();
+        // A metric the DRT tree owns, so the scrape has both halves to merge.
+        drt_metrics
+            .add_metric(Box::new(
+                prometheus::IntCounter::new(
+                    "dynamo_component_otlp_parity_probe_total",
+                    "Probe registered on the DRT tree",
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+
+        // --- First service: serves one request.
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .drt_metrics(Some(drt_metrics.clone()))
+            .build()
+            .unwrap();
+        let own_registry = service.prometheus_registry().clone();
+        let state = service.state_clone();
+        let card = ModelDeploymentCard::with_name_only("otlpmodel");
+        state
+            .manager()
+            .add_chat_completions_model("otlpmodel", card.mdcsum(), Arc::new(MockModelEngine {}))
+            .unwrap();
+        let (token, task) = spawn_service(service, listener);
+        wait_for_metrics_ready(port).await;
+        // A labelled family with no children is not gathered at all, so serve
+        // one request to give the per-model families a sample.
+        chat_once(port, "otlpmodel").await;
+
+        let text = scrape(port).await;
+        let declared = declared_families(&text);
+        let scraped: Names = declared.iter().cloned().collect();
+        let duplicated: Names = scraped
+            .iter()
+            .filter(|name| declared.iter().filter(|d| d == name).count() > 1)
+            .cloned()
+            .collect();
+        assert!(
+            duplicated.is_empty(),
+            "/metrics declares these families more than once: {duplicated:?}"
+        );
+        let own = assert_registry_is_exported(&own_registry, &drt_metrics);
+        for name in [
+            "dynamo_frontend_requests_total",
+            "dynamo_frontend_request_duration_seconds",
+            "dynamo_frontend_time_to_first_token_seconds",
+        ] {
+            assert!(own.contains(name), "{name} not in the service's registry");
+        }
+        let exported = otlp_export_families(&drt_metrics);
+        assert!(exported.contains("dynamo_component_otlp_parity_probe_total"));
+
+        let missing: Vec<_> = scraped.difference(&exported).collect();
+        let extra: Vec<_> = exported.difference(&scraped).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "/metrics and the OTLP export path disagree.\n\
+             on /metrics but not exported: {missing:?}\n\
+             exported but not on /metrics: {extra:?}"
+        );
+
+        // --- Shut the first service down; the task held the last clone.
+        token.cancel();
+        task.await.unwrap().unwrap();
+        drop(state);
+        let exported = otlp_export_families(&drt_metrics);
+        assert!(
+            !exported.contains("dynamo_frontend_requests_total"),
+            "a stopped service's metrics are still exported"
+        );
+
+        // --- Second service on the same DRT, no requests yet: none of the
+        // first service's request series may be served or exported. (Nor are
+        // the process-wide request-plane/tokio/transport/frontend-perf statics:
+        // they are registered once per process, into the first service's
+        // registry only.)
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .drt_metrics(Some(drt_metrics.clone()))
+            .build()
+            .unwrap();
+        let (token, task) = spawn_service(service, listener);
+        wait_for_metrics_ready(port).await;
+        let text = scrape(port).await;
+        let served: Names = declared_families(&text).into_iter().collect();
+        assert!(
+            !text.contains("dynamo_frontend_requests_total"),
+            "the first service's series are still served; families on /metrics: {served:?}"
+        );
+        for name in [
+            "dynamo_frontend_metrics_start_time_seconds",
+            "dynamo_component_otlp_parity_probe_total",
+        ] {
+            assert!(
+                text.contains(name),
+                "{name} not on /metrics; families on /metrics: {served:?}"
+            );
+        }
+        let exported = otlp_export_families(&drt_metrics);
+        assert!(exported.contains("dynamo_frontend_metrics_start_time_seconds"));
+        assert!(!exported.contains("dynamo_frontend_requests_total"));
+
+        token.cancel();
+        task.await.unwrap().unwrap();
+        drt.shutdown();
+    })
+    .await;
+}
+
+/// The KServe gRPC frontend builds its own HTTP service for /metrics. Given a
+/// runtime, that service's registry must be attached to the DRT tree too, so
+/// OTLP exports the same frontend families; dropping the service detaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_kserve_frontend_metrics_reach_the_otlp_export_path() {
+    use dynamo_llm::grpc::service::kserve::KserveService;
+    use dynamo_runtime::metrics::MetricsHierarchy;
+
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let drt = process_local_drt().await;
+        let drt_metrics = drt.get_metrics_registry().clone();
+
+        let service = KserveService::builder()
+            .runtime(Some(drt.clone()))
+            .build()
+            .unwrap();
+        let own =
+            assert_registry_is_exported(service.http_service().prometheus_registry(), &drt_metrics);
+        assert!(
+            own.contains("dynamo_frontend_metrics_start_time_seconds"),
+            "{own:?}"
+        );
+
+        drop(service);
+        let exported = otlp_export_families(&drt_metrics);
+        assert!(
+            !exported.contains("dynamo_frontend_metrics_start_time_seconds"),
+            "a dropped KServe service's metrics are still exported"
+        );
+
+        drt.shutdown();
+    })
+    .await;
+}
+
 // Integration tests that require distributed runtime with etcd
 #[cfg(feature = "integration")]
 mod integration_tests {
