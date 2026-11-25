@@ -142,6 +142,9 @@ impl RuntimeConfig {
                 );
             }
         }
+        // The runtime's remaining pair rules, such as the Velo transport, are
+        // configuration errors too, not connection failures.
+        config.check_request_plane_pair()?;
         Ok(config)
     }
 
@@ -3845,6 +3848,50 @@ mod tests {
     struct RuntimeConfigArgs {
         #[command(flatten)]
         runtime: RuntimeConfig,
+    }
+
+    #[tokio::test]
+    async fn worker_classifies_velo_requests_over_ucx_as_invalid_configuration() {
+        if std::env::var_os(ISOLATED_PLANE_ENV).is_none() {
+            let test =
+                "worker::tests::worker_classifies_velo_requests_over_ucx_as_invalid_configuration";
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            for (key, _) in clean_plane_env() {
+                child.env_remove(key);
+            }
+            let status = child
+                .env(ISOLATED_PLANE_ENV, "1")
+                .env("DYN_VELO_RESPONSE_TRANSPORT", "ucx")
+                .args(["--exact", test, "--include-ignored", "--nocapture"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated worker failed: {status}");
+            return;
+        }
+        let (engine, _) = StateMockEngine::new(false);
+        let mut worker = worker_with(engine);
+        worker.config.runtime = RuntimeConfig {
+            discovery_backend: Some("mem".into()),
+            request_plane: Some("velo".into()),
+            response_plane: Some("velo".into()),
+            ..RuntimeConfig::default()
+        };
+        let runtime = Runtime::from_current().unwrap();
+        let error = worker
+            .run_with_shutdown(runtime.clone(), None, CancellationToken::new())
+            .await
+            .unwrap_err();
+        runtime.shutdown();
+        assert!(
+            error
+                .to_string()
+                .contains("DYN_VELO_RESPONSE_TRANSPORT=ucx"),
+            "{error}"
+        );
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
     }
 
     #[test]

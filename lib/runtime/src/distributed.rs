@@ -279,12 +279,7 @@ impl DistributedRuntime {
     ) -> Result<Self> {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
-        let response_plane = match response_plane {
-            // An explicit Velo falls back to tcp under TLS, as the configured one does.
-            Some(mode) => mode.tcp_under_tls(),
-            None => ResponsePlaneMode::configured()?,
-        };
-
+        let response_plane = effective_response_plane(response_plane)?;
         check_request_plane_pair(request_plane, response_plane)?;
 
         let config = crate::config::RuntimeConfig::from_settings()?;
@@ -1335,6 +1330,16 @@ impl DistributedConfig {
 
     /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
     /// same process.
+    /// Checks the request and response plane pair exactly as
+    /// [`DistributedRuntime::new`] does, without starting anything, so a
+    /// caller can report a bad pair as a configuration error.
+    pub fn check_request_plane_pair(&self) -> Result<()> {
+        check_request_plane_pair(
+            self.request_plane,
+            effective_response_plane(self.response_plane)?,
+        )
+    }
+
     pub fn process_local() -> DistributedConfig {
         DistributedConfig {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::Memory),
@@ -1345,6 +1350,14 @@ impl DistributedConfig {
             response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Zmq,
         }
+    }
+}
+
+fn effective_response_plane(explicit: Option<ResponsePlaneMode>) -> Result<ResponsePlaneMode> {
+    match explicit {
+        // An explicit Velo falls back to tcp under TLS, as the configured one does.
+        Some(mode) => Ok(mode.tcp_under_tls()),
+        None => ResponsePlaneMode::configured(),
     }
 }
 
