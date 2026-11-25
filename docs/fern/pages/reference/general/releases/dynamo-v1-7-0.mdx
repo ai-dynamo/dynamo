@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo v1.7.0
 subtitle: Release notes for Dynamo v1.7.0 (GA Nov 23, 2026)
@@ -57,20 +57,20 @@ Pull, deploy, and install with every artifact pinned to the v1.7.0 release set.
     {
       area: "Router",
       title: "Deadline Queues, KV Fetch & Worker Affinity",
-      body: "Dynamo Router adds deadline-aware request scheduling. Policy-class queues order requests earliest-due-first by default and reject requests whose due time passes before admission ([#17724](https://github.com/ai-dynamo/dynamo/pull/17724), [#17725](https://github.com/ai-dynamo/dynamo/pull/17725)). A `kv.fetch` hint names only KV sources in the target worker's transfer island, and worker selection and KV source selection merge into one decision ([#16477](https://github.com/ai-dynamo/dynamo/pull/16477), [#16701](https://github.com/ai-dynamo/dynamo/pull/16701)). Routing parameters and busy thresholds update live over `/router_policy` ([#16818](https://github.com/ai-dynamo/dynamo/pull/16818)). In addition, `dynamo-sticky-min-load` pins each session to its first-bound, least-loaded worker ([#15600](https://github.com/ai-dynamo/dynamo/pull/15600)), and image-aware KV routing reaches TensorRT-LLM ([#17437](https://github.com/ai-dynamo/dynamo/pull/17437), [#18089](https://github.com/ai-dynamo/dynamo/pull/18089)).",
+      body: "Dynamo Router adds deadline-aware request scheduling. Policy-class queues order requests earliest-due-first by default, and opt-in expiry enforcement rejects requests whose due time passes before admission ([#17724](https://github.com/ai-dynamo/dynamo/pull/17724), [#17725](https://github.com/ai-dynamo/dynamo/pull/17725)). A `kv.fetch` hint names only KV sources in the target worker's transfer island, and worker selection and KV source selection merge into one decision ([#16477](https://github.com/ai-dynamo/dynamo/pull/16477), [#16701](https://github.com/ai-dynamo/dynamo/pull/16701)). Routing parameters and busy thresholds update live over `/router_policy` ([#16818](https://github.com/ai-dynamo/dynamo/pull/16818)). In addition, `dynamo-sticky-min-load` pins each session to its first-bound, least-loaded worker ([#15600](https://github.com/ai-dynamo/dynamo/pull/15600)), and image-aware KV routing reaches TensorRT-LLM ([#17437](https://github.com/ai-dynamo/dynamo/pull/17437), [#18089](https://github.com/ai-dynamo/dynamo/pull/18089)).",
       anchor: "scheduling",
     },
     {
       area: "Frontend",
       title: "New APIs, V2 Parsers & New Models",
       body: "Dynamo Frontend adds speech-to-text and batch inference. An OpenAI-compatible `/v1/audio/transcriptions` endpoint serves transcription from a dedicated vLLM worker ([#16208](https://github.com/ai-dynamo/dynamo/pull/16208)), and the Batch API runs through `/v1/files` and `/v1/batches` ([#15564](https://github.com/ai-dynamo/dynamo/pull/15564)). V2 tool-call and reasoning parsing becomes the default for six model families ([#16822](https://github.com/ai-dynamo/dynamo/pull/16822)), and a unified GPT-OSS parser handles reasoning, content, and parallel tool calls ([#17146](https://github.com/ai-dynamo/dynamo/pull/17146)). Muse Spark Open and Beam 1.0 join the supported models ([#17068](https://github.com/ai-dynamo/dynamo/pull/17068), [#17072](https://github.com/ai-dynamo/dynamo/pull/17072)), and an optional Velo response plane adds TCP and UCX/RDMA transport, with TCP still the default ([#15231](https://github.com/ai-dynamo/dynamo/pull/15231)).",
-      anchor: "frontend-agents",
+      anchor: "frontend--agents",
     },
     {
       area: "Multimodal",
       title: "Image Editing & Omni Workflows",
       body: "Diffusion serving adds image editing and new video generation workflows. `/v1/images/edits` accepts bounded multipart PNG, JPEG, and WebP uploads and forwards edit references to vLLM-Omni ([#15390](https://github.com/ai-dynamo/dynamo/pull/15390), [#16455](https://github.com/ai-dynamo/dynamo/pull/16455)), and image responses honor `output_format` and report real `nvext.usage` counts ([#15865](https://github.com/ai-dynamo/dynamo/pull/15865), [#16448](https://github.com/ai-dynamo/dynamo/pull/16448)). Experimental Cosmos3 Nano text-to-image, text-to-video, and image-to-video workflows run on the aggregated vLLM-Omni backend ([#15952](https://github.com/ai-dynamo/dynamo/pull/15952)). SGLang workers now accept image, video, and audio inputs ([#16203](https://github.com/ai-dynamo/dynamo/pull/16203)).",
-      anchor: "multimodal-diffusion",
+      anchor: "multimodal--diffusion",
     },
     {
       area: "Kubernetes",
@@ -81,7 +81,7 @@ Pull, deploy, and install with every artifact pinned to the v1.7.0 release set.
     {
       area: "Sidecar",
       title: "Multinode Engines & Engine-Failure Recovery",
-      body: "Dynamo v1.7.0 takes the Sidecar to multinode engines and makes it resilient to engine failures. Multinode SGLang, TensorRT-LLM, and vLLM engines run behind the Sidecar on Kubernetes, with explicit leader and worker pod templates for each backend ([#16685](https://github.com/ai-dynamo/dynamo/pull/16685), [#17216](https://github.com/ai-dynamo/dynamo/pull/17216), [#17559](https://github.com/ai-dynamo/dynamo/pull/17559)). When an engine dies, Dynamo Frontend migrates its in-flight requests to another worker, and the Sidecar restarts and re-registers automatically ([#17710](https://github.com/ai-dynamo/dynamo/pull/17710), [#17972](https://github.com/ai-dynamo/dynamo/pull/17972), [#17973](https://github.com/ai-dynamo/dynamo/pull/17973), [#17728](https://github.com/ai-dynamo/dynamo/pull/17728)). The TensorRT-LLM Sidecar also adds image, video, and audio inputs ([#16613](https://github.com/ai-dynamo/dynamo/pull/16613), [#18078](https://github.com/ai-dynamo/dynamo/pull/18078)), and a new `dynamo-sidecar lpx` serves LPX engines ([#16998](https://github.com/ai-dynamo/dynamo/pull/16998)). Dynamo Sidecar does not yet match every feature of the in-process backends.",
+      body: "Dynamo v1.7.0 takes the Sidecar to multinode engines and makes it resilient to engine failures. Multinode SGLang, TensorRT-LLM, and vLLM engines run behind the Sidecar on Kubernetes, with explicit leader and worker pod templates for each backend ([#16685](https://github.com/ai-dynamo/dynamo/pull/16685), [#17216](https://github.com/ai-dynamo/dynamo/pull/17216), [#17559](https://github.com/ai-dynamo/dynamo/pull/17559)). When an engine dies, Dynamo Frontend migrates its in-flight requests to another worker when `--migration-limit > 0`, and the Sidecar restarts and re-registers automatically ([#17710](https://github.com/ai-dynamo/dynamo/pull/17710), [#17972](https://github.com/ai-dynamo/dynamo/pull/17972), [#17973](https://github.com/ai-dynamo/dynamo/pull/17973), [#17728](https://github.com/ai-dynamo/dynamo/pull/17728)). The TensorRT-LLM Sidecar also adds image, video, and audio inputs ([#16613](https://github.com/ai-dynamo/dynamo/pull/16613), [#18078](https://github.com/ai-dynamo/dynamo/pull/18078)), and a new `dynamo-sidecar lpx` serves LPX engines ([#16998](https://github.com/ai-dynamo/dynamo/pull/16998)). Dynamo Sidecar does not yet match every feature of the in-process backends.",
       anchor: "dynamo-sidecar",
     },
     {

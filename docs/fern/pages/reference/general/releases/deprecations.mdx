@@ -249,7 +249,7 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **`/health` returns status only** ([#16454](https://github.com/ai-dynamo/dynamo/pull/16454)). It no longer serializes every discovered instance on every call, which on a large deployment meant a multi-megabyte body per probe. The not-ready 503 response and `/live` are unchanged.
 
-  > **Migrate:** Pass `?instances=true` where you need the endpoint and instance lists. Any other value returns HTTP 400.
+  > **Migrate:** Pass `?instances=true` where you need the endpoint and instance lists. `?instances=false` or no parameter returns the status-only response. A value other than `true` or `false` returns HTTP 400.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Streaming `/v1/responses` no longer sends a trailing `[DONE]` frame** ([#15229](https://github.com/ai-dynamo/dynamo/pull/15229)). The stream ends after the typed terminal event. Chat Completions and Completions keep their `[DONE]` sentinel.
 
