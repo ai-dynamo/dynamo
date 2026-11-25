@@ -1695,7 +1695,9 @@ impl<
         slot.send(AdmissionCommand::Enqueue {
             request,
             attempt_tx,
-            block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
+            // Kept only by a queue that refreshes overlap after a long wait.
+            block_hashes: block_hashes
+                .filter(|hashes| self.supports_overlap_refresh && !hashes.is_empty()),
             prepared,
             queue_metadata,
             lease,
@@ -2060,16 +2062,6 @@ impl<
             overlap,
             pool: Arc::clone(&self.load_maps),
         }
-    }
-
-    fn prepare_block_hashes_for_refresh(
-        &self,
-        block_hashes: Option<Vec<LocalBlockHash>>,
-    ) -> Option<Vec<LocalBlockHash>> {
-        if !self.supports_overlap_refresh {
-            return None;
-        }
-        block_hashes.filter(|hashes| !hashes.is_empty())
     }
 }
 
@@ -3291,8 +3283,12 @@ impl<
             let _ = attempt_tx.send(attempt_id);
         }
         if request.respond(Ok(response)) {
-            if let Some(selection) = non_max_overlap_selection {
-                self.dispatch_non_max_overlap_selection(request_id, selection);
+            if let Some(selection) = non_max_overlap_selection
+                && let Some(observer) = self.non_max_overlap_selection_observer.get()
+            {
+                let observer = Arc::clone(observer);
+                let _observer_task =
+                    tokio::task::spawn_blocking(move || observer(&request_id, selection));
             }
             return Admission::Booked;
         }
@@ -3305,20 +3301,6 @@ impl<
             tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
         Admission::Refused
-    }
-
-    fn dispatch_non_max_overlap_selection(
-        &self,
-        request_id: String,
-        selection: NonMaxOverlapSelection,
-    ) {
-        let Some(observer) = self.non_max_overlap_selection_observer.get() else {
-            return;
-        };
-        let observer = Arc::clone(observer);
-        let _observer_task = tokio::task::spawn_blocking(move || {
-            observer(&request_id, selection);
-        });
     }
 
     fn prefill_load_hint_for(
