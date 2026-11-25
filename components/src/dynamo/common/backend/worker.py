@@ -252,11 +252,12 @@ class Worker:
         # caller must not change the process environment on a configuration
         # error.
         validate_request_plane(request_plane, response_plane)
-        previous_response_plane = os.environ.get("DYN_RESPONSE_PLANE")
-        if response_plane is not None:
-            if response_plane not in {"tcp", "quic", "velo"}:
-                raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
-            os.environ["DYN_RESPONSE_PLANE"] = response_plane
+        if response_plane is not None and response_plane not in {
+            "tcp",
+            "quic",
+            "velo",
+        }:
+            raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
 
         runtime_cfg = _backend.RuntimeConfig(
             discovery_backend=self.config.discovery_backend,
@@ -300,14 +301,24 @@ class Worker:
         # (JSON request adapter); everything else is a token-pipeline
         # LLMEngine. The Rust Worker validates model_input against the kind.
         is_raw = isinstance(self.engine, RawEngine)
-        worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
+        # The runtime reads the response plane from the environment. Export it
+        # only now, after every check Python can make, and take it back if the
+        # worker fails: the runtime can still refuse the pair, for example
+        # when a TLS setting rules velo out.
+        previous_response_plane = os.environ.get("DYN_RESPONSE_PLANE")
+        if response_plane is not None:
+            os.environ["DYN_RESPONSE_PLANE"] = response_plane
         try:
+            worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
             await worker.run()
         except BaseException:
-            # The runtime can still refuse the pair, for example when a TLS
-            # setting rules velo out. Leave the caller's environment as it was.
-            if previous_response_plane is None:
-                os.environ.pop("DYN_RESPONSE_PLANE", None)
-            else:
-                os.environ["DYN_RESPONSE_PLANE"] = previous_response_plane
+            # Undo only our own write, and only if nobody changed it since.
+            if (
+                response_plane is not None
+                and os.environ.get("DYN_RESPONSE_PLANE") == response_plane
+            ):
+                if previous_response_plane is None:
+                    os.environ.pop("DYN_RESPONSE_PLANE", None)
+                else:
+                    os.environ["DYN_RESPONSE_PLANE"] = previous_response_plane
             raise

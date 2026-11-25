@@ -50,6 +50,21 @@ def _clear_plane_env(monkeypatch):
         monkeypatch.delenv(name)
 
 
+async def test_config_constructor_failure_preserves_host_response_plane(monkeypatch):
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    config = worker_module.WorkerConfig(
+        namespace="test",
+        configure_logging=False,
+        discovery_backend="mem",
+        request_plane="velo",
+        response_plane="velo",
+        structural_tag={"typo": True},
+    )
+    with pytest.raises(ValueError, match="Invalid structural_tag config"):
+        await worker_module.Worker(MagicMock(), config).run()
+    assert os.environ["DYN_RESPONSE_PLANE"] == "quic"
+
+
 async def test_tls_refusal_preserves_the_host_response_plane(monkeypatch):
     monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
     monkeypatch.setenv("DYN_TCP_TLS_INSECURE", "true")
@@ -115,6 +130,38 @@ async def test_run_exports_the_explicit_response_plane(monkeypatch):
         response_plane="tcp",
     )
     assert os.environ["DYN_RESPONSE_PLANE"] == "tcp"
+
+
+async def test_start_failure_preserves_host_response_plane_set_during_run(monkeypatch):
+    import asyncio
+
+    _clear_plane_env(monkeypatch)
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+
+    class FailingEngine:
+        async def start(self, worker_id):
+            entered.set()
+            await resume.wait()
+            raise RuntimeError("engine startup failed")
+
+        async def cleanup(self):
+            pass
+
+    config = worker_module.WorkerConfig(
+        namespace="test", discovery_backend="mem", configure_logging=False
+    )
+    task = asyncio.create_task(worker_module.Worker(FailingEngine(), config).run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        assert "DYN_RESPONSE_PLANE" not in os.environ
+        monkeypatch.setenv("DYN_RESPONSE_PLANE", "velo")
+    finally:
+        resume.set()
+    with pytest.raises(Exception, match="engine startup failed"):
+        await asyncio.wait_for(task, timeout=10)
+    observed = os.environ.get("DYN_RESPONSE_PLANE")
+    assert observed == "velo"
 
 
 async def test_run_normalizes_the_velo_pair(monkeypatch):
