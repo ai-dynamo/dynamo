@@ -204,13 +204,13 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	}
 	allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
 	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
-	allErrs = append(allErrs, dynamo.ValidateColdStartFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		dynamoComponentDeploymentSharedSpecValidationOptions{
 			grovePathway:                      grovePathway,
 			validateInferencePoolAvailability: validateInferencePoolAvailability,
+			backendFramework:                  spec.BackendFramework,
 			oldComponent:                      oldSharedSpec,
 		},
 	)...)

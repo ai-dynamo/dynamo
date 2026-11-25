@@ -450,26 +450,6 @@ func snapshotFailoverBackendSupported(backendFramework BackendFramework) bool {
 	return backendFramework == BackendFrameworkVLLM || backendFramework == BackendFrameworkSGLang
 }
 
-// ValidateColdStartFailover checks that intra-pod failover without a checkpoint
-// resolves to vLLM, the only engine buildColdStartFailoverPod renders.
-// component and fldPath must not be nil.
-func ValidateColdStartFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
-	// Apply this check only to cold-start intra-pod failover.
-	if GetCheckpoint(component) != nil || !IsIntraPodFailoverEnabled(component) || component.IsInterPodGMSEnabled() {
-		return nil
-	}
-
-	// Resolve the backend exactly as rendering does, including command inference.
-	backendFramework, err := DetermineBackendFrameworkForComponent(component, explicitBackendFramework)
-	if err != nil {
-		return field.ErrorList{field.Forbidden(fldPath.Child("experimental", "failover"), "Cold-start intra-pod failover requires a consistent vLLM backend")}
-	}
-	if backendFramework != BackendFrameworkVLLM {
-		return field.ErrorList{field.Forbidden(fldPath.Child("experimental", "failover"), fmt.Sprintf("Cold-start intra-pod failover supports only vLLM (detected: %s)", backendFramework))}
-	}
-	return nil
-}
-
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
 // engine pod. v1beta1 FailoverSpec is presence-only: v1alpha1 conversion only
