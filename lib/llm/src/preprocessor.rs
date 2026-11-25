@@ -3987,9 +3987,6 @@ impl OpenAIPreprocessor {
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
-        // Tool delimiters can also occur inside arguments. Keep generation alive
-        // through the backend terminal (including usage); single-call projection
-        // happens after parsing rather than through context-free string stops.
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
             builder.eos_token_ids(eos_token_ids);
@@ -20181,6 +20178,47 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn generic_reasoning_parsers_release_a_held_close_marker_prefix() {
+        // Basic parsers hold a trailing close-marker prefix (`<`, `[`) until the
+        // stream is finalized, so a turn ending there must still deliver it.
+        for (parser, output, reasoning) in [
+            ("qwen3", "<think>compare a <", "compare a <"),
+            ("mistral", "[THINK]compare a [", "compare a ["),
+        ] {
+            for finish_reason in [serde_json::json!("length"), serde_json::Value::Null] {
+                let chunk = Annotated::from_data(
+                    serde_json::from_value::<NvCreateChatCompletionStreamResponse>(
+                        serde_json::json!({"id": "test", "object": "chat.completion.chunk",
+                            "created": 0, "model": "test", "choices": [{"index": 0,
+                            "delta": {"content": output}, "finish_reason": finish_reason}]}),
+                    )
+                    .unwrap(),
+                );
+                let streamed: String = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+                    stream::iter([chunk]),
+                    parser.to_string(),
+                    false,
+                )
+                .filter_map(|item| async move { item.data })
+                .map(|data| {
+                    data.inner
+                        .choices
+                        .iter()
+                        .filter_map(|choice| choice.delta.reasoning_content.clone())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .await
+                .concat();
+                assert_eq!(
+                    streamed, reasoning,
+                    "{parser} finish_reason={finish_reason}"
+                );
+            }
+        }
     }
 
     /// Every client control that normalizes to MiniMax M3

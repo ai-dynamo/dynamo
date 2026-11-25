@@ -106,12 +106,17 @@ pub(super) enum IncompleteNativeToolCallPolicy {
     #[default]
     Recover,
     Reject,
+    /// Single-call requests return only call index 0, so a completed first
+    /// call satisfies them even if a later sibling is unfinished.
     RejectUnlessFirstCompleted,
 }
 
 impl IncompleteNativeToolCallPolicy {
-    pub(super) fn new(reject: bool, single_tool_call: bool) -> Self {
-        match (reject, single_tool_call) {
+    pub(super) fn new(family: &str, reject: bool, single_tool_call: bool) -> Self {
+        match (
+            reject && reports_incomplete_native_calls(family),
+            single_tool_call,
+        ) {
             (false, _) => Self::Recover,
             (true, true) => Self::RejectUnlessFirstCompleted,
             (true, false) => Self::Reject,
@@ -426,6 +431,8 @@ pub(crate) struct UnifiedRequestPolicy {
     pub structured_response: bool,
     pub multiple_choices: bool,
     pub reject_incomplete_native_tool_calls: bool,
+    /// `parallel_tool_calls: false`. Enforced after parsing, not with stop
+    /// strings: tool delimiters can also occur inside arguments.
     pub single_tool_call: bool,
 }
 
@@ -4008,7 +4015,8 @@ where
     let mut harmony_prefill_cache = policy.harmony_prefill_cache(family, prefill_prefix.clone());
     let tools = to_v2_tools(tool_definitions.as_deref());
     let incomplete_call_policy = IncompleteNativeToolCallPolicy::new(
-        policy.reject_incomplete_native_tool_calls && reports_incomplete_native_calls(family),
+        family,
+        policy.reject_incomplete_native_tool_calls,
         policy.single_tool_call,
     );
     stream! {

@@ -106,11 +106,12 @@ fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>, GenerationCapabi
         .split_once("\0generation_capabilities\0")
         .map_or(
             (fingerprint, GenerationCapabilities::empty()),
+            // Unparseable bits fall back to no capabilities, the legacy behavior.
             |(prefix, bits)| {
-                let bits = bits
-                    .parse()
-                    .expect("generation capabilities contain numeric bits");
-                (prefix, GenerationCapabilities::from_bits_retain(bits))
+                (
+                    prefix,
+                    GenerationCapabilities::from_bits_retain(bits.parse().unwrap_or_default()),
+                )
             },
         );
     let (checksum, video_contract) = fingerprint

@@ -773,6 +773,7 @@ impl DeltaAggregator {
         }
         if let Some(family) = selected_unified_family {
             let incomplete_call_policy = super::unified_parser::IncompleteNativeToolCallPolicy::new(
+                family,
                 parsing_options.reject_incomplete_native_tool_calls,
                 parsing_options.parallel_tool_calls == Some(false),
             );
