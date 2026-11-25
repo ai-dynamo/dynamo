@@ -211,6 +211,130 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** To keep synchronous scheduling, set `engine.async_scheduling` to `false` in the Mocker's `--extra-engine-args` file, or in `extra_engine_args`, `prefill_engine_args`, or `decode_engine_args` of the replay API. The Mocker file replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a file that changes only the scheduling is `{"engine": {"async_scheduling": false}, "dynamo": {"enable_local_indexer": true}}`.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **The platform chart rejects skipped-minor and major operator version changes** ([#16651](https://github.com/ai-dynamo/dynamo/pull/16651)). A preflight Job checks the installed operator version before the chart replaces the Deployment, so an upgrade from v1.5.x straight to v1.7.x fails instead of running. Flux needs helm-controller v1.7.0 or later, first shipped in Flux v2.10.0.
+
+  > **Migrate:** Upgrade through each intermediate minor release, or set `dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride` to the target `N.M` after validating that path separately. Every Kubernetes migration note for this release is in the [platform chart upgrade guide](https://github.com/ai-dynamo/dynamo/blob/release/1.7.0/deploy/helm/charts/platform/README.md#upgrading).
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Grove v0.2.0-beta1 is required** ([#17851](https://github.com/ai-dynamo/dynamo/pull/17851)). Grove stores resources as `grove.io/v1beta1` while still serving the `grove.io/v1alpha1` API Dynamo uses, an unset clique or scaling-group `scaleConfig.minReplicas` now defaults to `minAvailable` instead of `replicas`, and Dynamo's Grove informers depend on Grove's conversion webhook.
+
+  > **Migrate:** Upgrade externally managed Grove and its CRDs first with `crdInstaller.upgradeCRDs=true`, which replaces `grove.crdInstaller.enabled`, confirm the API server can reach the conversion webhook, and set `scaleConfig.minReplicas` where the old default mattered.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **LWS orchestration no longer requires Volcano, and the legacy LWS migration cleanup is gone** ([#17070](https://github.com/ai-dynamo/dynamo/pull/17070)). A cluster with LWS installed and no Volcano enables LWS orchestration after the operator upgrade, and the operator stops cleaning up the per-replica LWS objects and Volcano PodGroups created by Dynamo v1.1.x and earlier.
+
+  > **Migrate:** Complete the native-scaling migration on an intermediate operator version such as v1.2.x first. Configure gang scheduling separately through LWS, by installing Volcano and setting `gangSchedulingManagement.schedulerProvider=volcano`, or through Kueue; without it, multinode LWS workloads can sit partially scheduled.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Authored probes must declare exactly one handler, and frontends get a generated startup probe** ([#15581](https://github.com/ai-dynamo/dynamo/pull/15581), [#18987](https://github.com/ai-dynamo/dynamo/pull/18987)). Admission rejects any supplied `startupProbe`, `livenessProbe`, or `readinessProbe` that does not define exactly one of `exec`, `httpGet`, `tcpSocket`, or `grpc`, on both deployment kinds and both API versions. Both the generated frontend probe and frontend Sidecar probe replacement apply only where the workload records an operator origin of v1.7.0 or later (and a frontend runtime of v1.6.0 or later), so operator-only upgrades of v1.6.x deployments do not roll worker Pods.
+
+  > **Migrate:** Give every supplied probe one handler, or drop it and take the operator default, before upgrading the CRDs. To get startup protection on an older workload, author a complete `startupProbe` on its frontend container and plan for frontend replacement.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Multinode Sidecar components need explicit leader and worker role templates** ([#16685](https://github.com/ai-dynamo/dynamo/pull/16685), [#17216](https://github.com/ai-dynamo/dynamo/pull/17216), [#17559](https://github.com/ai-dynamo/dynamo/pull/17559)). An SGLang, vLLM, or TensorRT-LLM component declaring a `runtime` init container alongside `multinode` must supply complete `roles[]` templates carrying their own engine commands and topology arguments. Automatic Sidecar placement is gone.
+
+  > **Migrate:** Rewrite multinode Sidecar deployments with explicit `leader` and `worker` role templates and set `backendFramework` explicitly. Combined-runtime deployments do not change.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **The operator sets the LPX model-path variables in every container of an LPX Pod** ([#16998](https://github.com/ai-dynamo/dynamo/pull/16998), [#18192](https://github.com/ai-dynamo/dynamo/pull/18192)). `LPX_MODEL_PATH`, or `LPX_DRAFT_MODEL_PATH` and `LPX_TARGET_MODEL_PATH` for a speculative pair, now reach every regular and init container of every LPX role, and the operator's value replaces anything authored under those names.
+
+  > **Migrate:** Plan for a one-time rollout of LPX workloads, and rename any colliding container variable first.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **A hybrid LPX conductor must declare the runtime Sidecar** ([#18069](https://github.com/ai-dynamo/dynamo/pull/18069)). Reconciliation rejects a hybrid LPX build whose conductor template has no `runtime` init container and reports the deployment as failed. Operator v1.6.x rejects that init container, so affected deployments can only migrate after the upgrade.
+
+  > **Migrate:** After upgrading, add the `runtime` init container to the conductor template, run the Sidecar with the `lpx` subcommand, `--grpc-endpoint` pointed at the engine and `--model-path` at the tokenizer directory, and probe the engine on its own port.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Grove's OnDelete update strategy is rejected for LPX graphs** ([#16663](https://github.com/ai-dynamo/dynamo/pull/16663)). Under OnDelete, Grove leaves LPX Pods on stale templates and the graph cannot be placed again until those Pods are replaced by hand.
+
+  > **Migrate:** Remove the `nvidia.com/grove-update-strategy: OnDelete` annotation from existing LPX deployments before any other update is admitted, then replace the stale Pods with a new `spec.restart.id`.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Deployment-request shape detection and defaulting changed** ([#17308](https://github.com/ai-dynamo/dynamo/pull/17308), [#13744](https://github.com/ai-dynamo/dynamo/pull/13744)). An omitted `gpuSku` resolves to the GPU type of the node with the most GPUs, ties broken by VRAM per GPU, and a `numGpusPerNode` or `vramMb` differing from the selected shape is rejected when `totalGpus` is omitted. The `v1beta1` defaults for `spec.autoApply`, `spec.enableGpuDiscovery`, and `spec.useMocker` now come from the creating admission webhook rather than the CRD schema.
+
+  > **Migrate:** Set `gpuSku` explicitly on mixed-GPU clusters that relied on the old selection, set `totalGpus` alongside any shape override, and set those three fields on any request that depended on update-time defaulting.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`/health` returns status only** ([#16454](https://github.com/ai-dynamo/dynamo/pull/16454)). It no longer serializes every discovered instance on every call, which on a large deployment meant a multi-megabyte body per probe. The not-ready 503 response and `/live` are unchanged.
+
+  > **Migrate:** Pass `?instances=true` where you need the endpoint and instance lists. Any other value returns HTTP 400.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Streaming `/v1/responses` no longer sends a trailing `[DONE]` frame** ([#15229](https://github.com/ai-dynamo/dynamo/pull/15229)). The stream ends after the typed terminal event. Chat Completions and Completions keep their `[DONE]` sentinel.
+
+  > **Migrate:** Detect completion on `response.completed`, `response.incomplete`, or `response.failed` instead of waiting for `[DONE]`.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **V2 parsers are the default for several model families** ([#16822](https://github.com/ai-dynamo/dynamo/pull/16822)). With `DYN_PARSER_VERSION` unset or `auto`, Qwen3 Coder, DeepSeek V4 and V4.1, Gemma4, GLM4.7, Kimi K2, K2.5 and K3, and Muse Glimmer prefer the unified V2 parser. The deprecated `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2=false` maps to `auto`, so it prefers V2 too.
+
+  > **Migrate:** Set `DYN_PARSER_VERSION=1` to keep V1 parsing for these families.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Parser names are validated strictly at model setup** ([#17475](https://github.com/ai-dynamo/dynamo/pull/17475)). Automatic fallback and explicit V1 now reject noncanonical reasoning-selector casing such as `QWEN3` or `DEEPSEEK_R1`, and reject unsupported V1 and V2 selector pairs, so a tolerated configuration can fail at startup.
+
+  > **Migrate:** Use the canonical lowercase registry names in `--dyn-reasoning-parser` and `DYN_REASONING_PARSER`, and check that your parser pair is supported.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Workers refuse `--default-chat-template-kwargs`** ([#16570](https://github.com/ai-dynamo/dynamo/pull/16570)). Dynamo renders the chat template in the frontend, so the flag never reached Dynamo traffic from a worker. `python -m dynamo.sglang` and `python -m dynamo.vllm` now fail at startup when it is passed; the Sidecars log a warning.
+
+  > **Migrate:** Move the flag to `python -m dynamo.frontend`, where it applies to every backend and chat processor.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`shared_cache_multiplier` also credits blocks a worker could fetch from a peer** ([#16701](https://github.com/ai-dynamo/dynamo/pull/16701)). The multiplier that scores shared-cache hits now also scores blocks a KV fetch hint would pull from another worker, so selection can pick an idle worker that can fetch the prefix over a busy worker that holds it.
+
+  > **Migrate:** Review router selection if you already set a nonzero `shared_cache_multiplier`, and set it explicitly where shared cache is off, since it still defaults to `0` there.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Removed workers no longer leave stale metric series behind** ([#14606](https://github.com/ai-dynamo/dynamo/pull/14606)). The per-worker load and last-observation gauges are filtered at collection time against committed availability, so a removed worker has no series rather than a zero-valued one, and a withdrawn group disappears from `dynamo_frontend_router_workers`.
+
+  > **Migrate:** Change worker-loss and overload alert rules to treat an absent series, not just a zero value, as worker loss.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`NATS_SERVER` alone no longer opens a NATS connection** ([#17501](https://github.com/ai-dynamo/dynamo/pull/17501)). The runtime connects only when the request plane or the event plane is NATS, so workers and Planner on the default TCP and ZMQ planes no longer block at startup on a NATS server they never use.
+
+  > **Migrate:** Set `DYN_EVENT_PLANE=nats`, or select the NATS request plane, if you relied on an ambient `NATS_SERVER` for KV events.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Every gRPC Sidecar opens 32 connections to its engine by default**, up from 8 ([#17864](https://github.com/ai-dynamo/dynamo/pull/17864)). Every stream on a connection serializes behind one lock, so the old default capped token rate under high concurrency.
+
+  > **Migrate:** Set `--grpc-connections 8` or `DYN_SIDECAR_GRPC_CONNECTIONS=8` if you sized resources around the old default.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Velo response-plane defaults changed** ([#17577](https://github.com/ai-dynamo/dynamo/pull/17577), [#17854](https://github.com/ai-dynamo/dynamo/pull/17854)). A frontend now waits up to 180 seconds, up from 60, for a worker that accepted a request to open its Velo response stream, and `DYN_VELO_RESPONSE_BATCH_MS` defaults to 2 ms, down from 5 ms. Only deployments that set `DYN_RESPONSE_PLANE=velo` are affected.
+
+  > **Migrate:** Set `DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS` for a tighter stream window, or `DYN_VELO_RESPONSE_BATCH_MS=5` to keep the old batching.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **SGLang sizes its preprocessing workers automatically** ([#15253](https://github.com/ai-dynamo/dynamo/pull/15253)). With `--dyn-chat-processor sglang` and no explicit worker count, Dynamo resolves up to two workers from the detected CPU budget instead of preprocessing on the frontend's main event loop. Other chat processors still default to zero.
+
+  > **Migrate:** Pass `--dyn-preprocess-workers 0` or set `DYN_PREPROCESS_WORKERS=0` to keep preprocessing on the main event loop.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **SGLang publishes KV events in the Dynamo format by default** ([#15746](https://github.com/ai-dynamo/dynamo/pull/15746)). When KV events are on and `--kv-events-config` sets no format, `dynamo.sglang` requests the `dynamo` format, which carries the LoRA adapter name and namespaces block hashes by adapter.
+
+  > **Migrate:** Set `format` in `--kv-events-config` for the previous wire format, and update any consumer that parses SGLang KV events directly.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **TensorRT-LLM KV cache manager selection now follows the cache transceiver** ([#17099](https://github.com/ai-dynamo/dynamo/pull/17099), [#17587](https://github.com/ai-dynamo/dynamo/pull/17587)). TensorRT-LLM v1.4.0rc2 removed KV cache manager v1 from the default transceiver, so text workers take TensorRT-LLM's own default of v2 with polled KV events, while multimodal workers stay on v1.
+
+  > **Migrate:** A multimodal disaggregated worker with `--publish-kv-events`, or a snapshot disaggregated worker, must set `transceiver_runtime: CPP` and `use_kv_cache_manager_v2: false` on both prefill and decode, or it fails at startup. An explicit `use_kv_cache_manager_v2: true` is rejected there.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **The TensorRT-LLM Sidecar registers the engine's served model name** ([#17556](https://github.com/ai-dynamo/dynamo/pull/17556)). It requires a non-empty name from the engine, where it previously registered the `--model-path` value.
+
+  > **Migrate:** Set the engine's `--served_model_name` to keep a client-facing name you previously set through `--model-path`. An engine that does not report model information no longer starts this Sidecar.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Two vLLM defaults changed on vLLM 0.33 and later** ([#17862](https://github.com/ai-dynamo/dynamo/pull/17862)). The vLLM Sidecar publishes structural tags by default, matching the in-process worker and the SGLang Sidecar, and older servers that reject these tags keep the default off. Workers that publish KV events now disable vLLM 0.33's EAGLE and MTP lookahead block hashes, which Dynamo's KV indexers do not accept.
+
+  > **Migrate:** Pass `--dyn-structural-tag false` to turn the Sidecar default off. The hashes need no action, though those workers keep vLLM 0.32's trailing-block behavior rather than 0.33's lookahead prefix-cache reuse.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **KVBM is no longer built or shipped** ([#16324](https://github.com/ai-dynamo/dynamo/pull/16324), [#18963](https://github.com/ai-dynamo/dynamo/pull/18963)). The deprecated KVBM wheel and crates are gone from the container images, the cargo workspace, and release staging, and the legacy vLLM KVBM launch and deploy examples are removed. The source and `--connector kvbm` remain for the KVBM owners.
+
+  > **Migrate:** Point disaggregated LMCache and FlexKV deployments at `dynamo.vllm.pd_connector`, which now holds the prefill-decode connector that shipped in the KVBM wheel.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Python 3.10 is no longer supported; Dynamo requires Python 3.11 or newer** ([#16413](https://github.com/ai-dynamo/dynamo/pull/16413)), matching the supported range of SGLang.
+
+  > **Migrate:** Move to Python 3.11 or newer before installing or upgrading the `ai-dynamo` package.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the GlobalPlanner per-setting flags** in favor of a single `--config` taking inline JSON or a path to a JSON or YAML file ([#14035](https://github.com/ai-dynamo/dynamo/pull/14035)). `--max-total-gpus`, `--min-total-gpus`, `--managed-namespaces`, `--no-operation`, `--environment`, and `--intent-cache-ttl-seconds` now fail at startup instead of silently dropping a GPU budget or a namespace allowlist.
+
+  > **Migrate:** Move every GlobalPlanner setting into one `--config` payload. An empty `--config ""` is rejected too.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **`DYN_ENABLE_RUST_NVTX` is replaced by `DYN_NVTX`** ([#17334](https://github.com/ai-dynamo/dynamo/pull/17334)). A single `DYN_NVTX` switch now covers both the Rust and Python layers, and the old variable is ignored.
+
+  > **Migrate:** Set `DYN_NVTX` to capture Dynamo NVTX ranges.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the Grove preflight from the standalone operator chart** ([#16670](https://github.com/ai-dynamo/dynamo/pull/16670)). The platform chart owns the Grove dependency, so `grovePreflight.enabled` no longer exists in the operator chart on its own.
+
+  > **Migrate:** Deploy through the platform chart to keep the Grove compatibility gate, or run your own.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the absolute prefill busy thresholds** in favor of their fractional equivalents ([#16620](https://github.com/ai-dynamo/dynamo/pull/16620)). The policy YAML `prefill_busy_threshold`, the `--active-prefill-tokens-threshold` flag, and `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` each log a warning now.
+
+  > **Migrate:** Move to `prefill_busy_threshold_frac` and `--active-prefill-tokens-threshold-frac`.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the router policy-family and cache-bucket configuration format** in favor of flat policy classes ([#18298](https://github.com/ai-dynamo/dynamo/pull/18298)). Dynamo v1.7.0 still loads a profile setting `default_policy_family`, `uncached_isl_buckets`, or any class `policy_family` or `cache_bucket`, with one warning per load, and removal is planned for v1.8.0.
+
+  > **Migrate:** Convert each profile to the flat policy-class format before upgrading past v1.7.0.
+
 <a id="v162"></a>
 
 ## v1.6.2 - Nov 5, 2026
