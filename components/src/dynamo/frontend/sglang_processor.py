@@ -49,6 +49,7 @@ from .sglang_prepost import (
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
+    normalize_empty_tools,
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
@@ -777,6 +778,9 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
+        # This path bypasses the Rust preprocessor, so apply its empty-tools rule
+        # here, before preprocessing (inline or pool) and postprocessing read it.
+        request = normalize_empty_tools(request)
         if request.get("responses_native_tools") and not (
             self.exclude_tools_when_tool_choice_none
             and request.get("tool_choice") == "none"

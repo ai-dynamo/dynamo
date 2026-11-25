@@ -195,6 +195,7 @@ def _load_processor_module(
         convert_tools=lambda *_args, **_kwargs: None,
         create_parsers=lambda *_args, **_kwargs: (None, None),
         detect_force_reasoning_from_template=lambda *_args, **_kwargs: False,
+        normalize_empty_tools=lambda request: request,
         preprocess_chat_request=lambda *_args, **_kwargs: None,
         resolve_skip_special_tokens=lambda *_args, **_kwargs: True,
     )

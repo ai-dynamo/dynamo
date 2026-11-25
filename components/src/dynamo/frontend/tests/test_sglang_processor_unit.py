@@ -1396,6 +1396,60 @@ def test_routed_engine_rejection_keeps_its_semantic_error(
         assert caught.value is routed_error
 
 
+@pytest.mark.parametrize("tool_choice", [None, "auto", "required", "none"])
+def test_empty_tools_array_is_treated_as_omitted(tokenizer, tool_choice):
+    """An explicit ``tools: []`` reaches this processor unnormalized, because
+    the HTTP handler forwards the client fields; it must behave as no tools."""
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name=None,
+        eos_token_ids=[tokenizer.eos_token_id],
+    )
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 4,
+        "tools": [],
+    }
+    if tool_choice is not None:
+        request["tool_choice"] = tool_choice
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    asyncio.run(collect())
+    assert len(routed_engine.requests) == 1
+    assert request["tools"] == [], "the caller's request is not mutated"
+
+
+def test_empty_tools_array_with_named_tool_choice_is_rejected(tokenizer):
+    routed_engine = FakeRoutedEngine()
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name=None,
+        eos_token_ids=[tokenizer.eos_token_id],
+    )
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 4,
+        "tools": [],
+        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+    }
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    with pytest.raises(Exception, match="get_weather"):
+        asyncio.run(collect())
+    assert routed_engine.requests == []
+
+
 @pytest.mark.parametrize(
     "tool_choice",
     [
