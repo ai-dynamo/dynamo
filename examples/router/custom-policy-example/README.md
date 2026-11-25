@@ -61,6 +61,7 @@ for fields and missing-data behavior.
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
+| [`adaptive-imbalance`](adaptive-imbalance/README.md) | Adaptive routing policy that uses a control loop on pool-level load imbalance to adjust the cost-function weights at runtime |
 
 The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
@@ -228,6 +229,7 @@ cargo test \
   -p dynamo-custom-policy-example-simple-filter-score-pick \
   -p dynamo-custom-policy-example-disagg-filter-score-pick \
   -p dynamo-custom-policy-example-simple-stacked-score-pick \
+  -p dynamo-custom-policy-example-adaptive-imbalance \
   -p dynamo-custom-policy-example-catalog
 cargo build -p dynamo-custom-policy-example-epp
 ```
