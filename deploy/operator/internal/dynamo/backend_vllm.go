@@ -153,7 +153,7 @@ func isSystemOneSerialOptIn(container *corev1.Container) bool {
 
 	// Read shell words as arguments; direct launches already provide exact arguments.
 	if len(container.Command) > 0 && isShellCommand(container.Command[0]) {
-		var expanded []string
+		expanded := make([]string, 0, len(commandLine))
 		for _, script := range commandLine {
 			expanded = append(expanded, shellLaunchWords(script)...)
 		}
