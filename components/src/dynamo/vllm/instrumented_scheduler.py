@@ -4000,6 +4000,82 @@ class InstrumentedScheduler(AsyncScheduler):
             return sum(manager_blocks)
         return math.ceil(num_tokens / self.block_size)
 
+    def _bench_window_excess_blocks(
+        self, num_tokens: int, *, apply_admission_cap: bool = False
+    ) -> int:
+        """Blocks a request's sliding-window groups hold above their steady state.
+
+        ``_bench_blocks_per_req`` prices a window group at its prefill-time
+        peak: ``ceil(tokens / block)``, or vLLM's admission cap,
+        ``cdiv(window + in-flight tokens, block)``. Once vLLM releases the
+        positions that left the window (``remove_skipped_blocks``), a request
+        holds at most the window plus the block being written,
+        ``ceil(window / block) + 1``. Short-convolution caches are
+        ``SlidingWindowSpec`` groups too. Other groups add nothing.
+        """
+        coordinator = getattr(
+            getattr(self, "kv_cache_manager", None), "coordinator", None
+        )
+        excess = 0
+        for manager in getattr(coordinator, "single_type_managers", ()):
+            spec = getattr(manager, "kv_cache_spec", None)
+            block_size = getattr(manager, "block_size", None)
+            if (
+                not isinstance(spec, SlidingWindowSpec)
+                or not isinstance(block_size, int)
+                or block_size < 1
+            ):
+                continue
+            window = spec.sliding_window
+            if not isinstance(window, int) or window <= 0:
+                continue
+            peak = math.ceil(num_tokens / block_size)
+            admission_cap = self._kvwarm_admission_cap(manager)
+            if apply_admission_cap and admission_cap is not None:
+                peak = min(peak, admission_cap)
+            excess += max(0, peak - (math.ceil(window / block_size) + 1))
+        return excess
+
+    def _bench_native_fleet_blocks(self, token_counts: list[int]) -> int:
+        """Blocks a fleet of natively prefilled requests needs at one time.
+
+        Every request holds its steady-state footprint, and at most one
+        request is mid-prefill at its window peak: vLLM admits a prefill
+        chunk only when its blocks are free, and parked requests release
+        their expired window blocks (``_kvwarm_monitor_build``). Without
+        window groups this is the plain sum of ``_bench_blocks_per_req``.
+
+        The steady state is the capped count minus the window excess, rather
+        than a new ``_bench_blocks_per_req`` keyword, so subclasses that
+        override ``_bench_blocks_per_req`` keep their signature.
+        """
+        if not token_counts:
+            return 0
+        excess = [
+            self._bench_window_excess_blocks(tokens, apply_admission_cap=True)
+            for tokens in token_counts
+        ]
+        peak = sum(
+            self._bench_blocks_per_req(tokens, apply_admission_cap=True)
+            for tokens in token_counts
+        )
+        return peak - sum(excess) + max(excess)
+
+    def _bench_decode_points_native(self) -> bool:
+        """Whether the native exact-context warm-up builds the decode points.
+
+        Settled before the grid is built (``_bench_make_local_capacity``)
+        and agreed across attention-DP ranks through the negotiated
+        capacity. Synthetic injection admits each request at its full
+        context, so its points keep the prefill-time count.
+        """
+        negotiated = getattr(self, "_bench_negotiated_capacity", None)
+        return (
+            self._kvwarm_native
+            and getattr(self, "_kvwarm_eligible_cache", None) is True
+            and bool(getattr(negotiated, "kvwarm_eligible", True))
+        )
+
     def _bench_available_blocks(self) -> int:
         kv_cache_manager = getattr(self, "kv_cache_manager", None)
         block_pool = getattr(kv_cache_manager, "block_pool", None)
@@ -4334,10 +4410,16 @@ class InstrumentedScheduler(AsyncScheduler):
             max(context_len, 2) + 2 > max_model_len for context_len in context_lengths
         ):
             return False
-        required_blocks = sum(
-            self._bench_blocks_per_req(max(context_len, 2) + 1)
-            for context_len in context_lengths
-        )
+        token_counts = [max(context_len, 2) + 1 for context_len in context_lengths]
+        if self._bench_decode_points_native():
+            # Native warm-up prefills each request and parks it at its
+            # steady-state footprint, so a window group does not hold its
+            # whole context (see ``_bench_native_fleet_blocks``).
+            required_blocks = self._bench_native_fleet_blocks(token_counts)
+        else:
+            required_blocks = sum(
+                self._bench_blocks_per_req(tokens) for tokens in token_counts
+            )
         return required_blocks <= self._bench_grid_usable_blocks(
             batch_size, reserve_watermark=True
         )
@@ -6534,6 +6616,10 @@ class InstrumentedScheduler(AsyncScheduler):
     def _kvwarm_native_required_blocks(self, context_lengths: list[int]) -> int:
         """Native fleet peak, including admission and repeated steady writes.
 
+        Parked chains hold their steady-state window footprint, and one chain
+        at a time holds its prefill-time window peak
+        (``_bench_native_fleet_blocks``).
+
         Each align-mode state group adds one block per stage: a prefill that
         ends on a hash boundary inside a Mamba block registers its own partial
         tail in that group's manager, and the first decode's admission check
@@ -6551,12 +6637,11 @@ class InstrumentedScheduler(AsyncScheduler):
             getattr(manager, "mamba_cache_mode", None) == "align"
             for manager in self.kv_cache_manager.coordinator.single_type_managers
         )
-        return align_headroom + sum(
-            self._bench_blocks_per_req(
-                context + 1 + repeats + self.num_lookahead_tokens,
-                apply_admission_cap=True,
-            )
-            for context in context_lengths
+        return align_headroom + self._bench_native_fleet_blocks(
+            [
+                context + 1 + repeats + self.num_lookahead_tokens
+                for context in context_lengths
+            ]
         )
 
     def _kvwarm_native_pool_shortfall(self) -> int:
@@ -6741,6 +6826,22 @@ class InstrumentedScheduler(AsyncScheduler):
                     # Park: leave the scheduler's view; blocks and requests
                     # stay resident.
                     self.running = [r for r in running if r.request_id != req_id]
+                if self._kvwarm_native:
+                    # vLLM frees blocks that left a window only in
+                    # allocate_slots, which a parked chain never reaches.
+                    # Without this the fleet exceeds the steady-state
+                    # reservation and the stage stalls at the pool edge.
+                    # Shared chains keep the positional tables their
+                    # shadows borrow.
+                    self.kv_cache_manager.remove_skipped_blocks(
+                        req_id,
+                        max(
+                            0,
+                            req.num_computed_tokens
+                            - getattr(req, "num_in_flight_tokens", 0),
+                        ),
+                        num_prompt_tokens=req.num_prompt_tokens,
+                    )
                 if getattr(req, "num_output_placeholders", 0) > 0:
                     # Async scheduling advances num_computed_tokens when a step is
                     # scheduled, not when its output lands. Parking stops new steps;

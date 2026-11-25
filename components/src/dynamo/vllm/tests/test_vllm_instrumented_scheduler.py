@@ -6343,11 +6343,14 @@ def _kvwarm_native_build_stub():
         req_id: SimpleNamespace(
             request_id=req_id,
             num_computed_tokens=len(tokens),
+            num_prompt_tokens=len(tokens),
             num_output_placeholders=1,
         )
         for req_id, tokens in stub._kvwarm_chain_prompts.items()
     }
     stub.running = list(stub.requests.values())
+    # Parking a native chain releases its expired window blocks.
+    stub.kv_cache_manager.remove_skipped_blocks = MagicMock()
     stub._kvwarm_native_pool_shortfall = MagicMock(return_value=0)
     stub._bench_active_req_ids = set()
     stub._bench_current_point = None
@@ -6464,6 +6467,158 @@ def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
     # 511 prefilled tokens + admission + three steady writes; the full
     # group holds 33 blocks, while the native finite window needs only four.
     assert stub._kvwarm_native_required_blocks([511]) == 37
+
+
+def _window_managers(*, admission_cap=16_385):
+    """A full-attention group of 16-token blocks and a 4-token short-conv
+    window. The cap is vLLM's ``cdiv(window + in-flight tokens, block)`` with
+    64K tokens in flight, so it never binds below 64K tokens."""
+    return [
+        SimpleNamespace(
+            block_size=16,
+            kv_cache_spec=FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+            ),
+        ),
+        SimpleNamespace(
+            block_size=4,
+            max_admission_blocks_per_request=admission_cap,
+            kv_cache_spec=SlidingWindowSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=8,
+                dtype=torch.bfloat16,
+                sliding_window=4,
+            ),
+        ),
+    ]
+
+
+def test_window_excess_is_the_prefill_peak_above_the_steady_window():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=_window_managers())
+    )
+
+    # 8,193 tokens: 513 full-attention blocks and a 2,049-block window peak.
+    # A resident request holds ceil(4 / 4) + 1 = 2 window blocks.
+    assert stub._bench_blocks_per_req(8193, apply_admission_cap=True) == 2562
+    assert stub._bench_window_excess_blocks(8193, apply_admission_cap=True) == 2047
+    # A fleet holds every request's steady state plus one prefill peak.
+    assert stub._bench_native_fleet_blocks([8193] * 64) == 64 * (513 + 2) + 2047
+    # The admission cap bounds the peak, and so the excess.
+    stub.kv_cache_manager.coordinator.single_type_managers = _window_managers(
+        admission_cap=100
+    )
+    assert stub._bench_window_excess_blocks(8193, apply_admission_cap=True) == 98
+    assert stub._bench_window_excess_blocks(8193) == 2047
+
+
+def test_native_fleet_blocks_without_window_groups_are_the_plain_sum():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                _window_managers()[0],
+                # A chunked-local group: capped, but not a sliding window.
+                SimpleNamespace(block_size=16, max_admission_blocks_per_request=4),
+                SimpleNamespace(
+                    block_size=16,
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=0,
+                    kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+                ),
+            ]
+        )
+    )
+    tokens = [8193, 511, 2]
+
+    assert stub._bench_native_fleet_blocks(tokens) == sum(
+        stub._bench_blocks_per_req(count, apply_admission_cap=True) for count in tokens
+    )
+
+
+@pytest.mark.parametrize(
+    ("native", "eligible", "peer_eligible", "feasible"),
+    [
+        (True, True, True, True),
+        # Synthetic injection admits each request at its full context.
+        (False, True, True, False),
+        (True, False, True, False),
+        (True, True, False, False),
+    ],
+    ids=["native", "synthetic", "probe_failed", "peer_ineligible"],
+)
+def test_decode_feasibility_prices_native_window_points_at_steady_state(
+    native, eligible, peer_eligible, feasible
+):
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=10_000, block_size=16)
+    stub.max_model_len = 16_384
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=_window_managers())
+    )
+    stub._kvwarm_native = native
+    stub._kvwarm_eligible_cache = eligible
+    if not peer_eligible:
+        stub._bench_negotiated_capacity = SimpleNamespace(
+            max_model_len=16_384,
+            max_num_running_reqs=10_000,
+            usable_blocks_with_watermark=9_999,
+            usable_blocks_without_watermark=9_999,
+            kvwarm_eligible=False,
+        )
+
+    # 8 requests at 8,192 tokens: 8 x 2,562 = 20,496 blocks at the prefill
+    # peak; 8 x 515 + 2,047 = 6,167 blocks resident. The pool holds 9,999.
+    assert stub._bench_decode_point_feasible(8, 8 * 8192) is feasible
+
+
+def test_kvwarm_native_capacity_reserves_one_window_peak():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.max_model_len = 16_384
+    stub.num_lookahead_tokens = 0
+    stub._kvwarm_giant_repeats = lambda: 3
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=_window_managers())
+    )
+
+    # 8,191 prefilled tokens + admission + 3 steady writes = 8,195 tokens:
+    # 513 full blocks and 2 resident window blocks each, plus one chain's
+    # 2,047-block prefill excess, not two.
+    assert stub._kvwarm_native_required_blocks([8191, 8191]) == 2 * 515 + 2047
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native", "shared_chain"])
+def test_kvwarm_park_releases_expired_window_blocks_of_native_chains(native):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain = SimpleNamespace(
+        request_id="chain-a",
+        num_computed_tokens=8,
+        num_in_flight_tokens=1,
+        num_prompt_tokens=8,
+        num_output_placeholders=1,
+    )
+    stub._kvwarm_chain_ids = ["chain-a"]
+    stub._kvwarm_chain_prompts = {"chain-a": [1] * 8}
+    stub.requests = {"chain-a": chain}
+    stub.running = [chain]
+    stub._kvwarm_native = native
+    stub._kvwarm_building = True
+    stub._kvwarm_stage_batch = 1
+    stub._bench_synchronizer = None
+    stub.kv_cache_manager = MagicMock()
+
+    # The in-flight token keeps the stage pending, after the park.
+    assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
+    assert stub.running == []
+    if native:
+        # The basis vLLM's next allocate_slots would use: processed tokens.
+        stub.kv_cache_manager.remove_skipped_blocks.assert_called_once_with(
+            "chain-a", 7, num_prompt_tokens=8
+        )
+    else:
+        # Shadows borrow a shared chain's positional table.
+        stub.kv_cache_manager.remove_skipped_blocks.assert_not_called()
 
 
 @pytest.mark.core
