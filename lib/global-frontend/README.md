@@ -251,6 +251,12 @@ Use a discovery readiness probe independent of pool availability, such as
 `/live`. The existing `/health` requires a routable pool, so using it to discover
 new routers could keep Relays from ever finding them.
 
+Coming from a build whose routers took each pool's model from Global Discovery,
+upgrade the routers before the discovery service: an older router does not route
+a pool listed without a model. The
+[upgrade steps](../../docs/fern/pages/reference/components/global-discovery-service-configuration.md#upgrade-from-a-version-whose-registrations-named-a-model)
+give the full order.
+
 ## Router self-registration
 
 With GDS configured for `--router-discovery registrations`, pass both registration flags:

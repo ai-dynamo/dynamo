@@ -24,6 +24,10 @@
 # A pool's region is its member Cluster's spec.region on the Karmada control
 # plane, else its cluster's --cluster-region, else the cluster's name. It
 # keeps no state, so run any number.
+#
+# Coming from a version whose Pool Relays registered pools, upgrade the Global
+# Routers first, and scale this Deployment to zero before applying the new one.
+# The Global Discovery Service configuration reference has every step.
 apiVersion: v1
 kind: Namespace
 metadata:

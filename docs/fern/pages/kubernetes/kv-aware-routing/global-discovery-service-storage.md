@@ -8,7 +8,10 @@ subtitle: Keep pool registrations in memory or in a shared DynamoDB table
 **Experimental.** With `--pool-discovery registrations`, the Global Discovery Service lists the pools
 that [Pool Relays](pool-relay.md) register with `POST /pools`. The registration store decides where
 those registrations live. With `karmada` or `mcs`, the service lists the pools whose Pool Relay
-Services Multi-Cluster Services imports, takes no registrations, and needs no store. This page
+Services Multi-Cluster Services imports, takes no registrations, and needs no store; to take a store
+away from such a service, follow
+[the upgrade steps](../../reference/components/global-discovery-service-configuration.md#upgrade-from-a-version-whose-registrations-named-a-model).
+This page
 explains when to use each store, how to set up DynamoDB, and how to run and verify the service. For
 every flag and endpoint, see
 [Global Discovery Service Configuration](../../reference/components/global-discovery-service-configuration.md).

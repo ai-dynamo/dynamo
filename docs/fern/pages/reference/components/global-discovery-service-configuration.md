@@ -106,28 +106,37 @@ These flags work only with `--pool-discovery registrations`.
 
 The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
 
-## Upgrade from a release whose registrations named a model
+## Upgrade from a version whose registrations named a model
 
 Routers must learn pools' models from their state streams before the service stops listing them, and
-the service must take registrations without a model before Pool Relays stop sending one:
+the service must take registrations without a model before Pool Relays stop sending one. Dynamo 1.7.0
+is not such a version: its Pool Relays register no pools, and its Global Routers take pools only from
+`--pool`. From 1.7.0, set up discovery as for a new deployment.
 
 1. Upgrade the Global Routers.
 2. Upgrade the Global Discovery Service.
-   - With `karmada` or `mcs`, first remove `--registration-storage`, `--heartbeat-interval-secs`,
-     `--lease-duration-secs` and the DynamoDB flags: they now stop the service at startup.
-   - Also set each cluster's region, through the MCS implementation's region label, in Karmada's
-     `Cluster.spec.region`, or with `--cluster-region`.
-     Otherwise its pools are listed under the cluster's name, not the region their Pool Relays
-     registered.
-   - Replace every replica at once (`strategy: Recreate`). Older replicas list only registered pools,
-     under the registered regions, so a mix would list different pools from one request to the next.
-     Routers and Pool Relays keep their last lists while the service restarts.
+   - With `karmada` or `mcs`, first remove every flag listed above under the `registrations` and
+     `dynamodb` headings: these now stop the service at startup.
+   - Also set each cluster's region, or its pools are listed under the cluster's name, not the region
+     their Pool Relays registered. A service that reads a member cluster, as
+     [`global-discovery-service.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/global-discovery-service.yaml)
+     does, sees no Karmada `Cluster` objects: give it `--cluster-region` for each cluster, unless the
+     MCS implementation labels its slices with the region. One that reads the Karmada control plane
+     takes `Cluster.spec.region`, and needs read access to `clusters.cluster.karmada.io` there.
+   - Replace every replica at once. Older replicas list only registered pools, under the registered
+     regions, so a mix would list different pools from one request to the next. With the manifest,
+     scale the Deployment to zero, then apply the new manifest, which sets one replica again:
+     `kubectl -n global-discovery scale deployment/global-discovery-service --replicas=0`.
+     Elsewhere, use `strategy: Recreate`. Routers and Pool Relays keep their last lists meanwhile.
    - With `registrations`, a rolling update works.
-3. Upgrade the Pool Relays.
+3. Upgrade the Pool Relays: set the new image in each `DynamoPoolRelay`'s Pod template. Until then,
+   with `karmada` or `mcs`, each older Pool Relay warns once that it cannot register, and once that
+   its registration lapsed, and keeps working.
 
 To roll back, go in the reverse order: Pool Relays, then the Global Discovery Service, then the Global
 Routers. An older router does not route a pool listed without a model, and an older service refuses a
-registration without one.
+registration without one. An older Pool Relay also needs `--routing-pool-region` with
+`--routing-pool`, and an older service with `karmada` or `mcs` needs back any store flags it had.
 
 ## Environment
 
