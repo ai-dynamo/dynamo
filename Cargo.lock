@@ -3724,7 +3724,7 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-llm",
- "dynamo-protocols 10.0.1",
+ "dynamo-protocols 10.0.2",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",

@@ -2816,7 +2816,7 @@ mod tests {
             parser_plugins: vec!["/nonexistent/libparser.so".into()],
             ..WorkerConfig::default()
         };
-        let error = build_local_model(&config, &EngineConfig::default(), true)
+        let error = build_local_model(&config, &EngineConfig::default(), true, None)
             .await
             .unwrap_err();
         assert_eq!(
