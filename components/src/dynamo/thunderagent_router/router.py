@@ -122,6 +122,8 @@ class ThunderAgentScheduler:
         self,
         program_id: str,
         estimated_prompt_tokens: int = 0,
+        *,
+        request_id: Optional[str] = None,
     ) -> PauseDecision:
         gate = self._admission_gates.get(program_id)
         if gate is None:
@@ -130,7 +132,9 @@ class ThunderAgentScheduler:
         gate.users += 1
         try:
             async with gate.lock:
-                return await self._admit_request(program_id, estimated_prompt_tokens)
+                return await self._admit_request(
+                    program_id, estimated_prompt_tokens, request_id
+                )
         finally:
             gate.users -= 1
             if gate.users == 0 and self._admission_gates.get(program_id) is gate:
@@ -140,6 +144,7 @@ class ThunderAgentScheduler:
         self,
         program_id: str,
         estimated_prompt_tokens: int,
+        request_id: Optional[str],
     ) -> PauseDecision:
         wait_started = time.monotonic()
         while True:
@@ -159,7 +164,7 @@ class ThunderAgentScheduler:
 
         try:
             if wait_event is not None:
-                await self._wait_for_resume(program_id, wait_event)
+                await self._wait_for_resume(program_id, wait_event, request_id)
 
             waited = time.monotonic() - wait_started
 
@@ -198,7 +203,7 @@ class ThunderAgentScheduler:
         return self._policy.admission_ready(program_id)
 
     async def _wait_for_resume(
-        self, program_id: str, wait_event: asyncio.Event
+        self, program_id: str, wait_event: asyncio.Event, request_id: Optional[str]
     ) -> None:
         if self._policy.retry_on_request_change:
             await self._greedy_resume(self._capacity.snapshot())
@@ -211,8 +216,9 @@ class ThunderAgentScheduler:
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "Forced resume for %s after %.1fs",
+                "Forced resume for program=%s request_id=%s after %.1fs",
                 program_id,
+                request_id,
                 self._cfg.resume_timeout_seconds,
             )
             async with self._lock:
@@ -703,7 +709,7 @@ class ThunderAgentScheduler:
         for program in programs:
             plan.before_attempt(program)
             required = program.token_total + self._cfg.buffer_per_program
-            ceiling = plan.ceiling(program)
+            ceiling = plan.resume_ceiling
             # Finish this candidate's fit/exception decision before considering
             # a lower-ranked backfill candidate. Excluded native candidates
             # remain eligible only for explicit policy exceptions.
@@ -714,7 +720,6 @@ class ThunderAgentScheduler:
                     required,
                     ceiling,
                     packing,
-                    packing_ceiling=plan.resume_ceiling,
                 )
             if choice is None and plan.may_force_admit(program):
                 choice = self._select_resume_override_locked(usage, ceiling)
@@ -785,19 +790,12 @@ class ThunderAgentScheduler:
         required: int,
         ceiling: float,
         packing: Optional[list[tuple[ReplicaKey, int]]] = None,
-        packing_ceiling: Optional[float] = None,
     ) -> Optional[ResumeChoice]:
         """Normal capacity admission, owned by ThunderAgent for every policy."""
         if packing is not None:
             if not packing or packing[0][1] < required:
                 return None
             replica, remaining = packing[0]
-            # Equal ceilings retain native full-footprint accounting, including
-            # its treatment of weighted ACTING reservations.
-            if ceiling != packing_ceiling:
-                entry = usage[replica]
-                if int(entry.capacity * ceiling) - entry.used < required:
-                    return None
             return ResumeChoice(replica, remaining, ceiling)
 
         best = None

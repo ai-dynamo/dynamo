@@ -40,7 +40,7 @@ class AccountingKvRouter(FakeKvRouter):
             root=extra["duru_root_id"],
             agent=extra["duru_agent_id"],
         )
-        now = time.time()
+        now = time.monotonic()
         self.feed.capture(
             "accepted_output",
             dict(steps=[work_step(p=8, scheduled_at=now, end=now, **identity)]),
@@ -125,6 +125,26 @@ async def generate(handler, pid, tokens=8, **kwargs):
         "elapsed_since_arrival_ms": 12,
     }
     return [chunk async for chunk in handler.generate(request, **kwargs)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wall_jump", [-3600, 3600])
+async def test_live_accounting_survives_wall_clock_adjustments(
+    handler, monkeypatch, wall_jump
+):
+    await generate(handler, "clock-test")
+    first = await snapshot_when(handler, lambda s: s["accepted_steps"] == 1)
+    adjusted_wall = time.time() + wall_jump
+    monkeypatch.setattr(time, "time", lambda: adjusted_wall)
+
+    await generate(handler, "clock-test")
+    second = await snapshot_when(handler, lambda s: s["accepted_steps"] == 2)
+
+    assert second["observation_time"] >= first["observation_time"]
+    assert 0 <= time.monotonic() - second["time"] < 5
+    assert handler.accounting.reader.refresh()
+    assert handler.accounting.reader.reason == "fresh"
+    assert handler.failure is None
 
 
 @pytest.mark.asyncio
@@ -322,7 +342,12 @@ def fail_accounting(handler):
     handler.test_feed.emit(
         "accepted_output",
         steps=[
-            dict(client_request_id="unjoined", root="bad", agent="bad", end=time.time())
+            dict(
+                client_request_id="unjoined",
+                root="bad",
+                agent="bad",
+                end=time.monotonic(),
+            )
         ],
     )
 

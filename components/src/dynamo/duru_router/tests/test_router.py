@@ -45,7 +45,7 @@ class RouterCase:
 
     def save(self, age=0):
         self.snapshot = dict(
-            observation_time=time.time() - age, programs=deepcopy(self.scores)
+            observation_time=time.monotonic() - age, programs=deepcopy(self.scores)
         )
 
     def put(self, program, demand, score):
@@ -298,6 +298,28 @@ async def test_idle_reservation_competes_by_measured_u(
     assert case.used((1, 0)) == 600
 
 
+@pytest.mark.parametrize(
+    "first_admissions, expected",
+    [
+        ((True, True), ["first", "second"]),
+        ((True, False), ["first"]),
+        ((False, True), ["first"]),
+        ((False, False), ["first"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_admission_pass_shares_ceiling(case, first_admissions, expected):
+    case.router._cfg.pause_threshold, case.router._cfg.resume_hysteresis = 0.95, 0.1
+    first = case.put("first", 600, 2)
+    second = case.put("second", 300, 1)
+    first._u_new_admission, second._u_new_admission = first_admissions
+
+    await case.resume()
+
+    assert case.admitted == expected
+    assert case.used((1, 0)) == (900 if len(expected) == 2 else 600)
+
+
 @pytest.mark.asyncio
 async def test_newcomer_preserves_resume_headroom_for_established_waiters(case):
     case.router._cfg.pause_threshold, case.router._cfg.resume_hysteresis = 0.95, 0.1
@@ -455,7 +477,7 @@ def test_policies_and_prepared_plans_keep_their_own_scores(monkeypatch, caplog):
     snapshots = [
         dict(
             run_id=str(index),
-            observation_time=time.time() - index * 0.1,
+            observation_time=time.monotonic() - index * 0.1,
             programs={
                 pid: dict(score=score, U=score, request_id=f"{index}-{pid}")
                 for pid, score in zip(("a", "b"), scores)

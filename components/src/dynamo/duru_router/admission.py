@@ -57,11 +57,6 @@ class DuruPolicy:
             )
         ]
 
-    def ceiling(self, candidate: Candidate, established_waiters: bool) -> float:
-        if candidate.first_admission and not established_waiters:
-            return 1.0
-        return max(0.0, min(1.0, self.resume_ceiling))
-
     def may_force_admit(self, candidate: Candidate) -> bool:
         # This policy only admits requests that pass the host capacity check.
         return False

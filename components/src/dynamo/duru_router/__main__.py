@@ -104,7 +104,7 @@ class DuruRouterHandler(ThunderAgentRouterHandler):
 
     def emit(self, event, **fields):
         try:
-            self.ingress.emit(event, time.time(), **fields)
+            self.ingress.emit(event, time.monotonic(), **fields)
         except Exception as error:
             self.fail(error)
             raise AccountingUnavailable() from error

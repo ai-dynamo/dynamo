@@ -65,7 +65,8 @@ class Tail:
     def read(self):
         if not self.path.exists():
             return []
-        assert self.path.stat().st_size >= self.offset, "Journal truncated"
+        if self.path.stat().st_size < self.offset:
+            raise ValueError(f"Journal truncated: {self.path}")
         result = []
         with self.path.open("rb") as f:
             f.seek(self.offset)
@@ -78,13 +79,12 @@ class Tail:
                 if self.closed:
                     raise ValueError(f"Event after journal footer: {self.path}")
                 r = json.loads(line)
+                if r["sequence"] != self.sequence + 1:
+                    raise ValueError(
+                        f"Journal gap: {self.path}, expected {self.sequence + 1}"
+                    )
                 self.closed = r["event"] == "footer"
                 self.sequence += 1
-                assert r["sequence"] == self.sequence, (
-                    "Journal gap",
-                    self.path,
-                    self.sequence,
-                )
                 self.received_through = max(self.received_through, r["time"])
                 result.append(r)
             self.offset = f.tell()

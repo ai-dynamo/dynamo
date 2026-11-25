@@ -5,8 +5,10 @@
 
 import hashlib
 import json
+import math
 import random
 import statistics
+import tempfile
 import time
 from pathlib import Path
 
@@ -118,16 +120,23 @@ def measure(
             )
         points = saved["points"]
     else:
-        directory.mkdir(parents=True)
-        atomic_json(directory / "plan.json", plan)
-        atomic_json(directory / "contract.json", contract)
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        # Publish the run only once its identity and initial checkpoint exist.
+        with tempfile.TemporaryDirectory(
+            dir=directory.parent, prefix=f".{directory.name}-"
+        ) as staging_name:
+            staging = Path(staging_name)
+            atomic_json(staging / "plan.json", plan)
+            atomic_json(staging / "contract.json", contract)
+            atomic_json(
+                staging / "checkpoint.json", dict(fingerprint=fingerprint, points=[])
+            )
+            staging.rename(directory)
 
     def save():
         atomic_json(
             directory / "checkpoint.json", dict(fingerprint=fingerprint, points=points)
         )
-
-    save()
 
     def key(row):
         return row["phase"], row.get("P"), row.get("D"), row.get("K")
@@ -163,84 +172,80 @@ def measure(
             raise ValueError("Accepted-token ledger does not match request output")
         return response, steps
 
-    try:
-        current_d, prefix = None, []
-        for case in plan["cases"]:
-            if key(case) in done:
-                continue
-            phase = case["phase"]
-            if phase == "prefill":
-                d, p, count = case["D"], case["P"], 1
-                salt = f"duru-calibration-{attempt}-D{d}"
-                if d != current_d:
-                    reset()
-                    current_d = d
-                    rng = random.Random(f"prefix-{d}")
-                    prefix = [rng.randrange(100, vocab_size - 2) for _ in range(d)]
-                    if d:
-                        request(prefix + [vocab_size - 1], 1, salt)
-            elif phase == "decode":
+    current_d, prefix = None, []
+    for case in plan["cases"]:
+        if key(case) in done:
+            continue
+        phase = case["phase"]
+        if phase == "prefill":
+            d, p, count = case["D"], case["P"], 1
+            salt = f"duru-calibration-{attempt}-D{d}"
+            if d != current_d:
                 reset()
-                current_d, prefix = None, []
-                d, p, count = 0, case["K"], plan["decode_tokens"]
-                salt = f"duru-calibration-{attempt}-K{p}"
+                current_d = d
+                rng = random.Random(f"prefix-{d}")
+                prefix = [rng.randrange(100, vocab_size - 2) for _ in range(d)]
+                if d:
+                    request(prefix + [vocab_size - 1], 1, salt)
+        elif phase == "decode":
+            reset()
+            current_d, prefix = None, []
+            d, p, count = 0, case["K"], plan["decode_tokens"]
+            salt = f"duru-calibration-{attempt}-K{p}"
+        else:
+            raise ValueError("Unknown calibration phase")
+        samples = []
+        for rep in range(plan["warmups"] + plan["repeats"]):
+            rng = random.Random(f"{case}-{rep}")
+            suffix = [rng.randrange(100, vocab_size - 2) for _ in range(p)]
+            response, steps = request(prefix + suffix, count, salt)
+            if phase == "prefill":
+                if (
+                    response["cached_tokens"] != d
+                    or len(steps) != 1
+                    or steps[0]["p"] != p
+                    or steps[0]["d"] != d
+                ):
+                    raise ValueError(
+                        "Observed prefill/cache shape differs from planned point"
+                    )
+                sample = dict(
+                    wall_ms=1000 * (steps[0]["end"] - steps[0]["scheduled_at"])
+                )
             else:
-                raise ValueError("Unknown calibration phase")
-            samples = []
-            for rep in range(plan["warmups"] + plan["repeats"]):
-                rng = random.Random(f"{case}-{rep}")
-                suffix = [rng.randrange(100, vocab_size - 2) for _ in range(p)]
-                response, steps = request(prefix + suffix, count, salt)
-                if phase == "prefill":
-                    if (
-                        response["cached_tokens"] != d
-                        or len(steps) != 1
-                        or steps[0]["p"] != p
-                        or steps[0]["d"] != d
-                    ):
-                        raise ValueError(
-                            "Observed prefill/cache shape differs from planned point"
-                        )
-                    sample = dict(
-                        wall_ms=1000 * (steps[0]["end"] - steps[0]["scheduled_at"])
+                tokens, events = 0, []
+                for step in sorted(steps, key=lambda s: s["end"]):
+                    tokens += step["generated_tokens"]
+                    if step["generated_tokens"]:
+                        events.append((tokens, step["end"]))
+                sample = decode_window(events, p, plan["decode_warmup_tokens"], count)
+            if not math.isfinite(sample["wall_ms"]) or sample["wall_ms"] <= 0:
+                raise ValueError("Calibration timing must be finite and positive")
+            with (directory / "samples.jsonl").open("a") as output:
+                output.write(
+                    json.dumps(
+                        dict(
+                            case=case,
+                            repeat=rep,
+                            attempt=attempt,
+                            sample=sample,
+                            steps=steps,
+                        ),
+                        allow_nan=False,
                     )
-                else:
-                    tokens, events = 0, []
-                    for step in sorted(steps, key=lambda s: s["end"]):
-                        tokens += step["generated_tokens"]
-                        if step["generated_tokens"]:
-                            events.append((tokens, step["end"]))
-                    sample = decode_window(
-                        events, p, plan["decode_warmup_tokens"], count
-                    )
-                with (directory / "samples.jsonl").open("a") as output:
-                    output.write(
-                        json.dumps(
-                            dict(
-                                case=case,
-                                repeat=rep,
-                                attempt=attempt,
-                                sample=sample,
-                                steps=steps,
-                            ),
-                            allow_nan=False,
-                        )
-                        + "\n"
-                    )
-                if rep >= plan["warmups"]:
-                    samples.append(sample)
-            row = dict(case, wall_ms=statistics.median(s["wall_ms"] for s in samples))
-            if phase == "decode":
-                row["measured_K"] = statistics.mean(s["K"] for s in samples)
-            points.append(row)
-            done.add(key(row))
-            save()
-        result = fit(points, plan, contract)
-        atomic_json(directory / "calibration.json", result)
-        return result
-    except BaseException:
+                    + "\n"
+                )
+            if rep >= plan["warmups"]:
+                samples.append(sample)
+        row = dict(case, wall_ms=statistics.median(s["wall_ms"] for s in samples))
+        if phase == "decode":
+            row["measured_K"] = statistics.mean(s["K"] for s in samples)
+        points.append(row)
+        done.add(key(row))
         save()
-        raise
+    result = fit(points, plan, contract)
+    atomic_json(directory / "calibration.json", result)
+    return result
 
 
 def load(path, expected_contract):

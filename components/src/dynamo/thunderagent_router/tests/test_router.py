@@ -161,36 +161,20 @@ async def test_policy_can_force_candidates_excluded_from_native_shortlist(
     assert router._stat_forced_resumes == 1
 
 
-@pytest.mark.parametrize(
-    "candidates, forced_ceiling, expected_usage",
-    [
-        ([("forced", 1000), ("normal", 500)], 0.85, (500, 1900)),
-        ([("normal", 700), ("forced", 500), ("backfill", 250)], 0.2, (700, 1650)),
-    ],
-)
 @pytest.mark.asyncio
-async def test_forced_admission_updates_only_chosen_replica_packing(
-    monkeypatch, candidates, forced_ceiling, expected_usage
-):
+async def test_forced_admission_updates_only_chosen_replica_packing(monkeypatch):
     router, _ = make_router(
         capacity_workers={(1, 0): 1000, (2, 0): 2000},
         config=ThunderAgentConfig(buffer_per_program=0),
     )
     existing = router._table.begin_request("existing", 900)
     existing.assigned_replica = (2, 0)
-    for pid, tokens in candidates:
+    for pid, tokens in [("forced", 1000), ("normal", 500)]:
         program = router._table.begin_request(pid, tokens)
         program.lifecycle = ProgramLifecycle.PAUSED
         router._table.paused[pid] = None
 
     class ForcedPlan(ResumePlan):
-        def ceiling(self, program):
-            return (
-                forced_ceiling
-                if program.program_id == "forced"
-                else self.resume_ceiling
-            )
-
         def may_force_admit(self, program):
             return program.program_id == "forced"
 
@@ -205,15 +189,16 @@ async def test_forced_admission_updates_only_chosen_replica_packing(
     assert router._table.programs["forced"].assigned_replica == (2, 0)
     assert router._table.programs["normal"].assigned_replica == (1, 0)
     assert not router._table.paused
-    assert usage(router)[(1, 0)].used == expected_usage[0]
-    assert usage(router)[(2, 0)].used == expected_usage[1]
+    assert usage(router)[(1, 0)].used == 500
+    assert usage(router)[(2, 0)].used == 1900
     assert router._stat_forced_resumes == 1
 
 
 @pytest.mark.parametrize("ceiling, admitted", [(0.5, False), (0.85, True)])
+@pytest.mark.parametrize("native_packing", [False, True])
 @pytest.mark.asyncio
-async def test_native_packing_respects_per_program_ceiling(
-    monkeypatch, ceiling, admitted
+async def test_resume_respects_plan_ceiling(
+    monkeypatch, ceiling, admitted, native_packing
 ):
     router, _ = make_router(
         capacity_workers={(1, 0): 1000},
@@ -223,14 +208,12 @@ async def test_native_packing_respects_per_program_ceiling(
     program.lifecycle = ProgramLifecycle.PAUSED
     router._table.paused[program.program_id] = None
 
-    class LimitedPlan(ResumePlan):
-        def ceiling(self, candidate):
-            return ceiling
-
     monkeypatch.setattr(
         router._policy,
         "prepare_resume",
-        lambda programs, config: LimitedPlan(programs=programs, resume_ceiling=0.85),
+        lambda programs, config: ResumePlan(
+            programs=programs, resume_ceiling=ceiling, native_packing=native_packing
+        ),
     )
 
     await router._greedy_resume(router._capacity.snapshot())
@@ -466,7 +449,7 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
 
 
 @pytest.mark.asyncio
-async def test_forced_resume_after_timeout():
+async def test_forced_resume_after_timeout(caplog):
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=10.0,
         resume_timeout_seconds=0.05,
@@ -476,10 +459,11 @@ async def test_forced_resume_after_timeout():
     place(router, "p1", (0, 0))
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
-    decision = await router.before_request("p1")
+    decision = await router.before_request("p1", request_id="timed-out-request")
     assert decision.was_paused is True
     assert router._stat_forced_resumes >= 1
     assert router._table.programs["p1"].lifecycle == ProgramLifecycle.ACTIVE
+    assert "program=p1 request_id=timed-out-request" in caplog.text
 
 
 @pytest.mark.asyncio

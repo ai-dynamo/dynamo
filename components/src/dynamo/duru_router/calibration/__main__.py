@@ -34,7 +34,14 @@ def main():
     plan.add_argument("--repeats", type=int, default=10)
     plan.add_argument("--warmups", type=int, default=3)
     plan.add_argument("--out", type=Path, required=True)
-    run = commands.add_parser("measure")
+    run = commands.add_parser(
+        "measure",
+        epilog=(
+            "Launch isolated calibration workers with DURU_ENABLE_SCORING=0 and "
+            "DURU_ACCOUNTING_TRANSPORT=journal. Normal serving uses scoring by "
+            "default and requires a matching calibration artifact."
+        ),
+    )
     run.add_argument("--plan", type=Path, required=True)
     run.add_argument("--contract", type=Path, required=True)
     run.add_argument(

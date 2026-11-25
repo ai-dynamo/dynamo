@@ -52,11 +52,6 @@ class DuruResumePlan(ResumePlan):
     def before_attempt(self, program: Program) -> None:
         program._u_new_admission = False
 
-    def ceiling(self, program: Program) -> float:
-        return self.policy.ceiling(
-            self.candidates[program.program_id], self.established_waiters
-        )
-
     def may_force_admit(self, program: Program) -> bool:
         return self.policy.may_force_admit(self.candidates[program.program_id])
 
@@ -69,7 +64,7 @@ class DuruResumePlan(ResumePlan):
         row = self.snapshot.get("programs", {}).get(program.program_id, {})
         diagnostic(
             "admission",
-            time=time.time(),
+            time=time.monotonic(),
             program_id=program.program_id,
             request_id=row.get("request_id"),
             root=row.get("root"),
@@ -174,13 +169,19 @@ class DuruSchedulingPolicy(ThunderAgentPolicy):
         policy = DuruPolicy(
             resume_ceiling=config.pause_threshold - config.resume_hysteresis,
         )
+        established_waiters = any(not c.first_admission for c in candidates)
+        # Initial admissions may fill the replica only when no established
+        # program is waiting. Otherwise the whole queue shares resume headroom.
+        ceiling = (
+            max(0.0, min(1.0, policy.resume_ceiling)) if established_waiters else 1.0
+        )
         diagnostics = diagnostics_enabled()
         return DuruResumePlan(
             programs=[by_id[c.identity] for c in policy.order(candidates)],
-            resume_ceiling=policy.resume_ceiling,
+            resume_ceiling=ceiling,
             candidates={c.identity: c for c in candidates},
             policy=policy,
-            established_waiters=any(not c.first_admission for c in candidates),
+            established_waiters=established_waiters,
             diagnostics=diagnostics,
             snapshot=self.decision_snapshot,
             native_rank=(

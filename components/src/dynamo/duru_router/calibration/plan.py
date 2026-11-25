@@ -5,6 +5,7 @@
 
 import json
 import math
+import tempfile
 from pathlib import Path
 
 METRIC = "engine_service_time_v1"
@@ -13,9 +14,17 @@ METRIC = "engine_service_time_v1"
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
-    temporary.replace(path)
+    payload = json.dumps(value, indent=2, allow_nan=False) + "\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=path.parent, prefix=f".{path.name}-", suffix=".tmp", delete=False
+    ) as output:
+        temporary = Path(output.name)
+        try:
+            output.write(payload)
+            output.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def geometric_points(maximum, count):
