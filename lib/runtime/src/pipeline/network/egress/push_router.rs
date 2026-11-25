@@ -669,7 +669,6 @@ where
         let foreign = match (mode, &instance.transport) {
             (RequestPlaneMode::Velo, TransportType::Tcp(_)) => "tcp",
             (RequestPlaneMode::Velo, TransportType::Nats(_)) => "nats",
-            (RequestPlaneMode::Velo, TransportType::Direct(_)) => "direct",
             (RequestPlaneMode::Tcp | RequestPlaneMode::Nats, TransportType::Velo(_)) => "velo",
             _ => return Ok(()),
         };
@@ -2320,12 +2319,12 @@ mod tests {
 
     use crate::{
         DistributedRuntime, Runtime,
-        distributed::DistributedConfig,
+        distributed::{DistributedConfig, RequestPlaneMode},
         error::DynamoError,
         pipeline::{
             RequestStream, ResponseStream,
             context::{Context, Controller},
-            network::egress::route_span,
+            network::{ResponsePlaneMode, egress::route_span},
         },
     };
     use serde::{Deserialize, Serialize};
@@ -4095,14 +4094,27 @@ mod tests {
 
     /// A router built without a dispatch reaches direct instances through the
     /// runtime's registered direct dispatch, with its lifecycle hooks.
+    #[rstest::rstest]
+    #[case::tcp(RequestPlaneMode::Tcp, ResponsePlaneMode::Tcp)]
+    #[case::velo(RequestPlaneMode::Velo, ResponsePlaneMode::Velo)]
     #[tokio::test]
-    async fn direct_instances_use_the_registered_direct_dispatch() {
+    async fn direct_instances_use_the_registered_direct_dispatch(
+        #[case] request_plane: RequestPlaneMode,
+        #[case] response_plane: ResponsePlaneMode,
+    ) {
         let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
+        let drt = DistributedRuntime::new(
+            rt.clone(),
+            DistributedConfig {
+                request_plane,
+                response_plane: Some(response_plane),
+                ..DistributedConfig::process_local()
+            },
+        )
+        .await
+        .unwrap();
         let endpoint = drt
-            .namespace("test_direct_dispatch".to_string())
+            .namespace(format!("test_direct_dispatch_{request_plane}"))
             .unwrap()
             .component("test_component".to_string())
             .unwrap()
