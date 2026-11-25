@@ -4331,6 +4331,77 @@ async fn request_constraints_preserve_worker_only_affinity() {
 }
 
 #[tokio::test]
+async fn not_ready_worker_is_reached_only_by_a_caller_pin_in_every_phase() {
+    let mut not_ready = ModelRuntimeConfig::default();
+    not_ready
+        .taints
+        .insert(dynamo_scheduler::NOT_READY_TAINT.to_string());
+    let workers = HashMap::from([(7, ModelRuntimeConfig::default()), (8, not_ready)]);
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(10)), workers).await;
+    let budget = CleanupBudget::default();
+
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        // Automatic selection never lands on the not-ready worker.
+        for _ in 0..16 {
+            let (selection, _) = router
+                .select_with_affinity(&Context::new(request()), phase, true, &budget)
+                .await
+                .unwrap();
+            assert_eq!(selection.worker.worker_id, 7, "{phase:?}");
+        }
+
+        // The caller's pin for this phase reaches it.
+        let mut pinned = request();
+        pinned.routing = Some(serde_json::from_value(serde_json::json!({field: 8})).unwrap());
+        let (selection, _) = router
+            .select_with_affinity(&Context::new(pinned), phase, true, &budget)
+            .await
+            .unwrap();
+        assert_eq!(selection.worker.worker_id, 8, "{phase:?}");
+
+        // The caller's pin still reaches it when the session is bound to the same worker.
+        let session = SessionAffinityId::new(format!("not-ready-{field}-pinned"));
+        bind_affinity_target(&router, &session, AffinityTarget::worker(8)).await;
+        let mut pinned = request();
+        pinned.routing = Some(serde_json::from_value(serde_json::json!({field: 8})).unwrap());
+        let mut pinned = Context::new(pinned);
+        pinned.insert(SESSION_AFFINITY_CONTEXT_KEY, session);
+        let (selection, _) = router
+            .select_with_affinity(&pinned, phase, false, &budget)
+            .await
+            .unwrap();
+        assert_eq!(selection.worker.worker_id, 8, "{phase:?}");
+
+        // A session bound to it is automatic selection, so it is refused, whether the
+        // binding names the worker alone or an exact rank.
+        for (label, target) in [
+            ("worker", AffinityTarget::worker(8)),
+            ("rank", AffinityTarget::new(8, Some(0))),
+        ] {
+            let session = SessionAffinityId::new(format!("not-ready-{field}-{label}"));
+            bind_affinity_target(&router, &session, target).await;
+            let mut bound = Context::new(request());
+            bound.insert(SESSION_AFFINITY_CONTEXT_KEY, session);
+            assert!(
+                router
+                    .select_with_affinity(&bound, phase, false, &budget)
+                    .await
+                    .is_err(),
+                "{phase:?} {label}"
+            );
+        }
+    }
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
 async fn stale_affinity_rank_recovers_within_request() {
     let (router, runtime) = router(Some(Duration::from_secs(10))).await;
     let session_id = SessionAffinityId::new("stale-affinity-rank");

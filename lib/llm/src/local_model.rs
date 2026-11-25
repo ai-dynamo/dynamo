@@ -708,6 +708,14 @@ impl LocalModel {
         self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
+        // Decided here, not at build time, because it depends on the runtime's discovery backend.
+        let kubernetes_discovery = endpoint.drt().uses_kubernetes_discovery();
+        self.runtime_config
+            .add_startup_not_ready_taint(kubernetes_discovery);
+        self.card
+            .runtime_config
+            .add_startup_not_ready_taint(kubernetes_discovery);
+
         let lora_name = self.card.lora.as_ref().map(|info| info.name.as_str());
         let model_suffix = derive_lora_suffix(lora_name);
 

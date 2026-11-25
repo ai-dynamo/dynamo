@@ -75,6 +75,17 @@ pub trait WorkerConfigLike {
     }
 }
 
+/// Taint a worker publishes while it is discovered but not yet ready for ordinary traffic.
+///
+/// Other taints only attract requests that require them. This one repels: the router never
+/// selects a worker carrying it, and only a worker ID the caller supplied reaches it. Removing
+/// the taint makes the worker an ordinary member of its set.
+///
+/// [`RoutingEligibility`](crate::RoutingEligibility) enforces the rule.
+/// [`RoutingConstraints::is_compatible_with_worker_taints`] does not, so callers that
+/// pre-filter workers keep a pinned not-ready worker eligible.
+pub const NOT_READY_TAINT: &str = "dynamo.routing/not-ready";
+
 /// Request-level taint constraints evaluated against each worker's published taints.
 ///
 /// Topology-aware routing uses the same fields with canonical taints such as

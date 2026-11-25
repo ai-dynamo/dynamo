@@ -3645,6 +3645,19 @@ mod tests {
         assert_eq!(a.mdcsum(), b.mdcsum());
     }
 
+    /// Releasing a not-ready worker rewrites its taints in place. Frontends reject an
+    /// in-place change that alters the checksum, so taints must stay out of it.
+    #[test]
+    fn mdcsum_ignores_taints() {
+        let baseline = super::ModelDeploymentCard::with_name_only("model");
+        let mut held = super::ModelDeploymentCard::with_name_only("model");
+        held.runtime_config
+            .taints
+            .insert(dynamo_scheduler::NOT_READY_TAINT.to_string());
+
+        assert_eq!(baseline.mdcsum(), held.mdcsum());
+    }
+
     #[test]
     fn checked_file_uri_passes_through_remote_urls() {
         let tmp = tempfile::tempdir().unwrap();
