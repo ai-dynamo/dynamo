@@ -1546,7 +1546,43 @@ impl<
         ));
         let actor_writes = Arc::new(AtomicU64::new(0));
         let load_maps = Arc::new(LoadMapPool::new(LOAD_MAPS));
-        let queue = Self {
+        let caller_slots = Arc::clone(&slots);
+        let actor = SchedulerQueueActor {
+            commands: CommandInbox::new(admission_rx),
+            pending,
+            class_timers: ClassTimers::new(profile.classes().len()),
+            cleanup: Arc::clone(&cleanup),
+            capacity_updates: Arc::clone(&actor_wake),
+            capacity_workers: FxHashSet::default(),
+            profile: Arc::clone(&profile),
+            pending_count: Arc::clone(&pending_count),
+            pending_isl_tokens: Arc::clone(&pending_isl_tokens),
+            class_counters: Arc::clone(&class_counters),
+            slots: ActorSlots::new(slots, Arc::clone(&actor_writes)),
+            workers_with_configs: workers_with_configs.clone(),
+            workers_generation: Arc::clone(&workers_generation),
+            candidate_preparer: Arc::clone(&candidate_preparer),
+            turn_prepared: TurnPrepared::default(),
+            projected_loads: FxHashMap::default(),
+            full_ranks: FullRankCounts::default(),
+            gate_full_ranks: FullRankCounts::default(),
+            class_room: Vec::new(),
+            reread_ranks: Vec::new(),
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overlap_refresh_after,
+            eligibility: eligibility.clone(),
+            non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
+            selection_trace: Arc::clone(&selection_trace),
+            resident_blocks: Arc::clone(&resident_blocks),
+            reject_thresholds: reject_thresholds.clone(),
+            dispatch_gate: Arc::clone(&dispatch_gate),
+            gate_recheck_at: None,
+        };
+        tokio::spawn(actor.run());
+        Self {
             admission_tx,
             runtime_policy,
             cleanup,
@@ -1567,84 +1603,12 @@ impl<
             selection_trace,
             resident_blocks,
             reject_thresholds,
-            slots: Arc::clone(&slots),
+            slots: caller_slots,
             actor_writes,
             load_maps,
             dispatch_gate,
             actor_wake,
             _marker: PhantomData,
-        };
-        let actor = queue.new_actor(
-            CommandInbox::new(admission_rx),
-            pending,
-            Arc::clone(&queue.actor_wake),
-            slots,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overlap_refresh_after,
-        );
-        tokio::spawn(actor.run());
-        queue
-    }
-}
-
-impl<
-    P: SequencePublisher + 'static,
-    C: WorkerConfigLike,
-    Sel: WorkerSelector<C>,
-    RF: OverlapScoresRefresh,
-> SchedulerQueue<P, C, Sel, RF>
-{
-    /// An actor over this queue's shared state: the one the queue spawns, and the ones tests
-    /// drive by hand. Built in one place so both hold the same fields.
-    #[allow(clippy::too_many_arguments)]
-    fn new_actor<ActorSel: WorkerSelector<C>, ActorRF: OverlapScoresRefresh>(
-        &self,
-        commands: CommandInbox,
-        pending: PolicyQueue<QueuedRequest>,
-        capacity_updates: Arc<CapacityUpdates>,
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        selector: ActorSel,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<ActorRF>>,
-        overlap_refresh_after: Option<Duration>,
-    ) -> SchedulerQueueActor<P, C, ActorSel, ActorRF> {
-        SchedulerQueueActor {
-            commands,
-            pending,
-            class_timers: ClassTimers::new(self.profile.classes().len()),
-            cleanup: Arc::clone(&self.cleanup),
-            capacity_updates,
-            capacity_workers: FxHashSet::default(),
-            profile: Arc::clone(&self.profile),
-            pending_count: Arc::clone(&self.pending_count),
-            pending_isl_tokens: Arc::clone(&self.pending_isl_tokens),
-            class_counters: Arc::clone(&self.class_counters),
-            slots: ActorSlots::new(slots, Arc::clone(&self.actor_writes)),
-            workers_with_configs: self.workers_with_configs.clone(),
-            workers_generation: Arc::clone(&self.workers_generation),
-            candidate_preparer: Arc::clone(&self.candidate_preparer),
-            turn_prepared: TurnPrepared::default(),
-            projected_loads: FxHashMap::default(),
-            full_ranks: FullRankCounts::default(),
-            gate_full_ranks: FullRankCounts::default(),
-            class_room: Vec::new(),
-            reread_ranks: Vec::new(),
-            block_size: self.block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overlap_refresh_after,
-            eligibility: self.eligibility.clone(),
-            non_max_overlap_selection_observer: Arc::clone(
-                &self.non_max_overlap_selection_observer,
-            ),
-            selection_trace: Arc::clone(&self.selection_trace),
-            resident_blocks: Arc::clone(&self.resident_blocks),
-            reject_thresholds: self.reject_thresholds.clone(),
-            dispatch_gate: Arc::clone(&self.dispatch_gate),
-            gate_recheck_at: None,
         }
     }
 }
@@ -5612,20 +5576,43 @@ mod tests {
         selector: Sel,
     ) -> SchedulerQueueActor<NoopSequencePublisher, SimpleWorkerConfig, Sel, NoopOverlapScoresRefresh>
     {
-        let mut actor = queue.new_actor(
+        SchedulerQueueActor {
             // Commands go to the queue's own actor; this one sees a closed channel.
-            CommandInbox::new(mpsc::channel(1).1),
-            PolicyQueue::with_class_budget_expiry(&queue.profile),
-            Arc::new(CapacityUpdates::new()),
-            Arc::clone(slots),
+            commands: CommandInbox::new(mpsc::channel(1).1),
+            pending: PolicyQueue::with_class_budget_expiry(&queue.profile),
+            class_timers: ClassTimers::new(queue.profile.classes().len()),
+            cleanup: Arc::clone(&queue.cleanup),
+            capacity_updates: Arc::new(CapacityUpdates::new()),
+            capacity_workers: FxHashSet::default(),
+            profile: Arc::clone(&queue.profile),
+            pending_count: Arc::clone(&queue.pending_count),
+            pending_isl_tokens: Arc::clone(&queue.pending_isl_tokens),
+            class_counters: Arc::clone(&queue.class_counters),
+            slots: ActorSlots::new(Arc::clone(slots), Arc::clone(&queue.actor_writes)),
+            workers_with_configs: queue.workers_with_configs.clone(),
+            workers_generation: Arc::clone(&queue.workers_generation),
+            candidate_preparer: Arc::clone(&queue.candidate_preparer),
+            turn_prepared: TurnPrepared::default(),
+            projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            full_ranks: FullRankCounts::default(),
+            gate_full_ranks: FullRankCounts::default(),
+            class_room: Vec::new(),
+            reread_ranks: Vec::new(),
+            block_size: 16,
             selector,
-            None,
-            None::<Arc<NoopOverlapScoresRefresh>>,
-            None,
-        );
-        actor.block_size = 16;
-        actor.projected_loads = FxHashMap::with_capacity_and_hasher(8, Default::default());
-        actor
+            prefill_load_estimator: None,
+            overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
+            overlap_refresh_after: None,
+            eligibility: queue.eligibility.clone(),
+            non_max_overlap_selection_observer: Arc::clone(
+                &queue.non_max_overlap_selection_observer,
+            ),
+            selection_trace: Arc::clone(&queue.selection_trace),
+            resident_blocks: Arc::clone(&queue.resident_blocks),
+            reject_thresholds: queue.reject_thresholds.clone(),
+            dispatch_gate: Arc::clone(&queue.dispatch_gate),
+            gate_recheck_at: None,
+        }
     }
 
     async fn enqueue_prepared(
