@@ -1935,10 +1935,10 @@ async fn mesh_service(port: u16) -> SelectionService {
     SelectionServiceBuilder::new(
         test_config(),
         dynamo_router_protocol::WorkerType::Aggregated,
-        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
             dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                config.clone(),
-                role.default_selector_label(),
+                context.selection_config().clone(),
+                context.worker_type().default_selector_label(),
             )
         })),
     )
