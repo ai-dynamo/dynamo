@@ -9,6 +9,7 @@ threads refresh in the background without blocking scheduling on socket I/O.
 """
 
 import hashlib
+import math
 import os
 import pickle
 import queue
@@ -112,6 +113,8 @@ class Sender:
         self.lock = threading.Lock()
         self.queue = queue.Queue(maxsize=8192)
         self.closed = False
+        self._closing = False
+        self._close_lock = threading.Lock()
         self.error = None
         self.peer = None
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -141,6 +144,8 @@ class Sender:
             raise RuntimeError("Duru accounting frame exceeds memory limit")
         with self.lock:
             self.check()
+            if self._closing:
+                raise RuntimeError("Duru event transport is closing")
             if self.pending_bytes + len(frame) > self.capacity:
                 raise RuntimeError(
                     "Duru accounting buffer overflow; scorer must catch up"
@@ -150,8 +155,8 @@ class Sender:
             except queue.Full as exc:
                 raise RuntimeError("Duru accounting queue overflow") from exc
             self.pending_bytes += len(frame)
-        if self.recording is not None:
-            self.recording.submit(kind, value)
+            if self.recording is not None:
+                self.recording.submit(kind, value)
 
     def _send(self):
         connection = None
@@ -183,53 +188,124 @@ class Sender:
                 self.peer.close()
 
     def close(self):
-        if self.closed:
-            return
-        try:
-            self.check()
-            self.queue.put(None, timeout=5)
-            self.thread.join(5)
-            if self.thread.is_alive():
-                raise TimeoutError("Duru event consumer did not drain before close")
-            self.check()
-        finally:
-            self.closed = True
-            if self.peer is not None:
-                try:
-                    self.peer.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass  # Already closed by the sender thread.
-            self.listener.close()
-            self.thread.join(1)
-            if self.recording is not None:
-                self.recording.close()
-            # Keep the pathname to reject accidental reuse within this session.
-            # The launcher removes the run's directory after participants exit.
+        with self._close_lock:
+            with self.lock:
+                if self.closed:
+                    return
+                self._closing = True
+            try:
+                self.check()
+                # A full queue must not keep the sender from updating pending_bytes.
+                self.queue.put(None, timeout=5)
+                self.thread.join(5)
+                if self.thread.is_alive():
+                    raise TimeoutError("Duru event consumer did not drain before close")
+                self.check()
+            finally:
+                with self.lock:
+                    self.closed = True
+                if self.peer is not None:
+                    try:
+                        self.peer.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass  # Already closed by the sender thread.
+                self.listener.close()
+                self.thread.join(1)
+                if self.recording is not None:
+                    self.recording.close()
+                # Keep the pathname to reject accidental reuse within this session.
+                # The launcher removes the run's directory after participants exit.
 
 
 class Receiver:
+    """Read Connection-framed events without waiting for a partial frame."""
+
     def __init__(self, path):
-        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            peer.connect(str(path))
-            self.connection = Connection(peer.detach())
-        finally:
-            peer.close()
+            self.peer.connect(str(path))
+            self.peer.setblocking(False)
+        except BaseException:
+            self.peer.close()
+            raise
+        self._buffer = bytearray()
+        self._header_size = 4
+        self._frame_size = None
+        self._error = None
+
+    def _read_frame(self):
+        while True:
+            needed = self._header_size if self._frame_size is None else self._frame_size
+            if len(self._buffer) < needed:
+                try:
+                    chunk = self.peer.recv(needed - len(self._buffer))
+                except BlockingIOError:
+                    return None
+                if not chunk:
+                    if (
+                        self._buffer
+                        or self._frame_size is not None
+                        or self._header_size != 4
+                    ):
+                        raise EOFError(
+                            "Duru event producer disconnected during a frame"
+                        )
+                    raise EOFError("Duru event producer disconnected")
+                self._buffer.extend(chunk)
+                continue
+            if self._frame_size is None:
+                # Match Connection.send_bytes, including its extended length header.
+                length = struct.unpack(
+                    "!i" if self._header_size == 4 else "!Q", self._buffer
+                )[0]
+                self._buffer.clear()
+                if self._header_size == 4 and length == -1:
+                    self._header_size = 8
+                    continue
+                self._header_size = 4
+                if not 0 <= length <= MAX_FRAME:
+                    raise ValueError("Invalid Duru accounting frame length")
+                self._frame_size = length
+                continue
+            frame = self._buffer
+            self._buffer = bytearray()
+            self._frame_size = None
+            return frame
 
     def read(self, budget=4 * 1024 * 1024):
+        if self._error is not None:
+            raise self._error
         rows = []
         size = 0
-        while size < budget and self.connection.poll():
-            frame = self.connection.recv_bytes(MAX_FRAME)
-            size += len(frame)
-            row = pickle.loads(frame)
-            rows.append(row)
-            if row.get("event") == "footer":
-                break
+        try:
+            while size < budget:
+                frame = self._read_frame()
+                if frame is None:
+                    break
+                size += len(frame)
+                row = pickle.loads(frame)
+                if not isinstance(row, dict):
+                    raise ValueError("Duru event frame must contain a record")
+                rows.append(row)
+                if row.get("event") == "footer":
+                    break
+        except (
+            EOFError,
+            OSError,
+            ValueError,
+            OverflowError,
+            pickle.UnpicklingError,
+        ) as error:
+            self._error = error
+            self.close()
+            if not rows:
+                raise
+            # Deliver the valid prefix before reporting failure on the next read.
         return rows
 
     def close(self):
-        self.connection.close()
+        self.peer.close()
+        self._buffer.clear()
 
 
 def _receive(peer, size):
@@ -313,6 +389,38 @@ class ScorePublisher:
         self._frame = b""
 
 
+def _finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _validate_score_snapshot(snapshot):
+    if not isinstance(snapshot, dict):
+        raise ValueError("Invalid worker score snapshot")
+    if not snapshot:
+        return
+    if not _finite_number(snapshot.get("observation_time")):
+        raise ValueError("Invalid worker score observation time")
+    requests = snapshot.get("requests")
+    if not isinstance(requests, dict):
+        raise ValueError("Invalid worker score requests")
+    for request_id, row in requests.items():
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or not isinstance(row, dict)
+            or "score" not in row
+        ):
+            raise ValueError("Invalid worker request score")
+        score = row["score"]
+        if score is not None and (not _finite_number(score) or score < 0):
+            raise ValueError("Invalid worker request score")
+
+
 class ScoreSubscriber:
     def __init__(self, path):
         self._path = str(path)
@@ -339,10 +447,15 @@ class ScoreSubscriber:
                             "Worker score snapshot exceeds IPC memory limit"
                         )
                     snapshot = pickle.loads(_receive(peer, size))
-                    if not isinstance(snapshot, dict):
-                        raise ValueError("Invalid worker score snapshot")
+                    _validate_score_snapshot(snapshot)
                     self._snapshot = snapshot
-            except (OSError, EOFError, ValueError, pickle.UnpicklingError):
+            except (
+                OSError,
+                EOFError,
+                ValueError,
+                OverflowError,
+                pickle.UnpicklingError,
+            ):
                 self.failures += 1
                 self._snapshot = {}
             self._stop.wait(0.02)

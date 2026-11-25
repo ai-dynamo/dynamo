@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Router event ingress and fresh score delivery, independent of accounting."""
+
 import os
 import time
 from contextlib import contextmanager
@@ -24,6 +25,8 @@ def score_channel():
 
 
 class Reader:
+    """Read scores whose observation_time uses this host's monotonic clock."""
+
     def __init__(self, snapshot_source=None):
         self.snapshot_source = snapshot_source
         self.path = None if snapshot_source is not None else score_channel()
@@ -55,7 +58,7 @@ class Reader:
                 self._subscriber = ScoreSubscriber(channel_path(self.path))
             self.snapshot = self._subscriber.snapshot()
         self.age = (
-            time.time() - self.snapshot.get("observation_time", 0)
+            time.monotonic() - self.snapshot.get("observation_time", 0)
             if self.snapshot
             else None
         )
@@ -120,7 +123,7 @@ def _program_id(fields):
 
 
 class Ingress:
-    """Publish request lifecycle events with explicit router program identity."""
+    """Publish lifecycle events with program identity and monotonic timestamps."""
 
     def __init__(self, path, *, in_process=False):
         if in_process:
@@ -168,6 +171,6 @@ class Ingress:
 
     def close(self):
         try:
-            self.emit("footer", time.time())
+            self.emit("footer", time.monotonic())
         finally:
             self.journal.close()

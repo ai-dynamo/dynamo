@@ -5,6 +5,7 @@
 
 Keep timestamps ordered so the scorer cannot advance past work that
 has not yet been recorded. Clock updates require no GPU operations.
+All accounting timestamps use the same host's system-wide monotonic clock.
 """
 
 import atexit
@@ -20,8 +21,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-
-from dynamo.duru_router.transport import Sender, channel_path, transport
 
 FIELDS = (
     "client_request_id",
@@ -49,6 +48,9 @@ class AsyncJournal:
         self.queue = queue.Queue(maxsize=capacity)
         self.error = None
         self.closed = False
+        self._closing = False
+        self._submit_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         # Group signals must reach the owner first so it can drain the writer.
         previous = signal.pthread_sigmask(
             signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
@@ -74,15 +76,18 @@ class AsyncJournal:
             raise RuntimeError("Duru event writer is closed")
 
     def submit(self, kind, value):
-        self.check()
-        if kind != "record":
-            raise ValueError(f"Unsupported event message: {kind}")
-        try:
-            self.queue.put_nowait((value, None))
-        except queue.Full as exc:
-            raise RuntimeError(
-                "Duru event queue overflow; accounting cannot continue"
-            ) from exc
+        with self._submit_lock:
+            self.check()
+            if self._closing:
+                raise RuntimeError("Duru event writer is closing")
+            if kind != "record":
+                raise ValueError(f"Unsupported event message: {kind}")
+            try:
+                self.queue.put_nowait((value, None))
+            except queue.Full as exc:
+                raise RuntimeError(
+                    "Duru event queue overflow; accounting cannot continue"
+                ) from exc
 
     def _send(self):
         try:
@@ -108,6 +113,10 @@ class AsyncJournal:
             self.error = exc
 
     def flush(self, timeout=30):
+        with self._lifecycle_lock:
+            self._flush(timeout)
+
+    def _flush(self, timeout=30):
         self.check()
         ack = threading.Event()
         deadline = time.monotonic() + timeout
@@ -118,27 +127,33 @@ class AsyncJournal:
                 raise TimeoutError("Duru event flush timed out")
 
     def close(self):
-        if self.closed:
-            return
-        try:
-            self.flush()
-            self.queue.put(None, timeout=30)
-            self.thread.join(30)
-            if self.thread.is_alive():
-                raise TimeoutError("Duru event sender did not stop")
-            self.check()
-            self.proc.stdin.close()
-            if self.proc.wait(timeout=30):
-                raise RuntimeError("Duru event writer failed on close")
-        finally:
-            self.closed = True
-            if self.proc.poll() is None:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-            self.thread.join(5)
-            self.proc.stdin.close()
-            self.proc.stdout.close()
-            atexit.unregister(self.close)
+        with self._lifecycle_lock:
+            with self._submit_lock:
+                if self.closed:
+                    return
+                # Stop accepting records before flushing, but keep the sender
+                # running until every accepted record precedes the stop marker.
+                self._closing = True
+            try:
+                self._flush()
+                self.queue.put(None, timeout=30)
+                self.thread.join(30)
+                if self.thread.is_alive():
+                    raise TimeoutError("Duru event sender did not stop")
+                self.check()
+                self.proc.stdin.close()
+                if self.proc.wait(timeout=30):
+                    raise RuntimeError("Duru event writer failed on close")
+            finally:
+                with self._submit_lock:
+                    self.closed = True
+                if self.proc.poll() is None:
+                    self.proc.kill()
+                    self.proc.wait(timeout=5)
+                self.thread.join(5)
+                self.proc.stdin.close()
+                self.proc.stdout.close()
+                atexit.unregister(self.close)
 
 
 def open_journal(directory, *, name, fresh=True):
@@ -190,6 +205,9 @@ def _write_events(path):
 
 
 def open_feed(directory, *, name):
+    # The standalone -S writer must run without importing installed packages.
+    from dynamo.duru_router.transport import Sender, channel_path, transport
+
     if transport() == "journal":
         return open_journal(directory, name=name)
     recording = (
@@ -233,7 +251,9 @@ class CompactFeed:
             self.sequence += 1
             self.journal.submit(
                 "record",
-                dict(sequence=self.sequence, event=event, time=time.time(), **fields),
+                dict(
+                    sequence=self.sequence, event=event, time=time.monotonic(), **fields
+                ),
             )
 
     def capture(self, event, fields):
