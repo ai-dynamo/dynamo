@@ -14,14 +14,15 @@ use tokio_util::sync::CancellationToken;
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
 };
-use dynamo_scheduler::replication::{
-    AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityBindingEvent, REPLICA_EVENT_CHANNEL_CAPACITY,
-    ReplicaEventSender, ReplicaSyncConfig, ScopedReplicaEvent,
+use dynamo_scheduler::{
+    AFFINITY_EVENT_CHANNEL_CAPACITY, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
+    ReplicaSyncConfig, ScopedReplicaEvent,
 };
+use dynamo_session_affinity::AffinityBindingEvent;
 
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;
 
-const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
+pub(crate) const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 
 /// Session-affinity bindings ride the same mesh on their own topic, so peers
 /// that do not subscribe to it never see them.
@@ -100,7 +101,7 @@ pub(crate) fn setup_replica_sync(
     }))
 }
 
-pub(crate) fn start_replica_publisher(
+fn start_replica_publisher(
     bind_endpoint: &str,
     cancel_token: CancellationToken,
 ) -> Result<(
@@ -200,22 +201,73 @@ pub enum ReplicaPeerError {
     Unavailable,
 }
 
+/// Subscribes to replica peers and worker publishers on one SUB socket.
+///
+/// A worker publisher sends its own requests' events on the replica topic. The
+/// two sets are tracked apart; an endpoint stays connected while either holds it.
 pub(crate) struct PeerManager {
     command_tx: mpsc::Sender<PeerCommand>,
-    peers: Arc<RwLock<HashSet<String>>>,
+    members: Arc<RwLock<Members>>,
     cancel_token: CancellationToken,
     subscriber_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-enum PeerCommand {
-    Register {
-        endpoint: String,
-        response: oneshot::Sender<Result<bool>>,
-    },
-    Deregister {
-        endpoint: String,
-        response: oneshot::Sender<Result<bool>>,
-    },
+#[derive(Clone, Copy, Debug)]
+enum MemberKind {
+    Peer,
+    WorkerPublisher,
+}
+
+impl fmt::Display for MemberKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Peer => "replica peer",
+            Self::WorkerPublisher => "worker publisher",
+        })
+    }
+}
+
+#[derive(Default)]
+struct Members {
+    peers: HashSet<String>,
+    workers: HashSet<String>,
+}
+
+impl Members {
+    fn of(&self, kind: MemberKind) -> &HashSet<String> {
+        match kind {
+            MemberKind::Peer => &self.peers,
+            MemberKind::WorkerPublisher => &self.workers,
+        }
+    }
+
+    fn of_mut(&mut self, kind: MemberKind) -> &mut HashSet<String> {
+        match kind {
+            MemberKind::Peer => &mut self.peers,
+            MemberKind::WorkerPublisher => &mut self.workers,
+        }
+    }
+
+    /// Whether the other set also holds `endpoint`.
+    fn shared(&self, kind: MemberKind, endpoint: &str) -> bool {
+        match kind {
+            MemberKind::Peer => self.workers.contains(endpoint),
+            MemberKind::WorkerPublisher => self.peers.contains(endpoint),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MemberAction {
+    Register,
+    Deregister,
+}
+
+struct PeerCommand {
+    kind: MemberKind,
+    endpoint: String,
+    action: MemberAction,
+    response: oneshot::Sender<Result<bool>>,
 }
 
 impl PeerManager {
@@ -252,20 +304,20 @@ impl PeerManager {
             &[REPLICA_TOPIC]
         };
         let mut socket = create_sub_socket_topics(topics)?;
-        let mut configured_peers = HashSet::new();
+        let mut members = Members::default();
         for endpoint in initial_peers {
             validate_endpoint(&endpoint)
                 .with_context(|| format!("invalid replica peer endpoint `{endpoint}`"))?;
-            if configured_peers.insert(endpoint.clone()) {
+            if members.peers.insert(endpoint.clone()) {
                 socket
                     .connect(&endpoint)
                     .with_context(|| format!("failed to register replica peer `{endpoint}`"))?;
             }
         }
 
-        let peers = Arc::new(RwLock::new(configured_peers));
+        let members = Arc::new(RwLock::new(members));
         let (command_tx, mut command_rx) = mpsc::channel(PEER_COMMAND_CHANNEL_CAPACITY);
-        let task_peers = Arc::clone(&peers);
+        let task_members = Arc::clone(&members);
         let task_cancel = cancel_token.clone();
         let subscriber_task = tokio::spawn(async move {
             loop {
@@ -275,7 +327,7 @@ impl PeerManager {
                         let Some(command) = command else {
                             break;
                         };
-                        handle_peer_command(&socket, &task_peers, command);
+                        handle_peer_command(&socket, &task_members, command);
                     }
                     message = socket.recv_multipart() => {
                         match message {
@@ -291,30 +343,70 @@ impl PeerManager {
 
         Ok(Self {
             command_tx,
-            peers,
+            members,
             cancel_token,
             subscriber_task: Mutex::new(Some(subscriber_task)),
         })
     }
 
     pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
-        validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
-        let (response, result) = oneshot::channel();
-        self.command_tx
-            .send(PeerCommand::Register { endpoint, response })
+        self.update(MemberKind::Peer, endpoint, MemberAction::Register)
             .await
-            .map_err(|_| ReplicaPeerError::Unavailable)?;
-        result
-            .await
-            .map_err(|_| ReplicaPeerError::Unavailable)?
-            .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
     pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
+        self.update(MemberKind::Peer, endpoint, MemberAction::Deregister)
+            .await
+    }
+
+    pub(crate) fn list_peers(&self) -> Vec<String> {
+        self.list(MemberKind::Peer)
+    }
+
+    pub(crate) async fn register_worker_publisher(
+        &self,
+        endpoint: String,
+    ) -> Result<bool, ReplicaPeerError> {
+        self.update(
+            MemberKind::WorkerPublisher,
+            endpoint,
+            MemberAction::Register,
+        )
+        .await
+    }
+
+    pub(crate) async fn deregister_worker_publisher(
+        &self,
+        endpoint: String,
+    ) -> Result<bool, ReplicaPeerError> {
+        self.update(
+            MemberKind::WorkerPublisher,
+            endpoint,
+            MemberAction::Deregister,
+        )
+        .await
+    }
+
+    pub(crate) fn list_worker_publishers(&self) -> Vec<String> {
+        self.list(MemberKind::WorkerPublisher)
+    }
+
+    /// Add or remove `endpoint` as a `kind` member. Returns whether membership changed.
+    async fn update(
+        &self,
+        kind: MemberKind,
+        endpoint: String,
+        action: MemberAction,
+    ) -> Result<bool, ReplicaPeerError> {
         validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
         self.command_tx
-            .send(PeerCommand::Deregister { endpoint, response })
+            .send(PeerCommand {
+                kind,
+                endpoint,
+                action,
+                response,
+            })
             .await
             .map_err(|_| ReplicaPeerError::Unavailable)?;
         result
@@ -323,10 +415,10 @@ impl PeerManager {
             .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
-    pub(crate) fn list_peers(&self) -> Vec<String> {
-        let mut peers: Vec<_> = self.peers.read().iter().cloned().collect();
-        peers.sort();
-        peers
+    fn list(&self, kind: MemberKind) -> Vec<String> {
+        let mut endpoints: Vec<_> = self.members.read().of(kind).iter().cloned().collect();
+        endpoints.sort();
+        endpoints
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -354,39 +446,36 @@ impl Drop for PeerManager {
 
 fn handle_peer_command(
     socket: &crate::services::common::zmq::ZmqSocket,
-    peers: &RwLock<HashSet<String>>,
+    members: &RwLock<Members>,
     command: PeerCommand,
 ) {
-    match command {
-        PeerCommand::Register { endpoint, response } => {
-            if peers.read().contains(&endpoint) {
-                let _ = response.send(Ok(false));
-                return;
-            }
-            let result = socket
-                .connect(&endpoint)
-                .with_context(|| format!("failed to register replica peer `{endpoint}`"))
-                .map(|()| {
-                    peers.write().insert(endpoint);
-                    true
-                });
-            let _ = response.send(result);
-        }
-        PeerCommand::Deregister { endpoint, response } => {
-            if !peers.read().contains(&endpoint) {
-                let _ = response.send(Ok(false));
-                return;
-            }
-            let result = socket
-                .disconnect(&endpoint)
-                .with_context(|| format!("failed to deregister replica peer `{endpoint}`"))
-                .map(|()| {
-                    peers.write().remove(&endpoint);
-                    true
-                });
-            let _ = response.send(result);
-        }
+    let PeerCommand {
+        kind,
+        endpoint,
+        action,
+        response,
+    } = command;
+    let register = matches!(action, MemberAction::Register);
+    let mut members = members.write();
+    if members.of(kind).contains(&endpoint) == register {
+        let _ = response.send(Ok(false));
+        return;
     }
+    // Only the first membership connects and only the last disconnects.
+    let result = match (register, members.shared(kind, &endpoint)) {
+        (_, true) => Ok(()),
+        (true, false) => socket.connect(&endpoint),
+        (false, false) => socket.disconnect(&endpoint),
+    };
+    let result = match result {
+        Ok(()) if register => Ok(members.of_mut(kind).insert(endpoint)),
+        Ok(()) => Ok(members.of_mut(kind).remove(&endpoint)),
+        Err(error) => {
+            let action = if register { "register" } else { "deregister" };
+            Err(error.context(format!("failed to {action} {kind} `{endpoint}`")))
+        }
+    };
+    let _ = response.send(result);
 }
 
 fn handle_replica_message<F, A>(
@@ -431,7 +520,7 @@ mod tests {
     #[cfg(feature = "http")]
     use dynamo_router_protocol::identity::RoutingPartitionId;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     #[cfg(feature = "http")]
     use crate::services::slot_tracker::registry::SlotTrackerRegistry;
@@ -446,6 +535,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(1, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 42,
+                origin: Default::default(),
                 lora_name: None,
             },
         }
@@ -495,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dynamic_peer_registration_controls_delivery() {
+    async fn subscriptions_preserve_shared_connections() {
         let endpoint = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
         let (outbound, _affinity, publisher_task) =
@@ -523,9 +613,64 @@ mod tests {
         }
         assert!(delivered, "dynamically registered peer received no events");
 
+        async fn wait_for_request(
+            received_rx: &mut mpsc::Receiver<ScopedReplicaEvent>,
+            request_id: &str,
+        ) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(event) = received_rx.recv().await {
+                    if event.event.request_id == request_id {
+                        return;
+                    }
+                }
+                panic!("subscriber closed before receiving {request_id}");
+            })
+            .await
+            .expect("shared subscription stopped delivering events");
+        }
+
+        assert!(!manager.register_peer(endpoint.clone()).await.unwrap());
+        assert!(
+            manager
+                .register_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .register_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(manager.deregister_peer(endpoint.clone()).await.unwrap());
+        assert!(!manager.deregister_peer(endpoint.clone()).await.unwrap());
+        let mut worker_only = event();
+        worker_only.event.request_id = "worker-only".to_string();
+        outbound.send(worker_only).await.unwrap();
+        wait_for_request(&mut received_rx, "worker-only").await;
+
+        assert!(manager.register_peer(endpoint.clone()).await.unwrap());
+        assert!(
+            manager
+                .deregister_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .deregister_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(manager.list_worker_publishers().is_empty());
+        assert_eq!(manager.list_peers(), vec![endpoint.clone()]);
+        let mut peer_only = event();
+        peer_only.event.request_id = "peer-only".to_string();
+        outbound.send(peer_only).await.unwrap();
+        wait_for_request(&mut received_rx, "peer-only").await;
+
         assert!(manager.deregister_peer(endpoint).await.unwrap());
         while received_rx.try_recv().is_ok() {}
-
         let mut after_disconnect = event();
         after_disconnect.event.request_id = "after-disconnect".to_string();
         outbound.send(after_disconnect).await.unwrap();

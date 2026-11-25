@@ -74,6 +74,27 @@ or multiple major components require a
     unavailable, a maintainer can review the current head and comment `/ok to test <sha>` to start
     CI. Wait for that action rather than repeatedly pushing unchanged commits.
 
+    If a CI job fails because of a flaky test or infrastructure error, a maintainer can retry it.
+    If you have repository write access, post `/rerun ci` as a comment by itself.
+    Otherwise, ask a maintainer to post it. The command:
+
+    - Retries failed and timed-out jobs in the latest workflow runs for the current commit.
+      Dependent jobs also rerun. Independent successful jobs keep their results.
+    - Skips active runs and runs created seven or more days ago.
+    - Sends at most one retry request per run attempt. Wait for the retry to finish before another command.
+    - Does not treat cancelled jobs alone as a reason for a retry.
+
+    Full CI uses a `pull-request/<number>` branch.
+    `copy-pr-bot` creates it after automatic CI approval or `/ok to test <sha>`.
+    Retries for these workflows require approval for the current commit.
+
+    For fork PRs, GitHub can omit PR links for checks such as Pre Merge.
+    When those links are missing, the command cannot retry the checks.
+    Ask a maintainer to retry them through GitHub Actions.
+    Runs on approved `pull-request/<number>` branches remain eligible.
+
+    The bot reply reports the result for each workflow.
+
     <Info>
     You are responsible for understanding and validating all submitted code, including code
     produced with AI assistance.

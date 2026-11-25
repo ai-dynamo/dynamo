@@ -23,6 +23,7 @@ from tests.serve.multimodal_profiles.vllm import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.gpu_args import PYNVVIDEOCODEC_RESERVED_BYTES
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     chat_payload,
@@ -48,16 +49,11 @@ from tests.utils.payloads import (
     CompletionPayload,
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
+    HttpErrorPayload,
     ToolCallingChatPayload,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _is_cuda12() -> bool:
-    v = os.environ.get("CUDA_VERSION", "")
-    # handles "12", "12.9", "12.9.1", etc.
-    return v.startswith("12")
 
 
 def _is_aarch64() -> bool:
@@ -67,10 +63,9 @@ def _is_aarch64() -> bool:
 
 def _xfail_lmcache_upstream_container():
     return pytest.mark.xfail(
-        _is_cuda12() or _is_aarch64(),
+        _is_aarch64(),
         reason=(
-            "LMCache is provided by the upstream vLLM image. The CUDA 12 image "
-            "ships LMCache c_ops linked against libcudart.so.13, and LMCache "
+            "LMCache is provided by the upstream vLLM image, and LMCache "
             "does not publish aarch64 wheels yet."
         ),
         strict=False,
@@ -194,10 +189,6 @@ vllm_configs = {
         # max_thinking_tokens payload below: vLLM only enables the thinking-
         # budget logits processor when reasoning_config is populated.
         script_args=["--reasoning-parser", "qwen3"],
-        # vLLM #43808 (0.23.0) moved the MRv2 thinking_token_budget check from
-        # startup to request time, removing the auto-fallback to V1. Force V1
-        # runner here until native MRv2 support is added.
-        env={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -742,6 +733,19 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
+            # An uncompilable grammar (regex lookahead) must return 400, not 500;
+            # the valid-grammar payloads after it show the worker still serves.
+            HttpErrorPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Say a."}],
+                    "max_tokens": 5,
+                    "guided_regex": "(?=a)a",
+                },
+                expected_response=[],
+                expected_log=[],
+                endpoint="/v1/chat/completions",
+                timeout=10,
+            ),
             chat_payload(
                 "Generate a person with name and age",
                 repeat_count=1,
@@ -849,6 +853,39 @@ vllm_configs = {
                 expected_log=[],
                 expected_response=["Generated 1 embeddings with dimension 128"],
             ),
+            # Chat-style input runs vLLM's real renderer (the unit tests mock
+            # it), so a vLLM API change on that path fails here. One
+            # conversation sent in `input`, as vLLM accepts it...
+            EmbeddingPayload(
+                body={
+                    "input": [
+                        {"role": "user", "content": "What is the capital of France?"}
+                    ],
+                },
+                repeat_count=1,
+                expected_log=[],
+                expected_response=["Generated 1 embeddings with dimension"],
+            ),
+            # ...and a batch in `messages`, one vector per conversation.
+            EmbeddingPayload(
+                body={
+                    "messages": [
+                        [{"role": "user", "content": "The sky is blue."}],
+                        [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Machine learning"},
+                                    {"type": "text", "text": "is fascinating."},
+                                ],
+                            }
+                        ],
+                    ],
+                },
+                repeat_count=1,
+                expected_log=[],
+                expected_response=["Generated 2 embeddings with dimension"],
+            ),
         ],
     ),
     "classify_agg": VLLMConfig(
@@ -937,6 +974,18 @@ vllm_configs = {
     ),
 }
 
+# The embedding worker pool depends on vLLM internals; check it post-merge so a
+# vLLM change that breaks it fails main's CI without adding PR CI time.
+vllm_configs["embedding_agg_multiprocess"] = dataclasses.replace(
+    vllm_configs["embedding_agg"],
+    name="embedding_agg_multiprocess",
+    script_args=["--embedding-worker-processes", "2"],
+    marks=[
+        mark for mark in vllm_configs["embedding_agg"].marks if mark.name != "pre_merge"
+    ]
+    + [pytest.mark.post_merge],
+)
+
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
 def vllm_config_test(request):
@@ -964,6 +1013,24 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_pynvvideocodec_reservation_matches_vllm():
+    """The multimodal profiles' decoder reservation must match vLLM's."""
+    from vllm.multimodal.video_decoders.base import PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+    from vllm.multimodal.video_decoders.pynvvideocodec import (
+        PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    )
+
+    assert PYNVVIDEOCODEC_RESERVED_BYTES == (
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+        + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+    )
 
 
 # LoRA Test Directory

@@ -1,9 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Replication wire between slot trackers: active-sequence, active-block, and prefill events
-//! with the batch limits both ends share, and the scheduler-load report one tracker publishes
-//! about a rank's booked load. Both ends of this wire are slot trackers; the mesh that
+//! Replication wire between slot trackers: active-sequence events with the batch limits both
+//! ends share, and the scheduler-load report one tracker publishes about a rank's booked load. Both ends of this wire are slot trackers; the mesh that
 //! carries it is a `dynamo-kv-router` adapter.
 
 use std::time::Duration;
@@ -17,23 +16,11 @@ const fn default_track_prefill_tokens() -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PrefillEvent {
-    pub request_id: String,
-    pub worker_id: WorkerId,
-    pub data: PrefillEventData,
-    pub router_id: u64,
-}
-
-/// Represents the different stages of prefilling tokens for a request.
-///
-/// Each variant contains a `usize` representing the number of tokens
-/// that are pending prefill in the request.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum PrefillEventData {
-    NewPrefill(usize),
-    UpdatePrefill(usize),
-    CompletePrefill,
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActiveSequenceEventOrigin {
+    #[default]
+    Router,
+    Worker,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -41,10 +28,11 @@ pub struct ActiveSequenceEvent {
     pub request_id: String,
     pub worker: WorkerWithDpRank,
     pub data: ActiveSequenceEventData,
-    /// Source DRT identity, used to suppress a publisher's own echo. Router events use the router
-    /// ID; worker-origin completion marks use the worker ID.
+    /// Router identity for echo suppression; unused for worker events.
     pub router_id: u64,
     pub lora_name: Option<String>,
+    #[serde(default)]
+    pub origin: ActiveSequenceEventOrigin,
 }
 
 /// Active-sequence lifecycle events carried in publisher-queue arrival order.
@@ -76,18 +64,6 @@ pub enum ActiveSequenceEventData {
     // at high frequency, and broadcasting it would consume disproportionate network bandwidth.
     Free,
     MarkPrefillCompleted,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ActiveBlockEvent {
-    pub request_id: String,
-    pub data: ActiveBlockEventData,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ActiveBlockEventData {
-    NewBlock(Vec<SequenceHash>),
-    FreeBlock,
 }
 
 /// One router scheduler's view of a worker rank's in-flight load.

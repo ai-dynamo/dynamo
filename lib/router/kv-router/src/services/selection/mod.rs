@@ -16,6 +16,8 @@
 ))]
 mod server;
 mod service;
+#[cfg(feature = "replica-sync-zmq")]
+mod worker_publisher;
 #[cfg(feature = "ingest-zmq")]
 mod zmq_ingress;
 
@@ -50,25 +52,26 @@ pub use service::{
     SelectionService, SelectionServiceBuilder, SessionBindingUpdates, local_selection_core,
     local_selection_core_with_host, warn_for_unserved_worker_selection_policies,
 };
+#[cfg(feature = "replica-sync-zmq")]
+pub use worker_publisher::WorkerSequenceEventPublisher;
 #[cfg(feature = "ingest-zmq")]
 pub use zmq_ingress::ZmqDirectIngress;
 
 // Pre-split paths kept through 1.9 and removed in 1.10; the named list is the inventory in compat.rs.
 #[allow(deprecated)]
 pub use crate::compat::services::selection::{
-    AffinityBindingEvent, CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME,
-    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
-    HostCache, HostEligibility, HostLoad, HostReplicaChannels, HostReplicaSyncFactory,
-    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, ModelLoadResponse,
-    OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
-    PromptRequest, PromptView, ReadyResponse, ReplicaIngressObserver, ReservationRequest,
-    ReservationResponse, RouterPluginRegistry, SchedulerLoadSink, SelectAndReserveRequest,
-    SelectRequest, SelectResponse, Selected, SelectionAdmission, SelectionCacheConfig,
-    SelectionCore, SelectionError, SelectionHost, SelectionInputTrigger, SelectionOperation,
-    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
-    SelectionSessionContext, SelectionWorkerConfig, SelectionWorkerLoad, SessionBinding,
-    SharedCacheOverlapScore, WorkerCatalogRecord, WorkerCatalogSource, WorkerLifecycle,
-    WorkerOverlapScore, WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProvider, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError, affinity,
+    AffinityBindingEvent, CatalogReconciler, DEFAULT_MODEL_NAME, DYN_ROUTER_DECODE_POLICY,
+    DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY, HostCache, HostEligibility,
+    HostLoad, HostReplicaChannels, HostReplicaSyncFactory, HostReplication, HostTelemetry,
+    KvEventIngress, KvIndexSource, ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest,
+    OverlapScoresResponse, PotentialLoadsRequest, PromptRequest, PromptView, ReadyResponse,
+    ReplicaIngressObserver, ReservationRequest, ReservationResponse, RouterPluginRegistry,
+    SchedulerLoadSink, SelectAndReserveRequest, SelectRequest, SelectResponse, Selected,
+    SelectionAdmission, SelectionCacheConfig, SelectionCore, SelectionError, SelectionHost,
+    SelectionInputTrigger, SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun,
+    SelectionScheduler, SelectionSessionContext, SelectionWorkerConfig, SelectionWorkerLoad,
+    SessionBinding, SharedCacheOverlapScore, WorkerCatalogRecord, WorkerCatalogSource,
+    WorkerLifecycle, WorkerOverlapScore, WorkerPatchRequest, WorkerRequest,
+    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError, affinity,
 };

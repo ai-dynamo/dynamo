@@ -247,9 +247,7 @@ impl FpmEventRelay {
     fn new(py: Python<'_>, endpoint: Endpoint, zmq_endpoint: String) -> PyResult<Self> {
         // Don't hold the GIL while blocking on the runtime; its tasks may need it.
         let inner = py
-            .allow_threads(move || {
-                llm_rs::fpm_publisher::FpmEventRelay::new(endpoint.inner, zmq_endpoint)
-            })
+            .detach(move || llm_rs::fpm_publisher::FpmEventRelay::new(endpoint.inner, zmq_endpoint))
             .map_err(to_pyerr)?;
         Ok(Self { inner })
     }
@@ -295,7 +293,7 @@ impl FpmDirectPublisher {
         let rt = endpoint.inner.component().drt().runtime().secondary();
         // Don't hold the GIL while blocking on the runtime; its tasks may need it.
         let (inner, publishers) = py
-            .allow_threads(move || {
+            .detach(move || {
                 rt.block_on(llm_rs::fpm_publisher::FpmDirectPublisher::new(
                     endpoint.inner,
                     worker_id,
@@ -856,7 +854,7 @@ impl FpmEventSubscriber {
         }
 
         let rx = self.rx.clone();
-        py.allow_threads(move || {
+        py.detach(move || {
             let mut guard = rx
                 .lock()
                 .map_err(|e| to_pyerr(format!("lock poisoned: {e}")))?;

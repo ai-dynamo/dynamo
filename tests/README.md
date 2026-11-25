@@ -54,7 +54,6 @@ dynamo/
 │       └── ...
 ├── tests/                          # End-to-end and cross-component tests
 │   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm)
-│   ├── kvbm_integration/           # KVBM integration tests
 │   ├── gpu_memory_service/         # GPU Memory Service E2E tests
 │   ├── fault_tolerance/            # Fault tolerance, migration, cancellation
 │   ├── deploy/                     # Deployment tests
@@ -89,7 +88,6 @@ dynamo/
 | Unit               | Single function/class, isolated       | `components/src/dynamo/<component>/tests/`    |
 | Integration        | Interactions between modules/services | `components/src/dynamo/<component>/tests/`    |
 | End-to-End         | User workflows, CLI, API              | `tests/serve/`, `tests/deploy/`, etc.         |
-| KVBM Integration   | KV block manager integration          | `tests/kvbm_integration/`                     |
 | GPU Memory Service | GPU Memory Service E2E                | `tests/gpu_memory_service/`                   |
 | Router             | Router E2E with backends              | `tests/router/`                               |
 | Planner            | Planner unit + integration tests      | `components/src/dynamo/planner/tests/`        |
@@ -143,7 +141,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
-| Component               | core, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
+| Component               | core, multimodal, router, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, fault_tolerance} per framework-tagged test (disjoint). `planner` is its own component used by the planner test suite. |
 | Infrastructure          | k8s, deploy                                                      | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
 | Dependency add-ons      | lmcache                                                          | Optional dependency required by the test (paired with a framework marker, e.g. `vllm + lmcache`). |
@@ -158,7 +156,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.profiled_vram_gib(20.5)  # actual nvidia-smi peak
 @pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, fault_tolerance
 def test_kv_cache_behavior():
     ...
 ```
@@ -172,7 +170,7 @@ def test_kv_cache_behavior():
 @pytest.mark.requested_sglang_kv_tokens(96)     # KV cache cap (2x safety over min=48)
 @pytest.mark.timeout(265)
 @pytest.mark.sglang
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, fault_tolerance
 def test_sglang_aggregated():
     ...
 ```
@@ -186,7 +184,7 @@ def test_sglang_aggregated():
 @pytest.mark.requested_trtllm_kv_tokens(2592)   # KV cache cap (2x safety over min=1296)
 @pytest.mark.timeout(300)
 @pytest.mark.trtllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, fault_tolerance
 def test_trtllm_aggregated():
     ...
 ```
@@ -363,7 +361,7 @@ All commands below are meant to be run **inside the container**.
 
 **Local-dev / dev containers** -- you must compile the Rust bindings before running pytest. Without this step, tests that import `dynamo._internal` will fail with `ImportError`:
 ```bash
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 cd lib/bindings/python && maturin develop --uv && cd -
 ```
 
@@ -439,7 +437,7 @@ pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short
 - Run by component:
   ```bash
   pytest -m planner
-  pytest -m kvbm
+  pytest -m router
   ```
 - Show print/log output:
   ```bash

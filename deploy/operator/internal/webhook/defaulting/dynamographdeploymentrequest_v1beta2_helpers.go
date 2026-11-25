@@ -285,7 +285,7 @@ func (o DGDRV1beta2Options) hardwareDefaultsFromDiscoveryV1beta2(
 }
 
 func isEmptyHardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec) bool {
-	return hardware != nil && hardware.GPU == nil && hardware.NumGPUsPerNode == nil
+	return hardware != nil && hardware.GPU == nil && hardware.NumGPUsPerNode == nil && hardware.Interconnect == nil
 }
 
 // hardwareRejectionV1beta2 is hardware the cluster cannot complete, with the field that fixes it.

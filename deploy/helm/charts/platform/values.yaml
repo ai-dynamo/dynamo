@@ -38,6 +38,8 @@ global:
     # Automatically enabled when install=true. The operator uses this to decide whether to
     # inject schedulerName and queue labels into pod templates.
     enabled: false
+    # -- Scheduler name the operator sets on Grove pods when KAI integration is enabled. A custom name requires install=false and a Grove version that maps the name to its KAI backend; this setting does not reconfigure Grove or KAI.
+    schedulerName: kai-scheduler
 
   volcano-scheduler:
     # -- EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets.
@@ -122,20 +124,6 @@ dynamo-operator:
         # -- Target minor (N.M) allowed for an otherwise unsupported downgrade.
         # The value is ignored for other target minors and never bypasses other checks.
         unsupportedDowngradeOverride: ""
-
-  dgdrV1Beta2:
-    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
-    # Request API with conversion and install the Run and Candidate APIs. Run and
-    # Candidate objects are persisted in etcd; incompatible schema changes may make
-    # them unreadable or block future CRD upgrades. When true, the operator
-    # reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate
-    # planner Job with a publisher sidecar that persists deployment Candidates.
-    enabled: false
-    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
-    # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
-    # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
-    # and read, create, update and delete any Lease in the namespace.
-    plannerLiveRetune: false
 
   # Environment variables to pass to operator Deployment.
   env: []

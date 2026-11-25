@@ -513,7 +513,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 notifier.notify();
                             }
                             if let Some(link) = &worker_trace_link {
-                                chunk.worker_trace_link = Some(link.clone());
+                                chunk.worker_trace_link = Some(Box::new(link.clone()));
                             }
                             signalled = true;
                         } else if should_record_attrs
@@ -549,7 +549,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             && chunk.worker_trace_link.is_none()
                             && let Some(link) = &worker_trace_link
                         {
-                            chunk.worker_trace_link = Some(link.clone());
+                            chunk.worker_trace_link = Some(Box::new(link.clone()));
                         }
                         yield Annotated::from_data(chunk);
                         if is_terminal {

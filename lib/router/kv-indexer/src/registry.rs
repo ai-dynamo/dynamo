@@ -19,8 +19,8 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 
 use crate::backend::{Indexer, IndexerPolicy, create_indexer_with_policy};
-use crate::identity::RoutingPartitionId;
 use crate::metrics::KvIndexerMetrics;
+use dynamo_router_protocol::identity::RoutingPartitionId;
 
 /// A partition's indexer and the block size it was created for.
 pub struct IndexerEntry {
@@ -216,6 +216,25 @@ impl IndexRegistry {
             );
         }
         entry.indexer.clone()
+    }
+
+    /// Give the partition an indexer its host built, in place of one this registry
+    /// would create with its own policy and metrics. A partition that already has an
+    /// indexer keeps it. Returns the partition's indexer.
+    pub fn adopt_indexer(
+        &self,
+        key: RoutingPartitionId,
+        block_size: u32,
+        indexer: Indexer,
+    ) -> Indexer {
+        self.indexers
+            .entry(key)
+            .or_insert(IndexerEntry {
+                indexer,
+                block_size,
+            })
+            .indexer
+            .clone()
     }
 
     pub fn all_indexers_with_block_size(&self) -> Vec<(RoutingPartitionId, Indexer, u32)> {

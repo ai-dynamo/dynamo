@@ -62,14 +62,14 @@ use crate::python_payload::{self, PythonPayload, WaitClassification};
 /// The sender is delivered as a `response_sender` keyword argument, so a
 /// handler that does not declare one cannot be reached and must stay on the
 /// pull path.
-pub(crate) fn handler_supports_push(handler: &PyObject) -> bool {
+pub(crate) fn handler_supports_push(handler: &Py<PyAny>) -> bool {
     // MUST be `response_sender`, not `context`. Every handler accepts `context`,
     // so checking for it makes this test always true and the pull-path fallback
     // unreachable — every non-TRT-LLM Python handler in the repo would then be
     // driven in push mode and never terminate its stream.
     // `push_egress_capable` deletes its own `__wrapped__` precisely so
     // `inspect.signature` reports this parameter through the decorator.
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         callable_accepts_kwarg(py, handler.bind(py), "response_sender").unwrap_or(false)
     })
 }
@@ -493,7 +493,7 @@ impl ResponseSink {
         // thread, which has no tokio runtime context at all. It would panic only
         // if a handler managed to call `send` from an async tokio task while
         // holding the GIL.
-        py.allow_threads(|| tx.blocking_send(frame))
+        py.detach(|| tx.blocking_send(frame))
             .map_err(|_| self.consumer_gone())?;
         self.classification.accepted(output);
         Ok(())
@@ -553,7 +553,7 @@ impl ResponseSink {
 
         // No runtime on this thread: we are on the Python side. Same GIL rule
         // as `send` — release it across the wait.
-        let _ = Python::with_gil(|py| py.allow_threads(|| tx.blocking_send(frame)));
+        let _ = Python::attach(|py| py.detach(|| tx.blocking_send(frame)));
     }
 }
 
@@ -674,8 +674,8 @@ pub(crate) fn response_channel(
 /// handler's own control flow are untouched. A handler that yields anyway has
 /// broken the contract and its request is failed — see the driver task below.
 pub(crate) struct PythonPushEngine {
-    handler: Arc<PyObject>,
-    event_loop: Arc<PyObject>,
+    handler: Arc<Py<PyAny>>,
+    event_loop: Arc<Py<PyAny>>,
     /// The role its endpoint serves as a model backend, once one is recorded.
     backend_role: engine::BackendRole,
     /// The admission gate of the worker its endpoint serves for.
@@ -684,8 +684,8 @@ pub(crate) struct PythonPushEngine {
 
 impl PythonPushEngine {
     pub(crate) fn new(
-        handler: PyObject,
-        event_loop: PyObject,
+        handler: Py<PyAny>,
+        event_loop: Py<PyAny>,
         backend_role: engine::BackendRole,
         admission: WorkerAdmissionGate,
     ) -> Self {
@@ -814,7 +814,7 @@ mod tests {
     //! compiles code which references Python C-API symbols — even unreachable
     //! branches — fails with "undefined symbol: Py_InitializeEx" etc.
     //!
-    //! Confirmed: a trivial `prepare_freethreaded_python()` test produced
+    //! Confirmed: a trivial `Python::initialize()` test produced
     //! "undefined symbol: Py_InitializeEx" from rust-lld.
     //!
     //! **Root cause for push_egress.rs**: `ResponseSink::send` takes

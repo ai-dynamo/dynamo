@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterArgGroup,
     RouterConfigBase,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import (
     ArgEnv,
@@ -37,10 +38,22 @@ _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
+# --dyn-chat-processor values Dynamo implements; any other value names a custom
+# chat processor, resolved by dynamo.frontend.main.
+BUILTIN_CHAT_PROCESSORS = ("dynamo", "vllm", "sglang")
+
+
 def _parse_chat_template_kwargs(value: str) -> Dict[str, Any]:
     parsed = json.loads(value)
     if not isinstance(parsed, dict):
         raise ValueError("--default-chat-template-kwargs must be a JSON object")
+    return parsed
+
+
+def _parse_chat_processor_config(value: str) -> Dict[str, Any]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("--dyn-chat-processor-config must be a JSON object")
     return parsed
 
 
@@ -216,9 +229,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
-    response_plane: str = "tcp"
+    response_plane: Optional[str] = None
     event_plane: Optional[str] = None
     chat_processor: str
+    chat_processor_config: Optional[Dict[str, Any]] = None
     enable_anthropic_api: bool
     enable_systemone_api: bool
     strip_anthropic_preamble: bool
@@ -229,6 +243,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
+    isolate_tool_call_markers: bool
     default_chat_template_kwargs: Optional[Dict[str, Any]] = None
     preprocess_workers: Optional[int]
     tokenizer_backend: str
@@ -248,6 +263,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
 
     def validate(self) -> None:
+        if (
+            self.chat_processor_config is not None
+            and self.chat_processor in BUILTIN_CHAT_PROCESSORS
+        ):
+            raise ValueError(
+                "--dyn-chat-processor-config only applies to a custom "
+                f"--dyn-chat-processor, not '{self.chat_processor}'"
+            )
         if self.preprocess_workers is None:
             self.preprocess_workers = (
                 _default_sglang_preprocess_workers()
@@ -257,6 +280,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         elif self.preprocess_workers < 0:
             raise ValueError("--dyn-preprocess-workers must be >= 0")
 
+        # Check what was asked for before --load-aware forces KV routing, so a
+        # policy file with a conflicting --router-mode still fails.
+        self.router_mode = resolve_router_mode(
+            self.router_mode, self.router_policy_config
+        )
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_router_config()
@@ -322,10 +350,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
-        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
+        if self.isolate_tool_call_markers and self.chat_processor != "sglang":
             raise ValueError(
-                "--ais-perf-config requires --router-prefill-load-model=ais"
+                "--isolate-tool-call-markers requires --dyn-chat-processor=sglang"
             )
+        self.validate_ais_perf_inputs()
         if self.router_prefill_load_model == "ais":
             if self.router_mode != "kv":
                 raise ValueError(
@@ -601,7 +630,7 @@ class FrontendArgGroup(ArgGroup):
 
         # Router options (shared with dynamo.router)
         RouterArgGroup(
-            default_router_mode="round-robin",
+            default_router_mode=None,
             include_frontend_only=True,
             env=self.env,
         ).add_arguments(parser)
@@ -759,8 +788,12 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--response-plane",
             env_var="DYN_RESPONSE_PLANE",
-            default="tcp",
-            help="Select the response transport. Frontend and workers must match.",
+            default=None,
+            help=(
+                "Select the response transport. Frontend and workers must match. "
+                "When unset, the runtime uses tcp. velo has no TLS, so it falls "
+                "back to tcp while any DYN_TCP_TLS_* setting is present."
+            ),
             choices=["tcp", "quic", "velo"],
             env=self.env,
         )
@@ -906,6 +939,23 @@ class FrontendArgGroup(ArgGroup):
             ),
             env=self.env,
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--isolate-tool-call-markers",
+            env_var="DYN_ISOLATE_TOOL_CALL_MARKERS",
+            default=False,
+            help=(
+                "Tokenize message content that contains the tool-call parser's "
+                "delimiters (for example a literal <tool_call> in a tool result) as "
+                "plain sub-words instead of the delimiter tokens, so the model cannot "
+                "copy a delimiter token out of untrusted input and have it parsed as "
+                "a real tool call. Requests whose content the chat template rewrites "
+                "are rejected rather than encoded unsafely. Requires "
+                "--dyn-chat-processor=sglang. Evaluate against your model before "
+                "enabling."
+            ),
+            env=self.env,
+        )
         add_argument(
             g,
             flag_name="--dyn-chat-processor",
@@ -916,9 +966,23 @@ class FrontendArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Chat pre/post processor backend. 'dynamo' uses the Rust "
                 "preprocessor. 'vllm' uses local vLLM for pre and post processing. "
                 "'sglang' uses SGLang APIs for chat template rendering, tool call "
-                "parsing, and reasoning parsing."
+                "parsing, and reasoning parsing. Any other value loads a custom chat "
+                "processor: a name registered in the 'dynamo.frontend.chat_processors' "
+                "entry-point group, or a 'module:function' path."
             ),
-            choices=["dynamo", "vllm", "sglang"],
+            env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-chat-processor-config",
+            env_var="DYN_CHAT_PROCESSOR_CONFIG",
+            default=None,
+            dest="chat_processor_config",
+            arg_type=_parse_chat_processor_config,
+            help=(
+                "JSON object passed to a custom --dyn-chat-processor as its settings. "
+                "Not accepted with the built-in processors."
+            ),
             env=self.env,
         )
 

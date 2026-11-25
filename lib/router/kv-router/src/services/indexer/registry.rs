@@ -14,16 +14,14 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_indexer::metrics::KvIndexerMetrics;
+use dynamo_kv_indexer::KvIndexerMetrics;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
 
-use super::backend::{Indexer, IndexerPolicy};
+use super::backend::Indexer;
 use super::listener::spawn_zmq_listener;
 
-pub use dynamo_kv_indexer::registry::{
-    IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard,
-};
+pub use dynamo_kv_indexer::{IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +92,7 @@ pub enum WorkerSource {
 pub struct ListenerInfo {
     endpoint: String,
     engine_owned_mm_identity: bool,
+    idempotent_stores: bool,
     status: ListenerStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
@@ -145,6 +144,7 @@ pub struct ListenerRecord {
     endpoint: String,
     replay_endpoint: Option<String>,
     engine_owned_mm_identity: bool,
+    idempotent_stores: bool,
     block_size: u32,
     indexer: Indexer,
     watermark: Arc<AtomicU64>,
@@ -156,6 +156,7 @@ impl ListenerRecord {
         endpoint: String,
         replay_endpoint: Option<String>,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
         block_size: u32,
         indexer: Indexer,
         watermark: Arc<AtomicU64>,
@@ -164,6 +165,7 @@ impl ListenerRecord {
             endpoint,
             replay_endpoint,
             engine_owned_mm_identity,
+            idempotent_stores,
             block_size,
             indexer,
             watermark,
@@ -186,6 +188,10 @@ impl ListenerRecord {
 
     pub(super) fn engine_owned_mm_identity(&self) -> bool {
         self.engine_owned_mm_identity
+    }
+
+    pub(super) fn idempotent_stores(&self) -> bool {
+        self.idempotent_stores
     }
 
     pub(super) fn block_size(&self) -> u32 {
@@ -300,12 +306,13 @@ impl ListenerRecord {
         ListenerInfo {
             endpoint: self.endpoint.clone(),
             engine_owned_mm_identity: self.engine_owned_mm_identity,
+            idempotent_stores: self.idempotent_stores,
             status: runtime.status,
             last_error: runtime.last_error.clone(),
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(all(feature = "metrics", feature = "http"))]
     fn status(&self) -> ListenerStatus {
         self.runtime.lock().status
     }
@@ -336,13 +343,6 @@ impl WorkerRegistry {
             Arc::new(KvIndexerMetrics::new_unregistered()),
             root_cancel_token,
         )
-    }
-
-    pub fn new_with_indexer_metrics(
-        num_threads: usize,
-        indexer_metrics: Arc<KvIndexerMetrics>,
-    ) -> Self {
-        Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
     }
 
     #[cfg(all(feature = "metrics", feature = "http"))]
@@ -378,11 +378,6 @@ impl WorkerRegistry {
 
     pub fn index(&self) -> &Arc<IndexRegistry> {
         &self.index
-    }
-
-    /// Set the shape used for indexers created from now on.
-    pub fn set_indexer_policy(&self, policy: IndexerPolicy) {
-        self.index.set_indexer_policy(policy);
     }
 
     pub fn signal_ready(&self) {
@@ -431,6 +426,7 @@ impl WorkerRegistry {
         block_size: u32,
         replay_endpoint: Option<String>,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
     ) -> Result<()> {
         let key = RoutingPartitionId::new(model_name, routing_group);
         let registration = self.index.lock_lifecycle().await;
@@ -462,6 +458,7 @@ impl WorkerRegistry {
             endpoint,
             replay_endpoint,
             engine_owned_mm_identity,
+            idempotent_stores,
             bs,
             indexer,
             watermark,
@@ -821,9 +818,9 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::indexer::backend::test_util::store_event;
     use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::LocalBlockHash;
+    use dynamo_kv_indexer::testing::store_event;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use std::future::Future;
     use std::sync::atomic::Ordering;
@@ -851,6 +848,7 @@ mod tests {
                 "default".into(),
                 1,
                 None,
+                false,
                 false,
             )
             .await
@@ -897,6 +895,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -928,6 +927,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -942,6 +942,7 @@ mod tests {
             "default".into(),
             1,
             None,
+            false,
             false,
         );
         tokio::pin!(registration);
@@ -1018,6 +1019,7 @@ mod tests {
                     1,
                     None,
                     engine_owned,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -1036,6 +1038,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_records_idempotent_stores_per_listener() {
+        let registry = test_registry();
+        for (dp_rank, idempotent_stores) in [(0, false), (1, true)] {
+            registry
+                .register(
+                    1,
+                    format!("tcp://127.0.0.1:{}", 15580 + dp_rank),
+                    dp_rank,
+                    "test-model".to_string(),
+                    "default".to_string(),
+                    1,
+                    None,
+                    false,
+                    idempotent_stores,
+                )
+                .await
+                .unwrap();
+        }
+
+        let entry = registry.workers.get(&1).unwrap();
+        assert!(!entry.listeners[&0].idempotent_stores());
+        assert!(entry.listeners[&1].idempotent_stores());
+        assert!(!entry.listeners[&1].engine_owned_mm_identity());
+        drop(entry);
+        let listed = serde_json::to_value(registry.list()).unwrap();
+        assert_eq!(listed[0]["listeners"]["0"]["idempotent_stores"], false);
+        assert_eq!(listed[0]["listeners"]["1"]["idempotent_stores"], true);
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
     async fn deregister_dp_rank_removes_watermark() {
         let registry = test_registry();
         registry.signal_ready();
@@ -1050,6 +1083,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1063,6 +1097,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
                 false,
             )
             .await
@@ -1101,6 +1136,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1126,6 +1162,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1147,6 +1184,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
                 false,
             )
             .await
@@ -1180,6 +1218,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1212,6 +1251,7 @@ mod tests {
                 4,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1225,6 +1265,7 @@ mod tests {
                 "other-group".to_string(),
                 8,
                 None,
+                false,
                 false,
             )
             .await
