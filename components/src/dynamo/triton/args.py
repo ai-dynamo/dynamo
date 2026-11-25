@@ -43,7 +43,7 @@ class DynamoArgGroup(ArgGroup):
             default="tcp",
             choices=_REQUEST_PLANE_CHOICES,
             help="How requests are distributed from routers to workers. "
-            "'tcp' is fastest.",
+            "'tcp' is the default.",
         )
 
 

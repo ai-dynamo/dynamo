@@ -87,9 +87,14 @@ DYN_REQUEST_PLANE=velo DYN_RESPONSE_PLANE=velo python3 -m dynamo.frontend
 
 - A `velo` request plane requires a `velo` response plane. Any other effective
   response plane is a local configuration error and stops startup.
-- Velo has no TLS. While any `DYN_TCP_TLS_*` setting is present, Dynamo uses the
-  `tcp` response plane instead; a `velo` request plane then stops startup because
-  its response plane is no longer `velo`.
+- Velo has no TLS. Dynamo uses the `tcp` response plane instead while any of
+  `DYN_TCP_TLS_CERT_PATH`, `DYN_TCP_TLS_KEY_PATH`, `DYN_TCP_TLS_CA_CERT_PATH`,
+  `DYN_TCP_TLS_CLIENT_CERT_PATH`, `DYN_TCP_TLS_CLIENT_KEY_PATH`, or
+  `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` is set, or while `DYN_TCP_TLS_INSECURE` is
+  truthy. A `velo` request plane then stops startup because its response plane
+  is no longer `velo`. `DYN_TCP_TLS_SERVER_NAME`,
+  `DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS`, and `DYN_TCP_TLS_INSECURE=false` do not
+  trigger the fallback.
 - The Velo request plane supports only Velo's TCP transport. Setting
   `DYN_VELO_RESPONSE_TRANSPORT=ucx` with `DYN_REQUEST_PLANE=velo` stops startup.
 - Both planes share the Velo listener. `DYN_VELO_RESPONSE_PORT` sets its port.
@@ -98,9 +103,16 @@ DYN_REQUEST_PLANE=velo DYN_RESPONSE_PLANE=velo python3 -m dynamo.frontend
 - A pool must not mix Velo and non-Velo workers. A foreign transport in a Velo
   pool is a local configuration error; the router does not inhibit or migrate
   around it.
-- An older runtime skips Velo workers it does not understand, and on Kubernetes
-  it skips the whole pod. During a rolling update, keep a Velo pool in its own
-  namespace so an older frontend or worker never discovers a peer it cannot read.
+- An older runtime skips Velo metadata it cannot read. In Kubernetes pod mode
+  that covers the whole pod; in container mode, compatible sibling containers
+  can still be discovered. A separate Dynamo namespace isolates routing only
+  when the frontend selects that exact namespace or disjoint prefixes: a
+  `--namespace-prefix` that matches both pools still selects both, and Dynamo
+  namespaces do not filter raw Kubernetes watches.
+- In the closed-loop mock-worker comparison run for this option, `tcp` requests
+  with Velo responses had lower median latency than Velo requests with Velo
+  responses across three interleaved runs per arm. This is a result for that
+  workload, not a general ordering.
 
 ### Event Plane
 

@@ -694,7 +694,7 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
 </ParamField>
 
 <ParamField path="--request-plane" type="string" default="tcp">
-  Request distribution transport. `tcp` is the fastest. `velo` sends requests
+  Request distribution transport. `tcp` is the default. `velo` sends requests
   over the Velo response listener and requires `--response-plane velo`; see
   [Velo Request Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#velo-request-plane).
 
@@ -707,8 +707,9 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
   Response transport. The frontend and its workers must use the same value. When
   unset, the runtime uses `tcp`.
 
-  `velo` has no TLS. While any `DYN_TCP_TLS_*` setting is present, Dynamo uses
-  `tcp` instead, and a `velo` request plane then stops startup.
+  `velo` has no TLS. While any `DYN_TCP_TLS_*` certificate or key path is set, or
+  `DYN_TCP_TLS_INSECURE` is truthy, Dynamo uses `tcp` instead, and a `velo`
+  request plane then stops startup.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>quic</Badge> <Badge intent="note" minimal>velo</Badge></span>
 
