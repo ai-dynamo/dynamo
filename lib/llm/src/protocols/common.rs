@@ -401,6 +401,10 @@ pub const FREQUENCY_PENALTY_RANGE: (f32, f32) = (-1.0, 1.0);
 /// Collection of options that control the sampling behavior of the inference engine.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct SamplingOptions {
+    /// Backend-owned text watermark policy; omission keeps the engine default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermarking: Option<bool>,
+
     /// Number of output sequences to return for the given prompt
     pub n: Option<u8>,
 
